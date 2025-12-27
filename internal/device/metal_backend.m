@@ -108,7 +108,13 @@ void Metal_Free(MetalContextRef ctx) {
 }
 
 void Metal_Synchronize(MetalContextRef ctx) {
-  [(__bridge MetalWrapper *)ctx flush];
+  MetalWrapper *c = (__bridge MetalWrapper *)ctx;
+  [c stopEncoder];
+  if (c.currentCommandBuffer) {
+    [c.currentCommandBuffer commit];
+    [c.currentCommandBuffer waitUntilCompleted]; // MUST wait for ToHost
+    c.currentCommandBuffer = nil;
+  }
 }
 
 MetalBufferRef Metal_Alloc(MetalContextRef ctx, int size) {
