@@ -252,3 +252,64 @@ kernel void attention_f16(device const half *q [[ buffer(0) ]],
         out[head_idx * head_dim + i] = (half)weighted_sum;
     }
 }
+
+// Fused RMSNorm + Linear (xW^T) Kernel
+// Computes: normalized = RMSNorm(input, norm_weight) then output = normalized * weight^T
+// This eliminates the intermediate normalized buffer
+kernel void rmsnorm_linear_f16(device const half *input [[ buffer(0) ]],
+                               device const half *norm_weight [[ buffer(1) ]],
+                               device const half *weight [[ buffer(2) ]],  // [out_dim, in_dim]
+                               device half *output [[ buffer(3) ]],
+                               constant int &in_dim [[ buffer(4) ]],
+                               constant int &out_dim [[ buffer(5) ]],
+                               constant float &eps [[ buffer(6) ]],
+                               uint row_idx [[ threadgroup_position_in_grid ]],
+                               uint tid [[ thread_index_in_threadgroup ]],
+                               uint tg_size [[ threads_per_threadgroup ]]) {
+    
+    threadgroup float shared_sq_sum[256];
+    threadgroup half shared_normed[576];  // Max dimension for smollm2
+    
+    int input_offset = row_idx * in_dim;
+    
+    // Phase 1: Compute RMS
+    float local_sq_sum = 0.0;
+    for (int i = tid; i < in_dim; i += tg_size) {
+        float val = float(input[input_offset + i]);
+        local_sq_sum += val * val;
+    }
+    shared_sq_sum[tid] = local_sq_sum;
+    
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    
+    // Reduction for sum
+    for (uint stride = tg_size / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            shared_sq_sum[tid] += shared_sq_sum[tid + stride];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    
+    float inv_rms = 1.0 / sqrt(shared_sq_sum[0] / float(in_dim) + eps);
+    
+    // Phase 2: Normalize and store in shared memory
+    for (int i = tid; i < in_dim; i += tg_size) {
+        float val = float(input[input_offset + i]);
+        shared_normed[i] = half(val * inv_rms * float(norm_weight[i]));
+    }
+    
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    
+    // Phase 3: MatMul (normalized * weight^T)
+    // Each thread computes one output element
+    int output_offset = row_idx * out_dim;
+    for (int i = tid; i < out_dim; i += tg_size) {
+        float sum = 0.0;
+        // weight is [out_dim, in_dim], row-major
+        int weight_offset = i * in_dim;
+        for (int j = 0; j < in_dim; j++) {
+            sum += float(shared_normed[j]) * float(weight[weight_offset + j]);
+        }
+        output[output_offset + i] = half(sum);
+    }
+}

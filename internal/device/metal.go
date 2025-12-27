@@ -191,6 +191,16 @@ func (t *Tensor) RMSNorm(weight *Tensor, eps float32) *Tensor {
 	return res
 }
 
+// RMSNormLinear performs fused RMSNorm + Linear in single kernel
+// Eliminates intermediate buffer allocation
+func (t *Tensor) RMSNormLinear(normWeight, linearWeight *Tensor, eps float32) *Tensor {
+	// normWeight: [inDim], linearWeight: [outDim, inDim]
+	res := t.ctx.NewTensorPooled(t.rows, linearWeight.rows)
+	C.Metal_RMSNormLinear_F16(t.ctx.ref, t.buf, 0, normWeight.buf, 0, linearWeight.buf, 0, res.buf, 0,
+		C.int(t.cols), C.int(linearWeight.rows), C.float(eps))
+	return res
+}
+
 // Correct RoPE implementation using arguments expected by Kernel
 func (t *Tensor) RoPE(posOffset, headDim, numHeads, seqLen int) {
 	C.Metal_RoPE_F16(t.ctx.ref, t.buf, 0, 1, C.int(seqLen), C.int(numHeads), C.int(headDim), C.int(posOffset))

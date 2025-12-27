@@ -63,6 +63,12 @@ void Metal_Attention_F16(MetalContextRef ctx, MetalBufferRef q, int offQ,
                          MetalBufferRef result, int offRes, int pos,
                          int numHeads, int kvHeads, int headDim);
 
+void Metal_RMSNormLinear_F16(MetalContextRef ctx, MetalBufferRef input,
+                             int offIn, MetalBufferRef normWeight,
+                             int offNormWeight, MetalBufferRef weight,
+                             int offWeight, MetalBufferRef result, int offRes,
+                             int inDim, int outDim, float eps);
+
 // Matrix Multiplication (MPS)
 void Metal_MatMul_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
                       bool transA, MetalBufferRef b, int offB, bool transB,
