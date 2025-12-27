@@ -91,13 +91,26 @@ func (t *Tokenizer) Decode(ids []int) string {
 	var sb strings.Builder
 	for _, id := range ids {
 		if id < 0 || id >= len(t.Tokens) {
-			continue // or error?
+			continue // Skip invalid token IDs
 		}
-		// In a real BPE tokenizer we handle space replacement etc.
-		// For Llama 3 / GGUF, tokens usually contain the piece.
-		// e.g. " Hello" (with leading space char).
-		// For our simple test, we just concat.
-		sb.WriteString(t.Tokens[id])
+		
+		token := t.Tokens[id]
+		
+		// Skip special tokens
+		if strings.HasPrefix(token, "<|") && strings.HasSuffix(token, "|>") {
+			continue
+		}
+		
+		// Replace BPE special characters with actual characters
+		// Ġ (U+0120) is used for space in BPE
+		// Ċ (U+010A) is used for newline in BPE
+		token = strings.ReplaceAll(token, "Ġ", " ")
+		token = strings.ReplaceAll(token, "Ċ", "\n")
+		
+		// Handle other common BPE markers
+		token = strings.ReplaceAll(token, "ĉ", "\t")
+		
+		sb.WriteString(token)
 	}
 	return sb.String()
 }
