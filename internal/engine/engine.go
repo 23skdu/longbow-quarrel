@@ -281,13 +281,10 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int) ([]int, error) {
 		for l := 0; l < e.Config.Layers; l++ {
 			residual := current // Keep reference
 
-			// 1. RMS Norm
-			normed := current.RMSNorm(e.Weights.AttnNorm[l], e.Config.Eps)
-
-			// 2. QKV
-			q := normed.Linear(e.Weights.AttnQ[l])
-			k := normed.Linear(e.Weights.AttnK[l])
-			v := normed.Linear(e.Weights.AttnV[l])
+			// 1-2. Fused RMSNorm + QKV Linear (eliminates intermediate buffer)
+			q := current.RMSNormLinear(e.Weights.AttnNorm[l], e.Weights.AttnQ[l], e.Config.Eps)
+			k := current.RMSNormLinear(e.Weights.AttnNorm[l], e.Weights.AttnK[l], e.Config.Eps)
+			v := current.RMSNormLinear(e.Weights.AttnNorm[l], e.Weights.AttnV[l], e.Config.Eps)
 
 			// 3. RoPE
 			// Q: Heads * HeadDim
@@ -311,13 +308,9 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int) ([]int, error) {
 			// Residual Add
 			current = residual.Add(out)
 
-			// FFN
-			residual = current
-			ffnNorm := current.RMSNorm(e.Weights.FfnNorm[l], e.Config.Eps)
-
-			// SwiGLU
-			g := ffnNorm.Linear(e.Weights.FfnGate[l])
-			up := ffnNorm.Linear(e.Weights.FfnUp[l])
+			// FFN: Fused RMSNorm + Gate/Up projections
+			g := current.RMSNormLinear(e.Weights.FfnNorm[l], e.Weights.FfnGate[l], e.Config.Eps)
+			up := current.RMSNormLinear(e.Weights.FfnNorm[l], e.Weights.FfnUp[l], e.Config.Eps)
 
 			// SwiGLU: silu(gate) * up
 			// SwiGLU: silu(gate) * up
