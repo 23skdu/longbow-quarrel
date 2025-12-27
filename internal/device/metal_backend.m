@@ -227,7 +227,7 @@ void Metal_RMSNorm_F16(MetalContextRef ctx, MetalBufferRef input, int offIn,
 
 void Metal_RoPE_F16(MetalContextRef ctx, MetalBufferRef data, int offData,
                     int batchSize, int seqLen, int numHeads, int headDim,
-                    int posOffset) {
+                    int posOffset, float ropeTheta) {
   MetalWrapper *c = (__bridge MetalWrapper *)ctx;
   ENCODE(c, pipelineRoPE_F16);
   [c.currentEncoder setBuffer:(__bridge id<MTLBuffer>)data
@@ -237,6 +237,7 @@ void Metal_RoPE_F16(MetalContextRef ctx, MetalBufferRef data, int offData,
   [c.currentEncoder setBytes:&numHeads length:4 atIndex:2];
   [c.currentEncoder setBytes:&seqLen length:4 atIndex:3];
   [c.currentEncoder setBytes:&posOffset length:4 atIndex:4];
+  [c.currentEncoder setBytes:&ropeTheta length:4 atIndex:5];
   [c.currentEncoder dispatchThreads:MTLSizeMake(headDim / 2, numHeads,
                                                 batchSize * seqLen)
               threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];

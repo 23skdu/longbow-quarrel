@@ -207,8 +207,8 @@ func (t *Tensor) RMSNormLinear(normWeight, linearWeight *Tensor, eps float32) *T
 }
 
 // Correct RoPE implementation using arguments expected by Kernel
-func (t *Tensor) RoPE(posOffset, headDim, numHeads, seqLen int) {
-	C.Metal_RoPE_F16(t.ctx.ref, t.buf, 0, 1, C.int(seqLen), C.int(numHeads), C.int(headDim), C.int(posOffset))
+func (t *Tensor) RoPE(posOffset, headDim, numHeads, seqLen int, ropeTheta float32) {
+	C.Metal_RoPE_F16(t.ctx.ref, t.buf, 0, 1, C.int(seqLen), C.int(numHeads), C.int(headDim), C.int(posOffset), C.float(ropeTheta))
 }
 
 func (t *Tensor) SwiGLU(gate *Tensor) *Tensor {
