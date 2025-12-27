@@ -7,12 +7,6 @@ import (
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
 )
 
-type Tokenizer struct {
-	Tokens []string
-	Vocab  map[string]int
-	Scores []float32 // optional
-}
-
 func New(path string) (*Tokenizer, error) {
 	f, err := gguf.LoadFile(path)
 	if err != nil {
@@ -44,46 +38,72 @@ func New(path string) (*Tokenizer, error) {
 		vocab[s] = i
 	}
 
-	return &Tokenizer{
-		Tokens: tokens,
-		Vocab:  vocab,
-	}, nil
-}
-
-func (t *Tokenizer) Encode(text string) []int {
-	// Very naive whitespace tokenizer for verification
-	words := strings.Fields(text)
-	var ids []int
-	
-	for i, w := range words {
-		// Try to find token
-		// Llama 3 often uses " word" (space prefix) for middle words
-		token := w
-		if i > 0 {
-			token = "Ġ" + w // GGUF usually uses \u0120 or similar for space, or just space?
-			// GGUF tokens are string. Llama 3 uses byte fallback?
-			// Let's try literal space " " + w first.
-			// But check if token exists.
-			if _, ok := t.Vocab[" " + w]; ok {
-				token = " " + w
-			} else if _, ok := t.Vocab["Ġ" + w]; ok {
-				token = "Ġ" + w // Common in BPE
-			}
-		}
-		
-		if id, ok := t.Vocab[token]; ok {
-			ids = append(ids, id)
-		} else {
-			// Fallback: try original word if space version failed
-			if id, ok := t.Vocab[w]; ok {
-				ids = append(ids, id)
-			} else {
-				// Fallback to chars?
-				// Skip for now, simpler verification
-				fmt.Printf("Warning: Token not found for '%s'\n", w)
+	// Extract merges
+	var merges []string
+	if mVal, ok := f.KV["tokenizer.ggml.merges"]; ok {
+		if mArr, ok := mVal.([]interface{}); ok {
+			for _, m := range mArr {
+				if ms, ok := m.(string); ok {
+					merges = append(merges, ms)
+				}
 			}
 		}
 	}
+
+	return &Tokenizer{
+		Tokens: tokens,
+		Vocab:  vocab,
+		Merges: merges,
+	}, nil
+}
+
+type Tokenizer struct {
+	Tokens []string
+	Vocab  map[string]int
+	Merges []string
+	Scores []float32 // optional
+}
+
+func (t *Tokenizer) Encode(text string) []int {
+	if len(text) == 0 {
+		return nil
+	}
+
+	var ids []int
+	remaining := text
+	
+	for len(remaining) > 0 {
+		found := false
+		// Try to find the longest prefix of 'remaining' that is in our vocab
+		for l := len(remaining); l > 0; l-- {
+			sub := remaining[:l]
+			
+			// Try as is
+			if id, ok := t.Vocab[sub]; ok {
+				ids = append(ids, id)
+				remaining = remaining[l:]
+				found = true
+				break
+			}
+			
+			// Try replacing leading space with Ġ (BPE space marker)
+			if sub[0] == ' ' {
+				gSub := "Ġ" + sub[1:]
+				if id, ok := t.Vocab[gSub]; ok {
+					ids = append(ids, id)
+					remaining = remaining[l:]
+					found = true
+					break
+				}
+			}
+		}
+		
+		if !found {
+			// Skip 1 byte if no match found
+			remaining = remaining[1:]
+		}
+	}
+	
 	return ids
 }
 
@@ -91,13 +111,26 @@ func (t *Tokenizer) Decode(ids []int) string {
 	var sb strings.Builder
 	for _, id := range ids {
 		if id < 0 || id >= len(t.Tokens) {
-			continue // or error?
+			continue // Skip invalid token IDs
 		}
-		// In a real BPE tokenizer we handle space replacement etc.
-		// For Llama 3 / GGUF, tokens usually contain the piece.
-		// e.g. " Hello" (with leading space char).
-		// For our simple test, we just concat.
-		sb.WriteString(t.Tokens[id])
+		
+		token := t.Tokens[id]
+		
+		// Skip special tokens
+		if strings.HasPrefix(token, "<|") && strings.HasSuffix(token, "|>") {
+			continue
+		}
+		
+		// Replace BPE special characters with actual characters
+		// Ġ (U+0120) is used for space in BPE
+		// Ċ (U+010A) is used for newline in BPE
+		token = strings.ReplaceAll(token, "Ġ", " ")
+		token = strings.ReplaceAll(token, "Ċ", "\n")
+		
+		// Handle other common BPE markers
+		token = strings.ReplaceAll(token, "ĉ", "\t")
+		
+		sb.WriteString(token)
 	}
 	return sb.String()
 }
