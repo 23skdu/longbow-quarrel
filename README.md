@@ -2,7 +2,7 @@
 <img width="2784" height="1536" alt="quarrel_logo" src="https://github.com/user-attachments/assets/e1ab45ae-f4de-4f68-91a5-fe931a720c21" />
 
 # longbow-quarrel
-Longbow-quarrel is a high-performance LLM inference engine written in Go with Metal GPU acceleration for Apple Silicon. It's designed to run Llama 3 architecture models in GGUF format with maximum throughput and correctness.
+Longbow Quarrel is a high-performance LLM inference engine written in Go with Metal GPU acceleration for Apple Silicon. It's designed to run Llama 3 architecture models in GGUF format with maximum throughput and correctness.
 
 Key Features
 Performance:
