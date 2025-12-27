@@ -24,6 +24,7 @@ void Metal_CopyToDevice(MetalBufferRef buf, int offset, const void *data,
                         int size);
 void Metal_CopyToHost(MetalBufferRef buf, int offset, void *data, int size);
 void *Metal_GetBufferContents(MetalBufferRef buf);
+void Metal_ZeroBuffer(MetalBufferRef buf, int offset, int size);
 
 // Basic Ops
 void Metal_Add_F16(MetalContextRef ctx, MetalBufferRef a, int offA,

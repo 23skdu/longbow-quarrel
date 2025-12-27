@@ -146,6 +146,11 @@ void *Metal_GetBufferContents(MetalBufferRef buf) {
   return [(__bridge id<MTLBuffer>)buf contents];
 }
 
+void Metal_ZeroBuffer(MetalBufferRef buf, int offset, int size) {
+  id<MTLBuffer> buffer = (__bridge id<MTLBuffer>)buf;
+  memset((char *)[buffer contents] + offset, 0, size);
+}
+
 // ================= KERNEL DISPATCH =================
 
 #define ENCODE(wrapper, pipeline)                                              \

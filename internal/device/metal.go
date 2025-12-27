@@ -146,6 +146,11 @@ func (t *Tensor) ToHost() []float32 {
 	return f32
 }
 
+// ZeroInit initializes tensor buffer with zeros
+func (t *Tensor) ZeroInit() {
+	C.Metal_ZeroBuffer(t.buf, 0, C.int(t.sizeBytes))
+}
+
 func (c *Context) Synchronize() {
 	C.Metal_Synchronize(c.ref)
 }
