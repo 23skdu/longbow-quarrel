@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"strings"
 	"time"
@@ -92,11 +93,22 @@ func (e *Engine) loadModel(path string) error {
 		e.Config.Eps = 1e-5
 	}
 	
+	// Log Model Architecture
+	if arch, ok := f.KV["general.architecture"].(string); ok {
+		log.Printf("[MODEL] Architecture: %s", arch)
+	}
+	if vSize, ok := f.KV["llama.vocab_size"]; ok {
+		log.Printf("[MODEL] Vocab Size: %v", vSize)
+	}
+
 	// Initialize KV Cache (now that we have dimensions)
 	if err := e.initKVCache(); err != nil {
 		return err
 	}
 	
+	log.Printf("[MODEL] Config: Layers=%d, Dim=%d, Heads=%d, KVHeads=%d, Eps=%e, RopeFreq=%.1f", 
+		e.Config.Layers, e.Config.Dim, e.Config.Heads, e.Config.KVHeads, e.Config.Eps, e.Config.RopeTheta)
+
 	// Initialize Weights Slices
 	layers := e.Config.Layers
 	e.Weights.AttnQ = make([]*device.Tensor, layers)
@@ -111,16 +123,6 @@ func (e *Engine) loadModel(path string) error {
 	
 	// Map tensors
 	for _, t := range f.Tensors {
-		// Parse tensor name for mapping
-		// e.g. "blk.0.attn_q.weight" or "token_embd.weight"
-		
-		var mt *device.Tensor
-		
-		// Only supporting F32 for now (real models are F16/Qx, but we kept F32 limit for simplicity in previous steps)
-		// For Llama 3 support we MUST likely support F16 input because smollm2 is F16.
-		// Let's relax check or add F16 support.
-		// If input is F16, we can copy directly (since our Metal tensors are F16).
-		
 		cols := int(t.Dimensions[0])
 		rows := 1
 		if len(t.Dimensions) > 1 {
@@ -130,11 +132,9 @@ func (e *Engine) loadModel(path string) error {
 			rows *= int(t.Dimensions[i])
 		}
 		
-		// Validate dimensions
-		if cols <= 0 || rows <= 0 {
-			return fmt.Errorf("invalid tensor dimensions for %s: rows=%d, cols=%d", t.Name, rows, cols)
-		}
-		
+		fmt.Printf("[TENSOR] %-30s | Type: %-10s | Shape: [%d, %d]\n", t.Name, t.Type, rows, cols)
+
+		var mt *device.Tensor
 		mt = e.Ctx.NewTensor(rows, cols)
 		numElements := rows * cols
 		
@@ -262,127 +262,99 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int) ([]int, error) {
 			return nil, fmt.Errorf("input token %d at position %d is out of vocab range [0, %d)", token, i, e.Weights.TokenEmb.Rows())
 		}
 	}
-	
-	tStart := time.Now()
+
+	// tStart := time.Now()
 	result := make([]int, 0, tokensToGenerate)
 	
-	// Create dummy hidden state (Batch=1, Dim=1) 
-	// Since our "token_embd.weight" from test is 1x1, let's match that.
-	// Dim = 1.
-	// dim := e.Config.Dim // use real config
-	
-	// Allocate hidden state on GPU
-	// hidden := e.Ctx.NewTensor(1, dim)
-	// hidden.LoadFrom([]float32{1.0})
+	// Reset KV cache position for each inference call
+	e.CachePos = 0
 	
 	// Main Generation Loop
-	// First, prefill all input tokens to build KV cache context
-	// Then generate new tokens
-	totalTokens := len(inputTokens) + tokensToGenerate
-	var prevToken int // Track previous token during prefill
-	
-	for i := 0; i < totalTokens; i++ {
+	// Phase 1: Prefill all input tokens
+	for i := 0; i < len(inputTokens); i++ {
 		tToken := time.Now()
-		
-		// 1. Get Input Embedding
-		var lastToken int
-		if i < len(inputTokens) {
-			// Prefill phase: process input prompt tokens
-			lastToken = inputTokens[i]
-			prevToken = lastToken // Track for next iteration
-		} else {
-			// Generation phase: use previously generated tokens
-			if len(result) > 0 {
-				lastToken = result[len(result)-1]
-			} else {
-				// First generated token uses last prefill token
-				lastToken = prevToken
-			}
-		}
-		
-		// Lookup embedding
-		// TokenEmb: [Vocab, Dim]
-		// Rows=Vocab, Cols=Dim.
-		
-		// Validate token ID bounds
-		if lastToken < 0 || lastToken >= e.Weights.TokenEmb.Rows() {
-			return nil, fmt.Errorf("token %d at position %d is out of vocab range [0, %d)", lastToken, i, e.Weights.TokenEmb.Rows())
-		}
+		lastToken := inputTokens[i]
 		
 		current := e.Weights.TokenEmb.EmbeddingLookup(lastToken)
-		
-		// Layers
+
+		// Layers (Attention + FFN)
 		for l := 0; l < e.Config.Layers; l++ {
-			// Validate layer weights are loaded
-			if e.Weights.AttnNorm[l] == nil || e.Weights.AttnQ[l] == nil || e.Weights.AttnK[l] == nil || 
-				 e.Weights.AttnV[l] == nil || e.Weights.AttnO[l] == nil {
-				return nil, fmt.Errorf("attention weights not loaded for layer %d", l)
-			}
-			if e.Weights.FfnNorm[l] == nil || e.Weights.FfnGate[l] == nil || 
-				 e.Weights.FfnUp[l] == nil || e.Weights.FfnDown[l] == nil {
-				return nil, fmt.Errorf("ffn weights not loaded for layer %d", l)
-			}
-			
-			residual := current // Keep reference
-
-			// 1. RMS Norm
+			residual := current 
 			normed := current.RMSNorm(e.Weights.AttnNorm[l], e.Config.Eps)
-
-			// 2. QKV
 			q := normed.Linear(e.Weights.AttnQ[l])
 			k := normed.Linear(e.Weights.AttnK[l])
 			v := normed.Linear(e.Weights.AttnV[l])
-
-			// 3. RoPE
-			// Q: Heads * HeadDim
-			// K: KVHeads * HeadDim
-			// SeqLen = 1 (current token)
-			q.RoPE(e.CachePos, e.Config.HeadDim, e.Config.Heads, 1)
-			k.RoPE(e.CachePos, e.Config.HeadDim, e.Config.KVHeads, 1)
-
-			// 4. KV Cache Update
-			// Store current k,v into cache at e.CachePos
-			k.StoreKV(v, e.KVCacheK[l], e.KVCacheV[l], e.CachePos, e.Config.Heads, e.Config.HeadDim)
-			
-			// 5. Attention (GQA)
-			// Using fused kernel: q is [1, num_heads * head_dim]
+			q.RoPE(e.CachePos, e.Config.HeadDim, e.Config.Heads, 1, e.Config.RopeTheta)
+			k.RoPE(e.CachePos, e.Config.HeadDim, e.Config.KVHeads, 1, e.Config.RopeTheta)
+			k.StoreKV(v, e.KVCacheK[l], e.KVCacheV[l], e.CachePos, e.Config.KVHeads, e.Config.HeadDim)
 			weighted := q.Attention(e.KVCacheK[l], e.KVCacheV[l], e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim)
-
-			// Output Proj
-			// AttnO is [Dim, Dim]. Linear works.
 			out := weighted.Linear(e.Weights.AttnO[l])
-
-			// Residual Add
 			current = residual.Add(out)
-
-			// FFN
 			residual = current
 			ffnNorm := current.RMSNorm(e.Weights.FfnNorm[l], e.Config.Eps)
-
-			// SwiGLU
 			g := ffnNorm.Linear(e.Weights.FfnGate[l])
 			up := ffnNorm.Linear(e.Weights.FfnUp[l])
-
-			// SwiGLU: silu(gate) * up
-			// SwiGLU: silu(gate) * up
-			// Kernel: val * silu(gate). So val=up, gate=g.
 			activated := up.SwiGLU(g)
 			down := activated.Linear(e.Weights.FfnDown[l])
-
 			current = residual.Add(down)
 		}
 
-		// Final Norm
-		normed := current.RMSNorm(e.Weights.OutputNorm, e.Config.Eps)
-
-		// Output Head
-		logits := normed.Linear(e.Weights.Output)
-
-		// ArgMax
-		logitsData := logits.ToHost()
-		if len(logitsData) == 0 {
-			return nil, errors.New("logits tensor is empty")
+		// If this is the LAST prompt token, sample the first next token
+		if i == len(inputTokens)-1 {
+			normed := current.RMSNorm(e.Weights.OutputNorm, e.Config.Eps)
+			logits := normed.Linear(e.Weights.Output)
+			logitsData := logits.ToHost()
+			
+			maxIdx := 0
+			maxVal := logitsData[0]
+			for idx, val := range logitsData {
+				if val > maxVal {
+					maxVal = val
+					maxIdx = idx
+				}
+			}
+			result = append(result, maxIdx)
 		}
+
+		e.CachePos++
+		metrics.RecordInference(1, time.Since(tToken))
+	}
+
+	// Phase 2: Generation loop (remaining tokens)
+	for i := 1; i < tokensToGenerate; i++ {
+		tToken := time.Now()
+		lastToken := result[len(result)-1]
+		
+		if lastToken < 0 || lastToken >= e.Weights.TokenEmb.Rows() {
+			return nil, fmt.Errorf("token %d is out of vocab range", lastToken)
+		}
+		
+		current := e.Weights.TokenEmb.EmbeddingLookup(lastToken)
+
+		for l := 0; l < e.Config.Layers; l++ {
+			residual := current 
+			normed := current.RMSNorm(e.Weights.AttnNorm[l], e.Config.Eps)
+			q := normed.Linear(e.Weights.AttnQ[l])
+			k := normed.Linear(e.Weights.AttnK[l])
+			v := normed.Linear(e.Weights.AttnV[l])
+			q.RoPE(e.CachePos, e.Config.HeadDim, e.Config.Heads, 1, e.Config.RopeTheta)
+			k.RoPE(e.CachePos, e.Config.HeadDim, e.Config.KVHeads, 1, e.Config.RopeTheta)
+			k.StoreKV(v, e.KVCacheK[l], e.KVCacheV[l], e.CachePos, e.Config.KVHeads, e.Config.HeadDim)
+			weighted := q.Attention(e.KVCacheK[l], e.KVCacheV[l], e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim)
+			out := weighted.Linear(e.Weights.AttnO[l])
+			current = residual.Add(out)
+			residual = current
+			ffnNorm := current.RMSNorm(e.Weights.FfnNorm[l], e.Config.Eps)
+			g := ffnNorm.Linear(e.Weights.FfnGate[l])
+			up := ffnNorm.Linear(e.Weights.FfnUp[l])
+			activated := up.SwiGLU(g)
+			down := activated.Linear(e.Weights.FfnDown[l])
+			current = residual.Add(down)
+		}
+
+		normed := current.RMSNorm(e.Weights.OutputNorm, e.Config.Eps)
+		logits := normed.Linear(e.Weights.Output)
+		logitsData := logits.ToHost()
 		
 		maxIdx := 0
 		maxVal := logitsData[0]
@@ -393,23 +365,15 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int) ([]int, error) {
 			}
 		}
 		
-		// Validate generated token is in vocab range
-		nextToken := maxIdx
-		if nextToken < 0 || nextToken >= e.Weights.TokenEmb.Rows() {
-			return nil, fmt.Errorf("generated token %d is out of vocab range [0, %d)", nextToken, e.Weights.TokenEmb.Rows())
+		if maxIdx == 128001 { // <|end_of_text|> in Llama 3
+			break
 		}
 		
-		// Only append generated tokens (after prefill phase)
-		if i >= len(inputTokens) {
-			result = append(result, nextToken)
-		}
-
+		result = append(result, maxIdx)
 		e.CachePos++
-		metrics.RecordInference(1, time.Since(tToken)) 
+		metrics.RecordInference(1, time.Since(tToken))
 	}
-	
-	_ = time.Since(tStart)
-	
+
 	return result, nil
 }
 

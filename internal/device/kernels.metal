@@ -77,6 +77,7 @@ kernel void rope_kernel_f16(device half *data [[ buffer(0) ]],
                             constant int &num_heads [[ buffer(2) ]],
                             constant int &seq_len [[ buffer(3) ]],
                             constant int &pos_offset [[ buffer(4) ]],
+                            constant float &rope_theta [[ buffer(5) ]],
                             uint3 gid [[ thread_position_in_grid ]]) {
     uint i = gid.x; // feature pair index (0 to head_dim/2 - 1)
     uint h = gid.y; // head index
@@ -87,7 +88,7 @@ kernel void rope_kernel_f16(device half *data [[ buffer(0) ]],
     
     // Effective position
     float pos = float(pos_offset + seq_idx);
-    float theta = pos * pow(10000.0, -2.0 * (float)i / (float)head_dim);
+    float theta = pos * pow(rope_theta, -2.0 * (float)i / (float)head_dim);
     
     float cos_theta = cos(theta);
     float sin_theta = sin(theta);

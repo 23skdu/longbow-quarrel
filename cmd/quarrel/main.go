@@ -62,13 +62,16 @@ func main() {
 	defer e.Close()
 
 	// Tokenize
-	inputTokens := tok.Encode(*prompt)
+	inputTokensRaw := tok.Encode(*prompt)
+	
+	// Prepend BOS for SmolLM2 (1)
+	inputTokens := make([]int, 0, len(inputTokensRaw)+1)
+	inputTokens = append(inputTokens, 1)
+	inputTokens = append(inputTokens, inputTokensRaw...)
+	
 	log.Printf("Encoded prompt '%s' -> %v (len %d)", *prompt, inputTokens, len(inputTokens))
 
 	log.Printf("Starting inference for %d tokens...", *numTokens)
-	
-	// Run Inference in a goroutine so we can handle signals?
-	// Or just run it.
 	
 	doneChan := make(chan struct{})
 	
@@ -82,7 +85,15 @@ func main() {
 			tokensPerSec := float64(len(result)) / duration.Seconds()
 			log.Printf("Inference complete: generated %d tokens in %v (%.2f t/s)", 
 				len(result), duration, tokensPerSec)
-			log.Printf("Result tokens: %v", result)
+			
+			// Debug print each token
+			fmt.Print("Result Tokens Detail: ")
+			for _, id := range result {
+				decoded := tok.Decode([]int{id})
+				fmt.Printf("[%d:'%s'] ", id, decoded)
+			}
+			fmt.Println()
+
 			log.Printf("Decoded Text: %s", tok.Decode(result))
 		}
 		close(doneChan)

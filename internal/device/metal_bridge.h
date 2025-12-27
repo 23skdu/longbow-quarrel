@@ -46,7 +46,7 @@ void Metal_RMSNorm_F16(MetalContextRef ctx, MetalBufferRef input, int offIn,
 
 void Metal_RoPE_F16(MetalContextRef ctx, MetalBufferRef data, int offData,
                     int batchSize, int seqLen, int numHeads, int headDim,
-                    int posOffset);
+                    int posOffset, float ropeTheta);
 
 void Metal_SwiGLU_F16(MetalContextRef ctx, MetalBufferRef inputVal, int offVal,
                       MetalBufferRef inputGate, int offGate,
