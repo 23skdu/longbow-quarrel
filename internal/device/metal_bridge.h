@@ -81,6 +81,34 @@ void Metal_BatchedMatMul_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
                              MetalBufferRef c, int offC, int strideC, int M,
                              int N, int K, int batchCount);
 
+void Metal_RMSNormQKV_F16(MetalContextRef ctx, MetalBufferRef input, int offIn,
+                          MetalBufferRef normWeight, int offNormWeight,
+                          MetalBufferRef qWeight, int offQW,
+                          MetalBufferRef kWeight, int offKW,
+                          MetalBufferRef vWeight, int offVW,
+                          MetalBufferRef qOut, int offQO, MetalBufferRef kOut,
+                          int offKO, MetalBufferRef vOut, int offVO, int inDim,
+                          int qDim, int kvDim, float eps);
+
+void Metal_FusedFFN_F16(MetalContextRef ctx, MetalBufferRef input, int offIn,
+                        MetalBufferRef normWeight, int offNormWeight,
+                        MetalBufferRef gateWeight, int offGW,
+                        MetalBufferRef upWeight, int offUW,
+                        MetalBufferRef downWeight, int offDW,
+                        MetalBufferRef output, int offOut, int inDim,
+                        int interDim, float eps);
+
+void Metal_Layer_F16(MetalContextRef ctx, MetalBufferRef input,
+                     MetalBufferRef attnNormW, MetalBufferRef qW,
+                     MetalBufferRef kW, MetalBufferRef vW, MetalBufferRef oW,
+                     MetalBufferRef ffnNormW, MetalBufferRef ffnGateW,
+                     MetalBufferRef ffnUpW, MetalBufferRef ffnDownW,
+                     MetalBufferRef kCache, MetalBufferRef vCache,
+                     MetalBufferRef scratch1, MetalBufferRef scratch2,
+                     MetalBufferRef scratch3, MetalBufferRef scratch4, int pos,
+                     int numHeads, int kvHeads, int headDim, int interDim,
+                     float eps, float ropeTheta, int ctxLen);
+
 #ifdef __cplusplus
 }
 #endif

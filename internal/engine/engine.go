@@ -60,6 +60,13 @@ func (e *Engine) loadModel(path string) error {
 	} else {
 		return errors.New("missing llama.attention.head_count")
 	}
+
+	// Hidden Dim (FFN context)
+	if val, ok := f.KV["llama.feed_forward_length"]; ok {
+		e.Config.HiddenDim = int(toFloat64(val))
+	} else {
+		e.Config.HiddenDim = 4 * e.Config.Dim // fallback
+	}
 	
 	// KV Heads (GQA)
 	if val, ok := f.KV["llama.attention.head_count_kv"]; ok {
@@ -132,7 +139,7 @@ func (e *Engine) loadModel(path string) error {
 			rows *= int(t.Dimensions[i])
 		}
 		
-		fmt.Printf("[TENSOR] %-30s | Type: %-10s | Shape: [%d, %d]\n", t.Name, t.Type, rows, cols)
+		fmt.Printf("[TENSOR] %-30s | Type: %-10v | Shape: [%d, %d]\n", t.Name, t.Type, rows, cols)
 
 		var mt *device.Tensor
 		mt = e.Ctx.NewTensor(rows, cols)
@@ -208,6 +215,10 @@ func (e *Engine) loadModel(path string) error {
 				e.Weights.AttnNorm[layerIdx] = mt
 			case "ffn_gate.weight":
 				e.Weights.FfnGate[layerIdx] = mt
+				if layerIdx == 0 {
+					e.Config.HiddenDim = rows
+				}
+				continue
 			case "ffn_down.weight":
 				e.Weights.FfnDown[layerIdx] = mt
 			case "ffn_up.weight":
@@ -270,6 +281,13 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int) ([]int, error) {
 	e.CachePos = 0
 	
 	// Main Generation Loop
+	
+	// Create scratch buffers for the layer fusion
+	s1 := e.Ctx.NewTensorPooled(1, e.Config.Dim*4) // Oversized for various intermediates
+	s2 := e.Ctx.NewTensorPooled(1, e.Config.Dim*4)
+	s3 := e.Ctx.NewTensorPooled(1, e.Config.Dim*4)
+	s4 := e.Ctx.NewTensorPooled(1, e.Config.Heads*e.Config.SeqLen*2) // *2 for float32 scores storage
+
 	// Phase 1: Prefill all input tokens
 	for i := 0; i < len(inputTokens); i++ {
 		tToken := time.Now()
@@ -279,24 +297,11 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int) ([]int, error) {
 
 		// Layers (Attention + FFN)
 		for l := 0; l < e.Config.Layers; l++ {
-			residual := current 
-			normed := current.RMSNorm(e.Weights.AttnNorm[l], e.Config.Eps)
-			q := normed.Linear(e.Weights.AttnQ[l])
-			k := normed.Linear(e.Weights.AttnK[l])
-			v := normed.Linear(e.Weights.AttnV[l])
-			q.RoPE(e.CachePos, e.Config.HeadDim, e.Config.Heads, 1, e.Config.RopeTheta)
-			k.RoPE(e.CachePos, e.Config.HeadDim, e.Config.KVHeads, 1, e.Config.RopeTheta)
-			k.StoreKV(v, e.KVCacheK[l], e.KVCacheV[l], e.CachePos, e.Config.KVHeads, e.Config.HeadDim)
-			weighted := q.Attention(e.KVCacheK[l], e.KVCacheV[l], e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim)
-			out := weighted.Linear(e.Weights.AttnO[l])
-			current = residual.Add(out)
-			residual = current
-			ffnNorm := current.RMSNorm(e.Weights.FfnNorm[l], e.Config.Eps)
-			g := ffnNorm.Linear(e.Weights.FfnGate[l])
-			up := ffnNorm.Linear(e.Weights.FfnUp[l])
-			activated := up.SwiGLU(g)
-			down := activated.Linear(e.Weights.FfnDown[l])
-			current = residual.Add(down)
+			current.Layer(e.Weights.AttnNorm[l], e.Weights.AttnQ[l], e.Weights.AttnK[l], e.Weights.AttnV[l], e.Weights.AttnO[l],
+				e.Weights.FfnNorm[l], e.Weights.FfnGate[l], e.Weights.FfnUp[l], e.Weights.FfnDown[l],
+				e.KVCacheK[l], e.KVCacheV[l], s1, s2, s3, s4,
+				e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim,
+				e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen)
 		}
 
 		// If this is the LAST prompt token, sample the first next token
@@ -331,30 +336,26 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int) ([]int, error) {
 		
 		current := e.Weights.TokenEmb.EmbeddingLookup(lastToken)
 
+		// Layers (Attention + FFN)
+		tLayers := time.Now()
 		for l := 0; l < e.Config.Layers; l++ {
-			residual := current 
-			normed := current.RMSNorm(e.Weights.AttnNorm[l], e.Config.Eps)
-			q := normed.Linear(e.Weights.AttnQ[l])
-			k := normed.Linear(e.Weights.AttnK[l])
-			v := normed.Linear(e.Weights.AttnV[l])
-			q.RoPE(e.CachePos, e.Config.HeadDim, e.Config.Heads, 1, e.Config.RopeTheta)
-			k.RoPE(e.CachePos, e.Config.HeadDim, e.Config.KVHeads, 1, e.Config.RopeTheta)
-			k.StoreKV(v, e.KVCacheK[l], e.KVCacheV[l], e.CachePos, e.Config.KVHeads, e.Config.HeadDim)
-			weighted := q.Attention(e.KVCacheK[l], e.KVCacheV[l], e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim)
-			out := weighted.Linear(e.Weights.AttnO[l])
-			current = residual.Add(out)
-			residual = current
-			ffnNorm := current.RMSNorm(e.Weights.FfnNorm[l], e.Config.Eps)
-			g := ffnNorm.Linear(e.Weights.FfnGate[l])
-			up := ffnNorm.Linear(e.Weights.FfnUp[l])
-			activated := up.SwiGLU(g)
-			down := activated.Linear(e.Weights.FfnDown[l])
-			current = residual.Add(down)
+			current.Layer(e.Weights.AttnNorm[l], e.Weights.AttnQ[l], e.Weights.AttnK[l], e.Weights.AttnV[l], e.Weights.AttnO[l],
+				e.Weights.FfnNorm[l], e.Weights.FfnGate[l], e.Weights.FfnUp[l], e.Weights.FfnDown[l],
+				e.KVCacheK[l], e.KVCacheV[l], s1, s2, s3, s4,
+				e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim,
+				e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen)
+		}
+		if i == 1 {
+			fmt.Printf("Token %d: %d layers dispatched in %v\n", i, e.Config.Layers, time.Since(tLayers))
 		}
 
 		normed := current.RMSNorm(e.Weights.OutputNorm, e.Config.Eps)
 		logits := normed.Linear(e.Weights.Output)
+		tHost := time.Now()
 		logitsData := logits.ToHost()
+		if i == 1 {
+			fmt.Printf("Token %d: Logits ToHost (+ GPU Wait) took %v\n", i, time.Since(tHost))
+		}
 		
 		maxIdx := 0
 		maxVal := logitsData[0]

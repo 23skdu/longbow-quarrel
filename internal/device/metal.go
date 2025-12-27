@@ -206,6 +206,36 @@ func (t *Tensor) RMSNormLinear(normWeight, linearWeight *Tensor, eps float32) *T
 	return res
 }
 
+// RMSNormQKV performs fused RMSNorm + QKV Linear projections
+func (t *Tensor) RMSNormQKV(normWeight, wQ, wK, wV *Tensor, eps float32) (*Tensor, *Tensor, *Tensor) {
+	q := t.ctx.NewTensorPooled(t.rows, wQ.rows)
+	k := t.ctx.NewTensorPooled(t.rows, wK.rows)
+	v := t.ctx.NewTensorPooled(t.rows, wV.rows)
+	C.Metal_RMSNormQKV_F16(t.ctx.ref, t.buf, 0, normWeight.buf, 0,
+		wQ.buf, 0, wK.buf, 0, wV.buf, 0,
+		q.buf, 0, k.buf, 0, v.buf, 0,
+		C.int(t.cols), C.int(wQ.rows), C.int(wK.rows), C.float(eps))
+	return q, k, v
+}
+
+// FusedFFN performs one entire FFN block: RMSNorm + Gate/Up Linear + SwiGLU + Down Linear
+func (t *Tensor) FusedFFN(normWeight, wGate, wUp, wDown *Tensor, eps float32) *Tensor {
+	res := t.ctx.NewTensorPooled(t.rows, t.cols)
+	C.Metal_FusedFFN_F16(t.ctx.ref, t.buf, 0, normWeight.buf, 0,
+		wGate.buf, 0, wUp.buf, 0, wDown.buf, 0, res.buf, 0,
+		C.int(t.cols), C.int(wGate.rows), C.float(eps))
+	return res
+}
+
+func (t *Tensor) Layer(attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, kCache, vCache, s1, s2, s3, s4 *Tensor, pos, heads, kvHeads, headDim int, ropeTheta, eps float32, hiddenDim, ctxLen int) {
+	C.Metal_Layer_F16(t.ctx.ref, t.buf,
+		attnNorm.buf, q.buf, k.buf, v.buf, o.buf,
+		ffnNorm.buf, ffnGate.buf, ffnUp.buf, ffnDown.buf,
+		kCache.buf, vCache.buf, s1.buf, s2.buf, s3.buf, s4.buf,
+		C.int(pos), C.int(heads), C.int(kvHeads),
+		C.int(headDim), C.int(hiddenDim), C.float(eps), C.float(ropeTheta), C.int(ctxLen))
+}
+
 // Correct RoPE implementation using arguments expected by Kernel
 func (t *Tensor) RoPE(posOffset, headDim, numHeads, seqLen int, ropeTheta float32) {
 	C.Metal_RoPE_F16(t.ctx.ref, t.buf, 0, 1, C.int(seqLen), C.int(numHeads), C.int(headDim), C.int(posOffset), C.float(ropeTheta))
