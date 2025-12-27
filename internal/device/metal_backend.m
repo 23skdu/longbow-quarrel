@@ -53,7 +53,7 @@
   [self stopEncoder];
   if (self.currentCommandBuffer) {
     [self.currentCommandBuffer commit];
-    [self.currentCommandBuffer waitUntilCompleted]; // Simplifying sync for now
+    // Remove synchronous wait - let GPU work asynchronously
     self.currentCommandBuffer = nil;
   }
 }

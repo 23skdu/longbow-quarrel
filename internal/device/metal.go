@@ -27,9 +27,10 @@ var allocatedBytes int64
 //go:embed kernels.metal
 var kernelsSource string
 
-// Context holds the Metal connection
+// Context holds the Metal connection and tensor pool
 type Context struct {
 	ref C.MetalContextRef
+	pool map[string][]*Tensor // pool by size key "RxC"
 }
 
 func NewContext() *Context {
@@ -41,7 +42,10 @@ func NewContext() *Context {
 		panic("Failed to initialize Metal backend")
 	}
 	
-	return &Context{ref: ref}
+	return &Context{
+		ref: ref,
+		pool: make(map[string][]*Tensor),
+	}
 }
 
 func (c *Context) Free() {
@@ -85,6 +89,25 @@ func (c *Context) NewTensor(rows, cols int) *Tensor {
 	})
 	
 	return t
+}
+
+// NewTensorPooled attempts to reuse tensor from pool
+func (c *Context) NewTensorPooled(rows, cols int) *Tensor {
+	key := fmt.Sprintf("%dx%d", rows, cols)
+	if tensors, ok := c.pool[key]; ok && len(tensors) > 0 {
+		// Pop from pool
+		t := tensors[len(tensors)-1]
+		c.pool[key] = tensors[:len(tensors)-1]
+		return t
+	}
+	// Fallback to new allocation
+	return c.NewTensor(rows, cols)
+}
+
+// ReturnToPool returns tensor to pool for reuse
+func (t *Tensor) ReturnToPool() {
+	key := fmt.Sprintf("%dx%d", t.rows, t.cols)
+	t.ctx.pool[key] = append(t.ctx.pool[key], t)
 }
 
 func (t *Tensor) LoadFrom(data []float32) {
