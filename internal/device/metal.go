@@ -158,7 +158,7 @@ func (t *Tensor) MatMul(other *Tensor) *Tensor {
 		panic("MatMul dim mismatch")
 	}
 	t0 := time.Now()
-	res := t.ctx.NewTensor(t.rows, other.cols)
+	res := t.ctx.NewTensorPooled(t.rows, other.cols)
 	C.Metal_MatMul_F16(t.ctx.ref, t.buf, 0, false, other.buf, 0, false, res.buf, 0, 
 		C.int(t.rows), C.int(other.cols), C.int(t.cols))
 	metrics.RecordKernelDuration("MatMul", time.Since(t0))
@@ -173,7 +173,7 @@ func (t *Tensor) Linear(weight *Tensor) *Tensor {
 		panic(fmt.Sprintf("Linear dim mismatch: input cols %d != weight cols %d", t.cols, weight.cols))
 	}
 	t0 := time.Now()
-	res := t.ctx.NewTensor(t.rows, weight.rows) // [M, N]
+	res := t.ctx.NewTensorPooled(t.rows, weight.rows) // [M, N]
 	
 	// MatMul(A, B^T)
 	// Metal_MatMul_F16(..., transA=false, ..., transB=true, ...)
@@ -185,7 +185,7 @@ func (t *Tensor) Linear(weight *Tensor) *Tensor {
 }
 
 func (t *Tensor) RMSNorm(weight *Tensor, eps float32) *Tensor {
-	res := t.ctx.NewTensor(t.rows, t.cols)
+	res := t.ctx.NewTensorPooled(t.rows, t.cols)
 	C.Metal_RMSNorm_F16(t.ctx.ref, t.buf, 0, weight.buf, 0, res.buf, 0, 
 		C.int(t.rows), C.int(t.cols), C.float(eps))
 	return res
@@ -203,7 +203,7 @@ func (t *Tensor) SwiGLU(gate *Tensor) *Tensor {
 		panic("SwiGLU dim mismatch")
 	}
 	interSize := t.cols
-	res := t.ctx.NewTensor(t.rows, interSize)
+	res := t.ctx.NewTensorPooled(t.rows, interSize)
 	
 	C.Metal_SwiGLU_F16(t.ctx.ref, t.buf, 0, gate.buf, 0, res.buf, 0, C.int(t.rows), C.int(interSize))
 	return res
@@ -217,13 +217,13 @@ func (t *Tensor) Add(other *Tensor) *Tensor {
 	if t.rows != other.rows || t.cols != other.cols {
 		panic("Add dim mismatch")
 	}
-	res := t.ctx.NewTensor(t.rows, t.cols)
+	res := t.ctx.NewTensorPooled(t.rows, t.cols)
 	C.Metal_Add_F16(t.ctx.ref, t.buf, 0, other.buf, 0, res.buf, 0, C.int(t.rows*t.cols))
 	return res
 }
 
 func (t *Tensor) Scale(val float32) *Tensor {
-	res := t.ctx.NewTensor(t.rows, t.cols)
+	res := t.ctx.NewTensorPooled(t.rows, t.cols)
 	// Float32ToFloat16 is in utils.go
 	v16 := Float32ToFloat16(val)
 	C.Metal_Scale_F16(t.ctx.ref, t.buf, 0, C.uint16_t(v16), res.buf, 0, C.int(t.rows*t.cols))
@@ -231,7 +231,7 @@ func (t *Tensor) Scale(val float32) *Tensor {
 }
 
 func (t *Tensor) EmbeddingLookup(row int) *Tensor {
-	res := t.ctx.NewTensor(1, t.cols)
+	res := t.ctx.NewTensorPooled(1, t.cols)
 	C.Metal_Embedding_F16(t.ctx.ref, t.buf, 0, res.buf, 0, C.int(row), C.int(t.cols))
 	return res
 }
@@ -241,7 +241,7 @@ func (t *Tensor) StoreKV(v *Tensor, kCache, vCache *Tensor, pos, heads, headDim 
 }
 
 func (t *Tensor) Attention(kCache, vCache *Tensor, pos, numHeads, kvHeads, headDim int) *Tensor {
-	res := t.ctx.NewTensor(1, numHeads*headDim)
+	res := t.ctx.NewTensorPooled(1, numHeads*headDim)
 	C.Metal_Attention_F16(t.ctx.ref, t.buf, 0, kCache.buf, vCache.buf, res.buf, 0,
 		C.int(pos), C.int(numHeads), C.int(kvHeads), C.int(headDim))
 	return res
