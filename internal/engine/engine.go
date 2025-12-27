@@ -297,22 +297,12 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int) ([]int, error) {
 			k.RoPE(e.CachePos, e.Config.HeadDim, e.Config.KVHeads, 1)
 
 			// 4. KV Cache Update
-			// Stub: we don't effectively use cache for Attention calculation in this loop yet
-			// because we don't have the explicit Attn kernel that reads it.
-			// We just calculate score based on current dot product (which is effectively 1-token context).
-
+			// Store current k,v into cache at e.CachePos
+			k.StoreKV(v, e.KVCacheK[l], e.KVCacheV[l], e.CachePos, e.Config.Heads, e.Config.HeadDim)
+			
 			// 5. Attention (GQA)
-			// Placeholder: Skip dot product (require GQA/Slice kernels).
-			// We just project Q directly to Output for now to verify the rest of the graph.
-			// Q: [1, Dim], AttnO: [Dim, Dim]
-			// Real: Score = Q * K, Weighted = Score * V.
-			// Hack: Weighted = Q (dimensionally valid matching V if we assume head concatenation matches)
-			// Wait, Q is [1, Dim]. AttnO expects [1, Dim].
-			_ = v // Suppress unused error
-			weighted := q
-			// score := q.MatMul(k)
-			// score.Softmax()
-			// weighted := score.MatMul(v)
+			// Using fused kernel: q is [1, num_heads * head_dim]
+			weighted := q.Attention(e.KVCacheK[l], e.KVCacheV[l], e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim)
 
 			// Output Proj
 			// AttnO is [Dim, Dim]. Linear works.
