@@ -276,18 +276,28 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int) ([]int, error) {
 	// hidden.LoadFrom([]float32{1.0})
 	
 	// Main Generation Loop
-	for i := 0; i < tokensToGenerate; i++ {
+	// First, prefill all input tokens to build KV cache context
+	// Then generate new tokens
+	totalTokens := len(inputTokens) + tokensToGenerate
+	var prevToken int // Track previous token during prefill
+	
+	for i := 0; i < totalTokens; i++ {
 		tToken := time.Now()
 		
 		// 1. Get Input Embedding
-		// Input is a single token ID (last one)
-		lastToken := 0
-		if i == 0 {
-			if len(inputTokens) > 0 {
-				lastToken = inputTokens[len(inputTokens)-1]
-			}
+		var lastToken int
+		if i < len(inputTokens) {
+			// Prefill phase: process input prompt tokens
+			lastToken = inputTokens[i]
+			prevToken = lastToken // Track for next iteration
 		} else {
-			lastToken = result[len(result)-1]
+			// Generation phase: use previously generated tokens
+			if len(result) > 0 {
+				lastToken = result[len(result)-1]
+			} else {
+				// First generated token uses last prefill token
+				lastToken = prevToken
+			}
 		}
 		
 		// Lookup embedding
@@ -388,7 +398,11 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int) ([]int, error) {
 		if nextToken < 0 || nextToken >= e.Weights.TokenEmb.Rows() {
 			return nil, fmt.Errorf("generated token %d is out of vocab range [0, %d)", nextToken, e.Weights.TokenEmb.Rows())
 		}
-		result = append(result, nextToken)
+		
+		// Only append generated tokens (after prefill phase)
+		if i >= len(inputTokens) {
+			result = append(result, nextToken)
+		}
 
 		e.CachePos++
 		metrics.RecordInference(1, time.Since(tToken)) 
