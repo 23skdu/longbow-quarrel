@@ -146,6 +146,11 @@ func (t *Tensor) ToHost() []float32 {
 	return f32
 }
 
+// ZeroInit initializes tensor buffer with zeros
+func (t *Tensor) ZeroInit() {
+	C.Metal_ZeroBuffer(t.buf, 0, C.int(t.sizeBytes))
+}
+
 func (c *Context) Synchronize() {
 	C.Metal_Synchronize(c.ref)
 }
@@ -188,6 +193,16 @@ func (t *Tensor) RMSNorm(weight *Tensor, eps float32) *Tensor {
 	res := t.ctx.NewTensorPooled(t.rows, t.cols)
 	C.Metal_RMSNorm_F16(t.ctx.ref, t.buf, 0, weight.buf, 0, res.buf, 0, 
 		C.int(t.rows), C.int(t.cols), C.float(eps))
+	return res
+}
+
+// RMSNormLinear performs fused RMSNorm + Linear in single kernel
+// Eliminates intermediate buffer allocation
+func (t *Tensor) RMSNormLinear(normWeight, linearWeight *Tensor, eps float32) *Tensor {
+	// normWeight: [inDim], linearWeight: [outDim, inDim]
+	res := t.ctx.NewTensorPooled(t.rows, linearWeight.rows)
+	C.Metal_RMSNormLinear_F16(t.ctx.ref, t.buf, 0, normWeight.buf, 0, linearWeight.buf, 0, res.buf, 0,
+		C.int(t.cols), C.int(linearWeight.rows), C.float(eps))
 	return res
 }
 

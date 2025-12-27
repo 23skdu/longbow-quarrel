@@ -130,12 +130,19 @@ func (e *Engine) loadModel(path string) error {
 			rows *= int(t.Dimensions[i])
 		}
 		
+		// Validate dimensions
+		if cols <= 0 || rows <= 0 {
+			return fmt.Errorf("invalid tensor dimensions for %s: rows=%d, cols=%d", t.Name, rows, cols)
+		}
+		
 		mt = e.Ctx.NewTensor(rows, cols)
-		numElements := rows * cols /* rows * cols */
+		numElements := rows * cols
 		
 		if t.Type == gguf.GGMLTypeF32 {
 			dataBytes := numElements * 4
-			if uint64(len(t.Data)) < uint64(dataBytes) { return errors.New("tensor data truncated") }
+			if uint64(len(t.Data)) < uint64(dataBytes) { 
+				return fmt.Errorf("tensor %s data truncated: expected %d bytes, got %d", t.Name, dataBytes, len(t.Data))
+			}
 			
 			rawBytes := t.Data[:dataBytes]
 			f32Data := make([]float32, numElements)
@@ -148,7 +155,9 @@ func (e *Engine) loadModel(path string) error {
 		} else if t.Type == gguf.GGMLTypeF16 {
 			// Direct copy!
 			dataBytes := numElements * 2
-			if uint64(len(t.Data)) < uint64(dataBytes) { return errors.New("tensor data truncated") }
+			if uint64(len(t.Data)) < uint64(dataBytes) { 
+				return fmt.Errorf("tensor %s data truncated: expected %d bytes, got %d", t.Name, dataBytes, len(t.Data))
+			}
 			
 			// LoadFromRaw expects bytes to be FP16
 			mt.LoadFromRaw(t.Data[:dataBytes])
@@ -236,6 +245,24 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int) ([]int, error) {
 		return nil, errors.New("no model loaded")
 	}
 	
+	// Validate critical weights are loaded
+	if e.Weights.TokenEmb == nil {
+		return nil, errors.New("token embedding weights not loaded")
+	}
+	if e.Weights.OutputNorm == nil {
+		return nil, errors.New("output norm weights not loaded")
+	}
+	if e.Weights.Output == nil {
+		return nil, errors.New("output weights not loaded")
+	}
+	
+	// Validate input tokens are within vocab range
+	for i, token := range inputTokens {
+		if token < 0 || token >= e.Weights.TokenEmb.Rows() {
+			return nil, fmt.Errorf("input token %d at position %d is out of vocab range [0, %d)", token, i, e.Weights.TokenEmb.Rows())
+		}
+	}
+	
 	tStart := time.Now()
 	result := make([]int, 0, tokensToGenerate)
 	
@@ -267,18 +294,25 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int) ([]int, error) {
 		// TokenEmb: [Vocab, Dim]
 		// Rows=Vocab, Cols=Dim.
 		
-		var current *device.Tensor
-		
-		if e.Weights.TokenEmb != nil && lastToken < e.Weights.TokenEmb.Rows() {
-			current = e.Weights.TokenEmb.EmbeddingLookup(lastToken)
-		} else {
-			// Fallback (or first token if prompt empty, though lastToken handles that)
-			current = e.Ctx.NewTensor(1, e.Config.Dim)
-			// Zero init?
+		// Validate token ID bounds
+		if lastToken < 0 || lastToken >= e.Weights.TokenEmb.Rows() {
+			return nil, fmt.Errorf("token %d at position %d is out of vocab range [0, %d)", lastToken, i, e.Weights.TokenEmb.Rows())
 		}
+		
+		current := e.Weights.TokenEmb.EmbeddingLookup(lastToken)
 		
 		// Layers
 		for l := 0; l < e.Config.Layers; l++ {
+			// Validate layer weights are loaded
+			if e.Weights.AttnNorm[l] == nil || e.Weights.AttnQ[l] == nil || e.Weights.AttnK[l] == nil || 
+				 e.Weights.AttnV[l] == nil || e.Weights.AttnO[l] == nil {
+				return nil, fmt.Errorf("attention weights not loaded for layer %d", l)
+			}
+			if e.Weights.FfnNorm[l] == nil || e.Weights.FfnGate[l] == nil || 
+				 e.Weights.FfnUp[l] == nil || e.Weights.FfnDown[l] == nil {
+				return nil, fmt.Errorf("ffn weights not loaded for layer %d", l)
+			}
+			
 			residual := current // Keep reference
 
 			// 1. RMS Norm
@@ -336,6 +370,10 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int) ([]int, error) {
 
 		// ArgMax
 		logitsData := logits.ToHost()
+		if len(logitsData) == 0 {
+			return nil, errors.New("logits tensor is empty")
+		}
+		
 		maxIdx := 0
 		maxVal := logitsData[0]
 		for idx, val := range logitsData {
@@ -344,7 +382,12 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int) ([]int, error) {
 				maxIdx = idx
 			}
 		}
+		
+		// Validate generated token is in vocab range
 		nextToken := maxIdx
+		if nextToken < 0 || nextToken >= e.Weights.TokenEmb.Rows() {
+			return nil, fmt.Errorf("generated token %d is out of vocab range [0, %d)", nextToken, e.Weights.TokenEmb.Rows())
+		}
 		result = append(result, nextToken)
 
 		e.CachePos++
@@ -354,6 +397,32 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int) ([]int, error) {
 	_ = time.Since(tStart)
 	
 	return result, nil
+}
+
+func minFloat(arr []float32) float32 {
+	if len(arr) == 0 {
+		return 0
+	}
+	min := arr[0]
+	for _, v := range arr {
+		if v < min {
+			min = v
+		}
+	}
+	return min
+}
+
+func maxFloat(arr []float32) float32 {
+	if len(arr) == 0 {
+		return 0
+	}
+	max := arr[0]
+	for _, v := range arr {
+		if v > max {
+			max = v
+		}
+	}
+	return max
 }
 
 func (e *Engine) initKVCache() error {
@@ -389,9 +458,9 @@ func (e *Engine) initKVCache() error {
 		e.KVCacheK[i] = e.Ctx.NewTensor(rows, cols)
 		e.KVCacheV[i] = e.Ctx.NewTensor(rows, cols)
 		
-		// TODO: Zero init? NewTensor might be garbage.
-		// We should probably zero it or track valid length.
-		// We track CachePos.
+		// Zero init to prevent garbage data
+		e.KVCacheK[i].ZeroInit()
+		e.KVCacheV[i].ZeroInit()
 	}
 	
 	e.CachePos = 0

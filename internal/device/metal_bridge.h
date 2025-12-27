@@ -24,6 +24,7 @@ void Metal_CopyToDevice(MetalBufferRef buf, int offset, const void *data,
                         int size);
 void Metal_CopyToHost(MetalBufferRef buf, int offset, void *data, int size);
 void *Metal_GetBufferContents(MetalBufferRef buf);
+void Metal_ZeroBuffer(MetalBufferRef buf, int offset, int size);
 
 // Basic Ops
 void Metal_Add_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
@@ -62,6 +63,12 @@ void Metal_Attention_F16(MetalContextRef ctx, MetalBufferRef q, int offQ,
                          MetalBufferRef kCache, MetalBufferRef vCache,
                          MetalBufferRef result, int offRes, int pos,
                          int numHeads, int kvHeads, int headDim);
+
+void Metal_RMSNormLinear_F16(MetalContextRef ctx, MetalBufferRef input,
+                             int offIn, MetalBufferRef normWeight,
+                             int offNormWeight, MetalBufferRef weight,
+                             int offWeight, MetalBufferRef result, int offRes,
+                             int inDim, int outDim, float eps);
 
 // Matrix Multiplication (MPS)
 void Metal_MatMul_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
