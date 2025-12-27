@@ -137,7 +137,7 @@ func TestMetalRoPE(t *testing.T) {
 	tIn.LoadFrom(input)
 	
 	// Test Pos 0
-	tIn.RoPE(0, headDim, 1, 1)
+	tIn.RoPE(0, headDim, 1, 1, 10000.0)
 	out := tIn.ToHost()
 	if math.Abs(float64(out[0]-1.0)) > 1e-3 || math.Abs(float64(out[1]-0.0)) > 1e-3 {
 		t.Errorf("RoPE pos 0 mismatch: %v", out)
@@ -146,7 +146,7 @@ func TestMetalRoPE(t *testing.T) {
 	// Reset
 	tIn.LoadFrom(input)
 	// Test Pos 1
-	tIn.RoPE(1, headDim, 1, 1) // Offset=1
+	tIn.RoPE(1, headDim, 1, 1, 10000.0) // Offset=1
 	out = tIn.ToHost()
 	
 	expected0 := float32(math.Cos(1.0))
