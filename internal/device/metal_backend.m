@@ -21,6 +21,7 @@
 @property(strong) id<MTLComputePipelineState> pipelineEmbedding_F16;
 @property(strong) id<MTLComputePipelineState> pipelineStoreKV_F16;
 @property(strong) id<MTLComputePipelineState> pipelineAttention_F16;
+@property(strong) id<MTLComputePipelineState> pipelineRMSNormLinear_F16;
 
 @property(strong) id<MTLCommandBuffer> currentCommandBuffer;
 @property(strong) id<MTLComputeCommandEncoder> currentEncoder;
@@ -93,6 +94,7 @@ MetalContextRef Metal_Init(const char *libSource) {
   ctx.pipelineEmbedding_F16 = loadPipeline(ctx, @"embedding_kernel_f16");
   ctx.pipelineStoreKV_F16 = loadPipeline(ctx, @"kv_store_f16");
   ctx.pipelineAttention_F16 = loadPipeline(ctx, @"attention_f16");
+  ctx.pipelineRMSNormLinear_F16 = loadPipeline(ctx, @"rmsnorm_linear_f16");
 
   return (__bridge_retained MetalContextRef)ctx;
 }
@@ -106,7 +108,13 @@ void Metal_Free(MetalContextRef ctx) {
 }
 
 void Metal_Synchronize(MetalContextRef ctx) {
-  [(__bridge MetalWrapper *)ctx flush];
+  MetalWrapper *c = (__bridge MetalWrapper *)ctx;
+  [c stopEncoder];
+  if (c.currentCommandBuffer) {
+    [c.currentCommandBuffer commit];
+    [c.currentCommandBuffer waitUntilCompleted]; // MUST wait for ToHost
+    c.currentCommandBuffer = nil;
+  }
 }
 
 MetalBufferRef Metal_Alloc(MetalContextRef ctx, int size) {
@@ -136,6 +144,11 @@ void Metal_CopyToHost(MetalBufferRef buf, int offset, void *data, int size) {
 
 void *Metal_GetBufferContents(MetalBufferRef buf) {
   return [(__bridge id<MTLBuffer>)buf contents];
+}
+
+void Metal_ZeroBuffer(MetalBufferRef buf, int offset, int size) {
+  id<MTLBuffer> buffer = (__bridge id<MTLBuffer>)buf;
+  memset((char *)[buffer contents] + offset, 0, size);
 }
 
 // ================= KERNEL DISPATCH =================
@@ -407,4 +420,32 @@ void Metal_Attention_F16(MetalContextRef ctx, MetalBufferRef q, int offQ,
 
   [c.currentEncoder dispatchThreads:MTLSizeMake(numHeads, 1, 1)
               threadsPerThreadgroup:MTLSizeMake(MIN(numHeads, 512), 1, 1)];
+}
+
+void Metal_RMSNormLinear_F16(MetalContextRef ctx, MetalBufferRef input,
+                             int offIn, MetalBufferRef normWeight,
+                             int offNormWeight, MetalBufferRef weight,
+                             int offWeight, MetalBufferRef result, int offRes,
+                             int inDim, int outDim, float eps) {
+  MetalWrapper *c = (__bridge MetalWrapper *)ctx;
+  ENCODE(c, pipelineRMSNormLinear_F16);
+
+  [c.currentEncoder setBuffer:(__bridge id<MTLBuffer>)input
+                       offset:offIn
+                      atIndex:0];
+  [c.currentEncoder setBuffer:(__bridge id<MTLBuffer>)normWeight
+                       offset:offNormWeight
+                      atIndex:1];
+  [c.currentEncoder setBuffer:(__bridge id<MTLBuffer>)weight
+                       offset:offWeight
+                      atIndex:2];
+  [c.currentEncoder setBuffer:(__bridge id<MTLBuffer>)result
+                       offset:offRes
+                      atIndex:3];
+  [c.currentEncoder setBytes:&inDim length:4 atIndex:4];
+  [c.currentEncoder setBytes:&outDim length:4 atIndex:5];
+  [c.currentEncoder setBytes:&eps length:4 atIndex:6];
+
+  [c.currentEncoder dispatchThreads:MTLSizeMake(1, 1, 1)
+              threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
 }
