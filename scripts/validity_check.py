@@ -167,7 +167,7 @@ def main() -> int:
     quarrel_bin = "./quarrel"
     llama_bin = "/opt/homebrew/bin/llama-cli"
     model_path = "/Users/rsd/.ollama/models/blobs/sha256-f535f83ec568d040f88ddc04a199fa6da90923bbb41d4dcaed02caa924d6ef57"
-    questions_file = Path("benchmarks/generic_questions.md")
+    questions_file = Path("docs/generic_questions.md")
     
     print("=" * 70)
     print("Longbow-Quarrel Validity Check")
