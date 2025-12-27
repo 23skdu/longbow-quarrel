@@ -174,3 +174,81 @@ kernel void softmax_kernel_f16(device const half *input [[ buffer(0) ]],
         output[offset + i] = half(float(output[offset + i]) * inv_sum);
     }
 }
+
+// KV Cache Store
+kernel void kv_store_f16(device const half *k [[ buffer(0) ]],
+                         device const half *v [[ buffer(1) ]],
+                         device half *k_cache [[ buffer(2) ]],
+                         device half *v_cache [[ buffer(3) ]],
+                         constant int &pos [[ buffer(4) ]],
+                         constant int &num_heads [[ buffer(5) ]],
+                         constant int &head_dim [[ buffer(6) ]],
+                         uint head_idx [[ thread_position_in_grid ]]) {
+    int cache_offset = (pos * num_heads + head_idx) * head_dim;
+    int input_offset = head_idx * head_dim;
+    for (int i = 0; i < head_dim; i++) {
+        k_cache[cache_offset + i] = k[input_offset + i];
+        v_cache[cache_offset + i] = v[input_offset + i];
+    }
+}
+
+// Fused GQA Attention for Decoding (Single Token)
+kernel void attention_f16(device const half *q [[ buffer(0) ]],
+                          device const half *k_cache [[ buffer(1) ]],
+                          device const half *v_cache [[ buffer(2) ]],
+                          device half *out [[ buffer(3) ]],
+                          constant int &pos [[ buffer(4) ]],
+                          constant int &num_heads [[ buffer(5) ]],
+                          constant int &kv_heads [[ buffer(6) ]],
+                          constant int &head_dim [[ buffer(7) ]],
+                          uint head_idx [[ thread_position_in_grid ]]) {
+    int heads_per_kv = num_heads / kv_heads;
+    int kv_head_idx = head_idx / heads_per_kv;
+    float scale = 1.0f / sqrt((float)head_dim);
+    
+    float max_val = -1e10;
+    
+    // Pass 1: Max for Softmax
+    for (int t = 0; t <= pos; t++) {
+        float sum = 0;
+        int q_off = head_idx * head_dim;
+        int k_off = (t * kv_heads + kv_head_idx) * head_dim;
+        for (int i = 0; i < head_dim; i++) {
+            sum += (float)q[q_off + i] * (float)k_cache[k_off + i];
+        }
+        sum *= scale;
+        if (sum > max_val) max_val = sum;
+    }
+    
+    // Pass 2: Exp Sum
+    float sum_exp = 0;
+    for (int t = 0; t <= pos; t++) {
+        float sum = 0;
+        int q_off = head_idx * head_dim;
+        int k_off = (t * kv_heads + kv_head_idx) * head_dim;
+        for (int i = 0; i < head_dim; i++) {
+            sum += (float)q[q_off + i] * (float)k_cache[k_off + i];
+        }
+        sum *= scale;
+        sum_exp += exp(sum - max_val);
+    }
+    
+    // Pass 3: Weighted Sum
+    for (int i = 0; i < head_dim; i++) {
+        float weighted_sum = 0;
+        for (int t = 0; t <= pos; t++) {
+            float sum = 0;
+            int q_off = head_idx * head_dim;
+            int k_off = (t * kv_heads + kv_head_idx) * head_dim;
+            for (int k_i = 0; k_i < head_dim; k_i++) {
+                sum += (float)q[q_off + k_i] * (float)k_cache[k_off + k_i];
+            }
+            sum *= scale;
+            float attn_weight = exp(sum - max_val) / sum_exp;
+            
+            int v_off = (t * kv_heads + kv_head_idx) * head_dim;
+            weighted_sum += attn_weight * (float)v_cache[v_off + i];
+        }
+        out[head_idx * head_dim + i] = (half)weighted_sum;
+    }
+}

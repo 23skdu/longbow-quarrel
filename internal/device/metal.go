@@ -208,9 +208,18 @@ func (t *Tensor) Scale(val float32) *Tensor {
 }
 
 func (t *Tensor) EmbeddingLookup(row int) *Tensor {
-	// t is Weights [Rows=Vocab, Cols=Dim]
-	// row 'row' corresponds to token ID.
 	res := t.ctx.NewTensor(1, t.cols)
 	C.Metal_Embedding_F16(t.ctx.ref, t.buf, 0, res.buf, 0, C.int(row), C.int(t.cols))
+	return res
+}
+
+func (t *Tensor) StoreKV(v *Tensor, kCache, vCache *Tensor, pos, heads, headDim int) {
+	C.Metal_StoreKV_F16(t.ctx.ref, t.buf, 0, v.buf, 0, kCache.buf, vCache.buf, C.int(pos), C.int(heads), C.int(headDim))
+}
+
+func (t *Tensor) Attention(kCache, vCache *Tensor, pos, numHeads, kvHeads, headDim int) *Tensor {
+	res := t.ctx.NewTensor(1, numHeads*headDim)
+	C.Metal_Attention_F16(t.ctx.ref, t.buf, 0, kCache.buf, vCache.buf, res.buf, 0,
+		C.int(pos), C.int(numHeads), C.int(kvHeads), C.int(headDim))
 	return res
 }
