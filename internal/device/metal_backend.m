@@ -19,6 +19,8 @@
 @property(strong) id<MTLComputePipelineState> pipelineSwiGLU_F16;
 @property(strong) id<MTLComputePipelineState> pipelineSoftmax_F16;
 @property(strong) id<MTLComputePipelineState> pipelineEmbedding_F16;
+@property(strong) id<MTLComputePipelineState> pipelineStoreKV_F16;
+@property(strong) id<MTLComputePipelineState> pipelineAttention_F16;
 
 @property(strong) id<MTLCommandBuffer> currentCommandBuffer;
 @property(strong) id<MTLComputeCommandEncoder> currentEncoder;
@@ -89,6 +91,8 @@ MetalContextRef Metal_Init(const char *libSource) {
   ctx.pipelineSwiGLU_F16 = loadPipeline(ctx, @"swiglu_kernel_f16");
   ctx.pipelineSoftmax_F16 = loadPipeline(ctx, @"softmax_kernel_f16");
   ctx.pipelineEmbedding_F16 = loadPipeline(ctx, @"embedding_kernel_f16");
+  ctx.pipelineStoreKV_F16 = loadPipeline(ctx, @"kv_store_f16");
+  ctx.pipelineAttention_F16 = loadPipeline(ctx, @"attention_f16");
 
   return (__bridge_retained MetalContextRef)ctx;
 }
@@ -356,4 +360,51 @@ void Metal_BatchedMatMul_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
                    rightMatrix:mB
                   resultMatrix:mC];
   }
+}
+void Metal_StoreKV_F16(MetalContextRef ctx, MetalBufferRef k, int offK,
+                       MetalBufferRef v, int offV, MetalBufferRef kCache,
+                       MetalBufferRef vCache, int pos, int heads, int headDim) {
+  MetalWrapper *c = (__bridge MetalWrapper *)ctx;
+  ENCODE(c, pipelineStoreKV_F16);
+
+  [c.currentEncoder setBuffer:(__bridge id<MTLBuffer>)k offset:offK atIndex:0];
+  [c.currentEncoder setBuffer:(__bridge id<MTLBuffer>)v offset:offV atIndex:1];
+  [c.currentEncoder setBuffer:(__bridge id<MTLBuffer>)kCache
+                       offset:0
+                      atIndex:2];
+  [c.currentEncoder setBuffer:(__bridge id<MTLBuffer>)vCache
+                       offset:0
+                      atIndex:3];
+  [c.currentEncoder setBytes:&pos length:4 atIndex:4];
+  [c.currentEncoder setBytes:&heads length:4 atIndex:5];
+  [c.currentEncoder setBytes:&headDim length:4 atIndex:6];
+
+  [c.currentEncoder dispatchThreads:MTLSizeMake(heads, 1, 1)
+              threadsPerThreadgroup:MTLSizeMake(MIN(heads, 512), 1, 1)];
+}
+
+void Metal_Attention_F16(MetalContextRef ctx, MetalBufferRef q, int offQ,
+                         MetalBufferRef kCache, MetalBufferRef vCache,
+                         MetalBufferRef result, int offRes, int pos,
+                         int numHeads, int kvHeads, int headDim) {
+  MetalWrapper *c = (__bridge MetalWrapper *)ctx;
+  ENCODE(c, pipelineAttention_F16);
+
+  [c.currentEncoder setBuffer:(__bridge id<MTLBuffer>)q offset:offQ atIndex:0];
+  [c.currentEncoder setBuffer:(__bridge id<MTLBuffer>)kCache
+                       offset:0
+                      atIndex:1];
+  [c.currentEncoder setBuffer:(__bridge id<MTLBuffer>)vCache
+                       offset:0
+                      atIndex:2];
+  [c.currentEncoder setBuffer:(__bridge id<MTLBuffer>)result
+                       offset:offRes
+                      atIndex:3];
+  [c.currentEncoder setBytes:&pos length:4 atIndex:4];
+  [c.currentEncoder setBytes:&numHeads length:4 atIndex:5];
+  [c.currentEncoder setBytes:&kvHeads length:4 atIndex:6];
+  [c.currentEncoder setBytes:&headDim length:4 atIndex:7];
+
+  [c.currentEncoder dispatchThreads:MTLSizeMake(numHeads, 1, 1)
+              threadsPerThreadgroup:MTLSizeMake(MIN(numHeads, 512), 1, 1)];
 }
