@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"log"
 	"math"
-	"sort"
+
 	"strings"
 	"time"
 	"unsafe"
@@ -515,7 +515,7 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int) ([]int, error) {
 				e.Weights.FfnNorm[l], e.Weights.FfnGate[l], e.Weights.FfnUp[l], e.Weights.FfnDown[l],
 				e.KVCacheK[l], e.KVCacheV[l], s1, s2, s3, s4,
 				e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim,
-				e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen, false)
+				e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen)
 		}
 		if i == 1 {
 			fmt.Printf("Token %d: %d layers dispatched in %v\n", i, e.Config.Layers, time.Since(tLayers))

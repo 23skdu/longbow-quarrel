@@ -57,6 +57,7 @@ const (
 	DataTypeF16 = 0
 	DataTypeQ4K = 1
 	DataTypeQ3K = 2
+	DataTypeF32 = 3
 )
 
 // Tensor wraps a Metal buffer. Always FP16 for this engine.
@@ -129,6 +130,35 @@ func (c *Context) NewTensor(rows, cols int) *Tensor {
 		dataType:  DataTypeF16,
 	}
 	
+	
+	atomic.AddInt64(&allocatedBytes, int64(sizeBytes))
+	metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
+
+	runtime.SetFinalizer(t, func(ft *Tensor) {
+		C.Metal_FreeBuffer(ft.ctx.ref, ft.buf)
+		atomic.AddInt64(&allocatedBytes, -int64(ft.sizeBytes))
+		metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
+	})
+	
+	return t
+}
+
+// NewTensorFP32 creates a standard F32 tensor
+func (c *Context) NewTensorFP32(rows, cols int) *Tensor {
+	sizeBytes := rows * cols * 4 // FP32
+	buf := C.Metal_Alloc(c.ref, C.int(sizeBytes))
+	if buf == nil {
+		panic("Metal_Alloc returned nil!")
+	}
+	
+	t := &Tensor{
+		ctx: c,
+		buf: buf,
+		sizeBytes: sizeBytes,
+		rows: rows,
+		cols: cols,
+		dataType:  DataTypeF32,
+	}
 	
 	atomic.AddInt64(&allocatedBytes, int64(sizeBytes))
 	metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
@@ -512,34 +542,89 @@ func (t *Tensor) Layer(attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, k
 	
 	// --- FFN Block ---
 	
-	// 8. FFN Norm
-	normedFFN := t.ctx.NewTensor(t.rows, t.cols)
-	C.Metal_RMSNorm_F16(t.ctx.ref, t.buf, 0, ffnNorm.buf, 0, normedFFN.buf, 0, 
-		C.int(t.rows), C.int(t.cols), C.float(eps))
-	t.ctx.Synchronize()
+	// Check if we should use FP32 (if weights are Q4K)
+	// We check ffnGate (usually first one used).
+	useFP32 := (ffnGate.dataType == DataTypeQ4K && ffnUp.dataType == DataTypeQ4K && ffnDown.dataType == DataTypeQ4K)
+	
+	var resFFN *Tensor
+	
+	if useFP32 {
+		// FP32 Path
 		
-	// 9. FFN Gate/Up
-	gatePart := t.ctx.NewTensor(t.rows, ffnGate.rows) // [1, 14336]
-	upPart := t.ctx.NewTensor(t.rows, ffnUp.rows)     // [1, 14336]
-	normedFFN.LinearInto(ffnGate, gatePart)
-	normedFFN.LinearInto(ffnUp, upPart)
-	t.ctx.Synchronize()
-	
-	// 10. SwiGLU
-	// Args: metal_backend (iV, iG, o). (Up, Gate, Out).
-	// Result is written to gatePart.
-	C.Metal_SwiGLU_F16(t.ctx.ref, upPart.buf, 0, gatePart.buf, 0, gatePart.buf, 0, C.int(1), C.int(ffnGate.rows))
-	t.ctx.Synchronize()
-	
-	// 11. FFN Down Projection
-	// Input is gatePart (SwiGLU output)
-	resFFN := t.ctx.NewTensor(t.rows, ffnDown.rows) // [1, 4096]
-	gatePart.LinearInto(ffnDown, resFFN)
-	t.ctx.Synchronize()
-	
-	// 12. Residual Add 2
-	C.Metal_Add_F16(t.ctx.ref, t.buf, 0, resFFN.buf, 0, t.buf, 0, C.int(t.rows*t.cols))
-	t.ctx.Synchronize()
+		// 8. FFN Norm (Input t (F16) -> Normed (F32))
+		// We use RMSNormFP32 which takes F32 input? No. RMSNormFP32 takes F32 input from my implementation.
+		// Wait, t is F16. I need to convert t to F32 first?
+		// My RMSNormFP32 implementation: Input t is F32.
+		// So convert t to F32.
+		t_f32 := t.CopyToF32()
+		normedFFN_f32 := t_f32.RMSNormFP32(ffnNorm, eps)
+		t.ctx.Synchronize()
+		
+		// 9. FFN Gate/Up
+		gatePart_f32 := t.ctx.NewTensorFP32(t.rows, ffnGate.rows)
+		upPart_f32 := t.ctx.NewTensorFP32(t.rows, ffnUp.rows)
+		
+		normedFFN_f32.LinearIntoFP32(ffnGate, gatePart_f32)
+		normedFFN_f32.LinearIntoFP32(ffnUp, upPart_f32)
+		t.ctx.Synchronize()
+		
+		// 10. SwiGLU (F32)
+		// Result written to gatePart_f32
+		// My SwiGLUFP32 returns new tensor. Modification required?
+		// Metal_SwiGLU_F32 uses 3 buffers: inV, inG, out.
+		// In my LinearIntoFP32, I used separate buffers.
+		// The SwiGLUFP32 wrapper creates new tensor.
+		// Let's use it.
+		// But wait, SwiGLU usually modifies in place or writes to gate?
+		// In previous F16: C.Metal_SwiGLU_F16(..., gatePart.buf, 0, gatePart.buf, 0, ...) -> In place?
+		// Arguments: buffer(0)=iG, buffer(1)=iV, buffer(2)=out.
+		// If iG == out, it's in place.
+		// SwiGLUFP32 implementation: returns new tensor.
+		swigluOut_f32 := upPart_f32.SwiGLUFP32(gatePart_f32)
+		t.ctx.Synchronize()
+		
+		// 11. FFN Down Projection
+		resFFN_f32 := t.ctx.NewTensorFP32(t.rows, ffnDown.rows)
+		swigluOut_f32.LinearIntoFP32(ffnDown, resFFN_f32)
+		t.ctx.Synchronize()
+		
+		// 12. Residual Add 2 (t_f32 + resFFN_f32 -> final_f32)
+		final_f32 := t_f32.AddFP32(resFFN_f32)
+		t.ctx.Synchronize()
+		
+		// Copy back to t (F16) direct from F32
+		final_f32.CopyToF16_Into(t)
+	} else {
+		// F16 Path (Original)
+		// 8. FFN Norm
+		normedFFN := t.ctx.NewTensor(t.rows, t.cols)
+		C.Metal_RMSNorm_F16(t.ctx.ref, t.buf, 0, ffnNorm.buf, 0, normedFFN.buf, 0, 
+			C.int(t.rows), C.int(t.cols), C.float(eps))
+		t.ctx.Synchronize()
+			
+		// 9. FFN Gate/Up
+		gatePart := t.ctx.NewTensor(t.rows, ffnGate.rows) // [1, 14336]
+		upPart := t.ctx.NewTensor(t.rows, ffnUp.rows)     // [1, 14336]
+		normedFFN.LinearInto(ffnGate, gatePart)
+		normedFFN.LinearInto(ffnUp, upPart)
+		t.ctx.Synchronize()
+		
+		// 10. SwiGLU
+		// Args: metal_backend (iV, iG, o). (Up, Gate, Out).
+		// Result is written to gatePart.
+		C.Metal_SwiGLU_F16(t.ctx.ref, upPart.buf, 0, gatePart.buf, 0, gatePart.buf, 0, C.int(1), C.int(ffnGate.rows))
+		t.ctx.Synchronize()
+		
+		// 11. FFN Down Projection
+		// Input is gatePart (SwiGLU output)
+		resFFN = t.ctx.NewTensor(t.rows, ffnDown.rows) // [1, 4096]
+		gatePart.LinearInto(ffnDown, resFFN)
+		t.ctx.Synchronize()
+		
+		// 12. Residual Add 2
+		C.Metal_Add_F16(t.ctx.ref, t.buf, 0, resFFN.buf, 0, t.buf, 0, C.int(t.rows*t.cols))
+		t.ctx.Synchronize()
+	}
 }
 
 // Correct RoPE implementation using arguments expected by Kernel
@@ -601,4 +686,61 @@ func (t *Tensor) Attention(kCache, vCache *Tensor, pos, numHeads, kvHeads, headD
 		scores.buf, 0,
 		C.int(pos), C.int(numHeads), C.int(kvHeads), C.int(headDim), C.int(ctxLen))
 	return res
+}
+
+// FP32 Operations
+
+func (t *Tensor) RMSNormFP32(weight *Tensor, eps float32) *Tensor {
+	res := t.ctx.NewTensorFP32(t.rows, t.cols)
+	// Input t is F32, Weight is F16
+	C.Metal_RMSNorm_F32(t.ctx.ref, t.buf, 0, weight.buf, 0, res.buf, 0, 
+		C.int(t.rows), C.int(t.cols), C.float(eps))
+	return res
+}
+
+func (t *Tensor) LinearIntoFP32(weight *Tensor, out *Tensor) {
+	if t.cols != weight.cols {
+		panic(fmt.Sprintf("LinearIntoFP32 mismatch: %d != %d", t.cols, weight.cols))
+	}
+	// t is F32 input, out is F32 output
+	// weight can be Q4K (likely) or F16.
+	
+	if weight.dataType == DataTypeQ4K {
+		C.Metal_MatMul_Q4K_F32(t.ctx.ref, weight.buf, 0, false, t.buf, 0, false, out.buf, 0,
+			C.int(t.rows), C.int(weight.rows), C.int(weight.cols))
+	} else {
+		// Fallback for F16 weights with F32 input: Not implemented yet!
+		// For now panic or use Q4K path if compatible? No.
+		// We need Metal_MatMul_F16_F32.
+		panic("LinearIntoFP32: only Q4K weights supported currently")
+	}
+}
+
+func (t *Tensor) AddFP32(other *Tensor) *Tensor {
+	res := t.ctx.NewTensorFP32(t.rows, t.cols)
+	C.Metal_Add_F32(t.ctx.ref, t.buf, 0, other.buf, 0, res.buf, 0, C.int(t.rows*t.cols))
+	return res
+}
+
+func (t *Tensor) SwiGLUFP32(gate *Tensor) *Tensor {
+	// t is up (F32), gate is gate (F32)
+	res := t.ctx.NewTensorFP32(t.rows, t.cols)
+	C.Metal_SwiGLU_F32(t.ctx.ref, t.buf, 0, gate.buf, 0, res.buf, 0, C.int(t.rows), C.int(t.cols))
+	return res
+}
+
+func (t *Tensor) CopyToF32() *Tensor {
+	res := t.ctx.NewTensorFP32(t.rows, t.cols)
+	C.Metal_Copy_F16_F32(t.ctx.ref, t.buf, 0, res.buf, 0, C.int(t.rows*t.cols))
+	return res
+}
+
+func (t *Tensor) CopyToF16() *Tensor {
+	res := t.ctx.NewTensor(t.rows, t.cols)
+	C.Metal_Copy_F32_F16(t.ctx.ref, t.buf, 0, res.buf, 0, C.int(t.rows*t.cols))
+	return res
+}
+
+func (t *Tensor) CopyToF16_Into(dest *Tensor) {
+	C.Metal_Copy_F32_F16(t.ctx.ref, t.buf, 0, dest.buf, 0, C.int(t.rows*t.cols))
 }
