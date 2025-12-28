@@ -106,6 +106,30 @@ void Metal_FusedFFN_F16(MetalContextRef ctx, MetalBufferRef input, int offIn,
                         MetalBufferRef output, int offOut, int inDim,
                         int interDim, float eps);
 
+// FP32 Ops
+void Metal_RMSNorm_F32(MetalContextRef ctx, MetalBufferRef input, int offIn,
+                       MetalBufferRef weight, int offWeight,
+                       MetalBufferRef result, int offRes, int rows, int cols,
+                       float eps);
+
+void Metal_MatMul_Q4K_F32(MetalContextRef ctx, MetalBufferRef a, int offA,
+                          bool transA, MetalBufferRef b, int offB, bool transB,
+                          MetalBufferRef c, int offC, int M, int N, int K);
+
+void Metal_Add_F32(MetalContextRef ctx, MetalBufferRef a, int oA,
+                   MetalBufferRef b, int oB, MetalBufferRef r, int oR,
+                   int count);
+
+void Metal_Copy_F16_F32(MetalContextRef ctx, MetalBufferRef src, int oS,
+                        MetalBufferRef dst, int oD, int n);
+
+void Metal_Copy_F32_F16(MetalContextRef ctx, MetalBufferRef src, int oS,
+                        MetalBufferRef dst, int oD, int n);
+
+void Metal_SwiGLU_F32(MetalContextRef ctx, MetalBufferRef iV, int oV,
+                      MetalBufferRef iG, int oG, MetalBufferRef o, int oO,
+                      int n, int iS);
+
 #ifdef __cplusplus
 }
 #endif
