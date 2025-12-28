@@ -14,6 +14,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"runtime"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unsafe"
@@ -30,8 +31,9 @@ var kernelsSource string
 
 // Context holds the Metal connection and tensor pool
 type Context struct {
-	ref C.MetalContextRef
-	pool map[string][]*Tensor // pool by size key "RxC"
+	ref  C.MetalContextRef
+	mu   sync.Mutex
+	pool map[string][]*Tensor // pool by size key "RxCxType"
 }
 
 func NewContext() *Context {
@@ -59,6 +61,9 @@ func (c *Context) Free() {
 
 // ClearPool releases all pooled tensors to free up GPU memory.
 func (c *Context) ClearPool() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	
 	for key, tensors := range c.pool {
 		for _, t := range tensors {
 			C.Metal_FreeBuffer(c.ref, t.buf)
@@ -205,11 +210,16 @@ func (t *Tensor) Free() {
 // NewTensorFP32Pooled creates or reuses a pooled tensor for intermediate float32 results.
 func (c *Context) NewTensorFP32Pooled(rows, cols int) *Tensor {
 	key := fmt.Sprintf("%dx%dx%d", rows, cols, DataTypeF32)
+	
+	c.mu.Lock()
 	if tensors, ok := c.pool[key]; ok && len(tensors) > 0 {
 		t := tensors[len(tensors)-1]
 		c.pool[key] = tensors[:len(tensors)-1]
+		c.mu.Unlock()
 		return t
 	}
+	c.mu.Unlock()
+	
 	return c.NewTensorFP32(rows, cols)
 }
 
@@ -244,12 +254,17 @@ func (c *Context) NewTensorFP32(rows, cols int) *Tensor {
 // NewTensorPooled attempts to reuse tensor from pool (defaults to F16)
 func (c *Context) NewTensorPooled(rows, cols int) *Tensor {
 	key := fmt.Sprintf("%dx%dx%d", rows, cols, DataTypeF16)
+	
+	c.mu.Lock()
 	if tensors, ok := c.pool[key]; ok && len(tensors) > 0 {
 		// Pop from pool
 		t := tensors[len(tensors)-1]
 		c.pool[key] = tensors[:len(tensors)-1]
+		c.mu.Unlock()
 		return t
 	}
+	c.mu.Unlock()
+	
 	// Fallback to new allocation
 	return c.NewTensor(rows, cols)
 }
@@ -258,7 +273,10 @@ func (c *Context) NewTensorPooled(rows, cols int) *Tensor {
 // Note: This does NOT free the Metal memory, just prevents GC from reaping it.
 func (t *Tensor) ReturnToPool() {
 	key := fmt.Sprintf("%dx%dx%d", t.rows, t.cols, t.dataType)
+	
+	t.ctx.mu.Lock()
 	t.ctx.pool[key] = append(t.ctx.pool[key], t)
+	t.ctx.mu.Unlock()
 }
 
 func (t *Tensor) LoadFrom(data []float32) {
