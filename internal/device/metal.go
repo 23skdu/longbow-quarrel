@@ -173,6 +173,13 @@ func (t *Tensor) LoadFrom(data []float32) {
 	C.Metal_CopyToDevice(t.buf, 0, unsafe.Pointer(&f16[0]), C.int(t.sizeBytes))
 }
 
+func (t *Tensor) LoadRaw(data []byte) {
+	if len(data) > t.sizeBytes {
+		panic("Raw data size exceeds tensor buffer")
+	}
+	C.Metal_CopyToDevice(t.buf, 0, unsafe.Pointer(&data[0]), C.int(len(data)))
+}
+
 func (t *Tensor) Probe(name string, n int) {
 	t.ctx.Synchronize()
 	// data := t.ToHost()
@@ -194,26 +201,44 @@ func (t *Tensor) Probe(name string, n int) {
 	fmt.Printf("DEBUG_PROBE: %s [%d]: %v\n", name, len(f16Slice), f32Data)
 }
 
+// GetBufferContents returns unsafe pointer to buffer for diagnostics
+func (t *Tensor) GetBufferContents() unsafe.Pointer {
+	t.ctx.Synchronize()
+	return C.Metal_GetBufferContents(t.buf)
+}
+
+// DataType returns the tensor's data type
+func (t *Tensor) DataType() int {
+	return t.dataType
+}
+
 func (t *Tensor) ScanNaNs(name string) int {
 	t.ctx.Synchronize()
 	ptr := C.Metal_GetBufferContents(t.buf)
 	if ptr == nil { return 0 }
 	f16Slice := unsafe.Slice((*uint16)(ptr), t.rows*t.cols)
 	nanCount := 0
+	infCount := 0
 	for _, v := range f16Slice {
-		// Is it NaN? 
-		// F16 NaN: exp=31 (0x1F), mant!=0.
-		// bits: (v >> 10) & 0x1F == 31. (v & 0x3FF) != 0.
-		if ((v >> 10) & 0x1F) == 0x1F && (v & 0x3FF) != 0 {
-			nanCount++
+		// F16: exp=31 (0x1F) means NaN or Inf
+		// NaN: exp=31, mant!=0
+		// Inf: exp=31, mant==0
+		exp := (v >> 10) & 0x1F
+		mant := v & 0x3FF
+		if exp == 0x1F {
+			if mant != 0 {
+				nanCount++
+			} else {
+				infCount++
+			}
 		}
 	}
-	if nanCount > 0 {
-		fmt.Printf("DEBUG_SCAN: %s has %d NaNs!\n", name, nanCount)
+	if nanCount > 0 || infCount > 0 {
+		fmt.Printf("DEBUG_SCAN: %s has %d NaNs and %d Infs!\n", name, nanCount, infCount)
 	} else {
 		fmt.Printf("DEBUG_SCAN: %s is OCD Clean.\n", name)
 	}
-	return nanCount
+	return nanCount + infCount
 }
 
 func (t *Tensor) ScanMax(name string) float32 {
@@ -307,29 +332,31 @@ func (c *Context) Synchronize() {
 
 // MatMul performs matrix multiplication C = A * B
 func (t *Tensor) MatMul(b *Tensor) *Tensor {
-	// A=t: [rows x cols] (Weights)
-	// B=b: [cols x 1] (Vector)
+	// A=t: [N x K] (Weights)
+	// B=b: [M x K] (Input)
+	M := b.rows
+	N := t.rows
+	K := t.cols
 	
 	// If t is Q4_K, dispatch specialized kernel
 	if t.dataType == DataTypeQ4K {
-		// New result tensor (F16)
-		c := t.ctx.NewTensor(t.rows, b.cols)
+		c := t.ctx.NewTensor(N, M)
 		c.ZeroInit()
 		C.Metal_MatMul_Q4K_F16(t.ctx.ref,
 			t.buf, 0, C.bool(false),
 			b.buf, 0, C.bool(false),
 			c.buf, 0,
-			C.int(1), C.int(t.rows), C.int(t.cols));
+			C.int(M), C.int(N), C.int(K));
 			
 		return c
 	}
 
-	c := t.ctx.NewTensor(t.rows, b.cols) 
+	c := t.ctx.NewTensor(N, M) 
 	C.Metal_MatMul_F16(t.ctx.ref,
 		t.buf, 0, C.bool(false),
 		b.buf, 0, C.bool(false),
 		c.buf, 0,
-		C.int(1), C.int(t.rows), C.int(t.cols))
+		C.int(M), C.int(N), C.int(K))
 	return c
 }
 
@@ -350,10 +377,10 @@ func (t *Tensor) Linear(weight *Tensor) *Tensor {
 	
 	if weight.dataType == DataTypeQ4K {
 		C.Metal_MatMul_Q4K_F16(t.ctx.ref, weight.buf, 0, false, t.buf, 0, false, res.buf, 0,
-			C.int(1), C.int(weight.rows), C.int(weight.cols))
+			C.int(t.rows), C.int(weight.rows), C.int(weight.cols))
 	} else {
 		C.Metal_MatMul_F16(t.ctx.ref, weight.buf, 0, false, t.buf, 0, false, res.buf, 0,
-			C.int(1), C.int(weight.rows), C.int(weight.cols)) // M=1, N=rows, K=cols
+			C.int(t.rows), C.int(weight.rows), C.int(weight.cols))
 	}
 	metrics.RecordKernelDuration("Linear", time.Since(t0))
 	return res
@@ -370,10 +397,10 @@ func (t *Tensor) LinearInto(weight *Tensor, out *Tensor) {
 	
 	if weight.dataType == DataTypeQ4K {
 		C.Metal_MatMul_Q4K_F16(t.ctx.ref, weight.buf, 0, false, t.buf, 0, false, out.buf, 0,
-			C.int(1), C.int(weight.rows), C.int(weight.cols))
+			C.int(t.rows), C.int(weight.rows), C.int(weight.cols))
 	} else {
 		C.Metal_MatMul_F16(t.ctx.ref, weight.buf, 0, false, t.buf, 0, false, out.buf, 0,
-			C.int(1), C.int(weight.rows), C.int(weight.cols))
+			C.int(t.rows), C.int(weight.rows), C.int(weight.cols))
 	}
 }
 
@@ -435,14 +462,11 @@ func (t *Tensor) Layer(attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, k
 	// 1. Attention Norm
 	normed := t.RMSNorm(attnNorm, eps)
 	t.ctx.Synchronize()
-	
-	// DEBUG: Check Normed Output
-	// if pos == 0 { ... }
 		
-	// 2. QKV Projections
-	qPart := t.ctx.NewTensorPooled(t.rows, q.rows) // [1, 4096]
-	kPart := t.ctx.NewTensorPooled(t.rows, k.rows) // [1, 1024]
-	vPart := t.ctx.NewTensorPooled(t.rows, v.rows) // [1, 1024]
+	// 2. QKV Projections (NO POOLING)
+	qPart := t.ctx.NewTensor(t.rows, q.rows) // [1, 4096]
+	kPart := t.ctx.NewTensor(t.rows, k.rows) // [1, 1024]
+	vPart := t.ctx.NewTensor(t.rows, v.rows) // [1, 1024]
 	
 	normed.LinearInto(q, qPart)
 	normed.LinearInto(k, kPart)
@@ -460,7 +484,7 @@ func (t *Tensor) Layer(attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, k
 	t.ctx.Synchronize()
 		
 	// 5. Attention
-	attOut := t.ctx.NewTensorPooled(t.rows, t.cols) // [1, 4096]
+	attOut := t.ctx.NewTensor(t.rows, t.cols) // [1, 4096]
 	// Scores buffer for [Heads, SeqLen]. 32 Heads * ContextLen.
 	// For inference, we only need [32, cachePos+1] scores.
 	// We can allocate max size [32, ctxLen]. Or dynamic.
@@ -470,7 +494,7 @@ func (t *Tensor) Layer(attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, k
 	// Max ctxLen usually passed.
 	scoresDim := heads * ctxLen 
 	if scoresDim < 32768 { scoresDim = 32768 } // Min size
-	scores := t.ctx.NewTensorPooled(1, scoresDim) 
+	scores := t.ctx.NewTensor(1, scoresDim) 
 	
 	C.Metal_Attention_F16(t.ctx.ref, qPart.buf, 0, kCache.buf, vCache.buf, attOut.buf, 0,
 		scores.buf, 0,
@@ -478,7 +502,7 @@ func (t *Tensor) Layer(attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, k
 	t.ctx.Synchronize()
 		
 	// 6. Attention Output Projection
-	resAtt := t.ctx.NewTensorPooled(t.rows, o.rows) // [1, 4096]
+	resAtt := t.ctx.NewTensor(t.rows, o.rows) // [1, 4096]
 	attOut.LinearInto(o, resAtt)
 	t.ctx.Synchronize()
 	
@@ -489,30 +513,27 @@ func (t *Tensor) Layer(attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, k
 	// --- FFN Block ---
 	
 	// 8. FFN Norm
-	normedFFN := t.ctx.NewTensorPooled(t.rows, t.cols)
+	normedFFN := t.ctx.NewTensor(t.rows, t.cols)
 	C.Metal_RMSNorm_F16(t.ctx.ref, t.buf, 0, ffnNorm.buf, 0, normedFFN.buf, 0, 
 		C.int(t.rows), C.int(t.cols), C.float(eps))
 	t.ctx.Synchronize()
 		
 	// 9. FFN Gate/Up
-	gatePart := t.ctx.NewTensorPooled(t.rows, ffnGate.rows) // [1, 14336]
-	upPart := t.ctx.NewTensorPooled(t.rows, ffnUp.rows)     // [1, 14336]
+	gatePart := t.ctx.NewTensor(t.rows, ffnGate.rows) // [1, 14336]
+	upPart := t.ctx.NewTensor(t.rows, ffnUp.rows)     // [1, 14336]
 	normedFFN.LinearInto(ffnGate, gatePart)
 	normedFFN.LinearInto(ffnUp, upPart)
 	t.ctx.Synchronize()
 	
 	// 10. SwiGLU
-	// SwiGLU_F16(gate, up). Modifies gate in-place.
-	// Args: metal_backend (iV, iG). (Up, Gate).
-	// We pass: Up, Gate.
-	// Kernel reads Up, Read/Writes Gate.
-	// Result is in gatePart.
-	C.Metal_SwiGLU_F16(t.ctx.ref, upPart.buf, 0, gatePart.buf, 0, nil, 0, C.int(1), C.int(ffnGate.rows))
+	// Args: metal_backend (iV, iG, o). (Up, Gate, Out).
+	// Result is written to gatePart.
+	C.Metal_SwiGLU_F16(t.ctx.ref, upPart.buf, 0, gatePart.buf, 0, gatePart.buf, 0, C.int(1), C.int(ffnGate.rows))
 	t.ctx.Synchronize()
 	
 	// 11. FFN Down Projection
 	// Input is gatePart (SwiGLU output)
-	resFFN := t.ctx.NewTensorPooled(t.rows, ffnDown.rows) // [1, 4096]
+	resFFN := t.ctx.NewTensor(t.rows, ffnDown.rows) // [1, 4096]
 	gatePart.LinearInto(ffnDown, resFFN)
 	t.ctx.Synchronize()
 	

@@ -19,8 +19,7 @@ const (
 // - qs (128 bytes): 4-bit quants
 func DequantizeQ4K(data []byte, numElements int) []float32 {
 	if numElements%BlockSizeQ4K != 0 {
-		// padding handled by caller or just ignored?
-		// for now assume multiple of 256
+		// Kernel expects multiple of 256. Caller must ensure padding.
 	}
 	
 	numBlocks := numElements / BlockSizeQ4K
@@ -49,24 +48,15 @@ func DequantizeQ4K(data []byte, numElements int) []float32 {
 		var sc [8]uint8
 		var m  [8]uint8
 		
-		for j := 0; j < 4; j++ {
-			// d bits (header) from first 4 bytes
-			u_j := scales[j]
-			// overlay bytes
-			u_j4 := scales[j+4]
-			u_j8 := scales[j+8]
-			
-			// sc[j]:   low 4 bits from u_j4, high 2 bits from u_j (0,1)
-			sc[j]   = (u_j4 & 0xF) | ((u_j & 0x3) << 4)
-			
-			// m[j]:    high 4 bits from u_j4, high 2 bits from u_j (2,3)
-			m[j]    = (u_j4 >> 4) | ((u_j & 0xC) << 2)
-			
-			// sc[j+4]: low 4 bits from u_j8, high 2 bits from u_j (4,5)
-			sc[j+4] = (u_j8 & 0xF) | ((u_j & 0x30) >> 0) 
-			
-			// m[j+4]:  high 4 bits from u_j8, high 2 bits from u_j (6,7)
-			m[j+4]  = (u_j8 >> 4) | ((u_j & 0xC0) >> 2)
+		// Extract scales and mins using llama.cpp's get_scale_min_k4 logic
+		for j := 0; j < 8; j++ {
+			if j < 4 {
+				sc[j] = scales[j] & 63
+				m[j] = scales[j+4] & 63
+			} else {
+				sc[j] = (scales[j+4] & 0xF) | ((scales[j-4] >> 6) << 4)
+				m[j] = (scales[j+4] >> 4) | ((scales[j] >> 6) << 4)
+			}
 		}
 		
 		// Precompute effective scales/mins
@@ -92,8 +82,8 @@ func DequantizeQ4K(data []byte, numElements int) []float32 {
 				idxA := j*32 + k*2
 				idxB := idxA + 1
 				
-				out[i*BlockSizeQ4K + idxA] = D[j] * (float32(v0) - 8.0) - M[j]
-				out[i*BlockSizeQ4K + idxB] = D[j] * (float32(v1) - 8.0) - M[j]
+				out[i*BlockSizeQ4K + idxA] = D[j] * float32(v0) - M[j]
+				out[i*BlockSizeQ4K + idxB] = D[j] * float32(v1) - M[j]
 			}
 		}
 	}

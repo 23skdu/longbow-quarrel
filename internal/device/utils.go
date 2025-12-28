@@ -39,8 +39,19 @@ func Float16ToFloat32(f uint16) float32 {
         if mant == 0 {
             return math.Float32frombits(sign << 31)
         }
-        // Subnormal
-        return math.Float32frombits((sign << 31) | (1 << 23)) // Hacky subnormal mapping
+        // Subnormal: value = (-1)^sign * 2^-14 * (mant / 1024)
+        // In FP32: need to normalize it
+        // Find leading bit position
+        shift := uint32(0)
+        temp := mant
+        for temp < 0x400 {
+            temp <<= 1
+            shift++
+        }
+        // Now temp has implicit 1 in bit 10
+        mant = (temp & 0x3ff) << 13 // Keep only fractional part, shift to FP32 position
+        exp = 127 - 14 - shift       // FP32 bias - FP16 subnormal exp - normalization shift
+        return math.Float32frombits((sign << 31) | (exp << 23) | mant)
     } else if exp == 31 {
         if mant == 0 {
             return math.Float32frombits((sign << 31) | 0x7f800000)

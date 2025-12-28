@@ -153,8 +153,12 @@ func LoadFile(path string) (*GGUFFile, error) {
 		if t.Name == "token_embd.weight" {
 			fmt.Printf("DEBUG: token_embd.weight: t.Offset=%d, AbsOffset=%d\n", t.Offset, absOffset)
 			// Peek data
-			peek := data[absOffset : absOffset+16]
-			fmt.Printf("DEBUG: Raw Data @ AbsOffset: %x\n", peek)
+			if absOffset+16 <= uint64(len(data)) {
+				peek := data[absOffset : absOffset+16]
+				fmt.Printf("DEBUG: Raw Data @ AbsOffset: %x\n", peek)
+			} else {
+				fmt.Println("DEBUG: Data too small to peek")
+			}
 		}
 		
 		t.Data = data[absOffset:]

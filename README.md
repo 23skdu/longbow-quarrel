@@ -36,8 +36,10 @@ architecture models in GGUF format with maximum throughput and correctness.
 ### Model Format
 
 - GGUF format support (FP16 and FP32)
-- Compatible with Ollama-downloaded models
-- Tested with smollm2-135M/360M and Llama 3.2 models
+- **Native Ollama model support** - use model names like `mistral:latest`
+- Automatically resolves Ollama models from `~/.ollama/models`
+- Backward compatible with direct GGUF file paths
+- Tested with smollm2-135M/360M, Llama 3.2, and Mistral models
 
 ## Technical Stack
 
