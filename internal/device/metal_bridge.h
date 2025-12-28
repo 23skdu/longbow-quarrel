@@ -113,7 +113,7 @@ void Metal_RMSNorm_F32(MetalContextRef ctx, MetalBufferRef input, int offIn,
                        float eps);
 
 void Metal_MatMul_Q4K_F32(MetalContextRef ctx, MetalBufferRef a, int offA,
-                          bool transA, MetalBufferRef b, int offB, bool transB,
+                          int transA, MetalBufferRef b, int offB, int transB,
                           MetalBufferRef c, int offC, int M, int N, int K);
 
 void Metal_Add_F32(MetalContextRef ctx, MetalBufferRef a, int oA,

@@ -210,6 +210,11 @@ func (t *Tensor) LoadRaw(data []byte) {
 	C.Metal_CopyToDevice(t.buf, 0, unsafe.Pointer(&data[0]), C.int(len(data)))
 }
 
+// LoadFromBytes copies raw bytes to the buffer (for Q4K data, etc.)
+func (t *Tensor) LoadFromBytes(data []byte) {
+	C.Metal_CopyToDevice(t.buf, 0, unsafe.Pointer(&data[0]), C.int(len(data)))
+}
+
 func (t *Tensor) Probe(name string, n int) {
 	t.ctx.Synchronize()
 	// data := t.ToHost()
@@ -409,8 +414,19 @@ func (t *Tensor) Linear(weight *Tensor) *Tensor {
 		C.Metal_MatMul_Q4K_F16(t.ctx.ref, weight.buf, 0, false, t.buf, 0, false, res.buf, 0,
 			C.int(t.rows), C.int(weight.rows), C.int(weight.cols))
 	} else {
-		C.Metal_MatMul_F16(t.ctx.ref, weight.buf, 0, false, t.buf, 0, false, res.buf, 0,
-			C.int(t.rows), C.int(weight.rows), C.int(weight.cols))
+		// BatchedMatMul_F16 using MPS
+		M := t.rows
+		N := weight.rows
+		K := weight.cols
+		sA := K * 2
+		sB := K * 2
+		sC := N * 2
+		
+		C.Metal_BatchedMatMul_F16(t.ctx.ref, 
+			t.buf, 0, C.int(sA), false,
+			weight.buf, 0, C.int(sB), true,
+			res.buf, 0, C.int(sC),
+			C.int(M), C.int(N), C.int(K), 1)
 	}
 	metrics.RecordKernelDuration("Linear", time.Since(t0))
 	return res
@@ -429,8 +445,19 @@ func (t *Tensor) LinearInto(weight *Tensor, out *Tensor) {
 		C.Metal_MatMul_Q4K_F16(t.ctx.ref, weight.buf, 0, false, t.buf, 0, false, out.buf, 0,
 			C.int(t.rows), C.int(weight.rows), C.int(weight.cols))
 	} else {
-		C.Metal_MatMul_F16(t.ctx.ref, weight.buf, 0, false, t.buf, 0, false, out.buf, 0,
-			C.int(t.rows), C.int(weight.rows), C.int(weight.cols))
+		// BatchedMatMul_F16 using MPS
+		M := t.rows
+		N := weight.rows
+		K := weight.cols
+		sA := K * 2
+		sB := K * 2
+		sC := N * 2
+		
+		C.Metal_BatchedMatMul_F16(t.ctx.ref, 
+			t.buf, 0, C.int(sA), false,
+			weight.buf, 0, C.int(sB), true,
+			out.buf, 0, C.int(sC),
+			C.int(M), C.int(N), C.int(K), 1)
 	}
 }
 
@@ -503,36 +530,52 @@ func (t *Tensor) Layer(attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, k
 	normed.LinearInto(v, vPart)
 	t.ctx.Synchronize()
 	
-	// 3. RoPE
-	qPart.RoPE(pos, headDim, heads, 1, ropeTheta)
-	kPart.RoPE(pos, headDim, kvHeads, 1, ropeTheta)
-	t.ctx.Synchronize()
+	// 3. RoPE & 4. Store K/V & 5. Attention (Serial Loop for Prefill/Batch)
+	// Our RoPE, Attention and StoreKV kernels currently only support single-token processing.
+	// We must loop over the batch (t.rows) to process each token.
 	
-	// 4. Store K/V
-	C.Metal_StoreKV_F16(t.ctx.ref, kPart.buf, 0, vPart.buf, 0, kCache.buf, vCache.buf, 
-		C.int(pos), C.int(kvHeads), C.int(headDim))
-	t.ctx.Synchronize()
-		
-	// 5. Attention
-	attOut := t.ctx.NewTensor(t.rows, t.cols) // [1, 4096]
-	// Scores buffer for [Heads, SeqLen]. 32 Heads * ContextLen.
-	// For inference, we only need [32, cachePos+1] scores.
-	// We can allocate max size [32, ctxLen]. Or dynamic.
-	// 4096 dim is usually enough for 32*128. But Context can be 32k.
-	// Let's allocate based on KV Heas/Pos.
-	// Pos is dynamic. Let's use a large scratch or dynamic.
-	// Max ctxLen usually passed.
+	// Create outputs
+	attOut := t.ctx.NewTensor(t.rows, t.cols) // [Batch, 4096]
+	
+	// Scores buffer: Max needed for one token attention [Heads, CtxLen]
+	// allocate once and reuse.
 	scoresDim := heads * ctxLen 
-	if scoresDim < 32768 { scoresDim = 32768 } // Min size
-	scores := t.ctx.NewTensor(1, scoresDim) 
+	if scoresDim < 32768 { scoresDim = 32768 }
+	scores := t.ctx.NewTensorPooled(1, scoresDim)
+	resAtt := t.ctx.NewTensor(t.rows, o.rows) // [Batch, 4096] - Output of O projection
 	
-	C.Metal_Attention_F16(t.ctx.ref, qPart.buf, 0, kCache.buf, vCache.buf, attOut.buf, 0,
-		scores.buf, 0,
-		C.int(pos), C.int(heads), C.int(kvHeads), C.int(headDim), C.int(ctxLen))
+	kvStride := kvHeads * headDim * 2 // bytes (F16)
+	qStride := heads * headDim * 2    // bytes (F16)
+	attStride := heads * headDim * 2  // bytes (F16)
+	
+	for i := 0; i < t.rows; i++ {
+		p := pos + i
+		
+		// Offsets
+		offQ := i * qStride
+		offK := i * kvStride
+		offV := i * kvStride
+		offAtt := i * attStride
+		
+		// 3. RoPE (In-place on qPart/kPart row i)
+		C.Metal_RoPE_F16(t.ctx.ref, qPart.buf, C.int(offQ), 1, C.int(1), C.int(heads), C.int(headDim), C.int(p), C.float(ropeTheta))
+		C.Metal_RoPE_F16(t.ctx.ref, kPart.buf, C.int(offK), 1, C.int(1), C.int(kvHeads), C.int(headDim), C.int(p), C.float(ropeTheta))
+		
+		// 4. Store K/V
+		C.Metal_StoreKV_F16(t.ctx.ref, kPart.buf, C.int(offK), vPart.buf, C.int(offV), 
+			kCache.buf, vCache.buf, 
+			C.int(p), C.int(kvHeads), C.int(headDim))
+		
+		// 5. Attention
+		C.Metal_Attention_F16(t.ctx.ref, qPart.buf, C.int(offQ), kCache.buf, vCache.buf, attOut.buf, C.int(offAtt),
+			scores.buf, 0,
+			C.int(p), C.int(heads), C.int(kvHeads), C.int(headDim), C.int(ctxLen))
+		
+	}
 	t.ctx.Synchronize()
 		
 	// 6. Attention Output Projection
-	resAtt := t.ctx.NewTensor(t.rows, o.rows) // [1, 4096]
+	// attOut is now fully populated [Batch, Dim]
 	attOut.LinearInto(o, resAtt)
 	t.ctx.Synchronize()
 	
@@ -612,7 +655,7 @@ func (t *Tensor) Layer(attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, k
 		// 10. SwiGLU
 		// Args: metal_backend (iV, iG, o). (Up, Gate, Out).
 		// Result is written to gatePart.
-		C.Metal_SwiGLU_F16(t.ctx.ref, upPart.buf, 0, gatePart.buf, 0, gatePart.buf, 0, C.int(1), C.int(ffnGate.rows))
+		C.Metal_SwiGLU_F16(t.ctx.ref, upPart.buf, 0, gatePart.buf, 0, gatePart.buf, 0, C.int(t.rows), C.int(ffnGate.rows))
 		t.ctx.Synchronize()
 		
 		// 11. FFN Down Projection
@@ -706,7 +749,7 @@ func (t *Tensor) LinearIntoFP32(weight *Tensor, out *Tensor) {
 	// weight can be Q4K (likely) or F16.
 	
 	if weight.dataType == DataTypeQ4K {
-		C.Metal_MatMul_Q4K_F32(t.ctx.ref, weight.buf, 0, false, t.buf, 0, false, out.buf, 0,
+		C.Metal_MatMul_Q4K_F32(t.ctx.ref, weight.buf, 0, 0, t.buf, 0, 0, out.buf, 0,
 			C.int(t.rows), C.int(weight.rows), C.int(weight.cols))
 	} else {
 		// Fallback for F16 weights with F32 input: Not implemented yet!
