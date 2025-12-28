@@ -113,8 +113,13 @@ func (e *Engine) loadModel(path string) error {
 		return err
 	}
 	
-	log.Printf("[MODEL] Config: Layers=%d, Dim=%d, Heads=%d, KVHeads=%d, Eps=%e, RopeFreq=%.1f", 
-		e.Config.Layers, e.Config.Dim, e.Config.Heads, e.Config.KVHeads, e.Config.Eps, e.Config.RopeTheta)
+	// Override RopeTheta for Debugging if needed. Mistral 7B usually 10000.0 or 100000.0?
+	// The file reported 1000000.0.
+	// Try enforcing 10000.0.
+	e.Config.RopeTheta = 10000.0
+	
+	fmt.Printf("2025/12/27 14:06:59 [MODEL] Config: Layers=%d, Dim=%d, Heads=%d, KVHeads=%d, Eps=%e, RopeFreq=%f\n",
+		e.Config.Layers, e.Config.HiddenDim, e.Config.Heads, e.Config.KVHeads, e.Config.Eps, e.Config.RopeTheta)
 
 	// Initialize Weights Slices
 	layers := e.Config.Layers
@@ -128,7 +133,7 @@ func (e *Engine) loadModel(path string) error {
 	e.Weights.FfnUp = make([]*device.Tensor, layers)
 	e.Weights.FfnNorm = make([]*device.Tensor, layers)
 	
-	// Map tensors
+// Map tensors
 	for _, t := range f.Tensors {
 		cols := int(t.Dimensions[0])
 		rows := 1
@@ -139,38 +144,102 @@ func (e *Engine) loadModel(path string) error {
 			rows *= int(t.Dimensions[i])
 		}
 		
-		fmt.Printf("[TENSOR] %-30s | Type: %-10v | Shape: [%d, %d]\n", t.Name, t.Type, rows, cols)
+		// fmt.Printf("[TENSOR] %-30s | Type: %-10v | Shape: [%d, %d]\n", t.Name, t.Type, rows, cols)
 
 		var mt *device.Tensor
-		mt = e.Ctx.NewTensor(rows, cols)
 		numElements := rows * cols
 		
-		if t.Type == gguf.GGMLTypeF32 {
-			dataBytes := numElements * 4
-			if uint64(len(t.Data)) < uint64(dataBytes) { 
-				return fmt.Errorf("tensor %s data truncated: expected %d bytes, got %d", t.Name, dataBytes, len(t.Data))
-			}
+		// Map tensor types
+		// Validate F16 Conversion
+		if device.Float32ToFloat16(0.0) != 0 {
+			panic(fmt.Sprintf("Float32ToFloat16(0.0) = %x (Expected 0)", device.Float32ToFloat16(0.0)))
+		}
+		
+		if false { } else {
+			// Standard F16 Tensor (allocated as F16, loaded as F32 or F16)
+			mt = e.Ctx.NewTensor(rows, cols)
 			
-			rawBytes := t.Data[:dataBytes]
-			f32Data := make([]float32, numElements)
-			for i := 0; i < numElements; i++ {
-				bits := binary.LittleEndian.Uint32(rawBytes[i*4 : (i+1)*4])
-				f32Data[i] = math.Float32frombits(bits)
+			if t.Type == gguf.GGMLTypeF32 {
+				// ... F32 load ...
+				dataBytes := numElements * 4
+				if uint64(len(t.Data)) < uint64(dataBytes) { 
+					return fmt.Errorf("tensor %s data truncated", t.Name)
+				}
+				rawBytes := t.Data[:dataBytes]
+				f32Data := make([]float32, numElements)
+				for i := 0; i < numElements; i++ {
+					bits := binary.LittleEndian.Uint32(rawBytes[i*4 : (i+1)*4])
+					f32Data[i] = math.Float32frombits(bits)
+				}
+				
+				mt.LoadFrom(f32Data)
+				
+			} else if t.Type == gguf.GGMLTypeF16 {
+				// ... F16 load ...
+				dataBytes := numElements * 2
+				if uint64(len(t.Data)) < uint64(dataBytes) { 
+					return fmt.Errorf("tensor %s data truncated", t.Name)
+				}
+				mt.LoadFromRaw(t.Data[:dataBytes])
+				
+				// Type 11 (Q3_K). 
+				// Treat as Q3_K (GPU or CPU)
+				if t.Name == "token_embd.weight" {
+					mt = e.Ctx.NewTensor(rows, cols)
+					f32Data := gguf.DequantizeQ3K(t.Data, numElements)
+					mt.LoadFrom(f32Data)
+				} else {
+					mt = e.Ctx.NewQ3KTensor(rows, cols)
+					dataBytes := (numElements / 256) * 110
+					if uint64(len(t.Data)) < uint64(dataBytes) {
+						return fmt.Errorf("tensor %s data truncated", t.Name)
+					}
+					mt.LoadFromRaw(t.Data[:dataBytes])
+				}
+
+			} else if t.Type == gguf.GGMLTypeQ4_K {
+				// Type 12 (Q4_K). 
+				// token_embd must be CPU Dequantized to F16.
+				if t.Name == "token_embd.weight" {
+					mt = e.Ctx.NewTensor(rows, cols)
+					f32Data := gguf.DequantizeQ4K(t.Data, numElements)
+					
+					mt.LoadFrom(f32Data)
+				} else {
+					// Check blk.1.ffn_down size
+					if strings.Contains(t.Name, "blk.1.ffn_down") {
+                        expected := (rows * cols / 256) * 144
+                        if len(t.Data) < expected {
+                            fmt.Printf("CRITICAL: %s Truncated! %d < %d\n", t.Name, len(t.Data), expected)
+                        } else {
+                            fmt.Printf("DEBUG: %s Size OK: %d\n", t.Name, len(t.Data))
+                        }
+                    }
+					
+					mt = e.Ctx.NewQ4KTensor(rows, cols)
+					dataBytes := (numElements / 256) * 144
+					if uint64(len(t.Data)) < uint64(dataBytes) {
+						return fmt.Errorf("tensor %s data truncated", t.Name)
+					}
+					mt.LoadFromRaw(t.Data[:dataBytes])
+				}
+
+			} else if t.Type == gguf.GGMLTypeQ6_K {
+				// Type 14 (Q6_K).
+				// CPU Dequantize (No GPU Kernel yet)
+				f32Data := gguf.DequantizeQ6K(t.Data, numElements)
+				if t.Name == "output.weight" {
+					fmt.Printf("DEBUG: output.weight probe [0:10]: %v\n", f32Data[:10])
+				}
+				mt = e.Ctx.NewTensor(rows, cols)
+				mt.LoadFrom(f32Data)
+
+			} else if t.Type == gguf.GGMLTypeQ4_K_S { // 99 Unused
+				mt = e.Ctx.NewTensor(rows, cols) // fallback
+			} else {
+				fmt.Printf("Skipping unsupported tensor type: %d (%s)\n", t.Type, t.Name)
+				continue
 			}
-			mt.LoadFrom(f32Data)
-			
-		} else if t.Type == gguf.GGMLTypeF16 {
-			// Direct copy!
-			dataBytes := numElements * 2
-			if uint64(len(t.Data)) < uint64(dataBytes) { 
-				return fmt.Errorf("tensor %s data truncated: expected %d bytes, got %d", t.Name, dataBytes, len(t.Data))
-			}
-			
-			// LoadFromRaw expects bytes to be FP16
-			mt.LoadFromRaw(t.Data[:dataBytes])
-		} else {
-			// Skip quantization for now
-			continue // verify if smollm2 is Q or F16. Usually F16.
 		}
 
 		// Mapping Logic
@@ -184,7 +253,6 @@ func (e *Engine) loadModel(path string) error {
 		case "output_norm.weight":
 			e.Weights.OutputNorm = mt
 			continue
-		case "output.weight":
 			e.Weights.Output = mt
 			continue
 		}
@@ -294,6 +362,11 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int) ([]int, error) {
 		lastToken := inputTokens[i]
 		
 		current := e.Weights.TokenEmb.EmbeddingLookup(lastToken)
+		
+		// DEBUG: Verify Input on GPU
+		// if i == 0 {
+		// 	current.ScanMean("Embed Output")
+		// }
 
 		// Layers (Attention + FFN)
 		for l := 0; l < e.Config.Layers; l++ {
@@ -302,6 +375,11 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int) ([]int, error) {
 				e.KVCacheK[l], e.KVCacheV[l], s1, s2, s3, s4,
 				e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim,
 				e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen)
+            
+            if i == 0 && l == 1 {
+                fmt.Println("DEBUG: Probe Executed for Layer 1")
+                current.ScanMean("Layer 1 Output")
+            }
 		}
 
 		// If this is the LAST prompt token, sample the first next token
@@ -310,6 +388,21 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int) ([]int, error) {
 			logits := normed.Linear(e.Weights.Output)
 			logitsData := logits.ToHost()
 			
+			// DEBUG: Print first few logits
+			if len(logitsData) > 10 {
+				fmt.Printf("DEBUG: First 10 logits: %v\n", logitsData[:10])
+				// Check for NaN
+				nanCount := 0
+				for _, v := range logitsData {
+					if math.IsNaN(float64(v)) {
+						nanCount++
+					}
+				}
+				if nanCount > 0 {
+					fmt.Printf("DEBUG: Found %d NaNs in logits!\n", nanCount)
+				}
+			}
+
 			maxIdx := 0
 			maxVal := logitsData[0]
 			for idx, val := range logitsData {

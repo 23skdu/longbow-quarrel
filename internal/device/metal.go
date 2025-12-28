@@ -11,14 +11,12 @@ package device
 import "C"
 import (
 	_ "embed"
-	_ "embed"
+	"encoding/binary"
 	"fmt"
-	"time"
-
 	"runtime"
 	"sync/atomic"
+	"time"
 	"unsafe"
-
 	"github.com/23skdu/longbow-quarrel/internal/metrics"
 )
 
@@ -55,20 +53,72 @@ func (c *Context) Free() {
 	}
 }
 
+const (
+	DataTypeF16 = 0
+	DataTypeQ4K = 1
+	DataTypeQ3K = 2
+)
+
 // Tensor wraps a Metal buffer. Always FP16 for this engine.
 type Tensor struct {
-	ctx      *Context
-	buf      C.MetalBufferRef
+	ctx       *Context
+	rows      int
+	cols      int
 	sizeBytes int
-	rows, cols int
+	buf       C.MetalBufferRef
+	dataType  int // 0=F16, 1=Q4K, 2=Q3K
 }
 
 func (t *Tensor) Rows() int { return t.rows }
 func (t *Tensor) Cols() int { return t.cols }
 
+// NewQ3KTensor creates a tensor with Q3_K quantization layout (110 bytes per 256 weights)
+func (c *Context) NewQ3KTensor(rows, cols int) *Tensor {
+	numElements := rows * cols
+	if numElements%256 != 0 {
+		panic("Q3_K tensor size must be divisible by 256")
+	}
+	numBlocks := numElements / 256
+	sizeBytes := numBlocks * 110
+
+	buf := C.Metal_Alloc(c.ref, C.int(sizeBytes))
+	return &Tensor{
+		ctx:       c,
+		rows:      rows,
+		cols:      cols,
+		sizeBytes: int(sizeBytes),
+		buf:       buf,
+		dataType:  DataTypeQ3K,
+	}
+}
+
+// NewQ4KTensor creates a tensor with Q4_K quantization layout (144 bytes per 256 weights)
+func (c *Context) NewQ4KTensor(rows, cols int) *Tensor {
+	numElements := rows * cols
+	if numElements%256 != 0 {
+		panic("Q4_K tensor size must be divisible by 256")
+	}
+	numBlocks := numElements / 256
+	sizeBytes := numBlocks * 144
+
+	buf := C.Metal_Alloc(c.ref, C.int(sizeBytes))
+	return &Tensor{
+		ctx:       c,
+		rows:      rows,
+		cols:      cols,
+		sizeBytes: int(sizeBytes),
+		buf:       buf,
+		dataType:  DataTypeQ4K,
+	}
+}
+
+// NewTensor creates a standard F16 tensor
 func (c *Context) NewTensor(rows, cols int) *Tensor {
 	sizeBytes := rows * cols * 2 // FP16
 	buf := C.Metal_Alloc(c.ref, C.int(sizeBytes))
+	if buf == nil {
+		panic("Metal_Alloc returned nil!")
+	}
 	
 	t := &Tensor{
 		ctx: c,
@@ -76,6 +126,7 @@ func (c *Context) NewTensor(rows, cols int) *Tensor {
 		sizeBytes: sizeBytes,
 		rows: rows,
 		cols: cols,
+		dataType:  DataTypeF16,
 	}
 	
 	
@@ -122,6 +173,103 @@ func (t *Tensor) LoadFrom(data []float32) {
 	C.Metal_CopyToDevice(t.buf, 0, unsafe.Pointer(&f16[0]), C.int(t.sizeBytes))
 }
 
+func (t *Tensor) Probe(name string, n int) {
+	t.ctx.Synchronize()
+	// data := t.ToHost()
+	ptr := C.Metal_GetBufferContents(t.buf)
+	if ptr == nil {
+		fmt.Printf("DEBUG_PROBE: %s -> BUFFER IS NIL!\n", name)
+		return
+	}
+	
+	// Access as uint16 slice
+	f16Slice := unsafe.Slice((*uint16)(ptr), t.rows*t.cols)
+	
+	// Convert first n to float32
+	f32Data := make([]float32, n)
+	for i := 0; i < n && i < len(f16Slice); i++ {
+		f32Data[i] = Float16ToFloat32(f16Slice[i])
+	}
+	
+	fmt.Printf("DEBUG_PROBE: %s [%d]: %v\n", name, len(f16Slice), f32Data)
+}
+
+func (t *Tensor) ScanNaNs(name string) int {
+	t.ctx.Synchronize()
+	ptr := C.Metal_GetBufferContents(t.buf)
+	if ptr == nil { return 0 }
+	f16Slice := unsafe.Slice((*uint16)(ptr), t.rows*t.cols)
+	nanCount := 0
+	for _, v := range f16Slice {
+		// Is it NaN? 
+		// F16 NaN: exp=31 (0x1F), mant!=0.
+		// bits: (v >> 10) & 0x1F == 31. (v & 0x3FF) != 0.
+		if ((v >> 10) & 0x1F) == 0x1F && (v & 0x3FF) != 0 {
+			nanCount++
+		}
+	}
+	if nanCount > 0 {
+		fmt.Printf("DEBUG_SCAN: %s has %d NaNs!\n", name, nanCount)
+	} else {
+		fmt.Printf("DEBUG_SCAN: %s is OCD Clean.\n", name)
+	}
+	return nanCount
+}
+
+func (t *Tensor) ScanMax(name string) float32 {
+	t.ctx.Synchronize()
+	ptr := C.Metal_GetBufferContents(t.buf)
+	if ptr == nil { return 0 }
+	f16Slice := unsafe.Slice((*uint16)(ptr), t.rows*t.cols)
+	var maxVal float32 = 0
+	for _, v := range f16Slice {
+		f := Float16ToFloat32(v)
+		abs := f
+		if abs < 0 { abs = -abs }
+		if abs > maxVal { maxVal = abs }
+	}
+	fmt.Printf("DEBUG_MAX: %s Max Value: %f\n", name, maxVal)
+	return maxVal
+}
+
+func (t *Tensor) ScanQ4KScales(name string) float32 {
+	t.ctx.Synchronize()
+	ptr := C.Metal_GetBufferContents(t.buf)
+	if ptr == nil { return 0 }
+	// Unsafe cast to byte slice to handle stride
+	// Total bytes?
+	// Q4K size logic: (elements / 256) * 144?
+	// But t.sizeBytes is available.
+	data := unsafe.Slice((*byte)(ptr), t.sizeBytes)
+	
+	numBlocks := (t.rows * t.cols) / 256
+	var maxD float32 = 0
+	
+	for i := 0; i < numBlocks; i++ {
+		offset := i * 144
+		if offset+2 > len(data) { break }
+		dRaw := binary.LittleEndian.Uint16(data[offset : offset+2])
+		d := Float16ToFloat32(dRaw)
+		if d > maxD { maxD = d }
+	}
+	fmt.Printf("DEBUG_SCALES: %s Max Scale (d): %f\n", name, maxD)
+	return maxD
+}
+
+func (t *Tensor) ScanMean(name string) float32 {
+	t.ctx.Synchronize()
+	ptr := C.Metal_GetBufferContents(t.buf)
+	if ptr == nil { return 0 }
+	f16Slice := unsafe.Slice((*uint16)(ptr), t.rows*t.cols)
+	var sum float64 = 0
+	for _, v := range f16Slice {
+		sum += float64(Float16ToFloat32(v))
+	}
+	mean := float32(sum / float64(len(f16Slice)))
+	fmt.Printf("DEBUG_MEAN: %s Mean Value: %f\n", name, mean)
+	return mean
+}
+
 // LoadFromRaw copies raw bytes directly to the GPU buffer.
 // The caller must ensure the data is in the correct format (FP16 usually) and size.
 func (t *Tensor) LoadFromRaw(data []byte) {
@@ -157,17 +305,32 @@ func (c *Context) Synchronize() {
 
 // Operations
 
-func (t *Tensor) MatMul(other *Tensor) *Tensor {
-	// Simple M x K * K x N = M x N
-	if t.cols != other.rows {
-		panic("MatMul dim mismatch")
+// MatMul performs matrix multiplication C = A * B
+func (t *Tensor) MatMul(b *Tensor) *Tensor {
+	// A=t: [rows x cols] (Weights)
+	// B=b: [cols x 1] (Vector)
+	
+	// If t is Q4_K, dispatch specialized kernel
+	if t.dataType == DataTypeQ4K {
+		// New result tensor (F16)
+		c := t.ctx.NewTensor(t.rows, b.cols)
+		c.ZeroInit()
+		C.Metal_MatMul_Q4K_F16(t.ctx.ref,
+			t.buf, 0, C.bool(false),
+			b.buf, 0, C.bool(false),
+			c.buf, 0,
+			C.int(1), C.int(t.rows), C.int(t.cols));
+			
+		return c
 	}
-	t0 := time.Now()
-	res := t.ctx.NewTensorPooled(t.rows, other.cols)
-	C.Metal_MatMul_F16(t.ctx.ref, t.buf, 0, false, other.buf, 0, false, res.buf, 0, 
-		C.int(t.rows), C.int(other.cols), C.int(t.cols))
-	metrics.RecordKernelDuration("MatMul", time.Since(t0))
-	return res
+
+	c := t.ctx.NewTensor(t.rows, b.cols) 
+	C.Metal_MatMul_F16(t.ctx.ref,
+		t.buf, 0, C.bool(false),
+		b.buf, 0, C.bool(false),
+		c.buf, 0,
+		C.int(1), C.int(t.rows), C.int(t.cols))
+	return c
 }
 
 // Linear performs t * weight^T
@@ -181,12 +344,46 @@ func (t *Tensor) Linear(weight *Tensor) *Tensor {
 	res := t.ctx.NewTensorPooled(t.rows, weight.rows) // [M, N]
 	
 	// MatMul(A, B^T)
-	// Metal_MatMul_F16(..., transA=false, ..., transB=true, ...)
-	C.Metal_MatMul_F16(t.ctx.ref, t.buf, 0, false, weight.buf, 0, true, res.buf, 0,
-		C.int(t.rows), C.int(weight.rows), C.int(t.cols))
-		
+	// Swap arguments: A=weight, B=t.
+	// We want Weight (Matrix) as buffer 0 (primary stride source)
+	// and Input (Vector) as buffer 1 (broadcast source).
+	
+	if weight.dataType == DataTypeQ4K {
+		C.Metal_MatMul_Q4K_F16(t.ctx.ref, weight.buf, 0, false, t.buf, 0, false, res.buf, 0,
+			C.int(1), C.int(weight.rows), C.int(weight.cols))
+	} else {
+		C.Metal_MatMul_F16(t.ctx.ref, weight.buf, 0, false, t.buf, 0, false, res.buf, 0,
+			C.int(1), C.int(weight.rows), C.int(weight.cols)) // M=1, N=rows, K=cols
+	}
 	metrics.RecordKernelDuration("Linear", time.Since(t0))
 	return res
+}
+
+// LinearInto performs Linear using existing output tensor (scratch buffer)
+func (t *Tensor) LinearInto(weight *Tensor, out *Tensor) {
+	// t.cols (K) must match weight.cols (K)
+	if t.cols != weight.cols {
+		panic(fmt.Sprintf("LinearInto dim mismatch: input cols %d != weight cols %d", t.cols, weight.cols))
+	}
+	// Check/Resize out tensor? Assuming caller managed size.
+	// out should be [Rows, Weight.Rows] (usually [1, Dim]).
+	
+	if weight.dataType == DataTypeQ4K {
+		C.Metal_MatMul_Q4K_F16(t.ctx.ref, weight.buf, 0, false, t.buf, 0, false, out.buf, 0,
+			C.int(1), C.int(weight.rows), C.int(weight.cols))
+	} else {
+		C.Metal_MatMul_F16(t.ctx.ref, weight.buf, 0, false, t.buf, 0, false, out.buf, 0,
+			C.int(1), C.int(weight.rows), C.int(weight.cols))
+	}
+}
+
+// RunQ3K_Explicit for testing only
+func (c *Context) RunQ3K_Explicit(w, in, out *Tensor) {
+	C.Metal_MatMul_Q3K_F16(c.ref,
+		w.buf, 0, C.bool(false),
+		in.buf, 0, C.bool(false),
+		out.buf, 0,
+		C.int(1), C.int(w.rows), C.int(w.cols))
 }
 
 func (t *Tensor) RMSNorm(weight *Tensor, eps float32) *Tensor {
@@ -198,11 +395,11 @@ func (t *Tensor) RMSNorm(weight *Tensor, eps float32) *Tensor {
 
 // RMSNormLinear performs fused RMSNorm + Linear in single kernel
 // Eliminates intermediate buffer allocation
-func (t *Tensor) RMSNormLinear(normWeight, linearWeight *Tensor, eps float32) *Tensor {
-	// normWeight: [inDim], linearWeight: [outDim, inDim]
-	res := t.ctx.NewTensorPooled(t.rows, linearWeight.rows)
-	C.Metal_RMSNormLinear_F16(t.ctx.ref, t.buf, 0, normWeight.buf, 0, linearWeight.buf, 0, res.buf, 0,
-		C.int(t.cols), C.int(linearWeight.rows), C.float(eps))
+func (t *Tensor) RMSNormLinear(normWeight, weight *Tensor, eps float32) *Tensor {
+	res := t.ctx.NewTensorPooled(t.rows, weight.rows)
+	C.Metal_RMSNormLinear_F16(t.ctx.ref, t.buf, 0, 
+		normWeight.buf, 0, weight.buf, 0, res.buf, 0,
+		C.int(t.rows), C.int(weight.rows), C.float(eps))
 	return res
 }
 
@@ -227,13 +424,101 @@ func (t *Tensor) FusedFFN(normWeight, wGate, wUp, wDown *Tensor, eps float32) *T
 	return res
 }
 
+
 func (t *Tensor) Layer(attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, kCache, vCache, s1, s2, s3, s4 *Tensor, pos, heads, kvHeads, headDim int, ropeTheta, eps float32, hiddenDim, ctxLen int) {
-	C.Metal_Layer_F16(t.ctx.ref, t.buf,
-		attnNorm.buf, q.buf, k.buf, v.buf, o.buf,
-		ffnNorm.buf, ffnGate.buf, ffnUp.buf, ffnDown.buf,
-		kCache.buf, vCache.buf, s1.buf, s2.buf, s3.buf, s4.buf,
-		C.int(pos), C.int(heads), C.int(kvHeads),
-		C.int(headDim), C.int(hiddenDim), C.float(eps), C.float(ropeTheta), C.int(ctxLen))
+	// Sequential Implementation to support Mixed Precision (Q4_K + F16)
+	// s1, s2, s3, s4 are scratch buffers.
+	
+	// Sequential Implementation with Pooled Buffers
+	// s1..s4 inputs are ignored to avoid sizing issues.
+	
+	// 1. Attention Norm
+	normed := t.RMSNorm(attnNorm, eps)
+	t.ctx.Synchronize()
+	
+	// DEBUG: Check Normed Output
+	// if pos == 0 { ... }
+		
+	// 2. QKV Projections
+	qPart := t.ctx.NewTensorPooled(t.rows, q.rows) // [1, 4096]
+	kPart := t.ctx.NewTensorPooled(t.rows, k.rows) // [1, 1024]
+	vPart := t.ctx.NewTensorPooled(t.rows, v.rows) // [1, 1024]
+	
+	normed.LinearInto(q, qPart)
+	normed.LinearInto(k, kPart)
+	normed.LinearInto(v, vPart)
+	t.ctx.Synchronize()
+	
+	// 3. RoPE
+	qPart.RoPE(pos, headDim, heads, 1, ropeTheta)
+	kPart.RoPE(pos, headDim, kvHeads, 1, ropeTheta)
+	t.ctx.Synchronize()
+	
+	// 4. Store K/V
+	C.Metal_StoreKV_F16(t.ctx.ref, kPart.buf, 0, vPart.buf, 0, kCache.buf, vCache.buf, 
+		C.int(pos), C.int(kvHeads), C.int(headDim))
+	t.ctx.Synchronize()
+		
+	// 5. Attention
+	attOut := t.ctx.NewTensorPooled(t.rows, t.cols) // [1, 4096]
+	// Scores buffer for [Heads, SeqLen]. 32 Heads * ContextLen.
+	// For inference, we only need [32, cachePos+1] scores.
+	// We can allocate max size [32, ctxLen]. Or dynamic.
+	// 4096 dim is usually enough for 32*128. But Context can be 32k.
+	// Let's allocate based on KV Heas/Pos.
+	// Pos is dynamic. Let's use a large scratch or dynamic.
+	// Max ctxLen usually passed.
+	scoresDim := heads * ctxLen 
+	if scoresDim < 32768 { scoresDim = 32768 } // Min size
+	scores := t.ctx.NewTensorPooled(1, scoresDim) 
+	
+	C.Metal_Attention_F16(t.ctx.ref, qPart.buf, 0, kCache.buf, vCache.buf, attOut.buf, 0,
+		scores.buf, 0,
+		C.int(pos), C.int(heads), C.int(kvHeads), C.int(headDim), C.int(ctxLen))
+	t.ctx.Synchronize()
+		
+	// 6. Attention Output Projection
+	resAtt := t.ctx.NewTensorPooled(t.rows, o.rows) // [1, 4096]
+	attOut.LinearInto(o, resAtt)
+	t.ctx.Synchronize()
+	
+	// 7. Residual Add 1
+	C.Metal_Add_F16(t.ctx.ref, t.buf, 0, resAtt.buf, 0, t.buf, 0, C.int(t.rows*t.cols))
+	t.ctx.Synchronize()
+	
+	// --- FFN Block ---
+	
+	// 8. FFN Norm
+	normedFFN := t.ctx.NewTensorPooled(t.rows, t.cols)
+	C.Metal_RMSNorm_F16(t.ctx.ref, t.buf, 0, ffnNorm.buf, 0, normedFFN.buf, 0, 
+		C.int(t.rows), C.int(t.cols), C.float(eps))
+	t.ctx.Synchronize()
+		
+	// 9. FFN Gate/Up
+	gatePart := t.ctx.NewTensorPooled(t.rows, ffnGate.rows) // [1, 14336]
+	upPart := t.ctx.NewTensorPooled(t.rows, ffnUp.rows)     // [1, 14336]
+	normedFFN.LinearInto(ffnGate, gatePart)
+	normedFFN.LinearInto(ffnUp, upPart)
+	t.ctx.Synchronize()
+	
+	// 10. SwiGLU
+	// SwiGLU_F16(gate, up). Modifies gate in-place.
+	// Args: metal_backend (iV, iG). (Up, Gate).
+	// We pass: Up, Gate.
+	// Kernel reads Up, Read/Writes Gate.
+	// Result is in gatePart.
+	C.Metal_SwiGLU_F16(t.ctx.ref, upPart.buf, 0, gatePart.buf, 0, nil, 0, C.int(1), C.int(ffnGate.rows))
+	t.ctx.Synchronize()
+	
+	// 11. FFN Down Projection
+	// Input is gatePart (SwiGLU output)
+	resFFN := t.ctx.NewTensorPooled(t.rows, ffnDown.rows) // [1, 4096]
+	gatePart.LinearInto(ffnDown, resFFN)
+	t.ctx.Synchronize()
+	
+	// 12. Residual Add 2
+	C.Metal_Add_F16(t.ctx.ref, t.buf, 0, resFFN.buf, 0, t.buf, 0, C.int(t.rows*t.cols))
+	t.ctx.Synchronize()
 }
 
 // Correct RoPE implementation using arguments expected by Kernel
@@ -285,9 +570,14 @@ func (t *Tensor) StoreKV(v *Tensor, kCache, vCache *Tensor, pos, heads, headDim 
 	C.Metal_StoreKV_F16(t.ctx.ref, t.buf, 0, v.buf, 0, kCache.buf, vCache.buf, C.int(pos), C.int(heads), C.int(headDim))
 }
 
-func (t *Tensor) Attention(kCache, vCache *Tensor, pos, numHeads, kvHeads, headDim int) *Tensor {
+func (t *Tensor) Attention(kCache, vCache *Tensor, pos, numHeads, kvHeads, headDim, ctxLen int) *Tensor {
 	res := t.ctx.NewTensorPooled(1, numHeads*headDim)
+	scoresDim := numHeads * ctxLen
+	if scoresDim < 32768 { scoresDim = 32768 }
+	scores := t.ctx.NewTensorPooled(1, scoresDim)
+	
 	C.Metal_Attention_F16(t.ctx.ref, t.buf, 0, kCache.buf, vCache.buf, res.buf, 0,
-		C.int(pos), C.int(numHeads), C.int(kvHeads), C.int(headDim))
+		scores.buf, 0,
+		C.int(pos), C.int(numHeads), C.int(kvHeads), C.int(headDim), C.int(ctxLen))
 	return res
 }

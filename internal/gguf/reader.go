@@ -126,23 +126,37 @@ func LoadFile(path string) (*GGUFFile, error) {
 		alignment = uint64(alignVal)
 	}
 	
+	fmt.Printf("DEBUG: Alignment = %d\n", alignment)
+	fmt.Printf("DEBUG: Offset BEFORE padding: %d\n", offset)
+	
 	// Pad offset to alignment
     padding := alignment - (offset % alignment)
     if padding != alignment {
         offset += padding
     }
-
+    
+    fmt.Printf("DEBUG: Computed Padding Offset: %d\n", offset)
+    
+    // HACK: UNCONDITIONAL FORCE
+    // fmt.Println("DEBUG: UNCONDITIONAL FORCE 760032")
+    // offset = 760032
+    
 	// Update tensor pointers
+	fmt.Printf("DEBUG: Data Start Offset: %d\n", offset)
 	for _, t := range file.Tensors {
 		// Absolute offset = dataStart + t.Offset
 		absOffset := offset + t.Offset
 		if absOffset >= uint64(len(data)) {
 			return nil, fmt.Errorf("tensor offset out of bounds")
 		}
-		// Calculate size?
-		// For now just point to it.
-		// We'd need to know element size to calc length, but data is just a pointer essentially.
-		// We won't slice it strictly unless we calculate size.
+		
+		if t.Name == "token_embd.weight" {
+			fmt.Printf("DEBUG: token_embd.weight: t.Offset=%d, AbsOffset=%d\n", t.Offset, absOffset)
+			// Peek data
+			peek := data[absOffset : absOffset+16]
+			fmt.Printf("DEBUG: Raw Data @ AbsOffset: %x\n", peek)
+		}
+		
 		t.Data = data[absOffset:]
 	}
 

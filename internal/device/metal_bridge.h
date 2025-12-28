@@ -60,9 +60,9 @@ void Metal_StoreKV_F16(MetalContextRef ctx, MetalBufferRef k, int offK,
                        MetalBufferRef vCache, int pos, int heads, int headDim);
 
 void Metal_Attention_F16(MetalContextRef ctx, MetalBufferRef q, int offQ,
-                         MetalBufferRef kCache, MetalBufferRef vCache,
-                         MetalBufferRef result, int offRes, int pos,
-                         int numHeads, int kvHeads, int headDim);
+                         MetalBufferRef kC, MetalBufferRef vC, MetalBufferRef r,
+                         int oR, MetalBufferRef s, int oS, int p, int nh,
+                         int kh, int hd, int ctxLen);
 
 void Metal_RMSNormLinear_F16(MetalContextRef ctx, MetalBufferRef input,
                              int offIn, MetalBufferRef normWeight,
@@ -74,6 +74,14 @@ void Metal_RMSNormLinear_F16(MetalContextRef ctx, MetalBufferRef input,
 void Metal_MatMul_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
                       bool transA, MetalBufferRef b, int offB, bool transB,
                       MetalBufferRef c, int offC, int M, int N, int K);
+
+void Metal_MatMul_Q4K_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
+                          bool transA, MetalBufferRef b, int offB, bool transB,
+                          MetalBufferRef c, int offC, int M, int N, int K);
+
+void Metal_MatMul_Q3K_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
+                          bool transA, MetalBufferRef b, int offB, bool transB,
+                          MetalBufferRef c, int offC, int M, int N, int K);
 
 void Metal_BatchedMatMul_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
                              int strideA, bool transA, MetalBufferRef b,
@@ -97,17 +105,6 @@ void Metal_FusedFFN_F16(MetalContextRef ctx, MetalBufferRef input, int offIn,
                         MetalBufferRef downWeight, int offDW,
                         MetalBufferRef output, int offOut, int inDim,
                         int interDim, float eps);
-
-void Metal_Layer_F16(MetalContextRef ctx, MetalBufferRef input,
-                     MetalBufferRef attnNormW, MetalBufferRef qW,
-                     MetalBufferRef kW, MetalBufferRef vW, MetalBufferRef oW,
-                     MetalBufferRef ffnNormW, MetalBufferRef ffnGateW,
-                     MetalBufferRef ffnUpW, MetalBufferRef ffnDownW,
-                     MetalBufferRef kCache, MetalBufferRef vCache,
-                     MetalBufferRef scratch1, MetalBufferRef scratch2,
-                     MetalBufferRef scratch3, MetalBufferRef scratch4, int pos,
-                     int numHeads, int kvHeads, int headDim, int interDim,
-                     float eps, float ropeTheta, int ctxLen);
 
 #ifdef __cplusplus
 }
