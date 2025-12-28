@@ -9,7 +9,6 @@ import (
 
 	"strings"
 	"time"
-	"unsafe"
 
 	"github.com/23skdu/longbow-quarrel/internal/device"
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
@@ -163,6 +162,9 @@ func (e *Engine) loadModel(path string) error {
 					return fmt.Errorf("tensor %s data truncated", t.Name)
 				}
 				rawBytes := t.Data[:dataBytes]
+				
+
+				
 				f32Data := make([]float32, numElements)
 				for i := 0; i < numElements; i++ {
 					bits := binary.LittleEndian.Uint32(rawBytes[i*4 : (i+1)*4])
@@ -179,25 +181,18 @@ func (e *Engine) loadModel(path string) error {
 				}
 				mt.LoadFromRaw(t.Data[:dataBytes])
 				
-				// Type 11 (Q3_K). 
-				// Treat as Q3_K (GPU or CPU)
-				if t.Name == "token_embd.weight" {
-					mt = e.Ctx.NewTensor(rows, cols)
-					f32Data := gguf.DequantizeQ3K(t.Data, numElements)
-					mt.LoadFrom(f32Data)
-				} else {
-					mt = e.Ctx.NewQ3KTensor(rows, cols)
-					dataBytes := (numElements / 256) * 110
-					if uint64(len(t.Data)) < uint64(dataBytes) {
-						return fmt.Errorf("tensor %s data truncated", t.Name)
-					}
-					mt.LoadFromRaw(t.Data[:dataBytes])
-				}
+
 
 			} else if t.Type == gguf.GGMLTypeQ4_K {
 				// Type 12 (Q4_K). 
 				// token_embd must be CPU Dequantized to F16.
 				if t.Name == "token_embd.weight" {
+					fmt.Printf("DEBUG: token_embd.weight: t.Offset=%d\n", t.Offset)
+                    // DEBUG: Inspect first few bytes (Row 0 and Row 1)
+                    if len(t.Data) > 2320 {
+                        fmt.Printf("DEBUG: token_embd.weight Row 0 [0:16] = %x\n", t.Data[:16])
+                        fmt.Printf("DEBUG: token_embd.weight Row 1 [2304:2320] = %x\n", t.Data[2304:2320])
+                    }
 					mt = e.Ctx.NewTensor(rows, cols)
 					f32Data := gguf.DequantizeQ4K(t.Data, numElements)
 					
@@ -236,6 +231,15 @@ func (e *Engine) loadModel(path string) error {
 			} else {
 				fmt.Printf("Skipping unsupported tensor type: %d (%s)\n", t.Type, t.Name)
 				continue
+			}
+		}
+		
+		if mt != nil {
+			if t.Type == gguf.GGMLTypeF16 || t.Type == gguf.GGMLTypeF32 || t.Type == gguf.GGMLTypeQ6_K || t.Name == "token_embd.weight" {
+				mt.ScanNaNs(t.Name)
+				mt.ScanMax(t.Name)
+			} else if t.Type == gguf.GGMLTypeQ4_K {
+				mt.ScanQ4KScales(t.Name)
 			}
 		}
 
@@ -369,50 +373,7 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int) ([]int, error) {
 		tToken := time.Now()
 		lastToken := inputTokens[i]
 		
-		// DEBUG: Inspect Q4K scale factors for first layer
-		if i == 0 && len(e.Weights.AttnQ) > 0 {
-			attnQ := e.Weights.AttnQ[0]
-			if attnQ.DataType() == device.DataTypeQ4K {
-				// Read first few blocks to check scale factors
-				ptr := attnQ.GetBufferContents()
-				if ptr != nil {
-					// Check first block in detail
-					blockPtr := ptr
-					d_bits := binary.LittleEndian.Uint16((*[2]byte)(blockPtr)[:])
-					dmin_bits := binary.LittleEndian.Uint16((*[2]byte)(unsafe.Add(blockPtr, 2))[:])
-					
-					d := device.Float16ToFloat32(d_bits)
-					dmin := device.Float16ToFloat32(dmin_bits)
-					
-					// Extract 6-bit scales (same logic as kernel)
-					scalesPtr := unsafe.Add(blockPtr, 4)
-					scales := (*[12]byte)(scalesPtr)[:]
-					
-					var sc [8]uint8
-					var m [8]uint8
-					for j := 0; j < 4; j++ {
-						u_j := scales[j]
-						u_j4 := scales[j+4]
-						u_j8 := scales[j+8]
-						sc[j] = (u_j4 & 0xF) | ((u_j & 0x3) << 4)
-						m[j] = (u_j4 >> 4) | ((u_j & 0xC) << 2)
-						sc[j+4] = (u_j8 & 0xF) | ((u_j & 0x30) >> 0)
-						m[j+4] = (u_j8 >> 4) | ((u_j & 0xC0) >> 2)
-					}
-					
-					log.Printf("Q4K Block 0: d=%.6f, dmin=%.6f", d, dmin)
-					log.Printf("  6-bit scales: %v", sc)
-					log.Printf("  6-bit mins: %v", m)
-					
-					// Calculate effective block scales
-					for j := 0; j < 8; j++ {
-						d_val := d * float32(sc[j])
-						m_val := dmin * float32(m[j])
-						log.Printf("  Sub-block %d: d_val=%.6f, m_val=%.6f", j, d_val, m_val)
-					}
-				}
-			}
-		}
+
 		
 		current := e.Weights.TokenEmb.EmbeddingLookup(lastToken)
 		
@@ -434,6 +395,10 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int) ([]int, error) {
 				e.KVCacheK[l], e.KVCacheV[l], s1, s2, s3, s4,
 				e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim,
 				e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen)
+			if true {
+				current.ScanNaNs(fmt.Sprintf("Token %d Layer %d Output", i, l))
+				current.ScanMax(fmt.Sprintf("Token %d Layer %d Output", i, l))
+			}
 		}
 
 		// If this is the LAST prompt token, sample the first next token

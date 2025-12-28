@@ -3,110 +3,165 @@ package main
 import (
 	"encoding/binary"
 	"fmt"
+	"math"
 	"os"
-	
-	"github.com/23skdu/longbow-quarrel/internal/gguf"
+	"syscall"
+)
+
+const (
+	GGUFMagic = 0x46554747
 )
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Println("Usage: debug_gguf <path>")
-		// Fallback to test gen if no args? Or just exit.
-		// For now, let's keep the test gen if requested, or just use arg.
-		// Let's make it mandatory.
-		os.Exit(1)
+		fmt.Println("Usage: check_gguf <path>")
+		return
 	}
-	filename := os.Args[1]
+	path := os.Args[1]
 	
-	// if err := generateGGUF(filename); err != nil {
-	// 	panic(err)
-	// }
-	// defer os.Remove(filename)
-	
-	fmt.Println("Reading GGUF...")
-	f, err := gguf.LoadFile(filename)
-	if err != nil {
-		panic(err)
-	}
+	f, err := os.Open(path)
+	if err != nil { panic(err) }
 	defer f.Close()
 	
-	fmt.Printf("Magic: %x\n", f.Header.Magic)
-	fmt.Printf("Version: %d\n", f.Header.Version)
-	fmt.Printf("Tensors: %d\n", f.Header.TensorCount)
-	fmt.Printf("KV: %d\n", f.Header.KVCount)
+	info, _ := f.Stat()
+	size := info.Size()
+	data, err := syscall.Mmap(int(f.Fd()), 0, int(size), syscall.PROT_READ, syscall.MAP_SHARED)
+	if err != nil { panic(err) }
+	defer syscall.Munmap(data)
 	
-	fmt.Println("Metadata:")
-	for k, v := range f.KV {
-		// Truncate long values for display
-		s := fmt.Sprintf("%v", v)
-		if len(s) > 100 {
-			s = s[:97] + "..."
+	offset := uint64(0)
+	magic := binary.LittleEndian.Uint32(data[offset:])
+	offset += 4
+	fmt.Printf("Magic: %x\n", magic)
+	
+	version := binary.LittleEndian.Uint32(data[offset:])
+	offset += 4
+	fmt.Printf("Version: %d\n", version)
+	
+	tensorCount := binary.LittleEndian.Uint64(data[offset:])
+	offset += 8
+	kvCount := binary.LittleEndian.Uint64(data[offset:])
+	offset += 8
+	
+	fmt.Printf("Tensors: %d, KV: %d\n", tensorCount, kvCount)
+	
+	// Skip KV
+	fmt.Printf("Starting KV read at offset %d\n", offset)
+	for i := uint64(0); i < kvCount; i++ {
+		k, n := readString(data, offset)
+		offset += n
+		valType := binary.LittleEndian.Uint32(data[offset:])
+		offset += 4
+		
+		if valType == 4 { // Uint32
+			v := binary.LittleEndian.Uint32(data[offset:])
+			fmt.Printf("KV %d: Key=%s, Type=%d, Val=%d\n", i, k, valType, v)
+		} else if valType == 6 { // Float32
+			bits := binary.LittleEndian.Uint32(data[offset:])
+			fmt.Printf("KV %d: Key=%s, Type=%d, Val=%f\n", i, k, valType, math.Float32frombits(bits))
+		} else {
+			fmt.Printf("KV %d: Key=%s, Type=%d\n", i, k, valType)
 		}
-		fmt.Printf("  %s: %s\n", k, s)
+
+		_, n = readValue(data, offset, valType)
+		offset += n
 	}
 	
-	fmt.Println("Tensors:")
-	for _, t := range f.Tensors {
-		fmt.Printf("  %s: Dims %v, Type %d, Offset %d\n", t.Name, t.Dimensions, t.Type, t.Offset)
+	fmt.Printf("Offset after KV: %d\n", offset)
+	
+	// Read Tens
+	type Ten struct {
+		Name string
+		Off uint64
+		Size uint64
 	}
+	var lastTen Ten
+	
+	for i := uint64(0); i < tensorCount; i++ {
+		name, n := readString(data, offset)
+		offset += n
+		dims := binary.LittleEndian.Uint32(data[offset:])
+		offset += 4
+		
+		elements := uint64(1)
+		for j := uint32(0); j < dims; j++ {
+			d := binary.LittleEndian.Uint64(data[offset:])
+			elements *= d
+			offset += 8
+		}
+		
+		typ := binary.LittleEndian.Uint32(data[offset:])
+		offset += 4
+		tenOff := binary.LittleEndian.Uint64(data[offset:])
+		offset += 8
+		
+		// Approx size
+		// Q4_K(12): 144 bytes / 256
+		// F16(1): 2 bytes
+		// F32(0): 4 bytes
+		sz := uint64(0)
+		if typ == 12 {
+			sz = (elements / 256) * 144
+		} else if typ == 1 {
+			sz = elements * 2
+		} else if typ == 0 {
+			sz = elements * 4
+		} else if typ == 14 { // Q6K
+			sz = (elements / 256) * 210
+		}
+		
+            
+            // Print all tensors
+			fmt.Printf("Tensor %d: %s: Off=%d, Elements=%d, Typ=%d, EstSize=%d\n", i, name, tenOff, elements, typ, sz)
+		
+		lastTen = Ten{Name: name, Off: tenOff, Size: sz}
+	}
+	
+	fmt.Printf("Offset after TensorInfos: %d\n", offset)
+	
+	padding := uint64(32) - (offset % 32)
+	if padding == 32 { padding = 0 }
+	fmt.Printf("Padding: %d -> DataStart: %d\n", padding, offset + padding)
+	
+	// Check last tensor end
+	end := offset + padding + lastTen.Off + lastTen.Size
+	fmt.Printf("Last Tensor: %s, End: %d, FileSize: %d, Diff: %d\n", lastTen.Name, end, size, int64(size)-int64(end))
 }
 
-func generateGGUF(path string) error {
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	
-	// Magic
-	binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMagic))
-	// Version
-	binary.Write(f, binary.LittleEndian, uint32(3))
-	// Tensor Count (1)
-	binary.Write(f, binary.LittleEndian, uint64(1))
-	// KV Count (1)
-	binary.Write(f, binary.LittleEndian, uint64(1))
-	
-	// KV Pair 1: "general.architecture" -> "llama"
-	writeString(f, "general.architecture")
-	binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeString))
-	writeString(f, "llama")
-	
-	// Tensor Info 1: "token_embd.weight"
-	writeString(f, "token_embd.weight")
-	// Dims (1)
-	binary.Write(f, binary.LittleEndian, uint32(1))
-	// Ne[0] = 1
-	binary.Write(f, binary.LittleEndian, uint64(1))
-	// Type = F32
-	binary.Write(f, binary.LittleEndian, uint32(gguf.GGMLTypeF32))
-	// Offset = 0
-	binary.Write(f, binary.LittleEndian, uint64(0))
-	
-	// Alignment padding
-	// Current offset? 
-	// Magic(4)+Ver(4)+TC(8)+KC(8) = 24
-	// KV: len(8)+"general.architecture"(20)+type(4)+len(8)+"llama"(5) = 45
-	// Total so far = 69
-	// TensorInfo:
-	// len(8)+"token_embd.weight"(17) = 25
-	// dims(4) + ne(8) + type(4) + off(8) = 24
-	// Total info = 49
-	// Total header = 69 + 49 = 118
-	
-	// Alignment 32. Next multiple of 32 after 118 is 128.
-	// Padding = 10 bytes
-	pad := make([]byte, 10)
-	f.Write(pad)
-	
-	// Tensor Data (4 bytes for 1 float32)
-	// 123.456
-	binary.Write(f, binary.LittleEndian, float32(123.456))
-	
-	return nil
+func readString(data []byte, offset uint64) (string, uint64) {
+	l := binary.LittleEndian.Uint64(data[offset:])
+    fmt.Printf("READSTRING: Off=%d, Len=%d\n", offset, l)
+	return string(data[offset+8 : offset+8+l]), 8+l
 }
 
-func writeString(f *os.File, s string) {
-	binary.Write(f, binary.LittleEndian, uint64(len(s)))
-	f.WriteString(s)
+func readValue(data []byte, offset uint64, typ uint32) (interface{}, uint64) {
+	// Minimal skipper
+	switch typ {
+	case 8: // string
+		_, n := readString(data, offset)
+		return nil, n
+	case 9: // array
+		// type, len, elements
+		atype := binary.LittleEndian.Uint32(data[offset:])
+		alen := binary.LittleEndian.Uint64(data[offset+4:])
+		n := uint64(12)
+		off := offset + 12
+		for i:=uint64(0); i<alen; i++ {
+			_, sn := readValue(data, off, atype)
+			n += sn
+			off += sn
+		}
+		return nil, n
+	default:
+		// primitive fixed sizes?
+		// bool(10)=1, u8(0)=1, i8(1)=1, u16(2)=2, i16(3)=2, u32(4)=4, i32(5)=4, f32(6)=4, u64(7)=8, i64(11)=8, f64(12)=8
+		sz := uint64(0)
+		switch typ {
+		case 0,1,7: sz=1 // Bool is 7
+		case 2,3: sz=2
+		case 4,5,6: sz=4
+		case 10,11,12: sz=8
+		}
+		return nil, sz
+	}
 }

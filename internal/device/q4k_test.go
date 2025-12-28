@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"encoding/binary"
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
 )
 
@@ -26,6 +27,20 @@ func TestQ4K_Correctness(t *testing.T) {
 	q4kData := make([]byte, dataSize)
 	rand.Seed(time.Now().UnixNano())
 	rand.Read(q4kData) // Randomize scales, mins, quants
+	
+	// FIX: Ensure d (bytes 0-1) and dmin (bytes 2-3) are valid Float16s
+	// Random bytes can form NaNs (exponent=31, mantissa!=0) or Infs.
+	for i := 0; i < numBlocks; i++ {
+		offset := i * 144
+		// Generate valid random float16s for d and dmin
+		// Small positive numbers to prevent explosion
+		d := Float32ToFloat16(rand.Float32() * 0.1)
+		dmin := Float32ToFloat16(rand.Float32() * 0.1)
+		
+		// Write back
+		binary.LittleEndian.PutUint16(q4kData[offset:], d)
+		binary.LittleEndian.PutUint16(q4kData[offset+2:], dmin)
+	}
 
 	// 2. CPU Reference: Dequantize to F32 then Dot Product
 	weightsF32 := gguf.DequantizeQ4K(q4kData, rows*cols)
