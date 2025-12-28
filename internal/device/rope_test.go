@@ -4,6 +4,7 @@ import (
 	"math"
 	"math/rand"
 	"testing"
+	"time"
 )
 
 // CPU reference for RoPE
@@ -27,8 +28,8 @@ func cpuRoPE(data []float32, rows, headDim, heads int, pos int, theta float32) [
 			cos := float32(math.Cos(float64(freq)))
 			sin := float32(math.Sin(float64(freq)))
 
-			idx1 := headOff + 2*i
-			idx2 := headOff + 2*i + 1
+			idx1 := headOff + i
+			idx2 := headOff + i + (headDim / 2)
 
 			x1 := data[idx1]
 			x2 := data[idx2]
@@ -67,9 +68,13 @@ func TestRoPEKernel(t *testing.T) {
 	
 	// Pass 1 as batch/seqLen
 	tRow.RoPE(pos, headDim, heads, 1, theta) 
-	tRow.ctx.Synchronize()
+	
+	if err := ctx.WaitWithTimeout(2 * time.Second); err != nil {
+		t.Fatal(err)
+	}
 	
 	metalOut := tRow.ToHost()
+	tRow.Free()
 	
 	// Compare
 	for i, v := range metalOut {

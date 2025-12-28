@@ -70,7 +70,16 @@ func TestQ4K_Correctness(t *testing.T) {
 
 	// Run MatMul: C = A(1x256) * B(256x1) = 1x1
 	outTen := wTen.MatMul(inTen)
+	
+	if err := ctx.WaitWithTimeout(2 * time.Second); err != nil {
+		t.Fatal(err)
+	}
+	
 	res := outTen.ToHost()
+	
+	wTen.Free()
+	inTen.Free()
+	outTen.Free()
 
 	if len(res) != 1 {
 		t.Fatalf("Expected 1 result element, got %d", len(res))
@@ -117,9 +126,12 @@ func TestQ3K_Correctness(t *testing.T) {
 	rand.Seed(time.Now().UnixNano())
 	rand.Read(q3kData)
 
-	// Randomize data
-	rand.Seed(time.Now().UnixNano())
-	rand.Read(q3kData)
+	// FIX: Ensure d (bytes 108-109) is a valid and safe Float16
+	for i := 0; i < numBlocks; i++ {
+		offset := i * 110
+		d := Float32ToFloat16(rand.Float32() * 0.1)
+		binary.LittleEndian.PutUint16(q3kData[offset+108:], d)
+	}
 
 	// CPU Reference
 	weightsF32 := gguf.DequantizeQ3K(q3kData, rows*cols)
@@ -147,7 +159,15 @@ func TestQ3K_Correctness(t *testing.T) {
 	
 	ctx.RunQ3K_Explicit(wTen, inTen, c)
 		
+	if err := ctx.WaitWithTimeout(2 * time.Second); err != nil {
+		t.Fatal(err)
+	}
+	
 	res := c.ToHost()
+	
+	wTen.Free()
+	inTen.Free()
+	c.Free()
 
 	if len(res) != 1 {
 		t.Fatalf("Expected 1 result element, got %d", len(res))
@@ -166,6 +186,73 @@ func TestQ3K_Correctness(t *testing.T) {
 	// Only float adds are inexact.
 	
 	if diff > 1.0 && diff > float32(math.Abs(float64(expected)))*0.05 {
+		t.Errorf("Mismatch. Expected %f, Got %f, Diff %f", expected, got, diff)
+	}
+}
+
+func TestQ6K_Correctness(t *testing.T) {
+	ctx := NewContext()
+	defer ctx.Free()
+
+	cols := 256
+	rows := 1
+
+	// Q6_K: 210 bytes per 256
+	numBlocks := (rows * cols) / 256
+	dataSize := numBlocks * 210
+	q6kData := make([]byte, dataSize)
+	rand.Read(q6kData)
+
+	// Ensure some non-zero scales for stability
+	for i := 0; i < numBlocks; i++ {
+		offset := i * 210
+		// scales are at 192 (16 bytes)
+		for j := 0; j < 16; j++ {
+			q6kData[offset+192+j] = byte(rand.Intn(10) + 1)
+		}
+		// d is at 208 (2 bytes f16 f16)
+		d := Float32ToFloat16(0.01)
+		binary.LittleEndian.PutUint16(q6kData[offset+208:], d)
+	}
+
+	// CPU Reference
+	weightsF32 := gguf.DequantizeQ6K(q6kData, rows*cols)
+	inputF32 := make([]float32, cols)
+	for i := range inputF32 {
+		inputF32[i] = rand.Float32() - 0.5
+	}
+
+	var expected float32
+	for i := 0; i < cols; i++ {
+		expected += weightsF32[i] * inputF32[i]
+	}
+
+	// GPU Result
+	wTen := ctx.NewQ6KTensor(rows, cols)
+	wTen.LoadFromRaw(q6kData)
+	inTen := ctx.NewTensor(1, cols)
+	inTen.LoadFrom(inputF32)
+
+	outTen := wTen.MatMul(inTen)
+	if err := ctx.WaitWithTimeout(2 * time.Second); err != nil {
+		t.Fatal(err)
+	}
+	res := outTen.ToHost()
+
+	wTen.Free()
+	inTen.Free()
+	outTen.Free()
+
+	if len(res) != 1 {
+		t.Fatalf("Expected 1 result element, got %d", len(res))
+	}
+	got := res[0]
+
+	t.Logf("Q6K CPU Ref: %f", expected)
+	t.Logf("Q6K GPU Res: %f", got)
+
+	diff := math.Abs(float64(expected - got))
+	if diff > 1e-1 {
 		t.Errorf("Mismatch. Expected %f, Got %f, Diff %f", expected, got, diff)
 	}
 }

@@ -10,6 +10,7 @@
 @property(strong) id<MTLComputePipelineState> pipelineMatMul_F16;
 @property(strong) id<MTLComputePipelineState> pipelineMatMul_Q4K_F16;
 @property(strong) id<MTLComputePipelineState> pipelineMatMul_Q3K_F16;
+@property(strong) id<MTLComputePipelineState> pipelineMatMul_Q6K_F16;
 @property(strong) id<MTLComputePipelineState> pipelineRoPE_F16;
 @property(strong) id<MTLComputePipelineState> pipelineEmbedding_F16;
 @property(strong) id<MTLComputePipelineState> pipelineAdd_F16;
@@ -24,6 +25,7 @@
 @property(strong) id<MTLComputePipelineState> pipelineMatMul_Q4K_F32;
 @property(strong) id<MTLComputePipelineState> pipelineAdd_F32;
 @property(strong) id<MTLComputePipelineState> pipelineSwiGLU_F32;
+@property(strong) id<MTLComputePipelineState> pipelineMatMul_F16_F32;
 @property(strong) id<MTLComputePipelineState> pipelineCopy_F16_F32;
 @property(strong) id<MTLComputePipelineState> pipelineCopy_F32_F16;
 @property(strong) id<MTLCommandBuffer> currentCommandBuffer;
@@ -105,6 +107,7 @@ MetalContextRef Metal_Init(const char *libSource) {
   ctx.pipelineMatMul_F16 = loadPipeline(ctx, @"linear_f16");
   ctx.pipelineMatMul_Q4K_F16 = loadPipeline(ctx, @"linear_q4k_f16");
   ctx.pipelineMatMul_Q3K_F16 = loadPipeline(ctx, @"linear_q3k_f16");
+  ctx.pipelineMatMul_Q6K_F16 = loadPipeline(ctx, @"linear_q6k_f16");
   ctx.pipelineRoPE_F16 = loadPipeline(ctx, @"rope_f16");
   ctx.pipelineEmbedding_F16 = loadPipeline(ctx, @"embedding_f16");
   ctx.pipelineAdd_F16 = loadPipeline(ctx, @"add_f16");
@@ -120,6 +123,7 @@ MetalContextRef Metal_Init(const char *libSource) {
   ctx.pipelineMatMul_Q4K_F32 = loadPipeline(ctx, @"linear_q4k_f32");
   ctx.pipelineAdd_F32 = loadPipeline(ctx, @"add_f32");
   ctx.pipelineSwiGLU_F32 = loadPipeline(ctx, @"swiglu_f32");
+  ctx.pipelineMatMul_F16_F32 = loadPipeline(ctx, @"linear_f16_f32");
   ctx.pipelineCopy_F16_F32 = loadPipeline(ctx, @"copy_f16_to_f32");
   ctx.pipelineCopy_F32_F16 = loadPipeline(ctx, @"copy_f32_to_f16");
 
@@ -243,6 +247,22 @@ void Metal_MatMul_Q3K_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
   [enc setBytes:&K length:4 atIndex:3];
   [enc setBytes:&N length:4 atIndex:4];
 
+  [enc dispatchThreads:MTLSizeMake(32, N, M)
+      threadsPerThreadgroup:MTLSizeMake(32, 4, 1)];
+  [mc barrier];
+}
+
+void Metal_MatMul_Q6K_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
+                          bool transA, MetalBufferRef b, int offB, bool transB,
+                          MetalBufferRef c, int offC, int M, int N, int K) {
+  MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
+  id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
+  [enc setComputePipelineState:mc.pipelineMatMul_Q6K_F16];
+  [enc setBuffer:(__bridge id<MTLBuffer>)a offset:offA atIndex:0];
+  [enc setBuffer:(__bridge id<MTLBuffer>)b offset:offB atIndex:1];
+  [enc setBuffer:(__bridge id<MTLBuffer>)c offset:offC atIndex:2];
+  [enc setBytes:&K length:4 atIndex:3];
+  [enc setBytes:&N length:4 atIndex:4];
   [enc dispatchThreads:MTLSizeMake(32, N, M)
       threadsPerThreadgroup:MTLSizeMake(32, 4, 1)];
   [mc barrier];
@@ -579,5 +599,21 @@ void Metal_Copy_F32_F16(MetalContextRef ctx, MetalBufferRef src, int oS,
   [enc setBuffer:(__bridge id<MTLBuffer>)dst offset:oD atIndex:1];
   [enc dispatchThreads:MTLSizeMake(n, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(MIN(n, 256), 1, 1)];
+  [mc barrier];
+}
+
+void Metal_MatMul_F16_F32(MetalContextRef ctx, MetalBufferRef a, int offA,
+                          MetalBufferRef b, int offB, MetalBufferRef c,
+                          int offC, int M, int N, int K) {
+  MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
+  id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
+  [enc setComputePipelineState:mc.pipelineMatMul_F16_F32];
+  [enc setBuffer:(__bridge id<MTLBuffer>)a offset:offA atIndex:0];
+  [enc setBuffer:(__bridge id<MTLBuffer>)b offset:offB atIndex:1];
+  [enc setBuffer:(__bridge id<MTLBuffer>)c offset:offC atIndex:2];
+  [enc setBytes:&K length:4 atIndex:3];
+  [enc setBytes:&N length:4 atIndex:4];
+  [enc dispatchThreads:MTLSizeMake(32, N, M)
+      threadsPerThreadgroup:MTLSizeMake(32, 4, 1)];
   [mc barrier];
 }

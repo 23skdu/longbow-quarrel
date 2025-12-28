@@ -206,9 +206,11 @@ func CPUQ4KMatMul(a []float32, b []byte, M, N, K int) []float32 {
 						w1 := dVal * float32(val >> 4) - mVal
 						
 						// Multiply with A
-						idx := aBlockOff + sb*32 + l*2
-						sum += a[idx] * w0
-						sum += a[idx+1] * w1
+						// Sequential layout: low nibbles 0..15, high nibbles 16..31
+						idx0 := aBlockOff + sb*32 + l
+						idx1 := aBlockOff + sb*32 + l + 16
+						sum += a[idx0] * w0
+						sum += a[idx1] * w1
 					}
 				}
 			}

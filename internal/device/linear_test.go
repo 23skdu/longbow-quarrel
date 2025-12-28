@@ -4,6 +4,7 @@ import (
 	"math"
 	"math/rand"
 	"testing"
+	"time"
 )
 
 // CPU reference for MatMul A * B^T
@@ -67,9 +68,15 @@ func TestLinearF16(t *testing.T) {
 	// Since we are in `device` package, we can access Tensor methods.
 	tensorA.LinearInto(tensorB, tensorOut)
 	
-	tensorA.ctx.Synchronize()
+	if err := ctx.WaitWithTimeout(2 * time.Second); err != nil {
+		t.Fatal(err)
+	}
 	
 	metalOut := tensorOut.ToHost()
+	
+	tensorA.Free()
+	tensorB.Free()
+	tensorOut.Free()
 	
 	// Compare
 	for i, v := range metalOut {

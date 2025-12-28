@@ -3,6 +3,7 @@ package device
 import (
 	"math/rand"
 	"testing"
+	"time"
 )
 
 func TestLayer4_Q4KMatMul(t *testing.T) {
@@ -128,6 +129,13 @@ func TestLayer4_Q4KMatMul_FP32(t *testing.T) {
 	// Dimensions
 	M := 1
 	K := 256
+	// Guardrail: Check dimensions
+	if M*K > 1_000_000 && testing.Short() {
+		t.Skip("Skipping large tensor test in short mode")
+	}
+	if int64(M)*int64(K) > 100_000_000 { // 100M elements ~ 200MB/400MB
+		t.Fatal("Test dimension guardrail exceeded safe limit")
+	}
 	N := 1
 	
 	// 1. Generate Q4K Data
@@ -179,8 +187,16 @@ func TestLayer4_Q4KMatMul_FP32(t *testing.T) {
 	
 	tInput.LinearIntoFP32(tWeight, tOut)
 	
-	tOut.ctx.Synchronize()
+	// Use safer synchronization with timeout
+	if err := ctx.WaitWithTimeout(5 * time.Second); err != nil {
+		t.Fatal(err)
+	}
 	gpuOut := tOut.ToHost()
+	
+	// Manual Cleanup
+	tInput.Free()
+	tWeight.Free()
+	tOut.Free()
 	
 	// 5. Compare
 	assertClose(t, "Q4K MatMul FP32", cpuOut, gpuOut, 1.0)
