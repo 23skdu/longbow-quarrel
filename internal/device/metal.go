@@ -195,6 +195,13 @@ func (t *Tensor) LoadFrom(data []float32) {
 	if len(data) != t.rows*t.cols {
 		panic("Data size mismatch")
 	}
+	
+	if t.dataType == DataTypeF32 {
+		// Copy directly as F32
+		C.Metal_CopyToDevice(t.buf, 0, unsafe.Pointer(&data[0]), C.int(len(data)*4))
+		return
+	}
+
 	// Convert to FP16
 	f16 := make([]uint16, len(data))
 	for i, v := range data {
@@ -344,6 +351,13 @@ func (t *Tensor) LoadFromRaw(data []byte) {
 
 func (t *Tensor) ToHost() []float32 {
 	t.ctx.Synchronize()
+	
+	if t.dataType == DataTypeF32 {
+		f32 := make([]float32, t.rows*t.cols)
+		C.Metal_CopyToHost(t.buf, 0, unsafe.Pointer(&f32[0]), C.int(t.sizeBytes))
+		return f32
+	}
+
 	f16 := make([]uint16, t.rows*t.cols)
 	C.Metal_CopyToHost(t.buf, 0, unsafe.Pointer(&f16[0]), C.int(t.sizeBytes))
 	
@@ -374,6 +388,7 @@ func (t *Tensor) MatMul(b *Tensor) *Tensor {
 	K := t.cols
 	
 	// If t is Q4_K, dispatch specialized kernel
+	t0 := time.Now()
 	if t.dataType == DataTypeQ4K {
 		c := t.ctx.NewTensor(N, M)
 		c.ZeroInit()
@@ -382,7 +397,8 @@ func (t *Tensor) MatMul(b *Tensor) *Tensor {
 			b.buf, 0, C.bool(false),
 			c.buf, 0,
 			C.int(M), C.int(N), C.int(K));
-			
+		
+		metrics.RecordKernelDuration("MatMul", time.Since(t0))
 		return c
 	}
 
@@ -392,6 +408,7 @@ func (t *Tensor) MatMul(b *Tensor) *Tensor {
 		b.buf, 0, C.bool(false),
 		c.buf, 0,
 		C.int(M), C.int(N), C.int(K))
+	metrics.RecordKernelDuration("MatMul", time.Since(t0))
 	return c
 }
 

@@ -33,7 +33,7 @@ func TestQ4K_Correctness(t *testing.T) {
 	// Generate Random Input Vector (F32)
 	inputF32 := make([]float32, cols)
 	for i := range inputF32 {
-		inputF32[i] = (rand.Float32() - 0.5) * 2.0 // Range -1..1
+		inputF32[i] = (rand.Float32() - 0.5) * 0.05 // Small range to avoid F16 saturation
 	}
 
 	// Calculate Expected Dot Product (CPU)
@@ -48,8 +48,9 @@ func TestQ4K_Correctness(t *testing.T) {
 	wTen.LoadFromRaw(q4kData)
 
 	// Create Input Vector (F16)
-	// MatMul expects B as [K x 1] (Column Vector)
-	inTen := ctx.NewTensor(cols, 1)
+	// MatMul expects B as [M x K] where M is batch dims.
+	// We want M=1.
+	inTen := ctx.NewTensor(1, cols)
 	inTen.LoadFrom(inputF32)
 
 	// Run MatMul: C = A(1x256) * B(256x1) = 1x1
