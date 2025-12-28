@@ -72,39 +72,7 @@ func TestMetalMatMul(t *testing.T) {
 	// ... (Existing F16 test)
 }
 
-func TestMetalMatMulQ4K(t *testing.T) {
-	ctx := NewContext()
-	defer ctx.Free()
 
-	// 1x256 MatMul
-	// Weights: Q4_K [1, 256]. Input: F16 [1, 256]. Result: F16 [1, 1].
-	M, K := 1, 256
-
-	// Construct 16 blocks with unique bytes
-	fullBlocks := make([]byte, 16 * 144)
-	for b := 0; b < 16; b++ {
-		block := fullBlocks[b*144 : (b+1)*144]
-		for i := 0; i < 144; i++ {
-			block[i] = byte(i)
-		}
-	}
-	
-	t.Logf("CPU Block 0 Bytes (indices 0..15): %v", fullBlocks[:16])
-	
-	tAQ4 := ctx.NewQ4KTensor(16, K) 
-	tAQ4.LoadRaw(fullBlocks)
-	
-	tB := ctx.NewTensor(M, K) // input [1, 256]
-	bData := make([]float32, 256)
-	for i := 0; i < 256; i++ { bData[i] = 1.0 }
-	tB.LoadFrom(bData)
-	
-	tC := tB.MatMul(tAQ4) // [1, 16]
-	result := tC.ToHost()
-	
-	// Hijacked Output: First 16 bytes of block 0
-	t.Fatalf("Raw Block Bytes (indices 0..15): %v", result[:16])
-}
 
 func TestMetalRMSNorm(t *testing.T) {
 	ctx := NewContext()

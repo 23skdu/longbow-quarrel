@@ -124,8 +124,8 @@ kernel void linear_q4k_f16(device const uchar *weight [[ buffer(0) ]],
         device const uchar *block = row_ptr + i * 144;
         ushort d_bits = *(device const ushort*)(block);
         ushort dmin_bits = *(device const ushort*)(block + 2);
-        float d = fp16_to_fp32(d_bits);
-        float dmin = fp16_to_fp32(dmin_bits);
+        float d = (float)as_type<half>(d_bits);
+        float dmin = (float)as_type<half>(dmin_bits);
         
         // Debug: Print first block's scale for first row
         if (row == 0 && i == 0 && batch == 0 && lane_id == 0) {
@@ -335,8 +335,8 @@ kernel void linear_q4k_f32(device const uchar *weight [[ buffer(0) ]],
         device const uchar *block = row_ptr + i * 144;
         ushort d_bits = *(device const ushort*)(block);
         ushort dmin_bits = *(device const ushort*)(block + 2);
-        float d = fp16_to_fp32(d_bits);
-        float dmin = fp16_to_fp32(dmin_bits);
+        float d = (float)as_type<half>(d_bits);
+        float dmin = (float)as_type<half>(dmin_bits);
         
         device const uchar *scales = block + 4;
         device const uchar *qs = block + 16;
