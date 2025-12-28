@@ -36,6 +36,10 @@ func TestMetalAdd(t *testing.T) {
 			t.Fatalf("Add mismatch at %d: got %f, want %f", i, result[i], expected[i])
 		}
 	}
+	
+	tA.Free()
+	tB.Free()
+	tC.Free()
 }
 
 func TestMetalScale(t *testing.T) {
@@ -66,6 +70,9 @@ func TestMetalScale(t *testing.T) {
 			}
 		}
 	}
+
+	tA.Free()
+	tC.Free()
 }
 
 func TestMetalMatMul(t *testing.T) {

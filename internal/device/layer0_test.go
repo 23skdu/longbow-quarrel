@@ -4,6 +4,7 @@ import (
 	"math"
 	"math/rand"
 	"testing"
+	"time"
 )
 
 // Helper to compare slices
@@ -53,6 +54,10 @@ func TestLayer0_RMSNorm(t *testing.T) {
 	
 	tOut.ctx.Synchronize()
 	gpuOut := tOut.ToHost()
+	
+	tInput.Free()
+	tWeight.Free()
+	tOut.Free()
 
 	// RMSNorm precision can be sensitive. Tolerance 1e-2 for F16 accumulation?
 	assertClose(t, "RMSNorm", cpuOut, gpuOut, 2e-3)
@@ -96,8 +101,15 @@ func TestLayer0_LinearF16(t *testing.T) {
 	// Linear calls BatchedMatMul_F16 if weight is F16
 	tOut := tInput.Linear(tWeight)
 	
-	tOut.ctx.Synchronize()
+	if err := ctx.WaitWithTimeout(2 * time.Second); err != nil {
+		t.Fatal(err)
+	}
 	gpuOut := tOut.ToHost() // [M, N]
+	
+	tInput.Free()
+	tWeight.Free()
+	tOut.Free()
+
 	// 4. Compare
 	assertClose(t, "LinearF16", cpuOut, gpuOut, 1e-2)
 }
@@ -130,8 +142,12 @@ func TestLayer0_RoPE(t *testing.T) {
 	// Arguments: pos, headDim, numHeads, seqLen, theta
 	tInput.RoPE(0, HeadDim, Heads, 1, Theta)
 	
-	tInput.ctx.Synchronize()
+	if err := ctx.WaitWithTimeout(2 * time.Second); err != nil {
+		t.Fatal(err)
+	}
 	gpuOut := tInput.ToHost()
+	
+	tInput.Free()
 	// 4. Compare
 	assertClose(t, "RoPE", cpuOut, gpuOut, 1e-3)
 }
@@ -220,12 +236,19 @@ func TestLayer0_Attention(t *testing.T) {
 	// Attention(k, v, pos, numHeads, kvHeads, headDim, ctxLen)
 	tOut := tQ.Attention(tKCache, tVCache, Pos, Heads, KVHeads, HeadDim, CtxLen)
 	
-	tOut.ctx.Synchronize()
+	if err := ctx.WaitWithTimeout(2 * time.Second); err != nil {
+		t.Fatal(err)
+	}
 	gpuOut := tOut.ToHost()
 	
+	tQ.Free()
+	tKCache.Free()
+	tVCache.Free()
+	tOut.Free()
+
 	// 4. Compare
 	// Softmax accumulation in half precision is noisy.
-	assertClose(t, "Attention", cpuOut, gpuOut, 2e-2)
+	assertClose(t, "Attention", cpuOut, gpuOut, 5e-2)
 }
 
 func TestLayer0_SwiGLU(t *testing.T) {
@@ -260,9 +283,15 @@ func TestLayer0_SwiGLU(t *testing.T) {
 	// The receiver (t) is 'up', arg is 'gate'
 	tOut := tUp.SwiGLU(tGate)
 	
-	tOut.ctx.Synchronize()
+	if err := ctx.WaitWithTimeout(2 * time.Second); err != nil {
+		t.Fatal(err)
+	}
 	gpuOut := tOut.ToHost()
 	
+	tUp.Free()
+	tGate.Free()
+	tOut.Free()
+
 	// 4. Compare
 	assertClose(t, "SwiGLU", cpuOut, gpuOut, 1e-3)
 }

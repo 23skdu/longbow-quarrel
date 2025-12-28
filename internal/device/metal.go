@@ -22,6 +22,9 @@ import (
 
 var allocatedBytes int64
 
+// MaxGPUMemory is a soft limit for total allocations (default: 8GB)
+var MaxGPUMemory int64 = 8 * 1024 * 1024 * 1024 
+
 //go:embed kernels.metal
 var kernelsSource string
 
@@ -48,8 +51,22 @@ func NewContext() *Context {
 
 func (c *Context) Free() {
 	if c.ref != nil {
+		c.ClearPool()
 		C.Metal_Free(c.ref)
 		c.ref = nil
+	}
+}
+
+// ClearPool releases all pooled tensors to free up GPU memory.
+func (c *Context) ClearPool() {
+	for key, tensors := range c.pool {
+		for _, t := range tensors {
+			C.Metal_FreeBuffer(c.ref, t.buf)
+			atomic.AddInt64(&allocatedBytes, -int64(t.sizeBytes))
+			metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
+			t.buf = nil // Prevent double free
+		}
+		delete(c.pool, key)
 	}
 }
 
@@ -58,6 +75,7 @@ const (
 	DataTypeQ4K = 1
 	DataTypeQ3K = 2
 	DataTypeF32 = 3
+	DataTypeQ6K = 4
 )
 
 // Tensor wraps a Metal buffer. Always FP16 for this engine.
@@ -113,9 +131,36 @@ func (c *Context) NewQ4KTensor(rows, cols int) *Tensor {
 	}
 }
 
+// NewQ6KTensor creates a tensor with Q6_K quantization layout (210 bytes per 256 weights)
+func (c *Context) NewQ6KTensor(rows, cols int) *Tensor {
+	numElements := rows * cols
+	if numElements%256 != 0 {
+		panic("Q6_K tensor size must be divisible by 256")
+	}
+	numBlocks := numElements / 256
+	sizeBytes := numBlocks * 210
+	buf := C.Metal_Alloc(c.ref, C.int(sizeBytes))
+	return &Tensor{
+		ctx:       c,
+		rows:      rows,
+		cols:      cols,
+		sizeBytes: sizeBytes,
+		buf:       buf,
+		dataType:  DataTypeQ6K,
+	}
+}
+
 // NewTensor creates a standard F16 tensor
 func (c *Context) NewTensor(rows, cols int) *Tensor {
 	sizeBytes := rows * cols * 2 // FP16
+	
+	if atomic.LoadInt64(&allocatedBytes)+int64(sizeBytes) > MaxGPUMemory {
+		c.ClearPool() // Attempt to free some space
+		if atomic.LoadInt64(&allocatedBytes)+int64(sizeBytes) > MaxGPUMemory {
+			panic(fmt.Sprintf("Metal_Alloc: Exceeded memory budget of %d bytes", MaxGPUMemory))
+		}
+	}
+
 	buf := C.Metal_Alloc(c.ref, C.int(sizeBytes))
 	if buf == nil {
 		panic("Metal_Alloc returned nil!")
@@ -143,20 +188,29 @@ func (c *Context) NewTensor(rows, cols int) *Tensor {
 	return t
 }
 
-// NewTensorFP32 creates a standard F32 tensor
-// NewTensorFP32Pooled creates a pooled tensor for intermediate float32 results.
-func (c *Context) NewTensorFP32Pooled(rows, cols int) *Tensor {
-	numElements := rows * cols
-	sizeBytes := numElements * 4
-	buf := C.Metal_Alloc(c.ref, C.int(sizeBytes))
-	return &Tensor{
-		ctx:       c,
-		rows:      rows,
-		cols:      cols,
-		sizeBytes: int(sizeBytes),
-		buf:       buf,
-		dataType:  DataTypeF32,
+// Free explicitly releases the Metal buffer. 
+// Use this for large tensors in tight loops to avoid OOM due to lazy GC finalizers.
+func (t *Tensor) Free() {
+	if t.buf != nil {
+		// Clear finalizer first to prevent double free
+		runtime.SetFinalizer(t, nil)
+		C.Metal_FreeBuffer(t.ctx.ref, t.buf)
+		atomic.AddInt64(&allocatedBytes, -int64(t.sizeBytes))
+		metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
+		t.buf = nil // Mark as freed
 	}
+}
+
+// NewTensorFP32 creates a standard F32 tensor
+// NewTensorFP32Pooled creates or reuses a pooled tensor for intermediate float32 results.
+func (c *Context) NewTensorFP32Pooled(rows, cols int) *Tensor {
+	key := fmt.Sprintf("%dx%dx%d", rows, cols, DataTypeF32)
+	if tensors, ok := c.pool[key]; ok && len(tensors) > 0 {
+		t := tensors[len(tensors)-1]
+		c.pool[key] = tensors[:len(tensors)-1]
+		return t
+	}
+	return c.NewTensorFP32(rows, cols)
 }
 
 func (c *Context) NewTensorFP32(rows, cols int) *Tensor {
@@ -187,9 +241,9 @@ func (c *Context) NewTensorFP32(rows, cols int) *Tensor {
 	return t
 }
 
-// NewTensorPooled attempts to reuse tensor from pool
+// NewTensorPooled attempts to reuse tensor from pool (defaults to F16)
 func (c *Context) NewTensorPooled(rows, cols int) *Tensor {
-	key := fmt.Sprintf("%dx%d", rows, cols)
+	key := fmt.Sprintf("%dx%dx%d", rows, cols, DataTypeF16)
 	if tensors, ok := c.pool[key]; ok && len(tensors) > 0 {
 		// Pop from pool
 		t := tensors[len(tensors)-1]
@@ -200,9 +254,10 @@ func (c *Context) NewTensorPooled(rows, cols int) *Tensor {
 	return c.NewTensor(rows, cols)
 }
 
-// ReturnToPool returns tensor to pool for reuse
+// ReturnToPool returns tensor to pool for reuse. 
+// Note: This does NOT free the Metal memory, just prevents GC from reaping it.
 func (t *Tensor) ReturnToPool() {
-	key := fmt.Sprintf("%dx%d", t.rows, t.cols)
+	key := fmt.Sprintf("%dx%dx%d", t.rows, t.cols, t.dataType)
 	t.ctx.pool[key] = append(t.ctx.pool[key], t)
 }
 
@@ -413,7 +468,9 @@ func (t *Tensor) LoadFromRaw(data []byte) {
 }
 
 func (t *Tensor) ToHost() []float32 {
-	t.ctx.Synchronize()
+	if err := t.ctx.WaitWithTimeout(10 * time.Second); err != nil {
+		panic(fmt.Sprintf("ToHost failed: %v", err))
+	}
 	
 	if t.dataType == DataTypeF32 {
 		f32 := make([]float32, t.rows*t.cols)
@@ -440,8 +497,25 @@ func (c *Context) Synchronize() {
 	C.Metal_Synchronize(c.ref)
 }
 
-func (t *Tensor) Scale(val float32) {
-	C.Metal_Scale_F16(t.ctx.ref, t.buf, 0, C.float(val), t.buf, 0, C.int(t.rows*t.cols))
+// WaitWithTimeout wait for GPU to complete with a timeout to prevent system lockup.
+func (c *Context) WaitWithTimeout(timeout time.Duration) error {
+	done := make(chan struct{})
+	go func() {
+		c.Synchronize()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-time.After(timeout):
+		return fmt.Errorf("GPU synchronization timed out after %v", timeout)
+	}
+}
+
+func (t *Tensor) Scale(val float32) *Tensor {
+	res := t.ctx.NewTensorPooled(t.rows, t.cols)
+	C.Metal_Scale_F16(t.ctx.ref, t.buf, 0, C.float(val), res.buf, 0, C.int(t.rows*t.cols))
+	return res
 }
 
 // Operations
@@ -460,6 +534,28 @@ func (t *Tensor) MatMul(b *Tensor) *Tensor {
 		c := t.ctx.NewTensor(N, M)
 		c.ZeroInit()
 		C.Metal_MatMul_Q4K_F16(t.ctx.ref,
+			t.buf, 0, C.bool(false),
+			b.buf, 0, C.bool(false),
+			c.buf, 0,
+			C.int(M), C.int(N), C.int(K));
+		
+		metrics.RecordKernelDuration("MatMul", time.Since(t0))
+		return c
+	} else if t.dataType == DataTypeQ3K {
+		c := t.ctx.NewTensor(N, M)
+		c.ZeroInit()
+		C.Metal_MatMul_Q3K_F16(t.ctx.ref,
+			t.buf, 0, C.bool(false),
+			b.buf, 0, C.bool(false),
+			c.buf, 0,
+			C.int(M), C.int(N), C.int(K));
+		
+		metrics.RecordKernelDuration("MatMul", time.Since(t0))
+		return c
+	} else if t.dataType == DataTypeQ6K {
+		c := t.ctx.NewTensor(N, M)
+		c.ZeroInit()
+		C.Metal_MatMul_Q6K_F16(t.ctx.ref,
 			t.buf, 0, C.bool(false),
 			b.buf, 0, C.bool(false),
 			c.buf, 0,
@@ -528,9 +624,16 @@ func (t *Tensor) LinearInto(weight *Tensor, out *Tensor) {
 	if weight.dataType == DataTypeQ4K {
 		C.Metal_MatMul_Q4K_F16(t.ctx.ref, weight.buf, 0, false, t.buf, 0, false, out.buf, 0,
 			C.int(t.rows), C.int(weight.rows), C.int(weight.cols))
+	} else if weight.dataType == DataTypeQ3K {
+		C.Metal_MatMul_Q3K_F16(t.ctx.ref, weight.buf, 0, false, t.buf, 0, false, out.buf, 0,
+			C.int(t.rows), C.int(weight.rows), C.int(weight.cols))
+	} else if weight.dataType == DataTypeQ6K {
+		C.Metal_MatMul_Q6K_F16(t.ctx.ref, weight.buf, 0, false, t.buf, 0, false, out.buf, 0,
+			C.int(t.rows), C.int(weight.rows), C.int(weight.cols))
 	} else {
-		// Custom F16 kernel
-		C.Metal_MatMul_F16(t.ctx.ref, t.buf, 0, false, weight.buf, 0, true, out.buf, 0,
+		// Custom F16 kernel: expects (weight, input, output, dim_in, dim_out, batch)
+		// weight.buf at Index 0, t.buf at Index 1
+		C.Metal_MatMul_F16(t.ctx.ref, weight.buf, 0, true, t.buf, 0, false, out.buf, 0,
 			C.int(t.rows), C.int(weight.rows), C.int(weight.cols))
 	}
 }
@@ -658,6 +761,10 @@ func (t *Tensor) Layer(attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, k
 		scores.ScanScores(fmt.Sprintf("Attn Scores Pre-Softmax (Pos %d)", p))
 
 		// 5b. Softmax
+		// Score Scaling Removed (Testing if unscaled scores ~500 are sufficient)
+		// scores.ScaleInPlace(100.0) 
+		scores.ScanMax(fmt.Sprintf("Attn Scores (Pos %d)", p)) 
+		
 		C.Metal_AttSoftmax_F16(t.ctx.ref, scores.buf, 0, C.int(p), C.int(heads), C.int(ctxLen))
 		t.ctx.Synchronize()
 		scores.ScanScores(fmt.Sprintf("Attn Scores Post-Softmax (Pos %d)", p))
@@ -668,14 +775,16 @@ func (t *Tensor) Layer(attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, k
 		t.ctx.Synchronize()
 	}
 	t.ctx.Synchronize()
+	attOut.ScanMax("Attn Values (Pre-Proj)")
 		
 	// 6. Attention Output Projection
 	// attOut is now fully populated [Batch, Dim]
 	attOut.LinearInto(o, resAtt)
 	t.ctx.Synchronize()
+	resAtt.ScanMax("Attn Output (Post-Proj)")
 	
-	// FIX: Scale Output by 1000.0 because Weights are Tiny (1e-4)
-	resAtt.Scale(1000.0)
+	// FIX: Scale Output by 0.125 to prevent Residual Saturation (65504)
+	resAtt.ScaleInPlace(0.125)
 	t.ctx.Synchronize()
 	
 	// 7. Residual Add 1
@@ -835,17 +944,20 @@ func (t *Tensor) LinearIntoFP32(weight *Tensor, out *Tensor) {
 	if t.cols != weight.cols {
 		panic(fmt.Sprintf("LinearIntoFP32 mismatch: %d != %d", t.cols, weight.cols))
 	}
-	// t is F32 input, out is F32 output
-	// weight can be Q4K (likely) or F16.
+	
+	// Guardrail: Kernel uses float4/half4, so dim_in must be multiple of 4
+	if t.cols%4 != 0 {
+		panic(fmt.Sprintf("LinearIntoFP32: row dimension %d must be multiple of 4", t.cols))
+	}
 	
 	if weight.dataType == DataTypeQ4K {
 		C.Metal_MatMul_Q4K_F32(t.ctx.ref, weight.buf, 0, 0, t.buf, 0, 0, out.buf, 0,
 			C.int(t.rows), C.int(weight.rows), C.int(weight.cols))
+	} else if weight.dataType == DataTypeF16 {
+		C.Metal_MatMul_F16_F32(t.ctx.ref, weight.buf, 0, t.buf, 0, out.buf, 0,
+			C.int(t.rows), C.int(weight.rows), C.int(weight.cols))
 	} else {
-		// Fallback for F16 weights with F32 input: Not implemented yet!
-		// For now panic or use Q4K path if compatible? No.
-		// We need Metal_MatMul_F16_F32.
-		panic("LinearIntoFP32: only Q4K weights supported currently")
+		panic(fmt.Sprintf("LinearIntoFP32: unsupported weight data type %d", weight.dataType))
 	}
 }
 
@@ -868,6 +980,11 @@ func (t *Tensor) CopyToF32() *Tensor {
 	return res
 }
 
+func (t *Tensor) ScaleInPlace(val float32) {
+	C.Metal_Scale_F16(t.ctx.ref, t.buf, 0, C.float(val), t.buf, 0, C.int(t.rows*t.cols))
+}
+
+
 func (t *Tensor) CopyToF16() *Tensor {
 	res := t.ctx.NewTensor(t.rows, t.cols)
 	C.Metal_Copy_F32_F16(t.ctx.ref, t.buf, 0, res.buf, 0, C.int(t.rows*t.cols))
@@ -877,3 +994,4 @@ func (t *Tensor) CopyToF16() *Tensor {
 func (t *Tensor) CopyToF16_Into(dest *Tensor) {
 	C.Metal_Copy_F32_F16(t.ctx.ref, t.buf, 0, dest.buf, 0, C.int(t.rows*t.cols))
 }
+

@@ -46,9 +46,8 @@ float fp16_to_fp32(ushort f) {
 
 // Native casting is used instead of manual conversion
 
-kernel void scale_f16(device const half *x [[ buffer(0) ]], constant ushort &scale [[ buffer(1) ]], device half *out [[ buffer(2) ]], uint qid [[ thread_position_in_grid ]]) {
-    half s = as_type<half>(scale);
-    out[qid] = (half)((float)x[qid] * (float)s);
+kernel void scale_f16(device const half *x [[ buffer(0) ]], device half *out [[ buffer(1) ]], constant float &scale [[ buffer(2) ]], uint qid [[ thread_position_in_grid ]]) {
+    out[qid] = (half)((float)x[qid] * scale);
 }
 
 kernel void swiglu_f16(device const half *gate [[ buffer(0) ]], 
@@ -127,8 +126,8 @@ kernel void linear_q4k_f16(device const uchar *weight [[ buffer(0) ]],
         device const uchar *block = row_ptr + i * 144;
         ushort d_bits = *(device const ushort*)(block);
         ushort dmin_bits = *(device const ushort*)(block + 2);
-        float d = (float)as_type<half>(d_bits) * 4000.0f;
-        float dmin = (float)as_type<half>(dmin_bits) * 4000.0f;
+        float d = (float)as_type<half>(d_bits);
+        float dmin = (float)as_type<half>(dmin_bits);
         
         device const uchar *scales = block + 4;
         device const uchar *qs = block + 16;
@@ -149,8 +148,9 @@ kernel void linear_q4k_f16(device const uchar *weight [[ buffer(0) ]],
                 uchar b = qs[qs_offset + k];
                 float w0 = d_val * (float)(b & 0xF) - m_val;
                 float w1 = d_val * (float)(b >> 4) - m_val;
-                int idx = i * 256 + sub_offset + k * 2;
-                sum += w0 * (float)in_ptr[idx] + w1 * (float)in_ptr[idx + 1];
+                int idx0 = i * 256 + sub_offset + k;
+                int idx1 = idx0 + 16;
+                sum += w0 * (float)in_ptr[idx0] + w1 * (float)in_ptr[idx1];
             }
         }
     }
@@ -197,6 +197,47 @@ kernel void linear_q3k_f16(device const uchar *weight [[ buffer(0) ]],
     }
     sum = simd_sum(sum); 
     if (lane_id == 0) output[batch * dim_out + row] = (half)sum;
+}
+
+kernel void linear_q6k_f16(device const uchar *weight [[ buffer(0) ]],
+                         device const half *input [[ buffer(1) ]],
+                         device half *output [[ buffer(2) ]],
+                         constant int &dim_in [[ buffer(3) ]],
+                         constant int &dim_out [[ buffer(4) ]],
+                         uint3 tid [[ thread_position_in_threadgroup ]],
+                         uint3 qid [[ thread_position_in_grid ]]) {
+    uint row = qid.y; uint batch = qid.z;
+    if (row >= (uint)dim_out) return; uint lane_id = tid.x;
+    int num_blocks = dim_in / 256;
+    device const uchar *row_ptr = weight + row * num_blocks * 210;
+    device const half *in_ptr = input + batch * dim_in;
+    float sum = 0;
+    
+    for (int i = (int)lane_id; i < num_blocks; i += 32) {
+        device const uchar *block = row_ptr + i * 210;
+        device const uchar *ql = block;
+        device const uchar *qh = block + 128;
+        device const char  *sc = (device const char *)(block + 192);
+        float d = (float)*(device const half*)(block + 208);
+        
+        for (int l = 0; l < 16; l++) {
+            float s = d * (float)sc[l];
+            int sub_off = l * 16;
+            for (int k = 0; k < 16; k += 2) {
+                int idx = sub_off + k;
+                uchar b = ql[idx / 2];
+                uchar h0 = (qh[idx / 4] >> ((idx % 4) * 2)) & 3;
+                uchar h1 = (qh[(idx+1) / 4] >> (((idx+1) % 4) * 2)) & 3;
+                
+                float w0 = s * ((float)((int8_t)((h0 << 4) | (b & 0xF))) - 32.0f);
+                float w1 = s * ((float)((int8_t)((h1 << 4) | (b >> 4))) - 32.0f);
+                
+                sum += w0 * (float)in_ptr[i * 256 + idx] + w1 * (float)in_ptr[i * 256 + idx + 1];
+            }
+        }
+    }
+    sum = simd_sum(sum); 
+    if (lane_id == 0) output[batch * dim_out + row] = safe_half(sum);
 }
 
 kernel void rope_f16(device half *x [[ buffer(0) ]],
@@ -353,8 +394,8 @@ kernel void linear_q4k_f32(device const uchar *weight [[ buffer(0) ]],
         device const uchar *block = row_ptr + i * 144;
         ushort d_bits = *(device const ushort*)(block);
         ushort dmin_bits = *(device const ushort*)(block + 2);
-        float d = (float)as_type<half>(d_bits) * 4000.0f;
-        float dmin = (float)as_type<half>(dmin_bits) * 4000.0f;
+        float d = (float)as_type<half>(d_bits);
+        float dmin = (float)as_type<half>(dmin_bits);
         
         device const uchar *scales = block + 4;
         device const uchar *qs = block + 16;
@@ -375,8 +416,9 @@ kernel void linear_q4k_f32(device const uchar *weight [[ buffer(0) ]],
                 uchar b = qs[qs_offset + k];
                 float w0 = d_val * (float)(b & 0xF) - m_val;
                 float w1 = d_val * (float)(b >> 4) - m_val;
-                int idx = i * 256 + sub_offset + k * 2;
-                sum += w0 * in_ptr[idx] + w1 * in_ptr[idx + 1];
+                int idx0 = i * 256 + sub_offset + k;
+                int idx1 = idx0 + 16;
+                sum += w0 * in_ptr[idx0] + w1 * in_ptr[idx1];
             }
         }
     }
@@ -391,4 +433,28 @@ kernel void swiglu_f32(device const float *gate [[ buffer(0) ]],
     float g = gate[qid]; 
     float val = up[qid] * (g / (1.0f + exp(-g)));
     out[qid] = val;
+}
+
+kernel void linear_f16_f32(device const half *weight [[ buffer(0) ]],
+                         device const float *input [[ buffer(1) ]],
+                         device float *output [[ buffer(2) ]],
+                         constant int &dim_in [[ buffer(3) ]],
+                         constant int &dim_out [[ buffer(4) ]],
+                         uint3 tid [[ thread_position_in_threadgroup ]],
+                         uint3 qid [[ thread_position_in_grid ]]) {
+    uint row = qid.y; uint batch = qid.z;
+    if (row >= (uint)dim_out) return; uint lane_id = tid.x;
+    
+    device const half4 *w4 = (device const half4 *)(weight + row * dim_in);
+    device const float4 *i4 = (device const float4 *)(input + batch * dim_in);
+    int n4 = dim_in / 4;
+    
+    float sum = 0;
+    for (int i = (int)lane_id; i < n4; i += 32) {
+        float4 v_w = (float4)w4[i];
+        float4 v_i = i4[i];
+        sum += dot(v_w.xy, v_i.xy) + dot(v_w.zw, v_i.zw);
+    }
+    sum = simd_sum(sum); 
+    if (lane_id == 0) output[batch * dim_out + row] = sum;
 }

@@ -73,17 +73,17 @@ func DequantizeQ4K(data []byte, numElements int) []float32 {
 			// For each sub-block j (32 weights)
 			qsOffset := j * 16 // 16 bytes
 			for k := 0; k < 16; k++ {
-				// Byte contains 2 weights (low nibble, high nibble)
+				// Byte k contains low nibble for weight k and high nibble for weight k+16
 				b := qs[qsOffset+k]
 				v0 := b & 0xF
 				v1 := b >> 4
 				
-				// Weight indices
-				idxA := j*32 + k*2
-				idxB := idxA + 1
+				// Weight indices relative to sub-block start
+				idx0 := j*32 + k
+				idx1 := idx0 + 16
 				
-				out[i*BlockSizeQ4K + idxA] = D[j] * float32(v0) - M[j]
-				out[i*BlockSizeQ4K + idxB] = D[j] * float32(v1) - M[j]
+				out[i*BlockSizeQ4K + idx0] = D[j] * float32(v0) - M[j]
+				out[i*BlockSizeQ4K + idx1] = D[j] * float32(v1) - M[j]
 			}
 		}
 	}

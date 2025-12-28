@@ -93,6 +93,10 @@ void Metal_MatMul_Q3K_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
                           bool transA, MetalBufferRef b, int offB, bool transB,
                           MetalBufferRef c, int offC, int M, int N, int K);
 
+void Metal_MatMul_Q6K_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
+                          bool transA, MetalBufferRef b, int offB, bool transB,
+                          MetalBufferRef c, int offC, int M, int N, int K);
+
 void Metal_BatchedMatMul_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
                              int strideA, bool transA, MetalBufferRef b,
                              int offB, int strideB, bool transB,
@@ -139,6 +143,10 @@ void Metal_Copy_F32_F16(MetalContextRef ctx, MetalBufferRef src, int oS,
 void Metal_SwiGLU_F32(MetalContextRef ctx, MetalBufferRef iV, int oV,
                       MetalBufferRef iG, int oG, MetalBufferRef o, int oO,
                       int n, int iS);
+
+void Metal_MatMul_F16_F32(MetalContextRef ctx, MetalBufferRef a, int offA,
+                          MetalBufferRef b, int offB, MetalBufferRef c,
+                          int offC, int M, int N, int K);
 
 #ifdef __cplusplus
 }
