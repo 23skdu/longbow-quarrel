@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"sort"
 
 	"strings"
 	"time"
@@ -197,6 +198,18 @@ func (e *Engine) loadModel(path string) error {
 					f32Data := gguf.DequantizeQ4K(t.Data, numElements)
 					
 					mt.LoadFrom(f32Data)
+				} else if t.Name == "blk.0.attn_q.weight" {
+					fmt.Printf("DEBUG_OFFSET: blk.0.attn_q.weight Offset=%d\n", t.Offset)
+					if len(t.Data) >= 32 {
+						fmt.Printf("DEBUG_BYTES: blk.0.attn_q.weight [0:32] = %x\n", t.Data[:32])
+					}
+					// FIX: Actually Load the Tensor!
+					mt = e.Ctx.NewQ4KTensor(rows, cols)
+					dataBytes := (numElements / 256) * 144
+					if uint64(len(t.Data)) < uint64(dataBytes) {
+						return fmt.Errorf("tensor %s data truncated", t.Name)
+					}
+					mt.LoadFromRaw(t.Data[:dataBytes])
 				} else {
 					// Check blk.1.ffn_down size
 					if strings.Contains(t.Name, "blk.1.ffn_down") {
@@ -447,6 +460,17 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int) ([]int, error) {
 				}
 			}
 
+			// Logit analysis for debugging nonsensical output
+			if i == len(inputTokens)-1 || i < 5 {
+				sortedLogits := make([]struct{idx int; val float32}, len(logitsData))
+				for idx, val := range logitsData { sortedLogits[idx] = struct{idx int; val float32}{idx, val} }
+				// Find top 5 manually to avoid full sort if possible, but for debug full sort is fine
+				sort.Slice(sortedLogits, func(i, j int) bool { return sortedLogits[i].val > sortedLogits[j].val })
+				fmt.Printf("DEBUG SAMPLE: Token %d Top 5: ", i)
+				for k := 0; k < 5; k++ { fmt.Printf("[%d: %.4f] ", sortedLogits[k].idx, sortedLogits[k].val) }
+				fmt.Println()
+			}
+
 			maxIdx := 0
 			maxVal := logitsData[0]
 			for idx, val := range logitsData {
@@ -488,12 +512,18 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int) ([]int, error) {
 
 		normed := current.RMSNorm(e.Weights.OutputNorm, e.Config.Eps)
 		logits := normed.Linear(e.Weights.Output)
-		tHost := time.Now()
 		logitsData := logits.ToHost()
-		if i == 1 {
-			fmt.Printf("Token %d: Logits ToHost (+ GPU Wait) took %v\n", i, time.Since(tHost))
-		}
 		
+		// Logit analysis for generation
+		if i < 5 {
+			sortedLogits := make([]struct{idx int; val float32}, len(logitsData))
+			for idx, val := range logitsData { sortedLogits[idx] = struct{idx int; val float32}{idx, val} }
+			sort.Slice(sortedLogits, func(ia, j int) bool { return sortedLogits[ia].val > sortedLogits[j].val })
+			fmt.Printf("DEBUG SAMPLE: Gen Token %d Top 5: ", i)
+			for k := 0; k < 5; k++ { fmt.Printf("[%d: %.4f] ", sortedLogits[k].idx, sortedLogits[k].val) }
+			fmt.Println()
+		}
+
 		maxIdx := 0
 		maxVal := logitsData[0]
 		for idx, val := range logitsData {
