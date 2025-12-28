@@ -14,7 +14,13 @@ const (
 	GGMLTypeF16  GGMLType = 1
 	GGMLTypeQ4_0 GGMLType = 2
 	GGMLTypeQ4_1 GGMLType = 3
-	// ... add others as needed
+	GGMLTypeQ2_K GGMLType = 10
+	GGMLTypeQ3_K GGMLType = 11
+	GGMLTypeQ4_K GGMLType = 12
+	GGMLTypeQ5_K GGMLType = 13
+	GGMLTypeQ6_K GGMLType = 14
+	GGMLTypeQ8_K GGMLType = 15
+	GGMLTypeQ4_K_S GGMLType = 99 // Deprecated/Unused
 )
 
 type GGUFMetadataValueType uint32
