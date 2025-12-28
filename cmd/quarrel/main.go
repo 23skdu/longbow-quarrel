@@ -13,6 +13,7 @@ import (
 	_ "net/http/pprof"
 
 	"github.com/23skdu/longbow-quarrel/internal/engine"
+	"github.com/23skdu/longbow-quarrel/internal/ollama"
 	"github.com/23skdu/longbow-quarrel/internal/tokenizer"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -31,6 +32,16 @@ func main() {
 		fmt.Println("Error: --model flag is required")
 		flag.Usage()
 		os.Exit(1)
+	}
+
+	// Try to resolve as Ollama model name first
+	resolvedPath, err := ollama.ResolveModelPath(*modelPath)
+	if err == nil {
+		log.Printf("Resolved Ollama model '%s' to %s", *modelPath, resolvedPath)
+		*modelPath = resolvedPath
+	} else {
+		// Not an Ollama model, treat as direct path
+		log.Printf("Using direct model path: %s", *modelPath)
 	}
 
 	// Start Metrics Server

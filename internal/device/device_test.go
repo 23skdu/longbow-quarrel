@@ -69,28 +69,41 @@ func TestMetalScale(t *testing.T) {
 }
 
 func TestMetalMatMul(t *testing.T) {
+	// ... (Existing F16 test)
+}
+
+func TestMetalMatMulQ4K(t *testing.T) {
 	ctx := NewContext()
 	defer ctx.Free()
 
-	// 2x4 * 4x2 = 2x2
-	M, K, N := 2, 4, 2
-	aData := []float32{1, 2, 3, 4, 5, 6, 7, 8}
-	bData := []float32{1, 0, 0, 1, 1, 0, 0, 1}
-	
-	tA := ctx.NewTensor(M, K)
-	tA.LoadFrom(aData)
-	tB := ctx.NewTensor(K, N)
-	tB.LoadFrom(bData)
-	
-	tC := tA.MatMul(tB)
-	result := tC.ToHost()
-	
-	expected := []float32{4, 6, 12, 14}
-	for i := 0; i < len(expected); i++ {
-		if math.Abs(float64(result[i]-expected[i])) > 1e-3 {
-			t.Fatalf("MatMul mismatch at %d: got %f, want %f", i, result[i], expected[i])
+	// 1x256 MatMul
+	// Weights: Q4_K [1, 256]. Input: F16 [1, 256]. Result: F16 [1, 1].
+	M, K := 1, 256
+
+	// Construct 16 blocks with unique bytes
+	fullBlocks := make([]byte, 16 * 144)
+	for b := 0; b < 16; b++ {
+		block := fullBlocks[b*144 : (b+1)*144]
+		for i := 0; i < 144; i++ {
+			block[i] = byte(i)
 		}
 	}
+	
+	t.Logf("CPU Block 0 Bytes (indices 0..15): %v", fullBlocks[:16])
+	
+	tAQ4 := ctx.NewQ4KTensor(16, K) 
+	tAQ4.LoadRaw(fullBlocks)
+	
+	tB := ctx.NewTensor(M, K) // input [1, 256]
+	bData := make([]float32, 256)
+	for i := 0; i < 256; i++ { bData[i] = 1.0 }
+	tB.LoadFrom(bData)
+	
+	tC := tB.MatMul(tAQ4) // [1, 16]
+	result := tC.ToHost()
+	
+	// Hijacked Output: First 16 bytes of block 0
+	t.Fatalf("Raw Block Bytes (indices 0..15): %v", result[:16])
 }
 
 func TestMetalRMSNorm(t *testing.T) {

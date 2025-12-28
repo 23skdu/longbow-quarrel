@@ -16,56 +16,51 @@ func generateTestGGUF(path string) error {
 	defer f.Close()
 	
 	// Magic
-	binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMagic))
+	if err := binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMagic)); err != nil { return err }
 	// Version
-	binary.Write(f, binary.LittleEndian, uint32(3))
-	// Tensor Count (11) 
-	// token_embd, output, output_norm
-	// blk.0: attn_q, attn_k, attn_v, attn_o, attn_norm, ffn_gate, ffn_up, ffn_down, ffn_norm
-	// Total 12 tensors actually.
-	binary.Write(f, binary.LittleEndian, uint64(12))
-	// KV Count (5) - llama.block_count, dim, heads, kv_heads, ctx
-	binary.Write(f, binary.LittleEndian, uint64(5))
+	if err := binary.Write(f, binary.LittleEndian, uint32(3)); err != nil { return err }
+	// Tensor Count (12)
+	if err := binary.Write(f, binary.LittleEndian, uint64(12)); err != nil { return err }
+	// KV Count (5)
+	if err := binary.Write(f, binary.LittleEndian, uint64(5)); err != nil { return err }
 	
 	// ... KVs ...
 	// KV Pair 1: "llama.block_count" -> 1
-	writeString(f, "llama.block_count")
-	binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeUint32))
-	binary.Write(f, binary.LittleEndian, uint32(1))
+	if err := writeString(f, "llama.block_count"); err != nil { return err }
+	if err := binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeUint32)); err != nil { return err }
+	if err := binary.Write(f, binary.LittleEndian, uint32(1)); err != nil { return err }
 	
 	// KV Pair 2: "llama.embedding_length" -> 1 (dim)
-	writeString(f, "llama.embedding_length")
-	binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeUint32))
-	binary.Write(f, binary.LittleEndian, uint32(1))
+	if err := writeString(f, "llama.embedding_length"); err != nil { return err }
+	if err := binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeUint32)); err != nil { return err }
+	if err := binary.Write(f, binary.LittleEndian, uint32(1)); err != nil { return err }
 	
 	// KV Pair 3: "llama.attention.head_count" -> 1
-	writeString(f, "llama.attention.head_count")
-	binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeUint32))
-	binary.Write(f, binary.LittleEndian, uint32(1))
+	if err := writeString(f, "llama.attention.head_count"); err != nil { return err }
+	if err := binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeUint32)); err != nil { return err }
+	if err := binary.Write(f, binary.LittleEndian, uint32(1)); err != nil { return err }
 	
 	// KV Pair 4: "llama.attention.head_count_kv" -> 1
-	writeString(f, "llama.attention.head_count_kv")
-	binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeUint32))
-	binary.Write(f, binary.LittleEndian, uint32(1))
+	if err := writeString(f, "llama.attention.head_count_kv"); err != nil { return err }
+	if err := binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeUint32)); err != nil { return err }
+	if err := binary.Write(f, binary.LittleEndian, uint32(1)); err != nil { return err }
 
 	// KV Pair 5: "llama.context_length" -> 10
-	writeString(f, "llama.context_length")
-	binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeUint32))
-	binary.Write(f, binary.LittleEndian, uint32(10))
+	if err := writeString(f, "llama.context_length"); err != nil { return err }
+	if err := binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeUint32)); err != nil { return err }
+	if err := binary.Write(f, binary.LittleEndian, uint32(10)); err != nil { return err }
 	
 	// Helper to write 1x1 scalar tensor
-	writeTensor := func(name string, offset uint64) {
-		writeString(f, name)
-		binary.Write(f, binary.LittleEndian, uint32(1)) // Dims
-		binary.Write(f, binary.LittleEndian, uint64(1)) // Ne[0]
-		binary.Write(f, binary.LittleEndian, uint32(0)) // Type F32
-		binary.Write(f, binary.LittleEndian, uint64(offset))
+	writeTensor := func(name string, offset uint64) error {
+		if err := writeString(f, name); err != nil { return err }
+		if err := binary.Write(f, binary.LittleEndian, uint32(1)); err != nil { return err } // Dims
+		if err := binary.Write(f, binary.LittleEndian, uint64(1)); err != nil { return err } // Ne[0]
+		if err := binary.Write(f, binary.LittleEndian, uint32(0)); err != nil { return err } // Type F32
+		if err := binary.Write(f, binary.LittleEndian, uint64(offset)); err != nil { return err }
+		return nil
 	}
 	
-	// 32-byte alignment. Each 1x1 F32 is 4 bytes.
-	// We'll put them all 32-bytes apart to be safe/lazy with alignment.
 	currentOff := uint64(0)
-	
 	names := []string{
 		"token_embd.weight",
 		"output.weight",
@@ -82,40 +77,26 @@ func generateTestGGUF(path string) error {
 	}
 	
 	for _, n := range names {
-		writeTensor(n, currentOff)
+		if err := writeTensor(n, currentOff); err != nil { return err }
 		currentOff += 32 
 	}
 	
-	// Calculate Header Size for padding
-	// Header base size changes with tensor count/names.
-	// Let's just create a MASSIVE padding to be safe.
-	// GGUF parser reads name string then aligns.
-	// Actually, careful: offset is from END of header.
-	// We need to write padding *after* header to reach 32-byte align.
-	// Then data starts.
-	// Our 'currentOff' above is relative to Data Start.
+	// Pad header
+	if _, err := f.Write(make([]byte, 1024)); err != nil { return err }
 	
-	// We need to pad file so that 'Data Start' is aligned.
-	// Let's dump some bytes to finish header block.
-	f.Write(make([]byte, 1024)) // Lazy pad
-	
-	// Now write data at offsets 0, 32, 64...
-	// Since we padded 1024, and GGUF aligns to 32, we are aligned.
-	// We just need to fill data up to max offset.
-	
+	// Write data
 	for i := 0; i < len(names); i++ {
-		binary.Write(f, binary.LittleEndian, float32(1.0))
-		// Pad 28 bytes to next 32
-		f.Write(make([]byte, 28))
+		if err := binary.Write(f, binary.LittleEndian, float32(1.0)); err != nil { return err }
+		if _, err := f.Write(make([]byte, 28)); err != nil { return err }
 	}
-
 	
 	return nil
 }
 
-func writeString(f *os.File, s string) {
-	binary.Write(f, binary.LittleEndian, uint64(len(s)))
-	f.WriteString(s)
+func writeString(f *os.File, s string) error {
+	if err := binary.Write(f, binary.LittleEndian, uint64(len(s))); err != nil { return err }
+	_, err := f.WriteString(s)
+	return err
 }
 
 func TestEngineLifecycle(t *testing.T) {
@@ -131,16 +112,13 @@ func TestEngineLifecycle(t *testing.T) {
 	// e.Infer(prompt) -> tokens
 	
 	e, err := NewEngine(modelPath)
-	// Expect success now
-	
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
-	defer e.Ctx.Free()
-	
 	if e == nil {
 		t.Fatal("Engine is nil")
 	}
+	defer e.Ctx.Free()
 	
 	if e.Weights.TokenEmb == nil {
 		t.Fatal("Expected TokenEmb to be loaded")
@@ -162,12 +140,98 @@ func TestEngineLifecycle(t *testing.T) {
 	}
 	
 	if len(outputTokens) != 0 && len(outputTokens) != 10 {
-		// strict check later
+		t.Errorf("Expected 0 or 10 tokens, got %d", len(outputTokens))
 	}
 }
 
 func TestEngineMetrics(t *testing.T) {
 	// Verify that Engine calls metrics
-	// This might require injecting a spy metrics recorder or checking global state if we rely on global metrics package.
-	// For now, just defining the test.
+}
+
+func generateMistralMockGGUF(path string) error {
+	f, err := os.Create(path)
+	if err != nil { return err }
+	defer f.Close()
+	
+	if err := binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMagic)); err != nil { return err }
+	if err := binary.Write(f, binary.LittleEndian, uint32(3)); err != nil { return err }
+	if err := binary.Write(f, binary.LittleEndian, uint64(12)); err != nil { return err }
+	if err := binary.Write(f, binary.LittleEndian, uint64(6)); err != nil { return err }
+	
+	// Mistral Metadata
+	if err := writeString(f, "llama.block_count"); err != nil { return err }
+	if err := binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeUint32)); err != nil { return err }
+	if err := binary.Write(f, binary.LittleEndian, uint32(1)); err != nil { return err }
+	
+	if err := writeString(f, "llama.embedding_length"); err != nil { return err }
+	if err := binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeUint32)); err != nil { return err }
+	if err := binary.Write(f, binary.LittleEndian, uint32(128)); err != nil { return err }
+	
+	if err := writeString(f, "llama.attention.head_count"); err != nil { return err }
+	if err := binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeUint32)); err != nil { return err }
+	if err := binary.Write(f, binary.LittleEndian, uint32(32)); err != nil { return err }
+	
+	if err := writeString(f, "llama.attention.head_count_kv"); err != nil { return err }
+	if err := binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeUint32)); err != nil { return err }
+	if err := binary.Write(f, binary.LittleEndian, uint32(8)); err != nil { return err }
+
+	if err := writeString(f, "llama.rope.freq_base"); err != nil { return err }
+	if err := binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeUint32)); err != nil { return err }
+	if err := binary.Write(f, binary.LittleEndian, uint32(100000)); err != nil { return err }
+
+	if err := writeString(f, "llama.attention.layer_norm_rms_epsilon"); err != nil { return err }
+	if err := binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeFloat32)); err != nil { return err }
+	if err := binary.Write(f, binary.LittleEndian, float32(1e-6)); err != nil { return err }
+
+	// Tensors (minimal placeholders)
+	names := []string{
+		"token_embd.weight", "output.weight", "output_norm.weight",
+		"blk.0.attn_q.weight", "blk.0.attn_k.weight", "blk.0.attn_v.weight",
+		"blk.0.attn_output.weight", "blk.0.attn_norm.weight",
+		"blk.0.ffn_gate.weight", "blk.0.ffn_up.weight", "blk.0.ffn_down.weight",
+		"blk.0.ffn_norm.weight",
+	}
+	
+	writeTensor := func(name string, offset uint64) error {
+		if err := writeString(f, name); err != nil { return err }
+		if err := binary.Write(f, binary.LittleEndian, uint32(1)); err != nil { return err } 
+		if err := binary.Write(f, binary.LittleEndian, uint64(128)); err != nil { return err } 
+		if err := binary.Write(f, binary.LittleEndian, uint32(0)); err != nil { return err } 
+		if err := binary.Write(f, binary.LittleEndian, uint64(offset)); err != nil { return err }
+		return nil
+	}
+
+	currentOff := uint64(0)
+	for _, n := range names {
+		if err := writeTensor(n, currentOff); err != nil { return err }
+		currentOff += 512 
+	}
+	
+	if _, err := f.Write(make([]byte, 1024)); err != nil { return err }
+	for i := 0; i < len(names); i++ {
+		if err := binary.Write(f, binary.LittleEndian, make([]float32, 128)); err != nil { return err }
+	}
+	
+	return nil
+}
+
+func TestMistralMetadataSupport(t *testing.T) {
+	modelPath := "test_mistral_metadata.gguf"
+	if err := generateMistralMockGGUF(modelPath); err != nil {
+		t.Fatalf("Failed to generate Mistral mock: %v", err)
+	}
+	defer os.Remove(modelPath)
+
+	e, err := NewEngine(modelPath)
+	if err != nil {
+		t.Fatalf("Failed to create engine: %v", err)
+	}
+	defer e.Ctx.Free()
+
+	if e.Config.KVHeads != 8 {
+		t.Errorf("Expected KVHeads=8 (GQA), got %d", e.Config.KVHeads)
+	}
+	if e.Config.RopeTheta != 100000.0 {
+		t.Errorf("Expected RopeTheta=100000.0, got %f", e.Config.RopeTheta)
+	}
 }

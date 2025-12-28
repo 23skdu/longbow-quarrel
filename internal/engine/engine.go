@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"sort"
 	"strings"
 	"time"
+	"unsafe"
 
 	"github.com/23skdu/longbow-quarrel/internal/device"
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
@@ -113,13 +115,8 @@ func (e *Engine) loadModel(path string) error {
 		return err
 	}
 	
-	// Override RopeTheta for Debugging if needed. Mistral 7B usually 10000.0 or 100000.0?
-	// The file reported 1000000.0.
-	// Try enforcing 10000.0.
-	e.Config.RopeTheta = 10000.0
-	
-	fmt.Printf("2025/12/27 14:06:59 [MODEL] Config: Layers=%d, Dim=%d, Heads=%d, KVHeads=%d, Eps=%e, RopeFreq=%f\n",
-		e.Config.Layers, e.Config.HiddenDim, e.Config.Heads, e.Config.KVHeads, e.Config.Eps, e.Config.RopeTheta)
+	log.Printf("[MODEL] Config: Layers=%d, Dim=%d, HiddenDim=%d, Heads=%d, KVHeads=%d, HeadDim=%d, Eps=%e, RopeFreq=%f\n",
+		e.Config.Layers, e.Config.Dim, e.Config.HiddenDim, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.Eps, e.Config.RopeTheta)
 
 	// Initialize Weights Slices
 	layers := e.Config.Layers
@@ -253,6 +250,7 @@ func (e *Engine) loadModel(path string) error {
 		case "output_norm.weight":
 			e.Weights.OutputNorm = mt
 			continue
+		case "output.weight":
 			e.Weights.Output = mt
 			continue
 		}
@@ -264,8 +262,9 @@ func (e *Engine) loadModel(path string) error {
 			
 			// Parse N
 			layerIdx := 0
-			// naive parse
-			fmt.Sscanf(parts[1], "%d", &layerIdx)
+			if n, err := fmt.Sscanf(parts[1], "%d", &layerIdx); n != 1 || err != nil {
+				continue
+			}
 			if layerIdx >= layers { continue }
 			
 			suffix := strings.Join(parts[2:], ".")
@@ -289,6 +288,15 @@ func (e *Engine) loadModel(path string) error {
 				continue
 			case "ffn_down.weight":
 				e.Weights.FfnDown[layerIdx] = mt
+				// Debug all FFN Down weights
+				if layerIdx <= 5 {
+					if mt.DataType() == device.DataTypeQ4K {
+						log.Printf("blk.%d.ffn_down: Q4K quantized", layerIdx)
+						mt.ScanQ4KScales(fmt.Sprintf("blk.%d.ffn_down", layerIdx))
+					} else {
+						log.Printf("blk.%d.ffn_down: F16 (rows=%d, cols=%d)", layerIdx, mt.Rows(), mt.Cols())
+					}
+				}
 			case "ffn_up.weight":
 				e.Weights.FfnUp[layerIdx] = mt
 			case "ffn_norm.weight":
@@ -361,6 +369,51 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int) ([]int, error) {
 		tToken := time.Now()
 		lastToken := inputTokens[i]
 		
+		// DEBUG: Inspect Q4K scale factors for first layer
+		if i == 0 && len(e.Weights.AttnQ) > 0 {
+			attnQ := e.Weights.AttnQ[0]
+			if attnQ.DataType() == device.DataTypeQ4K {
+				// Read first few blocks to check scale factors
+				ptr := attnQ.GetBufferContents()
+				if ptr != nil {
+					// Check first block in detail
+					blockPtr := ptr
+					d_bits := binary.LittleEndian.Uint16((*[2]byte)(blockPtr)[:])
+					dmin_bits := binary.LittleEndian.Uint16((*[2]byte)(unsafe.Add(blockPtr, 2))[:])
+					
+					d := device.Float16ToFloat32(d_bits)
+					dmin := device.Float16ToFloat32(dmin_bits)
+					
+					// Extract 6-bit scales (same logic as kernel)
+					scalesPtr := unsafe.Add(blockPtr, 4)
+					scales := (*[12]byte)(scalesPtr)[:]
+					
+					var sc [8]uint8
+					var m [8]uint8
+					for j := 0; j < 4; j++ {
+						u_j := scales[j]
+						u_j4 := scales[j+4]
+						u_j8 := scales[j+8]
+						sc[j] = (u_j4 & 0xF) | ((u_j & 0x3) << 4)
+						m[j] = (u_j4 >> 4) | ((u_j & 0xC) << 2)
+						sc[j+4] = (u_j8 & 0xF) | ((u_j & 0x30) >> 0)
+						m[j+4] = (u_j8 >> 4) | ((u_j & 0xC0) >> 2)
+					}
+					
+					log.Printf("Q4K Block 0: d=%.6f, dmin=%.6f", d, dmin)
+					log.Printf("  6-bit scales: %v", sc)
+					log.Printf("  6-bit mins: %v", m)
+					
+					// Calculate effective block scales
+					for j := 0; j < 8; j++ {
+						d_val := d * float32(sc[j])
+						m_val := dmin * float32(m[j])
+						log.Printf("  Sub-block %d: d_val=%.6f, m_val=%.6f", j, d_val, m_val)
+					}
+				}
+			}
+		}
+		
 		current := e.Weights.TokenEmb.EmbeddingLookup(lastToken)
 		
 		// DEBUG: Verify Input on GPU
@@ -368,6 +421,12 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int) ([]int, error) {
 		// 	current.ScanMean("Embed Output")
 		// }
 
+		// Audit OutputNorm weights once
+		if i == 0 {
+			e.Weights.OutputNorm.ScanNaNs("OutputNorm weights")
+			e.Weights.OutputNorm.ScanMax("OutputNorm weights")
+		}
+		
 		// Layers (Attention + FFN)
 		for l := 0; l < e.Config.Layers; l++ {
 			current.Layer(e.Weights.AttnNorm[l], e.Weights.AttnQ[l], e.Weights.AttnK[l], e.Weights.AttnV[l], e.Weights.AttnO[l],
@@ -375,17 +434,37 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int) ([]int, error) {
 				e.KVCacheK[l], e.KVCacheV[l], s1, s2, s3, s4,
 				e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim,
 				e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen)
-            
-            if i == 0 && l == 1 {
-                fmt.Println("DEBUG: Probe Executed for Layer 1")
-                current.ScanMean("Layer 1 Output")
-            }
 		}
 
 		// If this is the LAST prompt token, sample the first next token
 		if i == len(inputTokens)-1 {
+			// Debug: Check current tensor IMMEDIATELY after layer loop
+			if true {
+				log.Printf("Checking tensor immediately after layer 31...")
+				current.ScanNaNs("After all layers (immediate)")
+				current.ScanMax("After all layers (immediate)")
+			}
+			
+			// Debug: Check current tensor before RMSNorm
+			if true {
+				data := current.ToHost()
+				nonZero := 0
+				for _, v := range data {
+					if v != 0 {
+						nonZero++
+					}
+				}
+				log.Printf("Before final RMSNorm: %d/%d non-zero values, first 10: %v", nonZero, len(data), data[:10])
+			}
+			
 			normed := current.RMSNorm(e.Weights.OutputNorm, e.Config.Eps)
+			normed.ScanNaNs("Final Normed")
+			normed.ScanMax("Final Normed")
+
 			logits := normed.Linear(e.Weights.Output)
+			logits.ScanNaNs("Final Logits")
+			logits.ScanMax("Final Logits")
+
 			logitsData := logits.ToHost()
 			
 			// DEBUG: Print first few logits
@@ -436,7 +515,7 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int) ([]int, error) {
 				e.Weights.FfnNorm[l], e.Weights.FfnGate[l], e.Weights.FfnUp[l], e.Weights.FfnDown[l],
 				e.KVCacheK[l], e.KVCacheV[l], s1, s2, s3, s4,
 				e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim,
-				e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen)
+				e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen, false)
 		}
 		if i == 1 {
 			fmt.Printf("Token %d: %d layers dispatched in %v\n", i, e.Config.Layers, time.Since(tLayers))
@@ -471,31 +550,7 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int) ([]int, error) {
 	return result, nil
 }
 
-func minFloat(arr []float32) float32 {
-	if len(arr) == 0 {
-		return 0
-	}
-	min := arr[0]
-	for _, v := range arr {
-		if v < min {
-			min = v
-		}
-	}
-	return min
-}
 
-func maxFloat(arr []float32) float32 {
-	if len(arr) == 0 {
-		return 0
-	}
-	max := arr[0]
-	for _, v := range arr {
-		if v > max {
-			max = v
-		}
-	}
-	return max
-}
 
 func (e *Engine) initKVCache() error {
 	layers := e.Config.Layers
