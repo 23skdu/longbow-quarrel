@@ -59,14 +59,17 @@ static id<MTLComputePipelineState> loadPipeline(MetalWrapper *ctx,
                                                 NSString *name) {
   id<MTLFunction> f = [ctx.library newFunctionWithName:name];
   if (!f) {
-    fprintf(stderr, "Metal Error: Function '%s' not found in library\n", [name UTF8String]);
+    fprintf(stderr, "Metal Error: Function '%s' not found in library\n",
+            [name UTF8String]);
     fflush(stderr);
     return nil;
   }
   NSError *err = nil;
-  id<MTLComputePipelineState> p = [ctx.device newComputePipelineStateWithFunction:f error:&err];
+  id<MTLComputePipelineState> p =
+      [ctx.device newComputePipelineStateWithFunction:f error:&err];
   if (!p) {
-    fprintf(stderr, "Metal Error: Failed to create pipeline '%s': %s\n", [name UTF8String], [[err localizedDescription] UTF8String]);
+    fprintf(stderr, "Metal Error: Failed to create pipeline '%s': %s\n",
+            [name UTF8String], [[err localizedDescription] UTF8String]);
     fflush(stderr);
     return nil;
   }
@@ -170,6 +173,7 @@ void Metal_Embedding_F16(MetalContextRef ctx, MetalBufferRef weights, int offW,
   [enc setBytes:&cols length:4 atIndex:3];
   [enc dispatchThreads:MTLSizeMake(cols, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(MIN(cols, 256), 1, 1)];
+  [mc barrier];
 }
 
 void Metal_RMSNorm_F16(MetalContextRef ctx, MetalBufferRef input, int offIn,
@@ -188,6 +192,7 @@ void Metal_RMSNorm_F16(MetalContextRef ctx, MetalBufferRef input, int offIn,
   int threads = (cols < 1024) ? cols : 1024;
   [enc dispatchThreads:MTLSizeMake(threads, rows, 1)
       threadsPerThreadgroup:MTLSizeMake(threads, 1, 1)];
+  [mc barrier];
 }
 
 void Metal_MatMul_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
@@ -204,6 +209,7 @@ void Metal_MatMul_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
   // 32 threads per row (1 SIMD group)
   [enc dispatchThreads:MTLSizeMake(32, N, M)
       threadsPerThreadgroup:MTLSizeMake(32, 4, 1)];
+  [mc barrier];
 }
 
 void Metal_MatMul_Q4K_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
@@ -221,6 +227,7 @@ void Metal_MatMul_Q4K_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
 
   [enc dispatchThreads:MTLSizeMake(32, N, M)
       threadsPerThreadgroup:MTLSizeMake(32, 4, 1)];
+  [mc barrier];
 }
 
 void Metal_MatMul_Q3K_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
@@ -238,6 +245,7 @@ void Metal_MatMul_Q3K_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
 
   [enc dispatchThreads:MTLSizeMake(32, N, M)
       threadsPerThreadgroup:MTLSizeMake(32, 4, 1)];
+  [mc barrier];
 }
 
 void Metal_Add_F16(MetalContextRef ctx, MetalBufferRef a, int oA,
@@ -251,18 +259,21 @@ void Metal_Add_F16(MetalContextRef ctx, MetalBufferRef a, int oA,
   [enc setBuffer:(__bridge id<MTLBuffer>)r offset:oR atIndex:2];
   [enc dispatchThreads:MTLSizeMake(count, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(MIN(count, 256), 1, 1)];
+  [mc barrier];
 }
 
-void Metal_Scale_F16(MetalContextRef ctx, MetalBufferRef a, int oA, uint16_t v,
-                     MetalBufferRef r, int oR, int n) {
+void Metal_Scale_F16(MetalContextRef ctx, MetalBufferRef x, int offX,
+                     float scale, MetalBufferRef result, int offRes,
+                     int count) {
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
   id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
   [enc setComputePipelineState:mc.pipelineScale_F16];
-  [enc setBuffer:(__bridge id<MTLBuffer>)a offset:oA atIndex:0];
-  [enc setBytes:&v length:2 atIndex:1];
-  [enc setBuffer:(__bridge id<MTLBuffer>)r offset:oR atIndex:2];
-  [enc dispatchThreads:MTLSizeMake(n, 1, 1)
-      threadsPerThreadgroup:MTLSizeMake(MIN(n, 256), 1, 1)];
+  [enc setBuffer:(__bridge id<MTLBuffer>)x offset:offX atIndex:0];
+  [enc setBuffer:(__bridge id<MTLBuffer>)result offset:offRes atIndex:1];
+  [enc setBytes:&scale length:sizeof(float) atIndex:2];
+  [enc dispatchThreads:MTLSizeMake(count, 1, 1)
+      threadsPerThreadgroup:MTLSizeMake(MIN(count, 256), 1, 1)];
+  [mc barrier];
 }
 void Metal_RoPE_F16(MetalContextRef ctx, MetalBufferRef d, int oD, int b, int s,
                     int nh, int hd, int po, float rt) {
@@ -277,6 +288,7 @@ void Metal_RoPE_F16(MetalContextRef ctx, MetalBufferRef d, int oD, int b, int s,
   int pairs = nh * (hd / 2);
   [enc dispatchThreads:MTLSizeMake(pairs, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(MIN(pairs, 256), 1, 1)];
+  [mc barrier];
 }
 
 void Metal_SwiGLU_F16(MetalContextRef ctx, MetalBufferRef iV, int oV,
@@ -291,6 +303,7 @@ void Metal_SwiGLU_F16(MetalContextRef ctx, MetalBufferRef iV, int oV,
   int total = n * iS;
   [enc dispatchThreads:MTLSizeMake(total, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(MIN(total, 256), 1, 1)];
+  [mc barrier];
 }
 
 void Metal_Softmax_F16(MetalContextRef ctx, MetalBufferRef i, int oI,
@@ -303,6 +316,7 @@ void Metal_Softmax_F16(MetalContextRef ctx, MetalBufferRef i, int oI,
   [enc setBytes:&rs length:4 atIndex:2];
   [enc dispatchThreads:MTLSizeMake(rs, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(MIN(rs, 256), 1, 1)];
+  [mc barrier];
 }
 
 void Metal_StoreKV_F16(MetalContextRef ctx, MetalBufferRef k, int oK,
@@ -320,12 +334,13 @@ void Metal_StoreKV_F16(MetalContextRef ctx, MetalBufferRef k, int oK,
   [enc setBuffer:(__bridge id<MTLBuffer>)vC offset:p * kv_dim * 2 atIndex:1];
   [enc dispatchThreads:MTLSizeMake(kv_dim, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(MIN(kv_dim, 256), 1, 1)];
+  [mc barrier];
 }
 
-void Metal_Attention_F16(MetalContextRef ctx, MetalBufferRef q, int oQ,
-                         MetalBufferRef kC, MetalBufferRef vC, MetalBufferRef r,
-                         int oR, MetalBufferRef s, int oS, int p, int nh,
-                         int kh, int hd, int ctxLen) {
+// Granular Attention Steps for Debugging
+void Metal_AttScores_F16(MetalContextRef ctx, MetalBufferRef q, int oQ,
+                         MetalBufferRef kC, MetalBufferRef s, int oS, int p,
+                         int nh, int kh, int hd, int ctxLen) {
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
   id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
   int stride = ctxLen;
@@ -341,6 +356,13 @@ void Metal_Attention_F16(MetalContextRef ctx, MetalBufferRef q, int oQ,
   [enc dispatchThreads:MTLSizeMake(nh * 32, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
   [mc barrier];
+}
+
+void Metal_AttSoftmax_F16(MetalContextRef ctx, MetalBufferRef s, int oS, int p,
+                          int nh, int ctxLen) {
+  MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
+  id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
+  int stride = ctxLen;
   [enc setComputePipelineState:mc.pipelineSoftmax_F16];
   [enc setBuffer:(__bridge id<MTLBuffer>)s offset:oS atIndex:0];
   [enc setBytes:&p length:4 atIndex:1];
@@ -348,6 +370,14 @@ void Metal_Attention_F16(MetalContextRef ctx, MetalBufferRef q, int oQ,
   [enc dispatchThreads:MTLSizeMake(nh, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(nh, 1, 1)];
   [mc barrier];
+}
+
+void Metal_AttValues_F16(MetalContextRef ctx, MetalBufferRef s, int oS,
+                         MetalBufferRef vC, MetalBufferRef r, int oR, int p,
+                         int nh, int kh, int hd, int ctxLen) {
+  MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
+  id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
+  int stride = ctxLen;
   [enc setComputePipelineState:mc.pipelineAttValues_F16];
   [enc setBuffer:(__bridge id<MTLBuffer>)s offset:oS atIndex:0];
   [enc setBuffer:(__bridge id<MTLBuffer>)vC offset:0 atIndex:1];
@@ -360,6 +390,16 @@ void Metal_Attention_F16(MetalContextRef ctx, MetalBufferRef q, int oQ,
   int dim = nh * hd;
   [enc dispatchThreads:MTLSizeMake(dim, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(MIN(dim, 256), 1, 1)];
+  [mc barrier];
+}
+
+void Metal_Attention_F16(MetalContextRef ctx, MetalBufferRef q, int oQ,
+                         MetalBufferRef kC, MetalBufferRef vC, MetalBufferRef r,
+                         int oR, MetalBufferRef s, int oS, int p, int nh,
+                         int kh, int hd, int ctxLen) {
+  Metal_AttScores_F16(ctx, q, oQ, kC, s, oS, p, nh, kh, hd, ctxLen);
+  Metal_AttSoftmax_F16(ctx, s, oS, p, nh, ctxLen);
+  Metal_AttValues_F16(ctx, s, oS, vC, r, oR, p, nh, kh, hd, ctxLen);
 }
 
 void Metal_RMSNormLinear_F16(MetalContextRef ctx, MetalBufferRef i, int oI,
@@ -452,6 +492,7 @@ void Metal_RMSNorm_F32(MetalContextRef ctx, MetalBufferRef input, int offIn,
   int threads = (cols < 1024) ? cols : 1024;
   [enc dispatchThreads:MTLSizeMake(threads, rows, 1)
       threadsPerThreadgroup:MTLSizeMake(threads, 1, 1)];
+  [mc barrier];
 }
 
 void Metal_Add_F32(MetalContextRef ctx, MetalBufferRef a, int oA,
@@ -465,6 +506,7 @@ void Metal_Add_F32(MetalContextRef ctx, MetalBufferRef a, int oA,
   [enc setBuffer:(__bridge id<MTLBuffer>)r offset:oR atIndex:2];
   [enc dispatchThreads:MTLSizeMake(count, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(MIN(count, 256), 1, 1)];
+  [mc barrier];
 }
 
 void Metal_MatMul_Q4K_F32(MetalContextRef ctx, MetalBufferRef a, int offA,
@@ -498,6 +540,7 @@ void Metal_MatMul_Q4K_F32(MetalContextRef ctx, MetalBufferRef a, int offA,
 
   [enc dispatchThreads:MTLSizeMake(32, N, M)
       threadsPerThreadgroup:MTLSizeMake(32, 4, 1)];
+  [mc barrier];
 }
 
 void Metal_SwiGLU_F32(MetalContextRef ctx, MetalBufferRef iV, int oV,
@@ -512,6 +555,7 @@ void Metal_SwiGLU_F32(MetalContextRef ctx, MetalBufferRef iV, int oV,
   int total = n * iS;
   [enc dispatchThreads:MTLSizeMake(total, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(MIN(total, 256), 1, 1)];
+  [mc barrier];
 }
 
 void Metal_Copy_F16_F32(MetalContextRef ctx, MetalBufferRef src, int oS,
@@ -523,6 +567,7 @@ void Metal_Copy_F16_F32(MetalContextRef ctx, MetalBufferRef src, int oS,
   [enc setBuffer:(__bridge id<MTLBuffer>)dst offset:oD atIndex:1];
   [enc dispatchThreads:MTLSizeMake(n, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(MIN(n, 256), 1, 1)];
+  [mc barrier];
 }
 
 void Metal_Copy_F32_F16(MetalContextRef ctx, MetalBufferRef src, int oS,
@@ -534,4 +579,5 @@ void Metal_Copy_F32_F16(MetalContextRef ctx, MetalBufferRef src, int oS,
   [enc setBuffer:(__bridge id<MTLBuffer>)dst offset:oD atIndex:1];
   [enc dispatchThreads:MTLSizeMake(n, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(MIN(n, 256), 1, 1)];
+  [mc barrier];
 }

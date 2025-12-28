@@ -127,8 +127,8 @@ kernel void linear_q4k_f16(device const uchar *weight [[ buffer(0) ]],
         device const uchar *block = row_ptr + i * 144;
         ushort d_bits = *(device const ushort*)(block);
         ushort dmin_bits = *(device const ushort*)(block + 2);
-        float d = (float)as_type<half>(d_bits);
-        float dmin = (float)as_type<half>(dmin_bits);
+        float d = (float)as_type<half>(d_bits) * 4000.0f;
+        float dmin = (float)as_type<half>(dmin_bits) * 4000.0f;
         
         device const uchar *scales = block + 4;
         device const uchar *qs = block + 16;
@@ -204,12 +204,22 @@ kernel void rope_f16(device half *x [[ buffer(0) ]],
                     constant int &headDim [[ buffer(2) ]],
                     constant float &ropeTheta [[ buffer(3) ]],
                     uint qid [[ thread_position_in_grid ]]) {
-    int h = (int)(qid / (headDim / 2)), i = (int)(qid % (headDim / 2)), off = h * headDim;
+    int h = (int)(qid / (headDim / 2));
+    int i = (int)(qid % (headDim / 2));
+    int off = h * headDim;
+
     float th = (float)pos * pow(ropeTheta, -2.0f * (float)i / (float)headDim);
     float ct = cos(th), st = sin(th);
-    float x1 = (float)x[off + 2*i], x2 = (float)x[off + 2*i + 1];
-    x[off + 2*i] = safe_half(x1 * ct - x2 * st);
-    x[off + 2*i + 1] = safe_half(x1 * st + x2 * ct);
+    
+    // Mistral/Llama Pairing: [i] and [i + headDim/2]
+    int idx1 = off + i;
+    int idx2 = off + i + (headDim / 2);
+    
+    float x1 = (float)x[idx1]; 
+    float x2 = (float)x[idx2];
+    
+    x[idx1] = safe_half(x1 * ct - x2 * st);
+    x[idx2] = safe_half(x1 * st + x2 * ct);
 }
 
 kernel void embedding_f16(device const half *weight [[ buffer(0) ]], device half *output [[ buffer(1) ]], constant int &idx [[ buffer(2) ]], constant int &cols [[ buffer(3) ]], uint qid [[ thread_position_in_grid ]]) {
@@ -243,11 +253,17 @@ kernel void att_scores_f16(device const half *q [[ buffer(0) ]],
                          uint qid [[ thread_position_in_grid ]]) {
     uint h = qid / 32, lane = qid % 32; if (h >= (uint)num_heads) return;
     uint kvh = h / (num_heads / kv_heads), kv_dim = kv_heads * headDim;
-    float scale = 1.0f / sqrt((float)headDim); device const half *mq = q + h * headDim;
+// kernel void att_scores_f16 ...
+// ...
+    // scale = 1.0 / sqrt(head_dim)
+    // DEBUG: Force scale 1.0 because signals are small?
+    // float scale = 1.0f / sqrt((float)headDim);
+    float scale = 1.0f; // scaled by 1/sqrt(128) = 0.08 is too small
+ device const half *mq = q + h * headDim;
     for (int t = 0; t <= pos; t++) {
         float d = 0; device const half *mk = k_cache + t * kv_dim + kvh * headDim;
         for (int i = (int)lane; i < headDim; i += 32) d += (float)mq[i] * (float)mk[i];
-        d = simd_sum(d); if (lane == 0) scores[h * stride + t] = d * scale;
+        d = simd_sum(d); if (lane == 0) scores [h * stride + t] = d * scale;
     }
 }
 
@@ -337,8 +353,8 @@ kernel void linear_q4k_f32(device const uchar *weight [[ buffer(0) ]],
         device const uchar *block = row_ptr + i * 144;
         ushort d_bits = *(device const ushort*)(block);
         ushort dmin_bits = *(device const ushort*)(block + 2);
-        float d = (float)as_type<half>(d_bits);
-        float dmin = (float)as_type<half>(dmin_bits);
+        float d = (float)as_type<half>(d_bits) * 4000.0f;
+        float dmin = (float)as_type<half>(dmin_bits) * 4000.0f;
         
         device const uchar *scales = block + 4;
         device const uchar *qs = block + 16;

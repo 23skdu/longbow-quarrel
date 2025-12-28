@@ -30,9 +30,8 @@ void Metal_ZeroBuffer(MetalBufferRef buf, int offset, int size);
 void Metal_Add_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
                    MetalBufferRef b, int offB, MetalBufferRef result,
                    int offRes, int count);
-void Metal_Scale_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
-                     uint16_t val, MetalBufferRef result, int offRes,
-                     int count);
+void Metal_Scale_F16(MetalContextRef ctx, MetalBufferRef x, int offX,
+                     float scale, MetalBufferRef result, int offRes, int count);
 
 void Metal_Embedding_F16(MetalContextRef ctx, MetalBufferRef weights, int offW,
                          MetalBufferRef result, int offRes, int rowIdx,
@@ -63,6 +62,17 @@ void Metal_Attention_F16(MetalContextRef ctx, MetalBufferRef q, int offQ,
                          MetalBufferRef kC, MetalBufferRef vC, MetalBufferRef r,
                          int oR, MetalBufferRef s, int oS, int p, int nh,
                          int kh, int hd, int ctxLen);
+
+void Metal_AttScores_F16(MetalContextRef ctx, MetalBufferRef q, int offQ,
+                         MetalBufferRef kC, MetalBufferRef s, int oS, int p,
+                         int nh, int kh, int hd, int ctxLen);
+
+void Metal_AttSoftmax_F16(MetalContextRef ctx, MetalBufferRef s, int oS, int p,
+                          int nh, int ctxLen);
+
+void Metal_AttValues_F16(MetalContextRef ctx, MetalBufferRef s, int oS,
+                         MetalBufferRef vC, MetalBufferRef r, int oR, int p,
+                         int nh, int kh, int hd, int ctxLen);
 
 void Metal_RMSNormLinear_F16(MetalContextRef ctx, MetalBufferRef input,
                              int offIn, MetalBufferRef normWeight,
@@ -116,9 +126,9 @@ void Metal_MatMul_Q4K_F32(MetalContextRef ctx, MetalBufferRef a, int offA,
                           int transA, MetalBufferRef b, int offB, int transB,
                           MetalBufferRef c, int offC, int M, int N, int K);
 
-void Metal_Add_F32(MetalContextRef ctx, MetalBufferRef a, int oA,
-                   MetalBufferRef b, int oB, MetalBufferRef r, int oR,
-                   int count);
+void Metal_Add_F32(MetalContextRef ctx, MetalBufferRef a, int offA,
+                   MetalBufferRef b, int offB, MetalBufferRef result,
+                   int offRes, int count);
 
 void Metal_Copy_F16_F32(MetalContextRef ctx, MetalBufferRef src, int oS,
                         MetalBufferRef dst, int oD, int n);

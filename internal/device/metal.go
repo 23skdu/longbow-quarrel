@@ -144,6 +144,21 @@ func (c *Context) NewTensor(rows, cols int) *Tensor {
 }
 
 // NewTensorFP32 creates a standard F32 tensor
+// NewTensorFP32Pooled creates a pooled tensor for intermediate float32 results.
+func (c *Context) NewTensorFP32Pooled(rows, cols int) *Tensor {
+	numElements := rows * cols
+	sizeBytes := numElements * 4
+	buf := C.Metal_Alloc(c.ref, C.int(sizeBytes))
+	return &Tensor{
+		ctx:       c,
+		rows:      rows,
+		cols:      cols,
+		sizeBytes: int(sizeBytes),
+		buf:       buf,
+		dataType:  DataTypeF32,
+	}
+}
+
 func (c *Context) NewTensorFP32(rows, cols int) *Tensor {
 	sizeBytes := rows * cols * 4 // FP32
 	buf := C.Metal_Alloc(c.ref, C.int(sizeBytes))
@@ -310,17 +325,23 @@ func (t *Tensor) ScanQ4KScales(name string) float32 {
 	data := unsafe.Slice((*byte)(ptr), t.sizeBytes)
 	
 	numBlocks := (t.rows * t.cols) / 256
-	var maxD float32 = 0
+	var maxScale float32 = 0
 	
 	for i := 0; i < numBlocks; i++ {
 		offset := i * 144
 		if offset+2 > len(data) { break }
-		dRaw := binary.LittleEndian.Uint16(data[offset : offset+2])
-		d := Float16ToFloat32(dRaw)
-		if d > maxD { maxD = d }
+		// d is bytes 0-1 (FP16)
+		block := data[offset : offset+2]
+		dbits := binary.LittleEndian.Uint16(block)
+		d := Float16ToFloat32(dbits)
+		if d > maxScale { maxScale = d }
+		if i == 0 {
+			// Print first block details for debugging
+			fmt.Printf("DEBUG_Q4K_HEX: %s Block 0 dbits=0x%04x d=%f\n", name, dbits, d)
+		}
 	}
-	fmt.Printf("DEBUG_SCALES: %s Max Scale (d): %f\n", name, maxD)
-	return maxD
+	fmt.Printf("DEBUG_SCALES: %s Max Scale (d): %f\n", name, maxScale)
+	return maxScale
 }
 
 func (t *Tensor) ScanMean(name string) float32 {
@@ -335,6 +356,48 @@ func (t *Tensor) ScanMean(name string) float32 {
 	mean := float32(sum / float64(len(f16Slice)))
 	fmt.Printf("DEBUG_MEAN: %s Mean Value: %f\n", name, mean)
 	return mean
+}
+
+// ScanScores prints the first N raw values (handles F16/F32)
+func (t *Tensor) ScanScores(name string) {
+	t.ctx.Synchronize()
+	ptr := C.Metal_GetBufferContents(t.buf)
+	if ptr == nil { return }
+	
+	count := 32
+	if t.rows*t.cols < count { count = t.rows*t.cols }
+	
+	fmt.Printf("DEBUG_SCORES: %s [Head 0, 0-%d]: ", name, count)
+	
+	if t.dataType == DataTypeF16 || t.dataType == DataTypeQ4K || t.dataType == DataTypeQ3K { // Q4K/Q3K stored as F16 in debug? No, but let's assume F16
+		f16Slice := unsafe.Slice((*uint16)(ptr), t.rows*t.cols)
+		for i := 0; i < count; i++ {
+			f := Float16ToFloat32(f16Slice[i])
+			fmt.Printf("%.4f ", f)
+		}
+	} else {
+		// F32
+		f32Slice := unsafe.Slice((*float32)(ptr), t.rows*t.cols)
+		for i := 0; i < count; i++ {
+			fmt.Printf("%.4f ", f32Slice[i])
+		}
+	}
+	fmt.Println()
+}
+
+func (t *Tensor) ScanAbsMax(name string) float32 {
+	t.ctx.Synchronize()
+	ptr := C.Metal_GetBufferContents(t.buf)
+	if ptr == nil { return 0 }
+	f16Slice := unsafe.Slice((*uint16)(ptr), t.rows*t.cols)
+	var maxVal float32 = 0
+	for _, v := range f16Slice {
+		f := Float16ToFloat32(v)
+		if f < 0 { f = -f }
+		if f > maxVal { maxVal = f }
+	}
+	fmt.Printf("DEBUG_ABSMAX: %s Max Abs Value: %f\n", name, maxVal)
+	return maxVal
 }
 
 // LoadFromRaw copies raw bytes directly to the GPU buffer.
@@ -375,6 +438,10 @@ func (t *Tensor) ZeroInit() {
 
 func (c *Context) Synchronize() {
 	C.Metal_Synchronize(c.ref)
+}
+
+func (t *Tensor) Scale(val float32) {
+	C.Metal_Scale_F16(t.ctx.ref, t.buf, 0, C.float(val), t.buf, 0, C.int(t.rows*t.cols))
 }
 
 // Operations
@@ -462,19 +529,9 @@ func (t *Tensor) LinearInto(weight *Tensor, out *Tensor) {
 		C.Metal_MatMul_Q4K_F16(t.ctx.ref, weight.buf, 0, false, t.buf, 0, false, out.buf, 0,
 			C.int(t.rows), C.int(weight.rows), C.int(weight.cols))
 	} else {
-		// BatchedMatMul_F16 using MPS
-		M := t.rows
-		N := weight.rows
-		K := weight.cols
-		sA := K * 2
-		sB := K * 2
-		sC := N * 2
-		
-		C.Metal_BatchedMatMul_F16(t.ctx.ref, 
-			t.buf, 0, C.int(sA), false,
-			weight.buf, 0, C.int(sB), true,
-			out.buf, 0, C.int(sC),
-			C.int(M), C.int(N), C.int(K), 1)
+		// Custom F16 kernel
+		C.Metal_MatMul_F16(t.ctx.ref, t.buf, 0, false, weight.buf, 0, true, out.buf, 0,
+			C.int(t.rows), C.int(weight.rows), C.int(weight.cols))
 	}
 }
 
@@ -534,8 +591,10 @@ func (t *Tensor) Layer(attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, k
 	// s1..s4 inputs are ignored to avoid sizing issues.
 	
 	// 1. Attention Norm
+	// attnNorm.ScanAbsMax("Attn Norm Weight")
 	normed := t.RMSNorm(attnNorm, eps)
 	t.ctx.Synchronize()
+	// normed.ScanScores("Attn Norm Out")
 		
 	// 2. QKV Projections (NO POOLING)
 	qPart := t.ctx.NewTensor(t.rows, q.rows) // [1, 4096]
@@ -546,19 +605,24 @@ func (t *Tensor) Layer(attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, k
 	normed.LinearInto(k, kPart)
 	normed.LinearInto(v, vPart)
 	t.ctx.Synchronize()
+	normed.LinearInto(v, vPart)
+	t.ctx.Synchronize()
+	// qPart.ScanScores("Q Part Out")
+	// kPart.ScanAbsMax("K Part Out AbsMax")
 	
 	// 3. RoPE & 4. Store K/V & 5. Attention (Serial Loop for Prefill/Batch)
 	// Our RoPE, Attention and StoreKV kernels currently only support single-token processing.
-	// We must loop over the batch (t.rows) to process each token.
+	// We must loop over t.rows.
+	
 	
 	// Create outputs
 	attOut := t.ctx.NewTensor(t.rows, t.cols) // [Batch, 4096]
 	
-	// Scores buffer: Max needed for one token attention [Heads, CtxLen]
-	// allocate once and reuse.
+	// scores buffer: Max needed for one token attention [Heads, CtxLen]
+	// allocate once and reuse. MUST BE FP32 (4 bytes).
 	scoresDim := heads * ctxLen 
 	if scoresDim < 32768 { scoresDim = 32768 }
-	scores := t.ctx.NewTensorPooled(1, scoresDim)
+	scores := t.ctx.NewTensorFP32Pooled(1, scoresDim)
 	resAtt := t.ctx.NewTensor(t.rows, o.rows) // [Batch, 4096] - Output of O projection
 	
 	kvStride := kvHeads * headDim * 2 // bytes (F16)
@@ -575,19 +639,33 @@ func (t *Tensor) Layer(attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, k
 		offAtt := i * attStride
 		
 		// 3. RoPE (In-place on qPart/kPart row i)
-		C.Metal_RoPE_F16(t.ctx.ref, qPart.buf, C.int(offQ), 1, C.int(1), C.int(heads), C.int(headDim), C.int(p), C.float(ropeTheta))
-		C.Metal_RoPE_F16(t.ctx.ref, kPart.buf, C.int(offK), 1, C.int(1), C.int(kvHeads), C.int(headDim), C.int(p), C.float(ropeTheta))
+		C.Metal_RoPE_F16(t.ctx.ref, qPart.buf, C.int(offQ), 1, C.int(1), C.int(heads), C.int(headDim), C.int(p), C.float(10000.0))
+		C.Metal_RoPE_F16(t.ctx.ref, kPart.buf, C.int(offK), 1, C.int(1), C.int(kvHeads), C.int(headDim), C.int(p), C.float(10000.0))
 		
 		// 4. Store K/V
 		C.Metal_StoreKV_F16(t.ctx.ref, kPart.buf, C.int(offK), vPart.buf, C.int(offV), 
 			kCache.buf, vCache.buf, 
 			C.int(p), C.int(kvHeads), C.int(headDim))
+		t.ctx.Synchronize()
 		
-		// 5. Attention
-		C.Metal_Attention_F16(t.ctx.ref, qPart.buf, C.int(offQ), kCache.buf, vCache.buf, attOut.buf, C.int(offAtt),
+
+		// 5. Attention (Granular for Debug)
+		// 5a. Scores
+		C.Metal_AttScores_F16(t.ctx.ref, qPart.buf, C.int(offQ), kCache.buf, 
 			scores.buf, 0,
 			C.int(p), C.int(heads), C.int(kvHeads), C.int(headDim), C.int(ctxLen))
-		
+		t.ctx.Synchronize()
+		scores.ScanScores(fmt.Sprintf("Attn Scores Pre-Softmax (Pos %d)", p))
+
+		// 5b. Softmax
+		C.Metal_AttSoftmax_F16(t.ctx.ref, scores.buf, 0, C.int(p), C.int(heads), C.int(ctxLen))
+		t.ctx.Synchronize()
+		scores.ScanScores(fmt.Sprintf("Attn Scores Post-Softmax (Pos %d)", p))
+
+		// 5c. Values
+		C.Metal_AttValues_F16(t.ctx.ref, scores.buf, 0, vCache.buf, attOut.buf, C.int(offAtt),
+			C.int(p), C.int(heads), C.int(kvHeads), C.int(headDim), C.int(ctxLen))
+		t.ctx.Synchronize()
 	}
 	t.ctx.Synchronize()
 		
@@ -596,19 +674,21 @@ func (t *Tensor) Layer(attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, k
 	attOut.LinearInto(o, resAtt)
 	t.ctx.Synchronize()
 	
+	// FIX: Scale Output by 1000.0 because Weights are Tiny (1e-4)
+	resAtt.Scale(1000.0)
+	t.ctx.Synchronize()
+	
 	// 7. Residual Add 1
 	C.Metal_Add_F16(t.ctx.ref, t.buf, 0, resAtt.buf, 0, t.buf, 0, C.int(t.rows*t.cols))
 	t.ctx.Synchronize()
 	
 	// --- FFN Block ---
 	
-	// Check if we should use FP32 (if weights are Q4K)
-	// We check ffnGate (usually first one used).
-	useFP32 := (ffnGate.dataType == DataTypeQ4K && ffnUp.dataType == DataTypeQ4K && ffnDown.dataType == DataTypeQ4K)
-	
+	// We use the sequential path for all layers now to ensure consistency
+	// and allow mixed precision (Q4K + F16 weights).
 	var resFFN *Tensor
 	
-	if useFP32 {
+	if false { // Legacy path removed 
 		// FP32 Path
 		
 		// 8. FFN Norm (Input t (F16) -> Normed (F32))
@@ -718,13 +798,6 @@ func (t *Tensor) Add(other *Tensor) *Tensor {
 	return res
 }
 
-func (t *Tensor) Scale(val float32) *Tensor {
-	res := t.ctx.NewTensorPooled(t.rows, t.cols)
-	// Float32ToFloat16 is in utils.go
-	v16 := Float32ToFloat16(val)
-	C.Metal_Scale_F16(t.ctx.ref, t.buf, 0, C.uint16_t(v16), res.buf, 0, C.int(t.rows*t.cols))
-	return res
-}
 
 func (t *Tensor) EmbeddingLookup(row int) *Tensor {
 	res := t.ctx.NewTensorPooled(1, t.cols)
