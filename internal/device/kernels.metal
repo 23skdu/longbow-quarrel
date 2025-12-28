@@ -333,9 +333,10 @@ kernel void linear_q4k_f32(device const uchar *weight [[ buffer(0) ]],
     float sum = 0;
     for (int i = (int)lane_id; i < num_blocks; i += 32) {
         device const uchar *block = row_ptr + i * 144;
-        device const half *block_h = (device const half*)block;
-        float d = (float)block_h[0];
-        float dmin = (float)block_h[1];
+        ushort d_bits = *(device const ushort*)(block);
+        ushort dmin_bits = *(device const ushort*)(block + 2);
+        float d = fp16_to_fp32(d_bits);
+        float dmin = fp16_to_fp32(dmin_bits);
         
         device const uchar *scales = block + 4;
         device const uchar *qs = block + 16;
@@ -361,7 +362,7 @@ kernel void linear_q4k_f32(device const uchar *weight [[ buffer(0) ]],
             }
         }
     }
-    sum = simd_sum(sum); 
+    sum = simd_sum(sum);
     if (lane_id == 0) output[batch * dim_out + row] = sum;
 }
 

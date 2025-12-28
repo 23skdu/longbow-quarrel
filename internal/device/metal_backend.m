@@ -1,5 +1,6 @@
 #import "metal_bridge.h"
 #import <Metal/Metal.h>
+#import <MetalPerformanceShaders/MetalPerformanceShaders.h>
 
 @interface MetalWrapper : NSObject
 @property(strong) id<MTLDevice> device;
@@ -358,7 +359,54 @@ void Metal_RMSNormLinear_F16(MetalContextRef ctx, MetalBufferRef i, int oI,
 void Metal_BatchedMatMul_F16(MetalContextRef ctx, MetalBufferRef a, int oA,
                              int sA, bool tA, MetalBufferRef b, int oB, int sB,
                              bool tB, MetalBufferRef c, int oC, int sC, int M,
-                             int N, int K, int bC) {}
+                             int N, int K, int bC) {
+  MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
+  id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
+  [enc endEncoding]; // MPS needs its own encoder (Blit/Compute) usually, or we
+                     // use command buffer directly.
+  mc.currentEncoder = nil;
+
+  MPSMatrixDescriptor *descA =
+      [MPSMatrixDescriptor matrixDescriptorWithRows:tA ? K : M
+                                            columns:tA ? M : K
+                                           rowBytes:sA
+                                           dataType:MPSDataTypeFloat16];
+  MPSMatrixDescriptor *descB =
+      [MPSMatrixDescriptor matrixDescriptorWithRows:tB ? N : K
+                                            columns:tB ? K : N
+                                           rowBytes:sB
+                                           dataType:MPSDataTypeFloat16];
+  MPSMatrixDescriptor *descC =
+      [MPSMatrixDescriptor matrixDescriptorWithRows:M
+                                            columns:N
+                                           rowBytes:sC
+                                           dataType:MPSDataTypeFloat16];
+
+  MPSMatrix *matA = [[MPSMatrix alloc] initWithBuffer:(__bridge id<MTLBuffer>)a
+                                               offset:oA
+                                           descriptor:descA];
+  MPSMatrix *matB = [[MPSMatrix alloc] initWithBuffer:(__bridge id<MTLBuffer>)b
+                                               offset:oB
+                                           descriptor:descB];
+  MPSMatrix *matC = [[MPSMatrix alloc] initWithBuffer:(__bridge id<MTLBuffer>)c
+                                               offset:oC
+                                           descriptor:descC];
+
+  MPSMatrixMultiplication *mul =
+      [[MPSMatrixMultiplication alloc] initWithDevice:mc.device
+                                        transposeLeft:tA
+                                       transposeRight:tB
+                                           resultRows:M
+                                        resultColumns:N
+                                      interiorColumns:K
+                                                alpha:1.0
+                                                 beta:0.0];
+
+  [mul encodeToCommandBuffer:mc.currentCommandBuffer
+                  leftMatrix:matA
+                 rightMatrix:matB
+                resultMatrix:matC];
+}
 void Metal_RMSNormQKV_F16(MetalContextRef ctx, MetalBufferRef input, int offIn,
                           MetalBufferRef normWeight, int offNormWeight,
                           MetalBufferRef qWeight, int offQW,
@@ -410,10 +458,20 @@ void Metal_Add_F32(MetalContextRef ctx, MetalBufferRef a, int oA,
 }
 
 void Metal_MatMul_Q4K_F32(MetalContextRef ctx, MetalBufferRef a, int offA,
-                          bool transA, MetalBufferRef b, int offB, bool transB,
+                          int transA, MetalBufferRef b, int offB, int transB,
                           MetalBufferRef c, int offC, int M, int N, int K) {
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
   id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
+
+  // Check if pipeline is valid
+  if (!mc.pipelineMatMul_Q4K_F32) {
+    fprintf(
+        stderr,
+        "ERROR: pipelineMatMul_Q4K_F32 is NULL! Kernel failed to compile.\n");
+    fflush(stderr);
+    return;
+  }
+
   [enc setComputePipelineState:mc.pipelineMatMul_Q4K_F32];
 
   [enc setBuffer:(__bridge id<MTLBuffer>)a
