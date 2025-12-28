@@ -137,10 +137,6 @@ func LoadFile(path string) (*GGUFFile, error) {
     
     fmt.Printf("DEBUG: Computed Padding Offset: %d\n", offset)
     
-    // HACK: UNCONDITIONAL FORCE
-    // fmt.Println("DEBUG: UNCONDITIONAL FORCE 760032")
-    // offset = 760032
-    
 	// Update tensor pointers
 	fmt.Printf("DEBUG: Data Start Offset: %d\n", offset)
 	for _, t := range file.Tensors {

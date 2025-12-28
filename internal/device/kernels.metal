@@ -6,6 +6,13 @@ static inline float simd_sum(float val) {
     return simd_broadcast(val, 0);
 }
 
+static inline half safe_half(float x) {
+    if (isnan(x)) return (half)0.0f;
+    if (x > 65504.0f) return (half)65504.0f;
+    if (x < -65504.0f) return (half)-65504.0f;
+    return (half)x;
+}
+
 // Manual FP16 to FP32 conversion with proper subnormal handling
 float fp16_to_fp32(ushort f) {
     uint sign = (uint(f) >> 15) & 0x1;
@@ -37,10 +44,6 @@ float fp16_to_fp32(ushort f) {
     return as_type<float>((sign << 31) | (newExp << 23) | (mant << 13));
 }
 
-half safe_half(float x) {
-    return (half)clamp(x, -65504.0f, 65504.0f);
-}
-
 // Native casting is used instead of manual conversion
 
 kernel void scale_f16(device const half *x [[ buffer(0) ]], constant ushort &scale [[ buffer(1) ]], device half *out [[ buffer(2) ]], uint qid [[ thread_position_in_grid ]]) {
@@ -54,7 +57,7 @@ kernel void swiglu_f16(device const half *gate [[ buffer(0) ]],
                      uint qid [[ thread_position_in_grid ]]) {
     float g = (float)gate[qid]; 
     float val = (float)up[qid] * (g / (1.0f + exp(-g)));
-    out[qid] = safe_half(val);
+    out[qid] = (half)val;
 }
 
 kernel void rmsnorm_f16(device const half *x [[ buffer(0) ]],
@@ -83,7 +86,7 @@ kernel void rmsnorm_f16(device const half *x [[ buffer(0) ]],
     float scale = s[0];
     for (int i = tid; i < cols; i += 1024) {
         int idx = row_offset + i;
-        out[idx] = (half)((float)x[idx] * scale * (float)w[i]);
+        out[idx] = safe_half((float)x[idx] * scale * (float)w[i]);
     }
 }
 
@@ -104,7 +107,7 @@ kernel void linear_f16(device const half *weight [[ buffer(0) ]],
         sum += dot(v_w.xy, v_i.xy) + dot(v_w.zw, v_i.zw);
     }
     sum = simd_sum(sum); 
-    if (lane_id == 0) output[batch * dim_out + row] = (half)sum;
+    if (lane_id == 0) output[batch * dim_out + row] = safe_half(sum);
 }
 
 kernel void linear_q4k_f16(device const uchar *weight [[ buffer(0) ]],
@@ -127,16 +130,9 @@ kernel void linear_q4k_f16(device const uchar *weight [[ buffer(0) ]],
         float d = (float)as_type<half>(d_bits);
         float dmin = (float)as_type<half>(dmin_bits);
         
-        // Debug: Print first block's scale for first row
-        if (row == 0 && i == 0 && batch == 0 && lane_id == 0) {
-            // Can't printf from Metal kernel, but we can write to a debug buffer
-            // For now, just ensure values are reasonable
-        }
-        
         device const uchar *scales = block + 4;
         device const uchar *qs = block + 16;
         uchar sc[8], m[8];
-        // Extract scales and mins using llama.cpp's get_scale_min_k4 logic
         for (int j = 0; j < 8; j++) {
             if (j < 4) {
                 sc[j] = scales[j] & 63;
@@ -211,9 +207,9 @@ kernel void rope_f16(device half *x [[ buffer(0) ]],
     int h = (int)(qid / (headDim / 2)), i = (int)(qid % (headDim / 2)), off = h * headDim;
     float th = (float)pos * pow(ropeTheta, -2.0f * (float)i / (float)headDim);
     float ct = cos(th), st = sin(th);
-    float x1 = (float)x[off + i], x2 = (float)x[off + i + headDim/2];
-    x[off + i] = (half)(x1 * ct - x2 * st);
-    x[off + i + headDim/2] = (half)(x1 * st + x2 * ct);
+    float x1 = (float)x[off + 2*i], x2 = (float)x[off + 2*i + 1];
+    x[off + 2*i] = safe_half(x1 * ct - x2 * st);
+    x[off + 2*i + 1] = safe_half(x1 * st + x2 * ct);
 }
 
 kernel void embedding_f16(device const half *weight [[ buffer(0) ]], device half *output [[ buffer(1) ]], constant int &idx [[ buffer(2) ]], constant int &cols [[ buffer(3) ]], uint qid [[ thread_position_in_grid ]]) {
@@ -225,8 +221,14 @@ kernel void softmax_f16(device float *scores [[ buffer(0) ]],
                       constant int &stride [[ buffer(2) ]],
                       uint qid [[ thread_position_in_grid ]]) {
     device float *s = scores + qid * stride;
-    float mv = -1e20f; for (int i = 0; i <= pos; i++) if (s[i] > mv) mv = s[i];
-    float se = 0; for (int i = 0; i <= pos; i++) { float e = exp(s[i] - mv); s[i] = e; se += e; }
+    float mv = s[0]; 
+    for (int i = 1; i <= pos; i++) if (s[i] > mv) mv = s[i];
+    float se = 0; 
+    for (int i = 0; i <= pos; i++) { 
+        float e = exp(s[i] - mv); 
+        s[i] = e; 
+        se += e; 
+    }
     for (int i = 0; i <= pos; i++) s[i] /= se;
 }
 
@@ -261,11 +263,11 @@ kernel void att_values_f16(device const float *scores [[ buffer(0) ]],
     uint h = qid / headDim, idx = qid % headDim; if (h >= (uint)num_heads) return;
     uint kvh = h / (num_heads / kv_heads), kv_dim = kv_heads * headDim;
     float r = 0; for (int t = 0; t <= pos; t++) r += scores[h * stride + t] * (float)v_cache[t * kv_dim + kvh * headDim + idx];
-    output[qid] = (half)r;
+    output[qid] = safe_half(r);
 }
 
 kernel void add_f16(device const half *a [[ buffer(0) ]], device const half *b [[ buffer(1) ]], device half *out [[ buffer(2) ]], uint qid [[ thread_position_in_grid ]]) {
-    out[qid] = a[qid] + b[qid];
+    out[qid] = safe_half((float)a[qid] + (float)b[qid]);
 }
 
 kernel void copy_f16(device const half *src [[ buffer(0) ]], device half *dst [[ buffer(1) ]], uint qid [[ thread_position_in_grid ]]) {

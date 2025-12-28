@@ -27,8 +27,8 @@ func cpuRoPE(data []float32, rows, headDim, heads int, pos int, theta float32) [
 			cos := float32(math.Cos(float64(freq)))
 			sin := float32(math.Sin(float64(freq)))
 
-			idx1 := headOff + i
-			idx2 := headOff + i + headDim/2
+			idx1 := headOff + 2*i
+			idx2 := headOff + 2*i + 1
 
 			x1 := data[idx1]
 			x2 := data[idx2]
@@ -50,7 +50,7 @@ func TestRoPEKernel(t *testing.T) {
 	headDim := 64
 	cols := heads * headDim
 	pos := 10
-	theta := float32(10000.0)
+	theta := float32(1000000.0)
 
 	// Create random input
 	inputData := make([]float32, rows*cols)

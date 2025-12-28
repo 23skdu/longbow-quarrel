@@ -58,9 +58,19 @@
 static id<MTLComputePipelineState> loadPipeline(MetalWrapper *ctx,
                                                 NSString *name) {
   id<MTLFunction> f = [ctx.library newFunctionWithName:name];
-  if (!f)
+  if (!f) {
+    fprintf(stderr, "Metal Error: Function '%s' not found in library\n", [name UTF8String]);
+    fflush(stderr);
     return nil;
-  return [ctx.device newComputePipelineStateWithFunction:f error:nil];
+  }
+  NSError *err = nil;
+  id<MTLComputePipelineState> p = [ctx.device newComputePipelineStateWithFunction:f error:&err];
+  if (!p) {
+    fprintf(stderr, "Metal Error: Failed to create pipeline '%s': %s\n", [name UTF8String], [[err localizedDescription] UTF8String]);
+    fflush(stderr);
+    return nil;
+  }
+  return p;
 }
 
 MetalContextRef Metal_Init(const char *libSource) {
