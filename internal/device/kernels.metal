@@ -55,8 +55,16 @@ kernel void swiglu_f16(device const half *gate [[ buffer(0) ]],
                      device half *out [[ buffer(2) ]],
                      uint qid [[ thread_position_in_grid ]]) {
     float g = (float)gate[qid]; 
-    float val = (float)up[qid] * (g / (1.0f + exp(-g)));
-    out[qid] = (half)val;
+    float u = (float)up[qid];
+    
+    // SwiGLU: up * silu(gate) where silu(x) = x * sigmoid(x)
+    float silu_g = g / (1.0f + exp(-g));
+    float val = u * silu_g;
+    
+    // Note: SmolLM2 produces large intermediate values (50-60 range) which
+    // causes activation explosion. Proper fix requires FP32 accumulation.
+    // For now, allow values up to FP16 safe range.
+    out[qid] = safe_half(val);
 }
 
 kernel void rmsnorm_f16(device const half *x [[ buffer(0) ]],
@@ -535,4 +543,59 @@ kernel void linear_f16_f32(device const half *weight [[ buffer(0) ]],
     }
     sum = simd_sum(sum); 
     if (lane_id == 0) output[batch * dim_out + row] = sum;
+}
+
+// ============================================================================
+// FP32 FFN Kernels for Small Models (SmolLM2, TinyLlama)
+// These kernels maintain FP32 precision through FFN to prevent activation explosion
+// ============================================================================
+
+// Linear: FP16 weights, FP16 input → FP32 output (for Gate/Up projections)
+kernel void linear_f16_to_f32(device const half *weight [[ buffer(0) ]],
+                              device const half *input [[ buffer(1) ]],
+                              device float *output [[ buffer(2) ]],
+                              constant int &dim_in [[ buffer(3) ]],
+                              constant int &dim_out [[ buffer(4) ]],
+                              uint3 tid [[ thread_position_in_threadgroup ]],
+                              uint3 qid [[ thread_position_in_grid ]]) {
+    uint row = qid.y; uint batch = qid.z;
+    if (row >= (uint)dim_out) return; uint lane_id = tid.x;
+    
+    device const half4 *w4 = (device const half4 *)(weight + row * dim_in);
+    device const half4 *i4 = (device const half4 *)(input + batch * dim_in);
+    int n4 = dim_in / 4;
+    
+    float sum = 0;
+    for (int i = (int)lane_id; i < n4; i += 32) {
+        float4 v_w = float4(w4[i]);
+        float4 v_i = float4(i4[i]);
+        sum += dot(v_w.xy, v_i.xy) + dot(v_w.zw, v_i.zw);
+    }
+    sum = simd_sum(sum); 
+    if (lane_id == 0) output[batch * dim_out + row] = sum;
+}
+
+// Linear: FP16 weights, FP32 input → FP16 output (for Down projection)
+kernel void linear_f32_to_f16(device const half *weight [[ buffer(0) ]],
+                              device const float *input [[ buffer(1) ]],
+                              device half *output [[ buffer(2) ]],
+                              constant int &dim_in [[ buffer(3) ]],
+                              constant int &dim_out [[ buffer(4) ]],
+                              uint3 tid [[ thread_position_in_threadgroup ]],
+                              uint3 qid [[ thread_position_in_grid ]]) {
+    uint row = qid.y; uint batch = qid.z;
+    if (row >= (uint)dim_out) return; uint lane_id = tid.x;
+    
+    device const half4 *w4 = (device const half4 *)(weight + row * dim_in);
+    device const float4 *i4 = (device const float4 *)(input + batch * dim_in);
+    int n4 = dim_in / 4;
+    
+    float sum = 0;
+    for (int i = (int)lane_id; i < n4; i += 32) {
+        float4 v_w = float4(w4[i]);
+        float4 v_i = i4[i];
+        sum += dot(v_w.xy, v_i.xy) + dot(v_w.zw, v_i.zw);
+    }
+    sum = simd_sum(sum); 
+    if (lane_id == 0) output[batch * dim_out + row] = safe_half(sum);
 }

@@ -28,6 +28,9 @@
 @property(strong) id<MTLComputePipelineState> pipelineSwiGLU_F32;
 @property(strong) id<MTLComputePipelineState> pipelineMatMul_F16_F32;
 @property(strong) id<MTLComputePipelineState> pipelineCopy_F16_F32;
+// FP32 FFN Pipelines for Small Models
+@property(strong) id<MTLComputePipelineState> pipelineLinearF16ToF32;
+@property(strong) id<MTLComputePipelineState> pipelineLinearF32ToF16;
 @property(strong) id<MTLComputePipelineState> pipelineCopy_F32_F16;
 @property(strong) id<MTLCommandBuffer> currentCommandBuffer;
 @property(strong) id<MTLComputeCommandEncoder> currentEncoder;
@@ -128,6 +131,10 @@ MetalContextRef Metal_Init(const char *libSource) {
   ctx.pipelineMatMul_F16_F32 = loadPipeline(ctx, @"linear_f16_f32");
   ctx.pipelineCopy_F16_F32 = loadPipeline(ctx, @"copy_f16_to_f32");
   ctx.pipelineCopy_F32_F16 = loadPipeline(ctx, @"copy_f32_to_f16");
+
+  // FP32 FFN Pipelines for Small Models
+  ctx.pipelineLinearF16ToF32 = loadPipeline(ctx, @"linear_f16_to_f32");
+  ctx.pipelineLinearF32ToF16 = loadPipeline(ctx, @"linear_f32_to_f16");
 
   return (__bridge_retained MetalContextRef)ctx;
 }
@@ -647,5 +654,41 @@ void Metal_AttFused_F16(MetalContextRef ctx, MetalBufferRef q, int oQ,
   [enc setBytes:&hd length:4 atIndex:7];
   [enc dispatchThreadgroups:MTLSizeMake(nh, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(1024, 1, 1)];
+  [mc barrier];
+}
+
+// FP32 FFN Bridge Functions for Small Models
+
+void Metal_LinearF16ToF32(MetalContextRef ctx, MetalBufferRef weight,
+                          int offWeight, MetalBufferRef input, int offInput,
+                          MetalBufferRef output, int offOutput, int rows,
+                          int dimIn, int dimOut) {
+  MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
+  id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
+  [enc setComputePipelineState:mc.pipelineLinearF16ToF32];
+  [enc setBuffer:(__bridge id<MTLBuffer>)weight offset:offWeight atIndex:0];
+  [enc setBuffer:(__bridge id<MTLBuffer>)input offset:offInput atIndex:1];
+  [enc setBuffer:(__bridge id<MTLBuffer>)output offset:offOutput atIndex:2];
+  [enc setBytes:&dimIn length:4 atIndex:3];
+  [enc setBytes:&dimOut length:4 atIndex:4];
+  [enc dispatchThreadgroups:MTLSizeMake(1, dimOut, rows)
+      threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+  [mc barrier];
+}
+
+void Metal_LinearF32ToF16(MetalContextRef ctx, MetalBufferRef weight,
+                          int offWeight, MetalBufferRef input, int offInput,
+                          MetalBufferRef output, int offOutput, int rows,
+                          int dimIn, int dimOut) {
+  MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
+  id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
+  [enc setComputePipelineState:mc.pipelineLinearF32ToF16];
+  [enc setBuffer:(__bridge id<MTLBuffer>)weight offset:offWeight atIndex:0];
+  [enc setBuffer:(__bridge id<MTLBuffer>)input offset:offInput atIndex:1];
+  [enc setBuffer:(__bridge id<MTLBuffer>)output offset:offOutput atIndex:2];
+  [enc setBytes:&dimIn length:4 atIndex:3];
+  [enc setBytes:&dimOut length:4 atIndex:4];
+  [enc dispatchThreadgroups:MTLSizeMake(1, dimOut, rows)
+      threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
   [mc barrier];
 }

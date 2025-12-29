@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"math"
-	"sort"
 
 	"strings"
 	"time"
@@ -395,12 +394,6 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int) ([]int, error) {
 		// 	current.ScanMean("Embed Output")
 		// }
 
-		// Audit OutputNorm weights once
-		if i == 0 {
-			e.Weights.OutputNorm.ScanNaNs("OutputNorm weights")
-			e.Weights.OutputNorm.ScanMax("OutputNorm weights")
-		}
-		
 		// Layers (Attention + FFN)
 		for l := 0; l < e.Config.Layers; l++ {
 			current.Layer(e.Weights.AttnNorm[l], e.Weights.AttnQ[l], e.Weights.AttnK[l], e.Weights.AttnV[l], e.Weights.AttnO[l],
@@ -408,68 +401,13 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int) ([]int, error) {
 				e.KVCacheK[l], e.KVCacheV[l], s1, s2, s3, s4,
 				e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim,
 				e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen)
-			if true {
-				current.ScanNaNs(fmt.Sprintf("Token %d Layer %d Output", i, l))
-				current.ScanMax(fmt.Sprintf("Token %d Layer %d Output", i, l))
-			}
 		}
 
 		// If this is the LAST prompt token, sample the first next token
 		if i == len(inputTokens)-1 {
-			// Debug: Check current tensor IMMEDIATELY after layer loop
-			if true {
-				log.Printf("Checking tensor immediately after layer 31...")
-				current.ScanNaNs("After all layers (immediate)")
-				current.ScanMax("After all layers (immediate)")
-			}
-			
-			// Debug: Check current tensor before RMSNorm
-			if true {
-				data := current.ToHost()
-				nonZero := 0
-				for _, v := range data {
-					if v != 0 {
-						nonZero++
-					}
-				}
-				log.Printf("Before final RMSNorm: %d/%d non-zero values, first 10: %v", nonZero, len(data), data[:10])
-			}
-			
 			normed := current.RMSNorm(e.Weights.OutputNorm, e.Config.Eps)
-			normed.ScanNaNs("Final Normed")
-			normed.ScanMax("Final Normed")
-
 			logits := normed.Linear(e.Weights.Output)
-			logits.ScanNaNs("Final Logits")
-			logits.ScanMax("Final Logits")
-
 			logitsData := logits.ToHost()
-			
-			// DEBUG: Print first few logits
-			if len(logitsData) > 10 {
-				fmt.Printf("DEBUG: First 10 logits: %v\n", logitsData[:10])
-				// Check for NaN
-				nanCount := 0
-				for _, v := range logitsData {
-					if math.IsNaN(float64(v)) {
-						nanCount++
-					}
-				}
-				if nanCount > 0 {
-					fmt.Printf("DEBUG: Found %d NaNs in logits!\n", nanCount)
-				}
-			}
-
-			// Logit analysis for debugging nonsensical output
-			if i == len(inputTokens)-1 || i < 5 {
-				sortedLogits := make([]struct{idx int; val float32}, len(logitsData))
-				for idx, val := range logitsData { sortedLogits[idx] = struct{idx int; val float32}{idx, val} }
-				// Find top 5 manually to avoid full sort if possible, but for debug full sort is fine
-				sort.Slice(sortedLogits, func(i, j int) bool { return sortedLogits[i].val > sortedLogits[j].val })
-				fmt.Printf("DEBUG SAMPLE: Token %d Top 5: ", i)
-				for k := 0; k < 5; k++ { fmt.Printf("[%d: %.4f] ", sortedLogits[k].idx, sortedLogits[k].val) }
-				fmt.Println()
-			}
 
 			maxIdx := 0
 			maxVal := logitsData[0]
@@ -498,7 +436,6 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int) ([]int, error) {
 		current := e.Weights.TokenEmb.EmbeddingLookup(lastToken)
 
 		// Layers (Attention + FFN)
-		tLayers := time.Now()
 		for l := 0; l < e.Config.Layers; l++ {
 			current.Layer(e.Weights.AttnNorm[l], e.Weights.AttnQ[l], e.Weights.AttnK[l], e.Weights.AttnV[l], e.Weights.AttnO[l],
 				e.Weights.FfnNorm[l], e.Weights.FfnGate[l], e.Weights.FfnUp[l], e.Weights.FfnDown[l],
@@ -506,23 +443,12 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int) ([]int, error) {
 				e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim,
 				e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen)
 		}
-		if i == 1 {
-			fmt.Printf("Token %d: %d layers dispatched in %v\n", i, e.Config.Layers, time.Since(tLayers))
-		}
 
 		normed := current.RMSNorm(e.Weights.OutputNorm, e.Config.Eps)
 		logits := normed.Linear(e.Weights.Output)
 		logitsData := logits.ToHost()
 		
 		// Logit analysis for generation
-		if i < 5 {
-			sortedLogits := make([]struct{idx int; val float32}, len(logitsData))
-			for idx, val := range logitsData { sortedLogits[idx] = struct{idx int; val float32}{idx, val} }
-			sort.Slice(sortedLogits, func(ia, j int) bool { return sortedLogits[ia].val > sortedLogits[j].val })
-			fmt.Printf("DEBUG SAMPLE: Gen Token %d Top 5: ", i)
-			for k := 0; k < 5; k++ { fmt.Printf("[%d: %.4f] ", sortedLogits[k].idx, sortedLogits[k].val) }
-			fmt.Println()
-		}
 
 		maxIdx := 0
 		maxVal := logitsData[0]

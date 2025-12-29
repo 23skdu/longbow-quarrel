@@ -155,6 +155,17 @@ void Metal_AttFused_F16(MetalContextRef ctx, MetalBufferRef q, int offQ,
                         MetalBufferRef kC, MetalBufferRef vC, MetalBufferRef r,
                         int oR, int p, int nh, int kh, int hd);
 
+// FP32 FFN Kernels for Small Models
+void Metal_LinearF16ToF32(MetalContextRef ctx, MetalBufferRef weight,
+                          int offWeight, MetalBufferRef input, int offInput,
+                          MetalBufferRef output, int offOutput, int rows,
+                          int dimIn, int dimOut);
+
+void Metal_LinearF32ToF16(MetalContextRef ctx, MetalBufferRef weight,
+                          int offWeight, MetalBufferRef input, int offInput,
+                          MetalBufferRef output, int offOutput, int rows,
+                          int dimIn, int dimOut);
+
 #ifdef __cplusplus
 }
 #endif
