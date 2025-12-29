@@ -729,11 +729,12 @@ func (t *Tensor) Layer(attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, k
 	
 	// Sequential Implementation with Pooled Buffers
 	// s1..s4 inputs are ignored to avoid sizing issues.
-	
+
 	// 1. Attention Norm
 	// attnNorm.ScanAbsMax("Attn Norm Weight")
 	normed := t.RMSNorm(attnNorm, eps)
 	t.ctx.Synchronize()
+	
 	// normed.ScanScores("Attn Norm Out")
 		
 	// 2. QKV Projections (NO POOLING)
@@ -741,8 +742,6 @@ func (t *Tensor) Layer(attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, k
 	kPart := t.ctx.NewTensor(t.rows, k.rows) // [1, 1024]
 	vPart := t.ctx.NewTensor(t.rows, v.rows) // [1, 1024]
 	
-	normed.LinearInto(q, qPart)
-	normed.LinearInto(k, kPart)
 	normed.LinearInto(v, vPart)
 	t.ctx.Synchronize()
 	// qPart.ScanScores("Q Part Out")
@@ -814,8 +813,10 @@ func (t *Tensor) Layer(attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, k
 	attOut.LinearInto(o, resAtt)
 	t.ctx.Synchronize()
 	
+	
 	// 7. Residual Add 1
 	t1 := t.Add(resAtt)
+	
 	C.Metal_Copy_F16(t.ctx.ref, t1.buf, 0, t.buf, 0, C.int(t.rows*t.cols))
 	
 	// --- Cleanup Attn Intermediates ---
@@ -830,35 +831,73 @@ func (t *Tensor) Layer(attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, k
 	
 	// --- FFN Block ---
 	
+	// Use FP32 FFN for small models (dim < 1024) to prevent activation explosion
+	useF32FFN := t.cols < 1024
+	
 	// 8. FFN Norm
 	normedFFN := t.RMSNorm(ffnNorm, eps)
 	
-	// 9. FFN Gate/Up
-	gatePart := t.ctx.NewTensorPooled(t.rows, ffnGate.rows)
-	upPart := t.ctx.NewTensorPooled(t.rows, ffnUp.rows)
-	normedFFN.LinearInto(ffnGate, gatePart)
-	normedFFN.LinearInto(ffnUp, upPart)
-	t.ctx.Synchronize()
 	
-	// 10. SwiGLU
-	swiOut := upPart.SwiGLU(gatePart)
-	
-	// 11. Down Projection
-	resFFN := t.ctx.NewTensorPooled(t.rows, ffnDown.rows)
-	swiOut.LinearInto(ffnDown, resFFN)
-	t.ctx.Synchronize()
-	
-	// 12. Residual Add 2
-	t2 := t.Add(resFFN)
-	C.Metal_Copy_F16(t.ctx.ref, t2.buf, 0, t.buf, 0, C.int(t.rows*t.cols))
-	
-	// --- Final Cleanup ---
-	normedFFN.ReturnToPool()
-	gatePart.ReturnToPool()
-	upPart.ReturnToPool()
-	swiOut.ReturnToPool()
-	resFFN.ReturnToPool()
-	t2.ReturnToPool()
+	if useF32FFN {
+		// FP32 FFN Path for Small Models (SmolLM2, TinyLlama)
+		// Maintains FP32 precision through FFN to prevent explosion
+		
+		// 9. Gate/Up Projections → FP32
+		gatePart := normedFFN.LinearToFP32(ffnGate)
+		upPart := normedFFN.LinearToFP32(ffnUp)
+		t.ctx.Synchronize()
+		
+		// 10. SwiGLU (FP32)
+		swiOut := gatePart.SwiGLU_FP32(upPart)
+		
+		// 11. Down Projection (FP32 → FP16)
+		resFFN := swiOut.LinearFromFP32(ffnDown)
+		t.ctx.Synchronize()
+		
+		// Cleanup FP32 intermediates
+		gatePart.ReturnToPool()
+		upPart.ReturnToPool()
+		swiOut.ReturnToPool()
+		
+		// 12. Residual Add 2
+		t2 := t.Add(resFFN)
+		
+		C.Metal_Copy_F16(t.ctx.ref, t2.buf, 0, t.buf, 0, C.int(t.rows*t.cols))
+		
+		normedFFN.ReturnToPool()
+		resFFN.ReturnToPool()
+		t2.ReturnToPool()
+	} else {
+		// Standard FP16 FFN Path for Large Models (Mistral, Llama)
+		
+		// 9. FFN Gate/Up
+		gatePart := t.ctx.NewTensorPooled(t.rows, ffnGate.rows)
+		upPart := t.ctx.NewTensorPooled(t.rows, ffnUp.rows)
+		normedFFN.LinearInto(ffnGate, gatePart)
+		normedFFN.LinearInto(ffnUp, upPart)
+		t.ctx.Synchronize()
+		
+		// 10. SwiGLU
+		swiOut := upPart.SwiGLU(gatePart)
+		
+		// 11. Down Projection
+		resFFN := t.ctx.NewTensorPooled(t.rows, ffnDown.rows)
+		swiOut.LinearInto(ffnDown, resFFN)
+		t.ctx.Synchronize()
+		
+		// 12. Residual Add 2
+		t2 := t.Add(resFFN)
+		
+		C.Metal_Copy_F16(t.ctx.ref, t2.buf, 0, t.buf, 0, C.int(t.rows*t.cols))
+		
+		// --- Final Cleanup ---
+		normedFFN.ReturnToPool()
+		gatePart.ReturnToPool()
+		upPart.ReturnToPool()
+		swiOut.ReturnToPool()
+		resFFN.ReturnToPool()
+		t2.ReturnToPool()
+	}
 }
 
 // Correct RoPE implementation using arguments expected by Kernel
@@ -881,6 +920,47 @@ func (t *Tensor) SwiGLU(gate *Tensor) *Tensor {
 
 func (t *Tensor) Softmax() {
 	C.Metal_Softmax_F16(t.ctx.ref, t.buf, 0, t.buf, 0, C.int(t.rows), C.int(t.cols))
+}
+
+// FP32 FFN Methods for Small Models (SmolLM2, TinyLlama)
+
+// LinearToFP32 performs FP16 weight × FP16 input → FP32 output
+// Used for Gate/Up projections in FP32 FFN path
+func (t *Tensor) LinearToFP32(weight *Tensor) *Tensor {
+	out := t.ctx.NewTensorFP32Pooled(t.rows, weight.rows)
+	C.Metal_LinearF16ToF32(t.ctx.ref, weight.buf, 0, t.buf, 0, out.buf, 0,
+		C.int(t.rows), C.int(t.cols), C.int(weight.rows))
+	return out
+}
+
+// SwiGLU_FP32 performs SwiGLU with FP32 inputs and outputs
+// gate and up must both be FP32 tensors
+func (gate *Tensor) SwiGLU_FP32(up *Tensor) *Tensor {
+	if gate.rows != up.rows || gate.cols != up.cols {
+		panic("SwiGLU_FP32 dim mismatch")
+	}
+	if gate.dataType != DataTypeF32 || up.dataType != DataTypeF32 {
+		panic("SwiGLU_FP32 requires FP32 inputs")
+	}
+	
+	res := gate.ctx.NewTensorFP32Pooled(gate.rows, gate.cols)
+	
+	// Use existing swiglu_f32 kernel
+	C.Metal_SwiGLU_F32(gate.ctx.ref, gate.buf, 0, up.buf, 0, res.buf, 0,
+		C.int(gate.rows), C.int(gate.cols))
+	return res
+}
+
+// LinearFromFP32 performs FP16 weight × FP32 input → FP16 output
+// Used for Down projection in FP32 FFN path
+func (t *Tensor) LinearFromFP32(weight *Tensor) *Tensor {
+	if t.dataType != DataTypeF32 {
+		panic("LinearFromFP32 requires FP32 input")
+	}
+	out := t.ctx.NewTensorPooled(t.rows, weight.rows)
+	C.Metal_LinearF32ToF16(t.ctx.ref, weight.buf, 0, t.buf, 0, out.buf, 0,
+		C.int(t.rows), C.int(t.cols), C.int(weight.rows))
+	return out
 }
 
 func (t *Tensor) Add(other *Tensor) *Tensor {
