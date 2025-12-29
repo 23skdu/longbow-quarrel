@@ -10,8 +10,6 @@ import (
 	"syscall"
 	"time"
 
-	_ "net/http/pprof"
-
 	"github.com/23skdu/longbow-quarrel/internal/engine"
 	"github.com/23skdu/longbow-quarrel/internal/ollama"
 	"github.com/23skdu/longbow-quarrel/internal/tokenizer"
@@ -26,6 +24,14 @@ var (
 )
 
 func main() {
+	// Increase File Descriptor Limit (Metal Buffers might use FDs)
+	var rLimit syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rLimit); err == nil {
+		rLimit.Cur = 10240
+		if rLimit.Max < 10240 { rLimit.Max = 10240 }
+		syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rLimit)
+	}
+
 	flag.Parse()
 
 	if *modelPath == "" {

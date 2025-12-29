@@ -463,6 +463,40 @@ kernel void rmsnorm_f32(device const float *x [[ buffer(0) ]],
     }
 }
 
+kernel void rmsnorm_f32_to_f16(device const float *x [[ buffer(0) ]],
+                      device half *out [[ buffer(1) ]],
+                      device const half *w [[ buffer(2) ]],
+                      constant float &eps [[ buffer(3) ]],
+                      constant int &cols [[ buffer(4) ]],
+                      uint tid [[ thread_index_in_threadgroup ]],
+                      uint2 qid [[ thread_position_in_grid ]]) {
+    threadgroup float s[1024]; 
+    float sum = 0.0f;
+    int row_offset = qid.y * cols;
+    for (int i = tid; i < cols; i += 1024) {
+        float val = x[row_offset + i];
+        sum += val * val;
+    }
+    s[tid] = sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) { 
+        float t = 0; 
+        int active_threads = (cols < 1024) ? cols : 1024;
+        for (int i = 0; i < active_threads; i++) t += s[i]; 
+        s[0] = 1.0f / sqrt(t / (float)cols + eps); 
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float scale = s[0];
+    for (int i = tid; i < cols; i += 1024) {
+        int idx = row_offset + i;
+        out[idx] = safe_half(x[idx] * scale * (float)w[i]);
+    }
+}
+
+kernel void add_f32_f16(device const float *a [[ buffer(0) ]], device const half *b [[ buffer(1) ]], device float *out [[ buffer(2) ]], uint qid [[ thread_position_in_grid ]]) {
+    out[qid] = a[qid] + (float)b[qid];
+}
+
 kernel void linear_q4k_f32(device const uchar *weight [[ buffer(0) ]],
                          device const float *input [[ buffer(1) ]],
                          device float *output [[ buffer(2) ]],

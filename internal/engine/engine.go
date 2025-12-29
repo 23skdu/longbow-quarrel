@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"runtime"
 
 	"strings"
 	"time"
@@ -106,7 +107,12 @@ func (e *Engine) loadModel(path string) error {
 		log.Printf("[MODEL] Architecture: %s", arch)
 	}
 	if vSize, ok := f.KV["llama.vocab_size"]; ok {
-		log.Printf("[MODEL] Vocab Size: %v", vSize)
+		e.Config.VocabSize = int(toFloat64(vSize))
+		log.Printf("[MODEL] Vocab Size: %d", e.Config.VocabSize)
+	} else {
+		// Fallback for Smollm2 / Llama3 if missing
+		e.Config.VocabSize = 49152 
+		log.Printf("[MODEL] Vocab Size (Default): %d", e.Config.VocabSize)
 	}
 
 	// Initialize KV Cache (now that we have dimensions)
@@ -140,7 +146,7 @@ func (e *Engine) loadModel(path string) error {
 			rows *= int(t.Dimensions[i])
 		}
 		
-		// fmt.Printf("[TENSOR] %-30s | Type: %-10v | Shape: [%d, %d]\n", t.Name, t.Type, rows, cols)
+		fmt.Printf("[TENSOR] %-30s | Type: %-10v | Shape: [%d, %d]\n", t.Name, t.Type, rows, cols)
 
 		var mt *device.Tensor
 		numElements := rows * cols
@@ -369,19 +375,29 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int) ([]int, error) {
 	// tStart := time.Now()
 	result := make([]int, 0, tokensToGenerate)
 	
-	// Reset KV cache position for each inference call
+	// Reset KV cache position
 	e.CachePos = 0
 	
+	// Lock OS thread for AutoreleasePool consistency
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
 	// Main Generation Loop
 	
 	// Create scratch buffers for the layer fusion
-	s1 := e.Ctx.NewTensorPooled(1, e.Config.Dim*4) // Oversized for various intermediates
-	s2 := e.Ctx.NewTensorPooled(1, e.Config.Dim*4)
-	s3 := e.Ctx.NewTensorPooled(1, e.Config.Dim*4)
-	s4 := e.Ctx.NewTensorPooled(1, e.Config.Heads*e.Config.SeqLen*2) // *2 for float32 scores storage
+	// New Scratch Buffer for Zero-Alloc	// Initialize scratch buffers (Heap backed, includes Logits)
+	scratch := e.Ctx.NewLayerScratch(1, e.Config.Dim, e.Config.HiddenDim, 
+		e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.SeqLen, e.Config.VocabSize)
+	defer scratch.Free()
+	
+	// Logits are in scratch.Logits
+	logits := scratch.Logits
 
 	// Phase 1: Prefill all input tokens
 	for i := 0; i < len(inputTokens); i++ {
+		// Autorelease Pool for this iteration
+		pool := e.Ctx.AutoreleasePoolPush()
+		
 		tToken := time.Now()
 		lastToken := inputTokens[i]
 		
@@ -389,24 +405,43 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int) ([]int, error) {
 		
 		current := e.Weights.TokenEmb.EmbeddingLookup(lastToken)
 		
-		// DEBUG: Verify Input on GPU
-		// if i == 0 {
-		// 	current.ScanMean("Embed Output")
-		// }
-
+		// Convert embedding to FP32 for residual stream accumulation
+		currentF32 := current.ToF32()
+		current.ReturnToPool() // Release F16
+		
 		// Layers (Attention + FFN)
 		for l := 0; l < e.Config.Layers; l++ {
-			current.Layer(e.Weights.AttnNorm[l], e.Weights.AttnQ[l], e.Weights.AttnK[l], e.Weights.AttnV[l], e.Weights.AttnO[l],
-				e.Weights.FfnNorm[l], e.Weights.FfnGate[l], e.Weights.FfnUp[l], e.Weights.FfnDown[l],
-				e.KVCacheK[l], e.KVCacheV[l], s1, s2, s3, s4,
-				e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim,
-				e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen)
+			attnNorm := e.Weights.AttnNorm[l]
+			q := e.Weights.AttnQ[l]
+			k := e.Weights.AttnK[l]
+			v := e.Weights.AttnV[l]
+			o := e.Weights.AttnO[l]
+			ffnNorm := e.Weights.FfnNorm[l]
+			ffnGate := e.Weights.FfnGate[l]
+			ffnUp := e.Weights.FfnUp[l]
+			ffnDown := e.Weights.FfnDown[l]
+			kCache := e.KVCacheK[l]
+			vCache := e.KVCacheV[l]
+
+			currentF32.Layer(attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, kCache, vCache,
+				scratch, // Pass scratch
+				e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen)
 		}
 
 		// If this is the LAST prompt token, sample the first next token
 		if i == len(inputTokens)-1 {
-			normed := current.RMSNorm(e.Weights.OutputNorm, e.Config.Eps)
-			logits := normed.Linear(e.Weights.Output)
+			// Final Norm (F32 -> F16)
+			// Debug Output Norm Weights
+			if i == 0 {
+				e.Weights.OutputNorm.ScanMax("Output Norm Weights")
+			}
+			currentF32.RMSNormFP32_ToF16_Into(e.Weights.OutputNorm, e.Config.Eps, scratch.Normed)
+			
+			// Output Head (F16 -> F32 Logits)
+			// Reuse pre-allocated logits buffer
+			// scratch.Normed contains result. Use it.
+			scratch.Normed.LinearInto(e.Weights.Output, logits)
+			
 			logitsData := logits.ToHost()
 
 			maxIdx := 0
@@ -419,13 +454,25 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int) ([]int, error) {
 			}
 			result = append(result, maxIdx)
 		}
+		
+		currentF32.ReturnToPool()
 
-		e.CachePos++
-		metrics.RecordInference(1, time.Since(tToken))
+		isLastPrefill := i == len(inputTokens)-1
+		if !isLastPrefill {
+			e.CachePos++
+			metrics.RecordInference(1, time.Since(tToken))
+			e.Ctx.AutoreleasePoolPop(pool)
+			continue
+		}
+		// Flush Pool
+		e.Ctx.AutoreleasePoolPop(pool)
 	}
 
 	// Phase 2: Generation loop (remaining tokens)
 	for i := 1; i < tokensToGenerate; i++ {
+		// Autorelease Pool for this iteration
+		pool := e.Ctx.AutoreleasePoolPush()
+
 		tToken := time.Now()
 		lastToken := result[len(result)-1]
 		
@@ -435,20 +482,58 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int) ([]int, error) {
 		
 		current := e.Weights.TokenEmb.EmbeddingLookup(lastToken)
 
+		// Convert embedding to FP32 for residual stream accumulation
+		currentF32 := current.ToF32()
+		current.ReturnToPool() // Release F16 embedding
+		
 		// Layers (Attention + FFN)
 		for l := 0; l < e.Config.Layers; l++ {
-			current.Layer(e.Weights.AttnNorm[l], e.Weights.AttnQ[l], e.Weights.AttnK[l], e.Weights.AttnV[l], e.Weights.AttnO[l],
-				e.Weights.FfnNorm[l], e.Weights.FfnGate[l], e.Weights.FfnUp[l], e.Weights.FfnDown[l],
-				e.KVCacheK[l], e.KVCacheV[l], s1, s2, s3, s4,
-				e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim,
-				e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen)
-		}
+			// e.updateCurrentLayer(l) // This function call is not defined in the provided context. Removed.
+			attnNorm := e.Weights.AttnNorm[l]
+			q := e.Weights.AttnQ[l]
+			k := e.Weights.AttnK[l]
+			v := e.Weights.AttnV[l]
+			o := e.Weights.AttnO[l] // Corrected from AttnOutput
+			ffnNorm := e.Weights.FfnNorm[l]
+			ffnGate := e.Weights.FfnGate[l]
+			ffnUp := e.Weights.FfnUp[l]
+			ffnDown := e.Weights.FfnDown[l]
 
-		normed := current.RMSNorm(e.Weights.OutputNorm, e.Config.Eps)
-		logits := normed.Linear(e.Weights.Output)
+			kCache := e.KVCacheK[l] // Corrected from KCache
+			vCache := e.KVCacheV[l] // Corrected from VCache
+
+			// Layer now handles F32 currentF32, using mixed precision
+			currentF32.Layer(attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, kCache, vCache,
+				scratch, // Pass scratch
+				e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen) // Corrected variable names
+		}
+		
+		// Final Norm (F32 -> F16)
+		
+		// Use Into to avoid alloc
+		currentF32.RMSNormFP32_ToF16_Into(e.Weights.OutputNorm, e.Config.Eps, scratch.Normed)
+		
+		// Output Head (F16 -> F32 Logits)
+		// Reuse pre-allocated logits buffer
+		// scratch.Normed contains result. Use it.
+		// Output into scratch.Logits (which is 'logits')
+		scratch.Normed.LinearInto(e.Weights.Output, logits)
+		
+		// Logic update: RMSNormFP32_ToF16_Into does NOT allocate.
+		// It writes to scratch.Normed.
+		// No need to ReturnToPool for scratch.Normed (it's persistent scratch).
+		
 		logitsData := logits.ToHost()
 		
-		// Logit analysis for generation
+		currentF32.ReturnToPool()
+
+		if i == len(inputTokens)-1 { // This is the `isLastPrefill` check
+		    e.CachePos++
+		    metrics.RecordInference(1, time.Since(tToken))
+		    continue
+		}
+		
+		// git analysis for generation
 
 		maxIdx := 0
 		maxVal := logitsData[0]
@@ -460,12 +545,14 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int) ([]int, error) {
 		}
 		
 		if maxIdx == 128001 { // <|end_of_text|> in Llama 3
+			e.Ctx.AutoreleasePoolPop(pool)
 			break
 		}
 		
 		result = append(result, maxIdx)
 		e.CachePos++
 		metrics.RecordInference(1, time.Since(tToken))
+		e.Ctx.AutoreleasePoolPop(pool)
 	}
 
 	return result, nil
@@ -502,18 +589,34 @@ func (e *Engine) initKVCache() error {
 	rows := seqLen
 	cols := kvHeads * headDim
 	
-	for i := 0; i < layers; i++ {
-		e.KVCacheK[i] = e.Ctx.NewTensor(rows, cols)
-		e.KVCacheV[i] = e.Ctx.NewTensor(rows, cols)
-		
-		// Zero init to prevent garbage data
-		e.KVCacheK[i].ZeroInit()
-		e.KVCacheV[i].ZeroInit()
+	// Align 4096
+	align := func(n int) int {
+		return (n + 4095) & ^4095
+	}
+	szPerTensor := align(rows * cols * 2) // F16
+	totalSz := layers * 2 * szPerTensor
+	
+	fmt.Printf("Alloc KVCache Heap: %d bytes\n", totalSz)
+	heap := e.Ctx.NewHeap(totalSz)
+	if heap == nil {
+		return errors.New("KVCache Heap alloc failed")
 	}
 	
-	e.CachePos = 0
+	// We don't store heap ref in Engine struct for now (leaks at exit), 
+	// assuming Engine lives for lifetime of process or we add Free() later.
+	
+	for i := 0; i < layers; i++ {
+		e.KVCacheK[i] = e.Ctx.NewBufferFromHeap(heap, szPerTensor, rows, cols, device.DataTypeF16)
+		e.KVCacheV[i] = e.Ctx.NewBufferFromHeap(heap, szPerTensor, rows, cols, device.DataTypeF16)
+		
+		if e.KVCacheK[i] == nil || e.KVCacheV[i] == nil {
+			return errors.New("KVCache Buffer alloc failed")
+		}
+	}
+	
 	return nil
 }
+
 
 func (e *Engine) Close() {
 	if e.Ctx != nil {
