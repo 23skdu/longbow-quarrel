@@ -23,6 +23,11 @@ go build -tags metal -o quarrel ./cmd/quarrel
 | `-model` | (required) | Path to GGUF model file |
 | `-prompt` | "Hello" | Input prompt text |
 | `-n` | 10 | Number of tokens to generate |
+| `-chatml` | `false` | Wrap prompt in ChatML template (Instruction Tuning) |
+| `-temp` | `0.7` | Sampling Temperature (0.0 = greedy) |
+| `-topk` | `40` | Top-K Sampling |
+| `-topp` | `0.95` | Top-P (Nucleus) Sampling |
+| `-penalty` | `1.1` | Repetition Penalty (1.0 = none) |
 
 ## Model Format
 

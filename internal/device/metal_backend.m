@@ -294,7 +294,6 @@ void Metal_MatMul_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
                       bool transA, MetalBufferRef b, int offB, bool transB,
                       MetalBufferRef c, int offC, int M, int N, int K) {
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
-  printf("DEBUG: MatMul AOff=%d BOff=%d COff=%d\n", offA, offB, offC);
   id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
   [enc setComputePipelineState:mc.pipelineMatMul_F16];
   [enc setBuffer:(__bridge id<MTLBuffer>)a offset:offA atIndex:0];
@@ -781,7 +780,6 @@ void Metal_RMSNorm_F32_F16(MetalContextRef ctx, MetalBufferRef input, int offIn,
                            MetalBufferRef result, int offRes, int rows,
                            int cols, float eps) {
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
-  printf("DEBUG: RMSNorm InOff=%d ResOff=%d\n", offIn, offRes);
   id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
   [enc setComputePipelineState:mc.pipelineRMSNorm_F32_F16];
   [enc setBuffer:(__bridge id<MTLBuffer>)input offset:offIn atIndex:0];
