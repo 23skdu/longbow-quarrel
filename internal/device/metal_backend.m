@@ -472,14 +472,14 @@ void Metal_StoreKV_F16(MetalContextRef ctx, MetalBufferRef k, int oK,
 
 // Granular Attention Steps for Debugging
 void Metal_AttScores_F16(MetalContextRef ctx, MetalBufferRef q, int oQ,
-                         MetalBufferRef kC, MetalBufferRef s, int oS, int p,
-                         int nh, int kh, int hd, int ctxLen) {
+                         MetalBufferRef kC, int oK, MetalBufferRef s, int oS,
+                         int p, int nh, int kh, int hd, int ctxLen) {
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
   id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
   int stride = ctxLen;
   [enc setComputePipelineState:mc.pipelineAttScores_F16];
   [enc setBuffer:(__bridge id<MTLBuffer>)q offset:oQ atIndex:0];
-  [enc setBuffer:(__bridge id<MTLBuffer>)kC offset:0 atIndex:1];
+  [enc setBuffer:(__bridge id<MTLBuffer>)kC offset:oK atIndex:1];
   [enc setBuffer:(__bridge id<MTLBuffer>)s offset:oS atIndex:2];
   [enc setBytes:&p length:4 atIndex:3];
   [enc setBytes:&nh length:4 atIndex:4];
@@ -506,14 +506,14 @@ void Metal_AttSoftmax_F16(MetalContextRef ctx, MetalBufferRef s, int oS, int p,
 }
 
 void Metal_AttValues_F16(MetalContextRef ctx, MetalBufferRef s, int oS,
-                         MetalBufferRef vC, MetalBufferRef r, int oR, int p,
-                         int nh, int kh, int hd, int ctxLen) {
+                         MetalBufferRef vC, int oV, MetalBufferRef r, int oR,
+                         int p, int nh, int kh, int hd, int ctxLen) {
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
   id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
   int stride = ctxLen;
   [enc setComputePipelineState:mc.pipelineAttValues_F16];
   [enc setBuffer:(__bridge id<MTLBuffer>)s offset:oS atIndex:0];
-  [enc setBuffer:(__bridge id<MTLBuffer>)vC offset:0 atIndex:1];
+  [enc setBuffer:(__bridge id<MTLBuffer>)vC offset:oV atIndex:1];
   [enc setBuffer:(__bridge id<MTLBuffer>)r offset:oR atIndex:2];
   [enc setBytes:&p length:4 atIndex:3];
   [enc setBytes:&nh length:4 atIndex:4];
@@ -527,12 +527,12 @@ void Metal_AttValues_F16(MetalContextRef ctx, MetalBufferRef s, int oS,
 }
 
 void Metal_Attention_F16(MetalContextRef ctx, MetalBufferRef q, int oQ,
-                         MetalBufferRef kC, MetalBufferRef vC, MetalBufferRef r,
-                         int oR, MetalBufferRef s, int oS, int p, int nh,
-                         int kh, int hd, int ctxLen) {
-  Metal_AttScores_F16(ctx, q, oQ, kC, s, oS, p, nh, kh, hd, ctxLen);
+                         MetalBufferRef kC, int oK, MetalBufferRef vC, int oV,
+                         MetalBufferRef r, int oR, MetalBufferRef s, int oS,
+                         int p, int nh, int kh, int hd, int ctxLen) {
+  Metal_AttScores_F16(ctx, q, oQ, kC, oK, s, oS, p, nh, kh, hd, ctxLen);
   Metal_AttSoftmax_F16(ctx, s, oS, p, nh, ctxLen);
-  Metal_AttValues_F16(ctx, s, oS, vC, r, oR, p, nh, kh, hd, ctxLen);
+  Metal_AttValues_F16(ctx, s, oS, vC, oV, r, oR, p, nh, kh, hd, ctxLen);
 }
 
 void Metal_RMSNormLinear_F16(MetalContextRef ctx, MetalBufferRef i, int oI,
@@ -763,14 +763,15 @@ void Metal_MatMul_F16_F32_F32(MetalContextRef ctx, MetalBufferRef a, int offA,
 }
 
 void Metal_AttFused_F16(MetalContextRef ctx, MetalBufferRef q, int oQ,
-                        MetalBufferRef kC, MetalBufferRef vC, MetalBufferRef r,
-                        int oR, int p, int nh, int kh, int hd) {
+                        MetalBufferRef kC, int oK, MetalBufferRef vC, int oV,
+                        MetalBufferRef r, int oR, int p, int nh, int kh,
+                        int hd) {
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
   id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
   [enc setComputePipelineState:mc.pipelineAttFused_F16];
   [enc setBuffer:(__bridge id<MTLBuffer>)q offset:oQ atIndex:0];
-  [enc setBuffer:(__bridge id<MTLBuffer>)kC offset:0 atIndex:1];
-  [enc setBuffer:(__bridge id<MTLBuffer>)vC offset:0 atIndex:2];
+  [enc setBuffer:(__bridge id<MTLBuffer>)kC offset:oK atIndex:1];
+  [enc setBuffer:(__bridge id<MTLBuffer>)vC offset:oV atIndex:2];
   [enc setBuffer:(__bridge id<MTLBuffer>)r offset:oR atIndex:3];
   [enc setBytes:&p length:4 atIndex:4];
   [enc setBytes:&nh length:4 atIndex:5];

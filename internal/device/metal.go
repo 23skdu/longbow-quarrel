@@ -1015,11 +1015,13 @@ func (t *Tensor) Layer(attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, k
 		// 5. Attention
 		if p < 1024 {
 			C.Metal_AttFused_F16(t.ctx.ref, qPart.buf, C.int(qPart.Offset + offQ),
-				kCache.buf, vCache.buf, attOut.buf, C.int(attOut.Offset + offAtt),
+				kCache.buf, C.int(kCache.Offset + offK),
+				vCache.buf, C.int(vCache.Offset + offV),
+				attOut.buf, C.int(attOut.Offset + offAtt),
 				C.int(p), C.int(heads), C.int(kvHeads), C.int(headDim))
 		} else {
 			// 5a. Scores
-			C.Metal_AttScores_F16(t.ctx.ref, qPart.buf, C.int(qPart.Offset + offQ), kCache.buf, 
+			C.Metal_AttScores_F16(t.ctx.ref, qPart.buf, C.int(qPart.Offset + offQ), kCache.buf, C.int(kCache.Offset + offK),
 				scores.buf, 0,
 				C.int(p), C.int(heads), C.int(kvHeads), C.int(headDim), C.int(ctxLen))
 			t.ctx.Synchronize()
@@ -1044,7 +1046,7 @@ func (t *Tensor) Layer(attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, k
 			}
 
 			// 5c. Values
-			C.Metal_AttValues_F16(t.ctx.ref, scores.buf, 0, vCache.buf, attOut.buf, C.int(offAtt),
+			C.Metal_AttValues_F16(t.ctx.ref, scores.buf, 0, vCache.buf, C.int(vCache.Offset + offV), attOut.buf, C.int(offAtt),
 				C.int(p), C.int(heads), C.int(kvHeads), C.int(headDim), C.int(ctxLen))
 		}
 		t.ctx.Synchronize()
@@ -1320,10 +1322,23 @@ func (t *Tensor) Attention(kCache, vCache *Tensor, pos, numHeads, kvHeads, headD
 	if scoresDim < 32768 { scoresDim = 32768 }
 	scores := t.ctx.NewTensorFP32Pooled(1, scoresDim)
 	
-	C.Metal_Attention_F16(t.ctx.ref, t.buf, 0, kCache.buf, vCache.buf, res.buf, 0,
+	C.Metal_Attention_F16(t.ctx.ref, t.buf, 0, kCache.buf, C.int(kCache.Offset), 
+		vCache.buf, C.int(vCache.Offset), res.buf, 0,
 		scores.buf, 0,
 		C.int(pos), C.int(numHeads), C.int(kvHeads), C.int(headDim), C.int(ctxLen))
 	return res
+}
+
+// AttFused performs fused attention (Score + Softmax + Value Aggregation)
+// t is Query [1, Heads*HeadDim]
+// kCache, vCache are caches
+// out is Output [1, Heads*HeadDim]
+func (t *Tensor) AttFused(kCache, vCache *Tensor, out *Tensor, pos, numHeads, kvHeads, headDim int) {
+	C.Metal_AttFused_F16(t.ctx.ref, t.buf, C.int(t.Offset),
+		kCache.buf, C.int(kCache.Offset),
+		vCache.buf, C.int(vCache.Offset),
+		out.buf, C.int(out.Offset),
+		C.int(pos), C.int(numHeads), C.int(kvHeads), C.int(headDim))
 }
 
 // FP32 Operations
@@ -1451,9 +1466,9 @@ func (t *Tensor) ToHostF32() []float32 {
 func (t *Tensor) AttentionScores(kCache *Tensor, scores *Tensor, pos, numHeads, kvHeads, headDim, stride int) {
 	C.Metal_AttScores_F16(
 		t.ctx.ref,
-		t.buf, 0,
-		kCache.buf,
-		scores.buf, 0,
+		t.buf, C.int(t.Offset),
+		kCache.buf, C.int(kCache.Offset),
+		scores.buf, C.int(scores.Offset),
 		C.int(pos),
 		C.int(numHeads),
 		C.int(kvHeads),
