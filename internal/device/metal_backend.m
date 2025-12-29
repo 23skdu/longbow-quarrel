@@ -169,7 +169,7 @@ void Metal_Synchronize(MetalContextRef ctx) {
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
   [mc flush];
 }
-MetalBufferRef Metal_Alloc(MetalContextRef ctx, int size) {
+MetalBufferRef Metal_Alloc(MetalContextRef ctx, long long size) {
   id<MTLBuffer> buf = [[(__bridge MetalWrapper *)ctx device]
       newBufferWithLength:size
                   options:MTLResourceStorageModeShared];
@@ -179,7 +179,7 @@ MetalBufferRef Metal_Alloc(MetalContextRef ctx, int size) {
   return (__bridge_retained MetalBufferRef)buf;
 }
 
-MetalBufferRef Metal_AllocPrivate(MetalContextRef ctx, int size) {
+MetalBufferRef Metal_AllocPrivate(MetalContextRef ctx, long long size) {
   id<MTLBuffer> buf = [[(__bridge MetalWrapper *)ctx device]
       newBufferWithLength:size
                   options:MTLResourceStorageModePrivate];
@@ -196,7 +196,7 @@ void Metal_FreeBuffer(MetalContextRef ctx, MetalBufferRef buf) {
   b = nil;
 }
 // Heap Allocation
-void *Metal_NewHeap(MetalContextRef ctx, int size) {
+void *Metal_NewHeap(MetalContextRef ctx, long long size) {
   MTLHeapDescriptor *desc = [MTLHeapDescriptor new];
   desc.size = size;
   desc.storageMode = MTLStorageModeShared; // CPU accessible
@@ -215,7 +215,7 @@ void *Metal_NewHeap(MetalContextRef ctx, int size) {
   return (__bridge_retained void *)heap;
 }
 
-MetalBufferRef Metal_NewBufferFromHeap(void *heapRef, int size) {
+MetalBufferRef Metal_NewBufferFromHeap(void *heapRef, long long size) {
   id<MTLHeap> heap = (__bridge id<MTLHeap>)heapRef;
   id<MTLBuffer> buf = [heap newBufferWithLength:size
                                         options:MTLResourceStorageModeShared];
@@ -395,9 +395,12 @@ void Metal_RoPE_F16(MetalContextRef ctx, MetalBufferRef d, int oD, int b, int s,
   [enc setBytes:&po length:4 atIndex:1];
   [enc setBytes:&hd length:4 atIndex:2];
   [enc setBytes:&rt length:4 atIndex:3];
+  [enc setBytes:&nh length:4 atIndex:4];
 
   int pairs = nh * (hd / 2);
-  [enc dispatchThreads:MTLSizeMake(pairs, 1, 1)
+  // Dispatch: (pairs, seqLen, 1)
+  // kernel uses uint2 gid
+  [enc dispatchThreads:MTLSizeMake(pairs, s, 1)
       threadsPerThreadgroup:MTLSizeMake(MIN(pairs, 256), 1, 1)];
   [mc barrier];
 }

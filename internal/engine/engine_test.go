@@ -134,7 +134,11 @@ func TestEngineLifecycle(t *testing.T) {
 	// Inference
 	// We want to pass a prompt tokens list
 	inputTokens := []int{1, 2, 3}
-	outputTokens, err := e.Infer(inputTokens, 10) // generate 10 tokens
+	// Add config
+	config := SamplerConfig{
+		Temperature: 0,
+	}
+	outputTokens, err := e.Infer(inputTokens, 10, config) // generate 10 tokens
 	if err != nil {
 		t.Logf("Inference returned error (expected for empty/stub engine): %v", err)
 	}

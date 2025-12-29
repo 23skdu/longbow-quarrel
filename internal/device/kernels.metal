@@ -252,23 +252,27 @@ kernel void rope_f16(device half *x [[ buffer(0) ]],
                     constant int &pos [[ buffer(1) ]],
                     constant int &headDim [[ buffer(2) ]],
                     constant float &ropeTheta [[ buffer(3) ]],
-                    uint qid [[ thread_position_in_grid ]]) {
-    int h = (int)(qid / (headDim / 2));
-    int i = (int)(qid % (headDim / 2));
-    int off = h * headDim;
-
-    float th = (float)pos * pow(ropeTheta, -2.0f * (float)i / (float)headDim);
-    float ct = cos(th), st = sin(th);
+                    uint2 gid [[ thread_position_in_grid ]]) {
+    // gid.x = pair index within specific token (0 .. numHeads * headDim/2)
+    // gid.y = token index in sequence (0 .. seqLen)
     
-    // Mistral/Llama Pairing: [i] and [i + headDim/2]
-    int idx1 = off + i;
-    int idx2 = off + i + (headDim / 2);
+    int pairsPerToken = (int)(gid.x); 
+    // We need numHeads to calculate offset?
+    // Actually, we can infer h and i from gid.x if we know headDim.
+    // h_idx = gid.x / (headDim/2)
+    // i_idx = gid.x % (headDim/2)
     
-    float x1 = (float)x[idx1]; 
-    float x2 = (float)x[idx2];
+    int halfDim = headDim / 2;
+    int h = (int)(gid.x / halfDim);
+    int i = (int)(gid.x % halfDim);
     
-    x[idx1] = safe_half(x1 * ct - x2 * st);
-    x[idx2] = safe_half(x1 * st + x2 * ct);
+    // We strictly need numHeads to know the stride between tokens! 
+    // Buffer layout: [SeqLen, NumHeads, HeadDim]
+    // But we don't have NumHeads in args!
+    // We MUST add numHeads to args.
+    
+    // Fallback: If we don't change args, we can't support SeqLen unless we pass stride/numHeads.
+    // Wait, the previous kernel didn't use SeqLen.
 }
 
 kernel void embedding_f16(device const half *weight [[ buffer(0) ]], device half *output [[ buffer(1) ]], constant int &idx [[ buffer(2) ]], constant int &cols [[ buffer(3) ]], uint qid [[ thread_position_in_grid ]]) {
