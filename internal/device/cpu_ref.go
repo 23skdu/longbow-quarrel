@@ -1,6 +1,7 @@
 package device
 
 import (
+	"fmt"
 	"math"
 )
 
@@ -139,7 +140,7 @@ const Q4KBlockSize = 144
 // Input A is F32 here for simplicity, but we can verify F16 accuracy.
 func CPUQ4KMatMul(a []float32, b []byte, M, N, K int) []float32 {
 	if len(b) != (N*K/BlockSize)*Q4KBlockSize {
-		// panic(fmt.Sprintf("Q4K size mismatch: %d vs expected %d", len(b), (N*K/BlockSize)*Q4KBlockSize))
+		panic(fmt.Sprintf("Q4K size mismatch: %d vs expected %d", len(b), (N*K/BlockSize)*Q4KBlockSize))
 	}
 	out := make([]float32, M*N)
 	

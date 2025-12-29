@@ -787,30 +787,28 @@ func (t *Tensor) Layer(attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, k
 		t.ctx.Synchronize()
 		
 
-		// 5. Attention (Granular for Debug)
-		// 5a. Scores
-		C.Metal_AttScores_F16(t.ctx.ref, qPart.buf, C.int(offQ), kCache.buf, 
-			scores.buf, 0,
-			C.int(p), C.int(heads), C.int(kvHeads), C.int(headDim), C.int(ctxLen))
-		t.ctx.Synchronize()
-		scores.ScanScores(fmt.Sprintf("Attn Scores Pre-Softmax (Pos %d)", p))
+		if p < 1024 {
+			C.Metal_AttFused_F16(t.ctx.ref, qPart.buf, C.int(offQ),
+				kCache.buf, vCache.buf, attOut.buf, C.int(offAtt),
+				C.int(p), C.int(heads), C.int(kvHeads), C.int(headDim))
+		} else {
+			// 5a. Scores
+			C.Metal_AttScores_F16(t.ctx.ref, qPart.buf, C.int(offQ), kCache.buf, 
+				scores.buf, 0,
+				C.int(p), C.int(heads), C.int(kvHeads), C.int(headDim), C.int(ctxLen))
+			t.ctx.Synchronize()
+			
+			// 5b. Softmax
+			C.Metal_AttSoftmax_F16(t.ctx.ref, scores.buf, 0, C.int(p), C.int(heads), C.int(ctxLen))
+			t.ctx.Synchronize()
 
-		// 5b. Softmax
-		// Score Scaling Removed (Testing if unscaled scores ~500 are sufficient)
-		// scores.ScaleInPlace(100.0) 
-		scores.ScanMax(fmt.Sprintf("Attn Scores (Pos %d)", p)) 
-		
-		C.Metal_AttSoftmax_F16(t.ctx.ref, scores.buf, 0, C.int(p), C.int(heads), C.int(ctxLen))
-		t.ctx.Synchronize()
-		scores.ScanScores(fmt.Sprintf("Attn Scores Post-Softmax (Pos %d)", p))
-
-		// 5c. Values
-		C.Metal_AttValues_F16(t.ctx.ref, scores.buf, 0, vCache.buf, attOut.buf, C.int(offAtt),
-			C.int(p), C.int(heads), C.int(kvHeads), C.int(headDim), C.int(ctxLen))
+			// 5c. Values
+			C.Metal_AttValues_F16(t.ctx.ref, scores.buf, 0, vCache.buf, attOut.buf, C.int(offAtt),
+				C.int(p), C.int(heads), C.int(kvHeads), C.int(headDim), C.int(ctxLen))
+		}
 		t.ctx.Synchronize()
 	}
 	t.ctx.Synchronize()
-	attOut.ScanMax("Attn Values (Pre-Proj)")
 		
 	// 6. Attention Output Projection
 	attOut.LinearInto(o, resAtt)

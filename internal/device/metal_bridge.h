@@ -151,6 +151,10 @@ void Metal_MatMul_F16_F32(MetalContextRef ctx, MetalBufferRef a, int offA,
                           MetalBufferRef b, int offB, MetalBufferRef c,
                           int offC, int M, int N, int K);
 
+void Metal_AttFused_F16(MetalContextRef ctx, MetalBufferRef q, int offQ,
+                        MetalBufferRef kC, MetalBufferRef vC, MetalBufferRef r,
+                        int oR, int p, int nh, int kh, int hd);
+
 #ifdef __cplusplus
 }
 #endif

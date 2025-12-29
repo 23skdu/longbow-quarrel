@@ -270,17 +270,21 @@ kernel void embedding_f16(device const half *weight [[ buffer(0) ]], device half
 kernel void softmax_f16(device float *scores [[ buffer(0) ]],
                       constant int &pos [[ buffer(1) ]],
                       constant int &stride [[ buffer(2) ]],
-                      uint qid [[ thread_position_in_grid ]]) {
-    device float *s = scores + qid * stride;
-    float mv = s[0]; 
-    for (int i = 1; i <= pos; i++) if (s[i] > mv) mv = s[i];
-    float se = 0; 
-    for (int i = 0; i <= pos; i++) { 
-        float e = exp(s[i] - mv); 
-        s[i] = e; 
-        se += e; 
+                      uint tid [[ thread_position_in_threadgroup ]],
+                      uint qid [[ threadgroup_position_in_grid ]]) {
+    device float *s = scores + qid * (uint)stride;
+    float mv = -10000.0f;
+    for (int i = tid; i <= pos; i += 32) if (s[i] > mv) mv = s[i];
+    mv = simd_max(mv);
+    
+    float se = 0;
+    for (int i = tid; i <= pos; i += 32) {
+        float e = exp(s[i] - mv);
+        s[i] = e;
+        se += e;
     }
-    for (int i = 0; i <= pos; i++) s[i] /= se;
+    se = simd_sum(se);
+    for (int i = tid; i <= pos; i += 32) s[i] /= se;
 }
 
 kernel void att_scores_f16(device const half *q [[ buffer(0) ]],
@@ -304,6 +308,81 @@ kernel void att_scores_f16(device const half *q [[ buffer(0) ]],
         float d = 0; device const half *mk = k_cache + t * kv_dim + kvh * headDim;
         for (int i = (int)lane; i < headDim; i += 32) d += (float)mq[i] * (float)mk[i];
         d = simd_sum(d); if (lane == 0) scores [h * stride + t] = d * scale;
+    }
+}
+
+kernel void att_fused_f16(device const half *q [[ buffer(0) ]],
+                        device const half *k_cache [[ buffer(1) ]],
+                        device const half *v_cache [[ buffer(2) ]],
+                        device half *output [[ buffer(3) ]],
+                        constant int &pos [[ buffer(4) ]],
+                        constant int &num_heads [[ buffer(5) ]],
+                        constant int &kv_heads [[ buffer(6) ]],
+                        constant int &headDim [[ buffer(7) ]],
+                        uint3 tid [[ thread_position_in_threadgroup ]],
+                        uint3 group_id [[ threadgroup_position_in_grid ]]) {
+    uint h = group_id.x; if (h >= (uint)num_heads) return;
+    uint kvh = h / (num_heads / kv_heads);
+    uint kv_dim = kv_heads * headDim;
+    float scale = 1.0f / sqrt((float)headDim);
+
+    threadgroup float s_mem[1024]; // Max fused length
+    device const half *mq = q + h * headDim;
+    
+    // Parallel score calculation
+    for (int t = tid.x; t < 1024; t += 1024) {
+        if (t <= pos) {
+            float d = 0; device const half *mk = k_cache + t * kv_dim + kvh * headDim;
+            for (int i = 0; i < headDim; i++) d += (float)mq[i] * (float)mk[i];
+            s_mem[t] = d * scale;
+        } else {
+            s_mem[t] = -10000.0f; // -inf for softmax
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Softmax
+    threadgroup float tg_mv;
+    float l_mv = -10000.0f;
+    for (int i = tid.x; i <= pos; i += 1024) if (s_mem[i] > l_mv) l_mv = s_mem[i];
+    l_mv = simd_max(l_mv);
+    
+    threadgroup float scratch[32];
+    if ((tid.x & 31) == 0) scratch[tid.x / 32] = l_mv;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid.x < 32) {
+        float m = (tid.x < 32) ? scratch[tid.x] : -10000.0f;
+        m = simd_max(m);
+        if (tid.x == 0) tg_mv = m;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float mv = tg_mv;
+    
+    threadgroup float tg_se;
+    float l_se = 0;
+    for (int i = tid.x; i <= pos; i += 1024) {
+        float e = exp(s_mem[i] - mv);
+        s_mem[i] = e;
+        l_se += e;
+    }
+    l_se = simd_sum(l_se);
+    if ((tid.x & 31) == 0) scratch[tid.x / 32] = l_se;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid.x < 32) {
+        float s = (tid.x < 32) ? scratch[tid.x] : 0.0f;
+        s = simd_sum(s);
+        if (tid.x == 0) tg_se = s;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float se = tg_se;
+    
+    // Result Accumulation
+    if (tid.x < (uint)headDim) {
+        float r = 0;
+        for (int i = 0; i <= pos; i++) {
+            r += (s_mem[i] / se) * (float)v_cache[i * kv_dim + kvh * headDim + tid.x];
+        }
+        output[h * headDim + tid.x] = safe_half(r);
     }
 }
 
