@@ -32,6 +32,9 @@
 @property(strong) id<MTLComputePipelineState> pipelineLinearF16ToF32;
 @property(strong) id<MTLComputePipelineState> pipelineLinearF32ToF16;
 @property(strong) id<MTLComputePipelineState> pipelineCopy_F32_F16;
+// Mixed Precision
+@property(strong) id<MTLComputePipelineState> pipelineRMSNorm_F32_F16;
+@property(strong) id<MTLComputePipelineState> pipelineAdd_F32_F16;
 @property(strong) id<MTLCommandBuffer> currentCommandBuffer;
 @property(strong) id<MTLComputeCommandEncoder> currentEncoder;
 @end
@@ -80,6 +83,23 @@ static id<MTLComputePipelineState> loadPipeline(MetalWrapper *ctx,
     return nil;
   }
   return p;
+}
+
+// Autorelease Pool
+void *Metal_AutoreleasePoolPush() {
+#if __has_feature(objc_arc)
+  return (__bridge void *)[NSAutoreleasePool new];
+#else
+  return [NSAutoreleasePool new];
+#endif
+}
+
+void Metal_AutoreleasePoolPop(void *pool) {
+#if __has_feature(objc_arc)
+  [(__bridge NSAutoreleasePool *)pool drain];
+#else
+  [(NSAutoreleasePool *)pool drain];
+#endif
 }
 
 MetalContextRef Metal_Init(const char *libSource) {
@@ -135,6 +155,8 @@ MetalContextRef Metal_Init(const char *libSource) {
   // FP32 FFN Pipelines for Small Models
   ctx.pipelineLinearF16ToF32 = loadPipeline(ctx, @"linear_f16_to_f32");
   ctx.pipelineLinearF32ToF16 = loadPipeline(ctx, @"linear_f32_to_f16");
+  ctx.pipelineRMSNorm_F32_F16 = loadPipeline(ctx, @"rmsnorm_f32_to_f16");
+  ctx.pipelineAdd_F32_F16 = loadPipeline(ctx, @"add_f32_f16");
 
   return (__bridge_retained MetalContextRef)ctx;
 }
@@ -148,19 +170,79 @@ void Metal_Synchronize(MetalContextRef ctx) {
   [mc flush];
 }
 MetalBufferRef Metal_Alloc(MetalContextRef ctx, int size) {
-  return (
-      __bridge_retained MetalBufferRef)[[(__bridge MetalWrapper *)ctx device]
+  id<MTLBuffer> buf = [[(__bridge MetalWrapper *)ctx device]
       newBufferWithLength:size
                   options:MTLResourceStorageModeShared];
+#if !__has_feature(objc_arc)
+  [buf retain];
+#endif
+  return (__bridge_retained MetalBufferRef)buf;
+}
+
+MetalBufferRef Metal_AllocPrivate(MetalContextRef ctx, int size) {
+  id<MTLBuffer> buf = [[(__bridge MetalWrapper *)ctx device]
+      newBufferWithLength:size
+                  options:MTLResourceStorageModePrivate];
+#if !__has_feature(objc_arc)
+  [buf retain];
+#endif
+  return (__bridge_retained MetalBufferRef)buf;
 }
 void Metal_FreeBuffer(MetalContextRef ctx, MetalBufferRef buf) {
-  id<MTLBuffer> b = (__bridge_transfer id<MTLBuffer>)buf;
+  id<MTLBuffer> b = (__bridge id<MTLBuffer>)buf;
+#if !__has_feature(objc_arc)
+  [b release];
+#endif
   b = nil;
 }
+// Heap Allocation
+void *Metal_NewHeap(MetalContextRef ctx, int size) {
+  MTLHeapDescriptor *desc = [MTLHeapDescriptor new];
+  desc.size = size;
+  desc.storageMode = MTLStorageModeShared; // CPU accessible
+  desc.cpuCacheMode = MTLCPUCacheModeDefaultCache;
+  desc.hazardTrackingMode = MTLHazardTrackingModeDefault;
+
+  id<MTLHeap> heap =
+      [[(__bridge MetalWrapper *)ctx device] newHeapWithDescriptor:desc];
+  if (!heap) {
+    printf("ERROR: Failed to allocate Metal Heap of size %d\n", size);
+    return NULL;
+  }
+#if !__has_feature(objc_arc)
+  [heap retain];
+#endif
+  return (__bridge_retained void *)heap;
+}
+
+MetalBufferRef Metal_NewBufferFromHeap(void *heapRef, int size) {
+  id<MTLHeap> heap = (__bridge id<MTLHeap>)heapRef;
+  id<MTLBuffer> buf = [heap newBufferWithLength:size
+                                        options:MTLResourceStorageModeShared];
+  if (!buf) {
+    printf("ERROR: Failed to allocate Buffer from Heap size %d\n", size);
+    return NULL;
+  }
+#if !__has_feature(objc_arc)
+  [buf retain];
+#endif
+  return (__bridge_retained MetalBufferRef)buf;
+}
+
+void Metal_FreeHeap(void *heap) {
+  id<MTLHeap> h = (__bridge id<MTLHeap>)heap;
+#if !__has_feature(objc_arc)
+  [h release];
+#endif
+  h = nil;
+}
+
 void Metal_CopyToDevice(MetalBufferRef buf, int o, const void *d, int s) {
   id<MTLBuffer> b = (__bridge id<MTLBuffer>)buf;
   memcpy([b contents] + o, d, s);
+#if defined(__MAC_10_15) || defined(__IPHONE_13_0)
   [b didModifyRange:NSMakeRange(o, s)];
+#endif
 }
 void Metal_CopyToHost(MetalBufferRef buf, int o, void *d, int s) {
   memcpy(d, [(__bridge id<MTLBuffer>)buf contents] + o, s);
@@ -212,6 +294,7 @@ void Metal_MatMul_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
                       bool transA, MetalBufferRef b, int offB, bool transB,
                       MetalBufferRef c, int offC, int M, int N, int K) {
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
+  printf("DEBUG: MatMul AOff=%d BOff=%d COff=%d\n", offA, offB, offC);
   id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
   [enc setComputePipelineState:mc.pipelineMatMul_F16];
   [enc setBuffer:(__bridge id<MTLBuffer>)a offset:offA atIndex:0];
@@ -441,8 +524,8 @@ void Metal_BatchedMatMul_F16(MetalContextRef ctx, MetalBufferRef a, int oA,
                              int N, int K, int bC) {
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
   id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
-  [enc endEncoding]; // MPS needs its own encoder (Blit/Compute) usually, or we
-                     // use command buffer directly.
+  [enc endEncoding]; // MPS needs its own encoder (Blit/Compute) usually, or
+                     // we use command buffer directly.
   mc.currentEncoder = nil;
 
   MPSMatrixDescriptor *descA =
@@ -690,5 +773,40 @@ void Metal_LinearF32ToF16(MetalContextRef ctx, MetalBufferRef weight,
   [enc setBytes:&dimOut length:4 atIndex:4];
   [enc dispatchThreadgroups:MTLSizeMake(1, dimOut, rows)
       threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+  [mc barrier];
+}
+
+void Metal_RMSNorm_F32_F16(MetalContextRef ctx, MetalBufferRef input, int offIn,
+                           MetalBufferRef weight, int offWeight,
+                           MetalBufferRef result, int offRes, int rows,
+                           int cols, float eps) {
+  MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
+  printf("DEBUG: RMSNorm InOff=%d ResOff=%d\n", offIn, offRes);
+  id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
+  [enc setComputePipelineState:mc.pipelineRMSNorm_F32_F16];
+  [enc setBuffer:(__bridge id<MTLBuffer>)input offset:offIn atIndex:0];
+  [enc setBuffer:(__bridge id<MTLBuffer>)result offset:offRes atIndex:1];
+  [enc setBuffer:(__bridge id<MTLBuffer>)weight offset:offWeight atIndex:2];
+  [enc setBytes:&eps length:4 atIndex:3];
+  [enc setBytes:&cols length:4 atIndex:4];
+  int threads = (cols < 1024) ? cols : 1024;
+  [enc dispatchThreads:MTLSizeMake(threads, rows, 1)
+      threadsPerThreadgroup:MTLSizeMake(threads, 1, 1)];
+  [mc barrier];
+}
+
+void Metal_Add_F32_F16(MetalContextRef ctx, MetalBufferRef a, int oA,
+                       MetalBufferRef b, int oB, MetalBufferRef r, int oR,
+                       int count) {
+  MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
+  id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
+  [enc setComputePipelineState:mc.pipelineAdd_F32_F16];
+  [enc setBuffer:(__bridge id<MTLBuffer>)a
+          offset:oA
+         atIndex:0]; // FP32 accumulator
+  [enc setBuffer:(__bridge id<MTLBuffer>)b offset:oB atIndex:1]; // FP16 delta
+  [enc setBuffer:(__bridge id<MTLBuffer>)r offset:oR atIndex:2]; // FP32 result
+  [enc dispatchThreads:MTLSizeMake(count, 1, 1)
+      threadsPerThreadgroup:MTLSizeMake(MIN(count, 256), 1, 1)];
   [mc barrier];
 }

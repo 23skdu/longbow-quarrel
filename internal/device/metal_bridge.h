@@ -166,6 +166,15 @@ void Metal_LinearF32ToF16(MetalContextRef ctx, MetalBufferRef weight,
                           MetalBufferRef output, int offOutput, int rows,
                           int dimIn, int dimOut);
 
+void Metal_RMSNorm_F32_F16(MetalContextRef ctx, MetalBufferRef input, int offIn,
+                           MetalBufferRef weight, int offWeight,
+                           MetalBufferRef result, int offRes, int rows,
+                           int cols, float eps);
+
+void Metal_Add_F32_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
+                       MetalBufferRef b, int offB, MetalBufferRef result,
+                       int offRes, int count);
+
 #ifdef __cplusplus
 }
 #endif
