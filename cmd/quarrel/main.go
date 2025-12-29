@@ -21,6 +21,13 @@ var (
 	prompt      = flag.String("prompt", "Hello world", "Prompt to generate from")
 	numTokens   = flag.Int("n", 20, "Number of tokens to generate")
 	metricsAddr = flag.String("metrics", ":9090", "Address to serve Prometheus metrics")
+	
+	// Sampling flags
+	temperature = flag.Float64("temp", 0.7, "Temperature for sampling (0.0 = greedy)")
+	topK        = flag.Int("topk", 40, "Top-K sampling")
+	topP        = flag.Float64("topp", 0.95, "Top-P (Nucleus) sampling")
+	repPenalty  = flag.Float64("penalty", 1.1, "Repetition penalty")
+	chatML      = flag.Bool("chatml", false, "Wrap prompt in ChatML template")
 )
 
 func main() {
@@ -78,15 +85,47 @@ func main() {
 	}
 	defer e.Close()
 
-	// Tokenize
-	inputTokensRaw := tok.Encode(*prompt)
+	// Parse ChatML Special Tokens from Tokenizer if possible, or use defaults for SmolLM2
+	// <|im_start|> = 1
+	// <|im_end|> = 2
+	// \n = 198 (Standard GPT-2/Llama)
+	const (
+		ID_IM_START = 1
+		ID_IM_END   = 2
+		ID_NEWLINE  = 198
+	)
+
+	// Tokenize prompt
+	var inputTokens []int
 	
-	// Prepend BOS for SmolLM2 (1)
-	inputTokens := make([]int, 0, len(inputTokensRaw)+1)
-	inputTokens = append(inputTokens, 1)
-	inputTokens = append(inputTokens, inputTokensRaw...)
+	if *chatML {
+		// Manual ChatML Construction to avoid tokenizer splitting special tokens
+		// <|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n
+		
+		inputTokens = append(inputTokens, ID_IM_START)
+		inputTokens = append(inputTokens, tok.Encode("user")...)
+		inputTokens = append(inputTokens, ID_NEWLINE)
+		
+		inputTokens = append(inputTokens, tok.Encode(*prompt)...)
+		
+		inputTokens = append(inputTokens, ID_IM_END)
+		inputTokens = append(inputTokens, ID_NEWLINE)
+		
+		inputTokens = append(inputTokens, ID_IM_START)
+		inputTokens = append(inputTokens, tok.Encode("assistant")...)
+		inputTokens = append(inputTokens, ID_NEWLINE)
+		
+	} else {
+		// Raw prompt
+		inputTokens = tok.Encode(*prompt)
+		// Prepend BOS if needed? SmolLM2 might not need BOS for raw completion, but usually yes.
+		// Let's prepend 1 just in case, unless it's ChatML where we explicitly added it.
+		// Actually, standard Llama 2 adds BOS.
+		// Let's add it.
+		inputTokens = append([]int{1}, inputTokens...)
+	}
 	
-	log.Printf("Encoded prompt '%s' -> %v (len %d)", *prompt, inputTokens, len(inputTokens))
+	log.Printf("Encoded tokens: %v (len %d)", inputTokens, len(inputTokens))
 
 	log.Printf("Starting inference for %d tokens...", *numTokens)
 	
@@ -94,7 +133,19 @@ func main() {
 	
 	go func() {
 		start := time.Now()
-		result, err := e.Infer(inputTokens, *numTokens)
+		
+		samplerConfig := engine.SamplerConfig{
+			Temperature: *temperature,
+			TopK:        *topK,
+			TopP:        *topP,
+			RepPenalty:  *repPenalty,
+			Seed:        time.Now().UnixNano(),
+		}
+		
+		log.Printf("Sampling Config: Temp=%.2f TopK=%d TopP=%.2f Penalty=%.2f", 
+			*temperature, *topK, *topP, *repPenalty)
+			
+		result, err := e.Infer(inputTokens, *numTokens, samplerConfig)
 		if err != nil {
 			log.Printf("Inference error: %v", err)
 		} else {

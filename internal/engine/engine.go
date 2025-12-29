@@ -337,7 +337,16 @@ func toFloat64(v interface{}) float64 {
 	}
 }
 
-func (e *Engine) Infer(inputTokens []int, tokensToGenerate int) ([]int, error) {
+func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig SamplerConfig) ([]int, error) {
+	// Validation
+	if len(inputTokens) == 0 {
+		return nil, errors.New("empty input tokens")
+	}
+
+	fmt.Printf("DEBUG CONFIG: RopeTheta=%.2f HeadDim=%d Heads=%d KVHeads=%d Eps=%.6f\n",
+		e.Config.RopeTheta, e.Config.HeadDim, e.Config.Heads, e.Config.KVHeads, e.Config.Eps)
+	
+	// Phase 1: Prefill (Process all tokens except last one, generating KV cache)
 	if e.Model == nil {
 		return nil, errors.New("no model loaded")
 	}
@@ -369,6 +378,8 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int) ([]int, error) {
 	// Lock OS thread for AutoreleasePool consistency
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
+	
+	sampler := NewSampler(samplerConfig)
 
 	// Main Generation Loop
 	
@@ -432,15 +443,10 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int) ([]int, error) {
 			
 			logitsData := logits.ToHost()
 
-			maxIdx := 0
-			maxVal := logitsData[0]
-			for idx, val := range logitsData {
-				if val > maxVal {
-					maxVal = val
-					maxIdx = idx
-				}
-			}
-			result = append(result, maxIdx)
+			// Use Sampler
+			// History is just inputTokens for the first step
+			nextObj := sampler.Sample(logitsData, inputTokens, e.Config.VocabSize)
+			result = append(result, nextObj)
 		}
 		
 		currentF32.ReturnToPool()
@@ -526,16 +532,7 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int) ([]int, error) {
 		    continue
 		}
 		
-		// git analysis for generation
-
-		maxIdx := 0
-		maxVal := logitsData[0]
-		for idx, val := range logitsData {
-			if val > maxVal {
-				maxVal = val
-				maxIdx = idx
-			}
-		}
+		maxIdx := sampler.Sample(logitsData, result, e.Config.VocabSize)
 		
 		if maxIdx == 128001 { // <|end_of_text|> in Llama 3
 			e.Ctx.AutoreleasePoolPop(pool)

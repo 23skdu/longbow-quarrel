@@ -821,7 +821,7 @@ func (c *Context) NewLayerScratch(batch, dim, hiddenDim, heads, kvHeads, headDim
 	szUp := align(batch * hiddenDim * 4)
 	szSwiOut := align(batch * hiddenDim * 4)
 	
-	szLogits := align(1 * vocabSize * 4)
+	szLogits := align(1 * vocabSize * 2) // F16
 	
 	total := szNormed + szQPart + szKPart + szVPart + szAttOut + szResAtt + 
 		szNormedFFN + szNormedFFN_F32 + szResFFN + szResFFN_F32 + szScores + szGate + szUp + szSwiOut + szLogits
@@ -875,7 +875,7 @@ func (c *Context) NewLayerScratch(batch, dim, hiddenDim, heads, kvHeads, headDim
 	s.UpPart = newT(szUp, batch, hiddenDim, DataTypeF32)
 	s.SwiOut = newT(szSwiOut, batch, hiddenDim, DataTypeF32)
 	
-	s.Logits = newT(szLogits, 1, vocabSize, DataTypeF32)
+	s.Logits = newT(szLogits, 1, vocabSize, DataTypeF16)
 	
 	return s
 }
@@ -1076,10 +1076,9 @@ func (t *Tensor) Layer(attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, k
 		// 10. SwiGLU (FP32)
 		swiOut := scratch.SwiOut
 		gatePart.SwiGLU_FP32_Into(upPart, swiOut)
-		// swiOut.ScanMax("SwiGLU Out (FP32)")
 		
-		// 11. Down Projection (FP32 → FP16)
-
+		// 11. Down Projection (FP32 -> FP16)
+		
 		// 11. Down Projection (FP32 -> FP32)
 		resFFN := scratch.ResFFN_F32
 		swiOut.LinearF32_Into(ffnDown, resFFN) // Handles Q4K
