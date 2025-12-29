@@ -7,8 +7,14 @@
 go build -tags metal -o quarrel ./cmd/quarrel
 
 # Run inference
-./quarrel -model /path/to/model.gguf -n 50 -prompt "Hello, world"
+./quarrel -model "mistral:latest" -n 50 -prompt "Hello, world"
+
+# (Optional) Direct path
+./quarrel -model ~/.ollama/models/blobs/sha256-... -n 50
 ```
+
+> [!TIP]
+> Longbow-quarrel automatically resolves Ollama model names by searching `~/.ollama/models`. You don't need to provide the full blob path manually.
 
 ## Command Line Options
 

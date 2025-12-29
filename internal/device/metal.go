@@ -374,14 +374,33 @@ func (t *Tensor) ScanNaNs(name string) int {
 func (t *Tensor) ScanMax(name string) float32 {
 	t.ctx.Synchronize()
 	ptr := C.Metal_GetBufferContents(t.buf)
-	if ptr == nil { return 0 }
-	f16Slice := unsafe.Slice((*uint16)(ptr), t.rows*t.cols)
+	if ptr == nil {
+		return 0
+	}
 	var maxVal float32 = 0
-	for _, v := range f16Slice {
-		f := Float16ToFloat32(v)
-		abs := f
-		if abs < 0 { abs = -abs }
-		if abs > maxVal { maxVal = abs }
+	if t.dataType == DataTypeF32 {
+		f32Slice := unsafe.Slice((*float32)(ptr), t.rows*t.cols)
+		for _, v := range f32Slice {
+			abs := v
+			if abs < 0 {
+				abs = -abs
+			}
+			if abs > maxVal {
+				maxVal = abs
+			}
+		}
+	} else {
+		f16Slice := unsafe.Slice((*uint16)(ptr), t.rows*t.cols)
+		for _, v := range f16Slice {
+			f := Float16ToFloat32(v)
+			abs := f
+			if abs < 0 {
+				abs = -abs
+			}
+			if abs > maxVal {
+				maxVal = abs
+			}
+		}
 	}
 	fmt.Printf("DEBUG_MAX: %s Max Value: %f\n", name, maxVal)
 	return maxVal
@@ -726,8 +745,6 @@ func (t *Tensor) Layer(attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, k
 	normed.LinearInto(k, kPart)
 	normed.LinearInto(v, vPart)
 	t.ctx.Synchronize()
-	normed.LinearInto(v, vPart)
-	t.ctx.Synchronize()
 	// qPart.ScanScores("Q Part Out")
 	// kPart.ScanAbsMax("K Part Out AbsMax")
 	
@@ -760,8 +777,8 @@ func (t *Tensor) Layer(attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, k
 		offAtt := i * attStride
 		
 		// 3. RoPE (In-place on qPart/kPart row i)
-		C.Metal_RoPE_F16(t.ctx.ref, qPart.buf, C.int(offQ), 1, C.int(1), C.int(heads), C.int(headDim), C.int(p), C.float(10000.0))
-		C.Metal_RoPE_F16(t.ctx.ref, kPart.buf, C.int(offK), 1, C.int(1), C.int(kvHeads), C.int(headDim), C.int(p), C.float(10000.0))
+		C.Metal_RoPE_F16(t.ctx.ref, qPart.buf, C.int(offQ), 1, C.int(1), C.int(heads), C.int(headDim), C.int(p), C.float(ropeTheta))
+		C.Metal_RoPE_F16(t.ctx.ref, kPart.buf, C.int(offK), 1, C.int(1), C.int(kvHeads), C.int(headDim), C.int(p), C.float(ropeTheta))
 		
 		// 4. Store K/V
 		C.Metal_StoreKV_F16(t.ctx.ref, kPart.buf, C.int(offK), vPart.buf, C.int(offV), 
@@ -796,102 +813,54 @@ func (t *Tensor) Layer(attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, k
 	attOut.ScanMax("Attn Values (Pre-Proj)")
 		
 	// 6. Attention Output Projection
-	// attOut is now fully populated [Batch, Dim]
 	attOut.LinearInto(o, resAtt)
-	t.ctx.Synchronize()
-	resAtt.ScanMax("Attn Output (Post-Proj)")
-	
-	// FIX: Scale Output by 0.125 to prevent Residual Saturation (65504)
-	resAtt.ScaleInPlace(0.125)
 	t.ctx.Synchronize()
 	
 	// 7. Residual Add 1
-	C.Metal_Add_F16(t.ctx.ref, t.buf, 0, resAtt.buf, 0, t.buf, 0, C.int(t.rows*t.cols))
-	t.ctx.Synchronize()
+	t1 := t.Add(resAtt)
+	C.Metal_Copy_F16(t.ctx.ref, t1.buf, 0, t.buf, 0, C.int(t.rows*t.cols))
+	
+	// --- Cleanup Attn Intermediates ---
+	qPart.Free()
+	kPart.Free()
+	vPart.Free()
+	normed.Free()
+	attOut.Free()
+	scores.Free()
+	resAtt.ReturnToPool()
+	t1.ReturnToPool()
 	
 	// --- FFN Block ---
 	
-	// We use the sequential path for all layers now to ensure consistency
-	// and allow mixed precision (Q4K + F16 weights).
-	var resFFN *Tensor
+	// 8. FFN Norm
+	normedFFN := t.RMSNorm(ffnNorm, eps)
 	
-	if false { // Legacy path removed 
-		// FP32 Path
-		
-		// 8. FFN Norm (Input t (F16) -> Normed (F32))
-		// We use RMSNormFP32 which takes F32 input? No. RMSNormFP32 takes F32 input from my implementation.
-		// Wait, t is F16. I need to convert t to F32 first?
-		// My RMSNormFP32 implementation: Input t is F32.
-		// So convert t to F32.
-		t_f32 := t.CopyToF32()
-		normedFFN_f32 := t_f32.RMSNormFP32(ffnNorm, eps)
-		t.ctx.Synchronize()
-		
-		// 9. FFN Gate/Up
-		gatePart_f32 := t.ctx.NewTensorFP32(t.rows, ffnGate.rows)
-		upPart_f32 := t.ctx.NewTensorFP32(t.rows, ffnUp.rows)
-		
-		normedFFN_f32.LinearIntoFP32(ffnGate, gatePart_f32)
-		normedFFN_f32.LinearIntoFP32(ffnUp, upPart_f32)
-		t.ctx.Synchronize()
-		
-		// 10. SwiGLU (F32)
-		// Result written to gatePart_f32
-		// My SwiGLUFP32 returns new tensor. Modification required?
-		// Metal_SwiGLU_F32 uses 3 buffers: inV, inG, out.
-		// In my LinearIntoFP32, I used separate buffers.
-		// The SwiGLUFP32 wrapper creates new tensor.
-		// Let's use it.
-		// But wait, SwiGLU usually modifies in place or writes to gate?
-		// In previous F16: C.Metal_SwiGLU_F16(..., gatePart.buf, 0, gatePart.buf, 0, ...) -> In place?
-		// Arguments: buffer(0)=iG, buffer(1)=iV, buffer(2)=out.
-		// If iG == out, it's in place.
-		// SwiGLUFP32 implementation: returns new tensor.
-		swigluOut_f32 := upPart_f32.SwiGLUFP32(gatePart_f32)
-		t.ctx.Synchronize()
-		
-		// 11. FFN Down Projection
-		resFFN_f32 := t.ctx.NewTensorFP32(t.rows, ffnDown.rows)
-		swigluOut_f32.LinearIntoFP32(ffnDown, resFFN_f32)
-		t.ctx.Synchronize()
-		
-		// 12. Residual Add 2 (t_f32 + resFFN_f32 -> final_f32)
-		final_f32 := t_f32.AddFP32(resFFN_f32)
-		t.ctx.Synchronize()
-		
-		// Copy back to t (F16) direct from F32
-		final_f32.CopyToF16_Into(t)
-	} else {
-		// F16 Path (Original)
-		// 8. FFN Norm
-		normedFFN := t.ctx.NewTensor(t.rows, t.cols)
-		C.Metal_RMSNorm_F16(t.ctx.ref, t.buf, 0, ffnNorm.buf, 0, normedFFN.buf, 0, 
-			C.int(t.rows), C.int(t.cols), C.float(eps))
-		t.ctx.Synchronize()
-			
-		// 9. FFN Gate/Up
-		gatePart := t.ctx.NewTensor(t.rows, ffnGate.rows) // [1, 14336]
-		upPart := t.ctx.NewTensor(t.rows, ffnUp.rows)     // [1, 14336]
-		normedFFN.LinearInto(ffnGate, gatePart)
-		normedFFN.LinearInto(ffnUp, upPart)
-		t.ctx.Synchronize()
-		
-		// 10. SwiGLU
-		// Args: metal_backend (iV, iG, o). (Up, Gate, Out).
-		// Result is written to gatePart.
-		C.Metal_SwiGLU_F16(t.ctx.ref, upPart.buf, 0, gatePart.buf, 0, gatePart.buf, 0, C.int(t.rows), C.int(ffnGate.rows))
-		t.ctx.Synchronize()
-		
-		// 11. FFN Down Projection
-		// Input is gatePart (SwiGLU output)
-		resFFN = t.ctx.NewTensor(t.rows, ffnDown.rows) // [1, 4096]
-		gatePart.LinearInto(ffnDown, resFFN)
-		t.ctx.Synchronize()
-		
-		// 12. Residual Add 2
-		C.Metal_Add_F16(t.ctx.ref, t.buf, 0, resFFN.buf, 0, t.buf, 0, C.int(t.rows*t.cols))
-		t.ctx.Synchronize()
-	}
+	// 9. FFN Gate/Up
+	gatePart := t.ctx.NewTensorPooled(t.rows, ffnGate.rows)
+	upPart := t.ctx.NewTensorPooled(t.rows, ffnUp.rows)
+	normedFFN.LinearInto(ffnGate, gatePart)
+	normedFFN.LinearInto(ffnUp, upPart)
+	t.ctx.Synchronize()
+	
+	// 10. SwiGLU
+	swiOut := upPart.SwiGLU(gatePart)
+	
+	// 11. Down Projection
+	resFFN := t.ctx.NewTensorPooled(t.rows, ffnDown.rows)
+	swiOut.LinearInto(ffnDown, resFFN)
+	t.ctx.Synchronize()
+	
+	// 12. Residual Add 2
+	t2 := t.Add(resFFN)
+	C.Metal_Copy_F16(t.ctx.ref, t2.buf, 0, t.buf, 0, C.int(t.rows*t.cols))
+	
+	// --- Final Cleanup ---
+	normedFFN.ReturnToPool()
+	gatePart.ReturnToPool()
+	upPart.ReturnToPool()
+	swiOut.ReturnToPool()
+	resFFN.ReturnToPool()
+	t2.ReturnToPool()
 }
 
 // Correct RoPE implementation using arguments expected by Kernel

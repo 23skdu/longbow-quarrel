@@ -578,6 +578,17 @@ void Metal_SwiGLU_F32(MetalContextRef ctx, MetalBufferRef iV, int oV,
   [mc barrier];
 }
 
+void Metal_Copy_F16(MetalContextRef ctx, MetalBufferRef src, int oS,
+                    MetalBufferRef dst, int oD, int count) {
+  MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
+  id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
+  [enc setComputePipelineState:mc.pipelineCopy_F16];
+  [enc setBuffer:(__bridge id<MTLBuffer>)src offset:oS atIndex:0];
+  [enc setBuffer:(__bridge id<MTLBuffer>)dst offset:oD atIndex:1];
+  [enc dispatchThreads:MTLSizeMake(count, 1, 1)
+      threadsPerThreadgroup:MTLSizeMake(1024, 1, 1)];
+}
+
 void Metal_Copy_F16_F32(MetalContextRef ctx, MetalBufferRef src, int oS,
                         MetalBufferRef dst, int oD, int n) {
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;

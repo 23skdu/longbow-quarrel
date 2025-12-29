@@ -82,9 +82,9 @@ class ModelRunner:
         """Run llama.cpp and return generated text"""
         try:
             result = subprocess.run(
-                [str(self.llama_path), "-m", str(self.model_path),
+                ["/opt/homebrew/bin/llama-completion", "-m", str(self.model_path),
                  "-p", prompt, "-n", str(n_tokens), 
-                 "--log-disable", "--no-conversation", "--simple-io"],
+                 "--log-disable"],
                 capture_output=True,
                 text=True,
                 timeout=30
@@ -96,6 +96,7 @@ class ModelRunner:
             lines = [l for l in output.split('\n') 
                     if not l.startswith('>') and not l.startswith('build') 
                     and not l.startswith('model')]
+            print(f"DEBUG: Running Llama with prompt: {prompt[:30]}...")
             return ' '.join(lines).strip()
         except subprocess.TimeoutExpired:
             return "[TIMEOUT]"
@@ -165,7 +166,7 @@ def main() -> int:
     """Main execution"""
     # Configuration
     quarrel_bin = "./quarrel"
-    llama_bin = "/opt/homebrew/bin/llama-cli"
+    llama_bin = "/opt/homebrew/bin/llama-completion"
     model_path = "/Users/rsd/.ollama/models/blobs/sha256-f535f83ec568d040f88ddc04a199fa6da90923bbb41d4dcaed02caa924d6ef57"
     questions_file = Path("docs/generic_questions.md")
     
@@ -193,8 +194,8 @@ def main() -> int:
     # Run comparisons
     results: List[ComparisonResult] = []
     
-    for i, question in enumerate(questions[:10], 1):  # Test first 10 for now
-        print(f"[{i}/10] {question.text}")
+    for i, question in enumerate(questions[:20], 1):  # Test first 20 for now
+        print(f"[{i}/20] {question.text}")
         
         quarrel_out = runner.run_quarrel(question.text, n_tokens=30)
         llama_out = runner.run_llama(question.text, n_tokens=30)
