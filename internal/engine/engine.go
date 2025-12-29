@@ -540,7 +540,13 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 		    continue
 		}
 		
-		maxIdx := sampler.Sample(logitsData, result, e.Config.VocabSize)
+		// Construct full history for Repetition Penalty
+		// We need to include input tokens + generated tokens
+		fullHistory := make([]int, 0, len(inputTokens)+len(result))
+		fullHistory = append(fullHistory, inputTokens...)
+		fullHistory = append(fullHistory, result...)
+		
+		maxIdx := sampler.Sample(logitsData, fullHistory, e.Config.VocabSize)
 		
 		if maxIdx == 128001 { // <|end_of_text|> in Llama 3
 			e.Ctx.AutoreleasePoolPop(pool)
