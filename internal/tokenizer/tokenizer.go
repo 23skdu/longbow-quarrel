@@ -199,10 +199,12 @@ func (t *Tokenizer) Decode(ids []int) string {
 		}
 		
 		// Replace BPE special characters with actual characters
-		// Ġ (U+0120) is used for space in BPE
+		// Ġ (U+0120) is used for space in BPE (GPT-2/RoBERTa)
 		// Ċ (U+010A) is used for newline in BPE
+		//  (U+2581) is used for space in SentencePiece (Llama/Mistral)
 		token = strings.ReplaceAll(token, "Ġ", " ")
 		token = strings.ReplaceAll(token, "Ċ", "\n")
+		token = strings.ReplaceAll(token, "\u2581", " ")
 		
 		// Handle other common BPE markers
 		token = strings.ReplaceAll(token, "ĉ", "\t")
