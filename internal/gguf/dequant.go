@@ -37,8 +37,8 @@ func DequantizeQ4K(data []byte, numElements int) []float32 {
 		blockData := data[blockOffset : blockOffset+blockSizeBytes]
 		
 		// Parse header
-		d := float16ToFloat32(binary.LittleEndian.Uint16(blockData[0:2]))
-		dmin := float16ToFloat32(binary.LittleEndian.Uint16(blockData[2:4]))
+		d := Float16ToFloat32(binary.LittleEndian.Uint16(blockData[0:2]))
+		dmin := Float16ToFloat32(binary.LittleEndian.Uint16(blockData[2:4]))
 		
 		scales := blockData[4:16] // 12 bytes
 		qs := blockData[16:144]   // 128 bytes
@@ -110,7 +110,7 @@ func DequantizeQ3K(data []byte, numElements int) []float32 {
 		hmask := block[0:32]
 		qs := block[32:96]
 		scales := block[96:108]
-		d := float16ToFloat32(binary.LittleEndian.Uint16(block[108:110]))
+		d := Float16ToFloat32(binary.LittleEndian.Uint16(block[108:110]))
 		
 		if i == 0 {
 			fmt.Printf("DEBUG: Q3K Block 0: d=%f, hmask[0]=%x, qs[0]=%x\n", d, hmask[0], qs[0])
@@ -218,7 +218,7 @@ func DequantizeQ6K(data []byte, numElements int) []float32 {
 		qs := block[0:128]
 		qh := block[128:192]
 		scales := block[192:208]
-		d := float16ToFloat32(binary.LittleEndian.Uint16(block[208:210]))
+		d := Float16ToFloat32(binary.LittleEndian.Uint16(block[208:210]))
 		
 		for l := 0; l < 16; l++ {
 			// scale = d * sc[l]
@@ -266,7 +266,7 @@ func DequantizeQ6K(data []byte, numElements int) []float32 {
 	return out
 }
 
-func float16ToFloat32(b uint16) float32 {
+func Float16ToFloat32(b uint16) float32 {
 	sign := uint32(b & 0x8000) << 16
 	exp := uint32(b & 0x7C00) >> 10
 	frac := uint32(b & 0x03FF) << 13
@@ -274,7 +274,7 @@ func float16ToFloat32(b uint16) float32 {
 	if exp == 0 {
 		if frac == 0 { return math.Float32frombits(sign) }
 		// subnormal
-		f := float64(frac) * math.Pow(2, -24)
+		f := float64(frac) * math.Pow(2, -23)
 		if sign != 0 { f = -f }
 		return float32(f * math.Pow(2, -14))
 	} else if exp == 0x1F {

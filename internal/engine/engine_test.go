@@ -226,7 +226,7 @@ func TestMistralMetadataSupport(t *testing.T) {
 	}
 	defer os.Remove(modelPath)
 
-	e, err := NewEngine(modelPath)
+	e, err := NewEngine(modelPath, false)
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}

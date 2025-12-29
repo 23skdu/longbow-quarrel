@@ -16,7 +16,7 @@ import (
 	"github.com/23skdu/longbow-quarrel/internal/metrics"
 )
 
-func NewEngine(modelPath string) (*Engine, error) {
+func NewEngine(modelPath string, debugDequant bool) (*Engine, error) {
 	// Initialize Metal Context
 	ctx := device.NewContext()
 	
@@ -24,6 +24,7 @@ func NewEngine(modelPath string) (*Engine, error) {
 		Ctx: ctx,
 		Weights: &LlamaWeights{},
 	}
+	e.Config.DebugDequant = debugDequant
 	
 	// Load Model
 	if err := e.loadModel(modelPath); err != nil {

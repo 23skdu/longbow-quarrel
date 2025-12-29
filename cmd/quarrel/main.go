@@ -28,6 +28,7 @@ var (
 	topP        = flag.Float64("topp", 0.95, "Top-P (Nucleus) sampling")
 	repPenalty  = flag.Float64("penalty", 1.1, "Repetition penalty")
 	chatML      = flag.Bool("chatml", false, "Wrap prompt in ChatML template")
+	debugDequant = flag.Bool("debug-dequant", false, "Enable dequantization debug dump")
 )
 
 func main() {
@@ -79,7 +80,7 @@ func main() {
 
 	// Initialize Engine
 	log.Printf("Loading model from %s...", *modelPath)
-	e, err := engine.NewEngine(*modelPath)
+	e, err := engine.NewEngine(*modelPath, *debugDequant)
 	if err != nil {
 		log.Fatalf("Failed to initialize engine: %v", err)
 	}

@@ -17,6 +17,9 @@ type LlamaConfig struct {
 	SeqLen     int
 	Eps        float32
 	RopeTheta  float32
+	
+	// Debug Flags
+	DebugDequant bool
 }
 
 type LlamaWeights struct {
