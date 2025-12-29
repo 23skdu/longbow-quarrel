@@ -191,45 +191,33 @@ func (e *Engine) loadModel(path string) error {
 
 			} else if t.Type == gguf.GGMLTypeQ4_K {
 				// Type 12 (Q4_K). 
-				// token_embd must be CPU Dequantized to F16.
-				if t.Name == "token_embd.weight" {
-					fmt.Printf("DEBUG: token_embd.weight: t.Offset=%d\n", t.Offset)
-                    // DEBUG: Inspect first few bytes (Row 0 and Row 1)
-                    if len(t.Data) > 2320 {
+				
+				// For Small Models (SmolLM2, TinyLlama), Q4K Kernels cause activation explosion
+				// or zero output due to alignment issues. We dequantize to F16 on load.
+				// This increases memory usage slightly but guarantees correctness.
+				// Token Embed is always dequantized.
+				if e.Config.Dim < 1024 || t.Name == "token_embd.weight" {
+					if t.Name == "token_embd.weight" && len(t.Data) > 2320 {
                         fmt.Printf("DEBUG: token_embd.weight Row 0 [0:16] = %x\n", t.Data[:16])
-                        fmt.Printf("DEBUG: token_embd.weight Row 1 [2304:2320] = %x\n", t.Data[2304:2320])
-                    }
-					mt = e.Ctx.NewTensor(rows, cols)
+                    } else if e.Config.Dim < 1024 {
+						fmt.Printf("DEBUG: Converting %s Q4K to F16 (Small Model)\n", t.Name)
+					}
+					
+					mt = e.Ctx.NewTensor(rows, cols) // Allocates F16
 					f32Data := gguf.DequantizeQ4K(t.Data, numElements)
-					
 					mt.LoadFrom(f32Data)
-				} else if t.Name == "blk.0.attn_q.weight" {
-					fmt.Printf("DEBUG_OFFSET: blk.0.attn_q.weight Offset=%d\n", t.Offset)
-					if len(t.Data) >= 32 {
-						fmt.Printf("DEBUG_BYTES: blk.0.attn_q.weight [0:32] = %x\n", t.Data[:32])
-					}
-					// FIX: Actually Load the Tensor!
-					mt = e.Ctx.NewQ4KTensor(rows, cols)
-					dataBytes := (numElements / 256) * 144
-					if uint64(len(t.Data)) < uint64(dataBytes) {
-						return fmt.Errorf("tensor %s data truncated", t.Name)
-					}
-					mt.LoadFromRaw(t.Data[:dataBytes])
-				} else {
-					// Check blk.1.ffn_down size
-					if strings.Contains(t.Name, "blk.1.ffn_down") {
-                        expected := (rows * cols / 256) * 144
-                        if len(t.Data) < expected {
-                            fmt.Printf("CRITICAL: %s Truncated! %d < %d\n", t.Name, len(t.Data), expected)
-                        } else {
-                            fmt.Printf("DEBUG: %s Size OK: %d\n", t.Name, len(t.Data))
-                        }
-                    }
 					
+				} else {
+					// Large Models: Use Q4K Tensor and Kernels
 					mt = e.Ctx.NewQ4KTensor(rows, cols)
 					dataBytes := (numElements / 256) * 144
+					// Check size matches (handle truncated data)
 					if uint64(len(t.Data)) < uint64(dataBytes) {
-						return fmt.Errorf("tensor %s data truncated", t.Name)
+						// Some models pad?
+						// Just load what we have? 
+						// Usually GGUF is packed.
+						// If len(Data) is slightly less?
+						return fmt.Errorf("tensor %s data truncated (Need %d, Has %d)", t.Name, dataBytes, len(t.Data))
 					}
 					mt.LoadFromRaw(t.Data[:dataBytes])
 				}
@@ -501,6 +489,11 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int) ([]int, error) {
 
 			kCache := e.KVCacheK[l] // Corrected from KCache
 			vCache := e.KVCacheV[l] // Corrected from VCache
+
+			if l == e.Config.Layers - 1 && i == 0 {
+				ffnDown.ScanMax("Last Layer FFN Down Weight")
+				fmt.Printf("DEBUG: Eps: %e\n", e.Config.Eps)
+			}
 
 			// Layer now handles F32 currentF32, using mixed precision
 			currentF32.Layer(attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, kCache, vCache,
