@@ -11,10 +11,11 @@ architecture models in GGUF format with maximum throughput and correctness.
 
 ### Performance
 
-- Metal GPU backend using custom kernels and MPS (Metal Performance Shaders)
-- Achieves ~298 tokens/second on smollm2-135M (116% of llama.cpp reference)
-- Fused kernel optimizations (RMSNorm+Linear fusion)
-- Asynchronous GPU dispatch with tensor pooling
+- Metal GPU backend using custom kernels for Llama architecture
+- Native support for **K-Quantization** (Q3_K, Q4_K, Q6_K)
+- Achieves high-performance inference on Apple Silicon
+- Fused kernel optimizations (RMSNorm+Linear fusion, attention scaling)
+- Thread-safe asynchronous GPU dispatch with tensor pooling and memory budget
 - CPU profiling support via pprof
 
 ### Architecture Support
@@ -35,11 +36,11 @@ architecture models in GGUF format with maximum throughput and correctness.
 
 ### Model Format
 
-- GGUF format support (FP16 and FP32)
+- GGUF format support (FP16, FP32, Q3_K, Q4_K, Q6_K)
 - **Native Ollama model support** - use model names like `mistral:latest`
 - Automatically resolves Ollama models from `~/.ollama/models`
 - Backward compatible with direct GGUF file paths
-- Tested with smollm2-135M/360M, Llama 3.2, and Mistral models
+- Tested and validated with SmolLM2 (135M/360M), Llama 3.2, and Mistral models
 
 ## Technical Stack
 
@@ -50,13 +51,11 @@ architecture models in GGUF format with maximum throughput and correctness.
 - **Dependencies**: Minimal - Metal, Foundation,
   MetalPerformanceShaders, Accelerate
 
-## Current Status
+The project is in active development (release/0.1.0) with:
 
-The project is in active development (release/0.0.1-rc2) with:
-
-- Complete Llama 3 inference pipeline
-- Validated correctness against llama.cpp
-- Optimized performance exceeding reference implementation
+- Complete Llama 3 inference pipeline with Metal acceleration
+- Validated correctness against `llama.cpp` for multiple quantization levels
+- Robust memory management with pooling and global budget
 - Comprehensive benchmarking and testing infrastructure
 
 It's part of the Longbow ecosystem, with longbow-fletcher handling

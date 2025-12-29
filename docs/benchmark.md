@@ -45,108 +45,34 @@ This document describes the benchmark and validation scripts available for testi
 
 ### 2. validity_check.py
 
-**Purpose**: Validate output correctness by comparing longbow-quarrel generations with llama.cpp reference on factual questions.
+**Purpose**: Validate output correctness by comparing longbow-quarrel generations with `llama.cpp` (via `llama-completion`) on factual questions.
 
 **Location**: `scripts/validity_check.py`
-
-**Dependencies**:
-
-```bash
-# Python 3.6+ (uses dataclasses and pathlib)
-# No additional pip packages required
-```
-
-**Usage**:
-
-```bash
-./scripts/validity_check.py
-```
-
-**Configuration**:
-Edit the script to configure paths:
-
-```python
-quarrel_bin = "./quarrel"              # Path to quarrel binary
-llama_bin = "/opt/homebrew/bin/llama-cli"  # Path to llama.cpp CLI
-model_path = "path/to/model.gguf"      # GGUF model file
-```
 
 **How It Works**:
 
 1. Loads benchmark questions from [docs/generic_questions.md](file:///Users/rsd/REPOS/longbow-quarrel/docs/generic_questions.md)
-2. Runs each question through both quarrel and llama.cpp
+2. Runs each question through both quarrel and `llama-completion`
 3. Calculates Jaccard similarity between outputs
-4. Classifies results as:
-   - **Match** (similarity >= 70%) - Outputs are very similar
-   - **Partial** (similarity >= 40%) - Outputs have some overlap
-   - **Mismatch** (similarity < 40%) - Outputs differ significantly
+4. Classifies results as MATCH, PARTIAL, or MISMATCH.
 
-**Output**:
-
-```
-======================================================================
-Longbow-Quarrel Validity Check
-======================================================================
-
-Loaded 100 questions
-
-[1/10] What is the capital of France?
-  Similarity: 0.85 (match)
-
-[2/10] Who wrote Romeo and Juliet?
-  Similarity: 0.72 (match)
-
-...
-
-======================================================================
-Summary
-======================================================================
-Match:    8/10 (80.0%)
-Partial:  2/10 (20.0%)
-Mismatch: 0/10 (0.0%)
-
-Average Similarity: 0.763
-```
-
-## Benchmark Questions
-
-The benchmark questions are curated factual questions organized by category:
-
-**Location**: [docs/generic_questions.md](file:///Users/rsd/REPOS/longbow-quarrel/docs/generic_questions.md)
-
-**Categories** (100 questions total):
-
-1. Geography (10 questions)
-2. History (10 questions)
-3. Science (10 questions)
-4. Literature (10 questions)
-5. Mathematics (10 questions)
-6. Technology (10 questions)
-7. Sports (10 questions)
-8. Arts (10 questions)
-9. General Knowledge (10 questions)
-10. Mixed Topics (10 questions)
-
-These questions are designed to test:
-
-- Factual accuracy
-- Common knowledge recall
-- Consistent response formatting
-- Model behavior across different domains
+> [!NOTE]
+> The script defaults to comparing the first 20 questions for a quick sanity check but can be expanded to the full 100-question set.
 
 ## Performance Targets
 
-Based on testing with smollm2-135M on Apple Silicon:
+Based on testing with `SmolLM2-135M` on Apple Silicon:
 
 **Throughput**:
 
 - Target: > 100 tokens/second
-- Current: ~298 tokens/second (116% of llama.cpp reference)
+- Current (FP16): ~300+ tokens/second (Metal Backend)
+- Current (Q4_K/Q6_K): High-performance quantized inference validated for correctness.
 
 **Correctness**:
 
 - Target: > 80% match rate with llama.cpp
-- Similarity: > 0.70 average Jaccard similarity
+- Similarity: > 0.70 average Jaccard similarity validated across FP16 and K-Quants.
 
 ## Profiling
 

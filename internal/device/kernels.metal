@@ -102,7 +102,7 @@ kernel void linear_f16(device const half *weight [[ buffer(0) ]],
     device const half4 *i4 = (device const half4 *)(input + batch * dim_in);
     int n4 = dim_in / 4;
     float sum = 0; for (int i = (int)lane_id; i < n4; i += 32) {
-        float4 v_w = (float4)w4[i]; float4 v_i = (float4)i4[i];
+        float4 v_w = float4(w4[i]); float4 v_i = float4(i4[i]);
         sum += dot(v_w.xy, v_i.xy) + dot(v_w.zw, v_i.zw);
     }
     sum = simd_sum(sum); 
@@ -298,8 +298,7 @@ kernel void att_scores_f16(device const half *q [[ buffer(0) ]],
 // ...
     // scale = 1.0 / sqrt(head_dim)
     // DEBUG: Force scale 1.0 because signals are small?
-    // float scale = 1.0f / sqrt((float)headDim);
-    float scale = 1.0f; // scaled by 1/sqrt(128) = 0.08 is too small
+    float scale = 1.0f / sqrt((float)headDim);
  device const half *mq = q + h * headDim;
     for (int t = 0; t <= pos; t++) {
         float d = 0; device const half *mk = k_cache + t * kv_dim + kvh * headDim;
@@ -451,7 +450,7 @@ kernel void linear_f16_f32(device const half *weight [[ buffer(0) ]],
     
     float sum = 0;
     for (int i = (int)lane_id; i < n4; i += 32) {
-        float4 v_w = (float4)w4[i];
+        float4 v_w = float4(w4[i]);
         float4 v_i = i4[i];
         sum += dot(v_w.xy, v_i.xy) + dot(v_w.zw, v_i.zw);
     }

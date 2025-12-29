@@ -134,6 +134,9 @@ void Metal_Add_F32(MetalContextRef ctx, MetalBufferRef a, int offA,
                    MetalBufferRef b, int offB, MetalBufferRef result,
                    int offRes, int count);
 
+void Metal_Copy_F16(MetalContextRef ctx, MetalBufferRef src, int oS,
+                    MetalBufferRef dst, int oD, int count);
+
 void Metal_Copy_F16_F32(MetalContextRef ctx, MetalBufferRef src, int oS,
                         MetalBufferRef dst, int oD, int n);
 
