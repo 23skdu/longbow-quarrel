@@ -19,6 +19,7 @@
 @property(strong) id<MTLComputePipelineState> pipelineSoftmax_F16;
 @property(strong) id<MTLComputePipelineState> pipelineAttScores_F16;
 @property(strong) id<MTLComputePipelineState> pipelineAttValues_F16;
+@property(strong) id<MTLComputePipelineState> pipelineAttFused_F16;
 @property(strong) id<MTLComputePipelineState> pipelineScale_F16;
 // FP32 Pipelines
 @property(strong) id<MTLComputePipelineState> pipelineRMSNorm_F32;
@@ -116,6 +117,7 @@ MetalContextRef Metal_Init(const char *libSource) {
   ctx.pipelineSoftmax_F16 = loadPipeline(ctx, @"softmax_f16");
   ctx.pipelineAttScores_F16 = loadPipeline(ctx, @"att_scores_f16");
   ctx.pipelineAttValues_F16 = loadPipeline(ctx, @"att_values_f16");
+  ctx.pipelineAttFused_F16 = loadPipeline(ctx, @"att_fused_f16");
   ctx.pipelineScale_F16 = loadPipeline(ctx, @"scale_f16");
 
   // FP32 Load
@@ -387,8 +389,8 @@ void Metal_AttSoftmax_F16(MetalContextRef ctx, MetalBufferRef s, int oS, int p,
   [enc setBuffer:(__bridge id<MTLBuffer>)s offset:oS atIndex:0];
   [enc setBytes:&p length:4 atIndex:1];
   [enc setBytes:&stride length:4 atIndex:2];
-  [enc dispatchThreads:MTLSizeMake(nh, 1, 1)
-      threadsPerThreadgroup:MTLSizeMake(nh, 1, 1)];
+  [enc dispatchThreadgroups:MTLSizeMake(nh, 1, 1)
+      threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
   [mc barrier];
 }
 
@@ -626,5 +628,24 @@ void Metal_MatMul_F16_F32(MetalContextRef ctx, MetalBufferRef a, int offA,
   [enc setBytes:&N length:4 atIndex:4];
   [enc dispatchThreads:MTLSizeMake(32, N, M)
       threadsPerThreadgroup:MTLSizeMake(32, 4, 1)];
+  [mc barrier];
+}
+
+void Metal_AttFused_F16(MetalContextRef ctx, MetalBufferRef q, int oQ,
+                        MetalBufferRef kC, MetalBufferRef vC, MetalBufferRef r,
+                        int oR, int p, int nh, int kh, int hd) {
+  MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
+  id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
+  [enc setComputePipelineState:mc.pipelineAttFused_F16];
+  [enc setBuffer:(__bridge id<MTLBuffer>)q offset:oQ atIndex:0];
+  [enc setBuffer:(__bridge id<MTLBuffer>)kC offset:0 atIndex:1];
+  [enc setBuffer:(__bridge id<MTLBuffer>)vC offset:0 atIndex:2];
+  [enc setBuffer:(__bridge id<MTLBuffer>)r offset:oR atIndex:3];
+  [enc setBytes:&p length:4 atIndex:4];
+  [enc setBytes:&nh length:4 atIndex:5];
+  [enc setBytes:&kh length:4 atIndex:6];
+  [enc setBytes:&hd length:4 atIndex:7];
+  [enc dispatchThreadgroups:MTLSizeMake(nh, 1, 1)
+      threadsPerThreadgroup:MTLSizeMake(1024, 1, 1)];
   [mc barrier];
 }

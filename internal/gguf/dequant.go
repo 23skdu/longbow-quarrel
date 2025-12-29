@@ -19,7 +19,7 @@ const (
 // - qs (128 bytes): 4-bit quants
 func DequantizeQ4K(data []byte, numElements int) []float32 {
 	if numElements%BlockSizeQ4K != 0 {
-		// Kernel expects multiple of 256. Caller must ensure padding.
+		panic("DequantizeQ4K: numElements must be multiple of 256")
 	}
 	
 	numBlocks := numElements / BlockSizeQ4K
