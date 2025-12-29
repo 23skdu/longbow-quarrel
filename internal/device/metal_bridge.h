@@ -36,6 +36,9 @@ void Metal_Scale_F16(MetalContextRef ctx, MetalBufferRef x, int offX,
 void Metal_Embedding_F16(MetalContextRef ctx, MetalBufferRef weights, int offW,
                          MetalBufferRef result, int offRes, int rowIdx,
                          int cols);
+void Metal_Embedding_Q4K(MetalContextRef ctx, MetalBufferRef weights, int offW,
+                         MetalBufferRef result, int offRes, int rowIdx,
+                         int cols);
 
 // Llama Specific Kernels
 void Metal_RMSNorm_F16(MetalContextRef ctx, MetalBufferRef input, int offIn,
@@ -147,9 +150,15 @@ void Metal_SwiGLU_F32(MetalContextRef ctx, MetalBufferRef iV, int oV,
                       MetalBufferRef iG, int oG, MetalBufferRef o, int oO,
                       int n, int iS);
 
-void Metal_MatMul_F16_F32(MetalContextRef ctx, MetalBufferRef a, int offA,
-                          MetalBufferRef b, int offB, MetalBufferRef c,
-                          int offC, int M, int N, int K);
+void Metal_MatMul_F16_F16_F32(MetalContextRef ctx, MetalBufferRef weight,
+                              int offWeight, MetalBufferRef input, int offInput,
+                              MetalBufferRef output, int offOutput, int rows,
+                              int dimIn, int dimOut);
+
+void Metal_MatMul_F16_F32_F32(MetalContextRef ctx, MetalBufferRef weight,
+                              int offWeight, MetalBufferRef input, int offInput,
+                              MetalBufferRef output, int offOutput, int rows,
+                              int dimIn, int dimOut);
 
 void Metal_AttFused_F16(MetalContextRef ctx, MetalBufferRef q, int offQ,
                         MetalBufferRef kC, MetalBufferRef vC, MetalBufferRef r,

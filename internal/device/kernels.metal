@@ -69,7 +69,7 @@ kernel void swiglu_f16(device const half *gate [[ buffer(0) ]],
 
 kernel void rmsnorm_f16(device const half *x [[ buffer(0) ]],
                       device half *out [[ buffer(1) ]],
-                      device const half *w [[ buffer(2) ]],
+                      device const float *w [[ buffer(2) ]],
                       constant float &eps [[ buffer(3) ]],
                       constant int &cols [[ buffer(4) ]],
                       uint tid [[ thread_index_in_threadgroup ]],
@@ -93,7 +93,7 @@ kernel void rmsnorm_f16(device const half *x [[ buffer(0) ]],
     float scale = s[0];
     for (int i = tid; i < cols; i += 1024) {
         int idx = row_offset + i;
-        out[idx] = safe_half((float)x[idx] * scale * (float)w[i]);
+        out[idx] = safe_half((float)x[idx] * scale * w[i]);
     }
 }
 
@@ -252,31 +252,78 @@ kernel void rope_f16(device half *x [[ buffer(0) ]],
                     constant int &pos [[ buffer(1) ]],
                     constant int &headDim [[ buffer(2) ]],
                     constant float &ropeTheta [[ buffer(3) ]],
+                    constant int &numHeads [[ buffer(4) ]],
                     uint2 gid [[ thread_position_in_grid ]]) {
     // gid.x = pair index within specific token (0 .. numHeads * headDim/2)
-    // gid.y = token index in sequence (0 .. seqLen)
+    // gid.y = token index (0 .. batch_size-1)
     
-    int pairsPerToken = (int)(gid.x); 
-    // We need numHeads to calculate offset?
-    // Actually, we can infer h and i from gid.x if we know headDim.
-    // h_idx = gid.x / (headDim/2)
-    // i_idx = gid.x % (headDim/2)
+    int h = gid.x / (headDim / 2);
+    int i = gid.x % (headDim / 2);
+    int p = pos + gid.y; // Absolute position in sequence
     
-    int halfDim = headDim / 2;
-    int h = (int)(gid.x / halfDim);
-    int i = (int)(gid.x % halfDim);
+    float freq = (float)p * pow(ropeTheta, -2.0f * (float)i / (float)headDim);
+    float ct = cos(freq);
+    float st = sin(freq);
     
-    // We strictly need numHeads to know the stride between tokens! 
-    // Buffer layout: [SeqLen, NumHeads, HeadDim]
-    // But we don't have NumHeads in args!
-    // We MUST add numHeads to args.
+    // Layout: [Tokens, Heads, HeadDim]
+    device half *token_ptr = x + gid.y * numHeads * headDim;
+    device half *q_ptr = token_ptr + h * headDim;
     
-    // Fallback: If we don't change args, we can't support SeqLen unless we pass stride/numHeads.
-    // Wait, the previous kernel didn't use SeqLen.
+    float x0 = (float)q_ptr[i];
+    float x1 = (float)q_ptr[i + headDim / 2];
+    
+    q_ptr[i] = (half)(x0 * ct - x1 * st);
+    q_ptr[i + headDim / 2] = (half)(x0 * st + x1 * ct);
 }
 
 kernel void embedding_f16(device const half *weight [[ buffer(0) ]], device half *output [[ buffer(1) ]], constant int &idx [[ buffer(2) ]], constant int &cols [[ buffer(3) ]], uint qid [[ thread_position_in_grid ]]) {
     output[qid] = weight[idx * (uint)cols + qid];
+}
+
+// Embedding Lookup: Q4_K weights → FP16 output
+kernel void embedding_q4k_f16(device const uchar *weight [[ buffer(0) ]],
+                             device half *output [[ buffer(1) ]],
+                             constant int &idx [[ buffer(2) ]],
+                             constant int &cols [[ buffer(3) ]],
+                             uint tid [[ thread_index_in_threadgroup ]]) {
+    int num_blocks = (cols + 255) / 256;
+    device const uchar *row_ptr = weight + (uint)idx * num_blocks * 144;
+    
+    // Each thread handles a portion of the 256-elements blocks
+    // If we want high performance, we'd distribute blocks across threads.
+    // For now, simpler: each thread handles one or more blocks if needed.
+    // But cols is usually small-ish (4096).
+    // 4096 / 256 = 16 blocks.
+    
+    for (int i = tid; i < num_blocks; i += 1024) {
+        device const uchar *block = row_ptr + i * 144;
+        ushort d_bits = *(device const ushort*)(block);
+        ushort dmin_bits = *(device const ushort*)(block + 2);
+        float d = (float)as_type<half>(d_bits);
+        float dmin = (float)as_type<half>(dmin_bits);
+        
+        device const uchar *scales = block + 4;
+        device const uchar *qs = block + 16;
+        uchar sc[8], m[8];
+        for (int j = 0; j < 8; j++) {
+            if (j < 4) {
+                sc[j] = scales[j] & 63;
+                m[j] = scales[j + 4] & 63;
+            } else {
+                sc[j] = (scales[j+4] & 0xF) | ((scales[j-4] >> 6) << 4);
+                m[j] = (scales[j+4] >> 4) | ((scales[j] >> 6) << 4);
+            }
+        }
+        for (int j = 0; j < 8; j++) {
+            float d_val = d * (float)sc[j], m_val = dmin * (float)m[j];
+            int sub_offset = j * 32, qs_offset = j * 16;
+            for (int k = 0; k < 16; k++) {
+                uchar b = qs[qs_offset + k];
+                output[i * 256 + sub_offset + k] = (half)(d_val * (float)(b & 0xF) - m_val);
+                output[i * 256 + sub_offset + k + 16] = (half)(d_val * (float)(b >> 4) - m_val);
+            }
+        }
+    }
 }
 
 kernel void softmax_f16(device float *scores [[ buffer(0) ]],
@@ -439,7 +486,7 @@ kernel void add_f32(device const float *a [[ buffer(0) ]], device const float *b
 
 kernel void rmsnorm_f32(device const float *x [[ buffer(0) ]],
                       device float *out [[ buffer(1) ]],
-                      device const half *w [[ buffer(2) ]],
+                      device const float *w [[ buffer(2) ]],
                       constant float &eps [[ buffer(3) ]],
                       constant int &cols [[ buffer(4) ]],
                       uint tid [[ thread_index_in_threadgroup ]],
@@ -463,13 +510,13 @@ kernel void rmsnorm_f32(device const float *x [[ buffer(0) ]],
     float scale = s[0];
     for (int i = tid; i < cols; i += 1024) {
         int idx = row_offset + i;
-        out[idx] = x[idx] * scale * (float)w[i];
+        out[idx] = x[idx] * scale * w[i];
     }
 }
 
 kernel void rmsnorm_f32_to_f16(device const float *x [[ buffer(0) ]],
                       device half *out [[ buffer(1) ]],
-                      device const half *w [[ buffer(2) ]],
+                      device const float *w [[ buffer(2) ]],
                       constant float &eps [[ buffer(3) ]],
                       constant int &cols [[ buffer(4) ]],
                       uint tid [[ thread_index_in_threadgroup ]],
@@ -493,7 +540,7 @@ kernel void rmsnorm_f32_to_f16(device const float *x [[ buffer(0) ]],
     float scale = s[0];
     for (int i = tid; i < cols; i += 1024) {
         int idx = row_offset + i;
-        out[idx] = safe_half(x[idx] * scale * (float)w[i]);
+        out[idx] = safe_half(x[idx] * scale * w[i]);
     }
 }
 
@@ -636,4 +683,17 @@ kernel void linear_f32_to_f16(device const half *weight [[ buffer(0) ]],
     }
     sum = simd_sum(sum); 
     if (lane_id == 0) output[batch * dim_out + row] = safe_half(sum);
+}
+
+kernel void store_kv_f16(device const half *k [[ buffer(0) ]],
+                        device const half *v [[ buffer(1) ]],
+                        device half *k_cache [[ buffer(2) ]],
+                        device half *v_cache [[ buffer(3) ]],
+                        constant int &pos [[ buffer(4) ]],
+                        constant int &kv_dim [[ buffer(5) ]],
+                        uint tid [[ thread_position_in_grid ]]) {
+    if (tid >= (uint)kv_dim) return;
+    int offset = pos * kv_dim + tid;
+    k_cache[offset] = k[tid];
+    v_cache[offset] = v[tid];
 }

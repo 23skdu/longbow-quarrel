@@ -159,10 +159,9 @@ func (e *Engine) loadModel(path string) error {
 		}
 		
 		if false { } else {
-			// Standard F16 Tensor (allocated as F16, loaded as F32 or F16)
-			mt = e.Ctx.NewTensor(rows, cols)
-			
 			if t.Type == gguf.GGMLTypeF32 {
+				// Standard F32 Tensor
+				mt = e.Ctx.NewTensorFP32(rows, cols)
 				// ... F32 load ...
 				dataBytes := numElements * 4
 				if uint64(len(t.Data)) < uint64(dataBytes) { 
@@ -179,8 +178,10 @@ func (e *Engine) loadModel(path string) error {
 				}
 				
 				mt.LoadFrom(f32Data)
+				mt.ScanMax("W-LOAD: " + t.Name)
 				
 			} else if t.Type == gguf.GGMLTypeF16 {
+				mt = e.Ctx.NewTensor(rows, cols)
 				// ... F16 load ...
 				dataBytes := numElements * 2
 				if uint64(len(t.Data)) < uint64(dataBytes) { 
@@ -196,11 +197,11 @@ func (e *Engine) loadModel(path string) error {
 				// For Small Models (SmolLM2, TinyLlama), Q4K Kernels cause activation explosion
 				// or zero output due to alignment issues. We dequantize to F16 on load.
 				// This increases memory usage slightly but guarantees correctness.
-				// Token Embed is always dequantized.
+				// ALSO: Always dequantize embeddings due to subnormal float16 handling issues
 				if e.Config.Dim < 1024 || t.Name == "token_embd.weight" {
-					if t.Name == "token_embd.weight" && len(t.Data) > 2320 {
-                        fmt.Printf("DEBUG: token_embd.weight Row 0 [0:16] = %x\n", t.Data[:16])
-                    } else if e.Config.Dim < 1024 {
+					if t.Name == "token_embd.weight" {
+						fmt.Printf("DEBUG: CPU-dequantizing %s for subnormal handling\n", t.Name)
+					} else {
 						fmt.Printf("DEBUG: Converting %s Q4K to F16 (Small Model)\n", t.Name)
 					}
 					
@@ -214,10 +215,6 @@ func (e *Engine) loadModel(path string) error {
 					dataBytes := (numElements / 256) * 144
 					// Check size matches (handle truncated data)
 					if uint64(len(t.Data)) < uint64(dataBytes) {
-						// Some models pad?
-						// Just load what we have? 
-						// Usually GGUF is packed.
-						// If len(Data) is slightly less?
 						return fmt.Errorf("tensor %s data truncated (Need %d, Has %d)", t.Name, dataBytes, len(t.Data))
 					}
 					mt.LoadFromRaw(t.Data[:dataBytes])
@@ -394,6 +391,7 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 	logits := scratch.Logits
 
 	// Phase 1: Prefill all input tokens
+	log.Printf("DEBUG: START INFER, CachePos=%d", e.CachePos)
 	for i := 0; i < len(inputTokens); i++ {
 		// Autorelease Pool for this iteration
 		pool := e.Ctx.AutoreleasePoolPush()
@@ -405,8 +403,15 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 		
 		current := e.Weights.TokenEmb.EmbeddingLookup(lastToken)
 		
+		// DEBUG: Print first 4 elements of embedding
+		e.Ctx.Synchronize()
+		embData := current.ToHost()
+		fmt.Printf("DEBUG_EMB: Token %d (pos %d) first 4: %v\n", lastToken, i, embData[:4])
+
 		// Convert embedding to FP32 for residual stream accumulation
 		currentF32 := current.ToF32()
+		fmt.Printf("DEBUG_PTR: currentF32 ptr=%p, buf=%p\n", currentF32, currentF32.BufRef())
+		currentF32.ScanMax("DEBUG: Embedding F32")
 		current.ReturnToPool() // Release F16
 		
 		// Layers (Attention + FFN)
@@ -512,12 +517,14 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 		
 		// Use Into to avoid alloc
 		currentF32.RMSNormFP32_ToF16_Into(e.Weights.OutputNorm, e.Config.Eps, scratch.Normed)
+		scratch.Normed.ScanMax("DEBUG_FINAL: Normed")
 		
 		// Output Head (F16 -> F32 Logits)
 		// Reuse pre-allocated logits buffer
 		// scratch.Normed contains result. Use it.
 		// Output into scratch.Logits (which is 'logits')
 		scratch.Normed.LinearInto(e.Weights.Output, logits)
+		logits.ScanMax("DEBUG_FINAL: Logits")
 		
 		// Logic update: RMSNormFP32_ToF16_Into does NOT allocate.
 		// It writes to scratch.Normed.

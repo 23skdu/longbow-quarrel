@@ -350,6 +350,7 @@ func (t *Tensor) DataType() int {
 }
 
 func (t *Tensor) ScanNaNs(name string) int {
+	if t.dataType == DataTypeQ4K { return 0 }
 	t.ctx.Synchronize()
 	ptr := C.Metal_GetBufferContents(t.buf)
 	if ptr == nil { return 0 }
@@ -385,6 +386,10 @@ func (t *Tensor) ScanMax(name string) float32 {
 		return 0
 	}
 	var maxVal float32 = 0
+	if t.dataType == DataTypeQ4K {
+		// return ScanQ4KScales(name) // Too much detail?
+		return 0
+	}
 	if t.dataType == DataTypeF32 {
 		f32Slice := unsafe.Slice((*float32)(ptr), t.rows*t.cols)
 		for _, v := range f32Slice {
@@ -509,6 +514,10 @@ func (t *Tensor) LoadFromRaw(data []byte) {
 		return
 	}
 	C.Metal_CopyToDevice(t.buf, 0, unsafe.Pointer(&data[0]), C.int(len(data)))
+}
+
+func (t *Tensor) BufRef() unsafe.Pointer {
+	return (unsafe.Pointer)(t.buf)
 }
 
 func (t *Tensor) ToHost() []float32 {
@@ -657,18 +666,20 @@ func (t *Tensor) Linear(weight *Tensor) *Tensor {
 }
 
 // LinearInto performs Linear using existing output tensor (scratch buffer)
-// LinearInto performs Linear using existing output tensor (scratch buffer)
 func (t *Tensor) LinearInto(weight *Tensor, out *Tensor) {
 	// t.cols (K) must match weight.cols (K)
 	if t.cols != weight.cols {
 		panic(fmt.Sprintf("LinearInto dim mismatch: input cols %d != weight cols %d", t.cols, weight.cols))
 	}
-	// Check/Resize out tensor? Assuming caller managed size.
-	// out should be [Rows, Weight.Rows] (usually [1, Dim]).
 	
 	if weight.dataType == DataTypeQ4K {
-		C.Metal_MatMul_Q4K_F16(t.ctx.ref, weight.buf, 0, false, t.buf, C.int(t.Offset), false, out.buf, C.int(out.Offset),
-			C.int(t.rows), C.int(weight.rows), C.int(weight.cols))
+		if out.dataType == DataTypeF32 {
+			C.Metal_MatMul_Q4K_F32(t.ctx.ref, weight.buf, 0, 0, t.buf, C.int(t.Offset), 0, out.buf, C.int(out.Offset),
+				C.int(t.rows), C.int(weight.rows), C.int(weight.cols))
+		} else {
+			C.Metal_MatMul_Q4K_F16(t.ctx.ref, weight.buf, 0, false, t.buf, C.int(t.Offset), false, out.buf, C.int(out.Offset),
+				C.int(t.rows), C.int(weight.rows), C.int(weight.cols))
+		}
 	} else if weight.dataType == DataTypeQ3K {
 		C.Metal_MatMul_Q3K_F16(t.ctx.ref, weight.buf, 0, false, t.buf, C.int(t.Offset), false, out.buf, C.int(out.Offset),
 			C.int(t.rows), C.int(weight.rows), C.int(weight.cols))
@@ -676,10 +687,16 @@ func (t *Tensor) LinearInto(weight *Tensor, out *Tensor) {
 		C.Metal_MatMul_Q6K_F16(t.ctx.ref, weight.buf, 0, false, t.buf, C.int(t.Offset), false, out.buf, C.int(out.Offset),
 			C.int(t.rows), C.int(weight.rows), C.int(weight.cols))
 	} else {
-		// Custom F16 kernel: expects (weight, input, output, dim_in, dim_out, batch)
-		// weight.buf at Index 0, t.buf at Index 1
-		C.Metal_MatMul_F16(t.ctx.ref, weight.buf, 0, true, t.buf, C.int(t.Offset), false, out.buf, C.int(out.Offset),
-			C.int(t.rows), C.int(weight.rows), C.int(weight.cols))
+		// F16 weights
+		if out.dataType == DataTypeF32 {
+			C.Metal_MatMul_F16_F16_F32(t.ctx.ref, weight.buf, 0, t.buf, C.int(t.Offset), out.buf, C.int(out.Offset), 
+				C.int(t.rows), C.int(weight.rows), C.int(weight.cols))
+		} else {
+			// Weights: F16, Input: F16, Output: F16
+			// Uses kernel linear_f16
+			C.Metal_MatMul_F16(t.ctx.ref, weight.buf, 0, true, t.buf, C.int(t.Offset), false, out.buf, C.int(out.Offset),
+				C.int(t.rows), C.int(weight.rows), C.int(weight.cols))
+		}
 	}
 }
 
@@ -919,6 +936,12 @@ func (t *Tensor) Layer(attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, k
 	scratch *LayerScratch, // NEW ARG
 	pos, heads, kvHeads, headDim int, ropeTheta, eps float32, hiddenDim, ctxLen int) {
 	
+	if true { 
+		fmt.Printf("DEBUG_LAYER_PTRS: pos=%d, t=%p (buf=%p), attnNorm=%p (buf=%p), normed=%p (buf=%p)\n", 
+			pos, t, t.buf, attnNorm, attnNorm.buf, scratch.Normed, scratch.Normed.buf)
+		t.ScanMax("L-Input_Res_START") 
+	}
+	
 	// Use scratch buffers instead of allocating
 	normed := scratch.Normed
 	// Norm into scratch
@@ -1063,6 +1086,7 @@ func (t *Tensor) Layer(attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, k
 		normedFFN := scratch.NormedFFN_F32
 		if t.dataType == DataTypeF32 {
 			t.RMSNorm_F32_Into(ffnNorm, eps, normedFFN)
+			if pos < 1 { normedFFN.ScanMax("L-FFNNorm_F32") }
 		}
 		
 		// 9. Gate/Up Projections -> FP32
@@ -1072,10 +1096,15 @@ func (t *Tensor) Layer(attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, k
 		normedFFN.LinearF32_Into(ffnGate, gatePart)
 		normedFFN.LinearF32_Into(ffnUp, upPart)
 		t.ctx.Synchronize()
+		if pos < 1 {
+			gatePart.ScanMax("L-FFNGate")
+			upPart.ScanMax("L-FFNUp")
+		}
 		
 		// 10. SwiGLU (FP32)
 		swiOut := scratch.SwiOut
 		gatePart.SwiGLU_FP32_Into(upPart, swiOut)
+		if pos < 1 { swiOut.ScanMax("L-SwiGLU") }
 		
 		// 11. Down Projection (FP32 -> FP16)
 		
@@ -1083,6 +1112,7 @@ func (t *Tensor) Layer(attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, k
 		resFFN := scratch.ResFFN_F32
 		swiOut.LinearF32_Into(ffnDown, resFFN) // Handles Q4K
 		t.ctx.Synchronize()
+		if pos < 1 { resFFN.ScanMax("L-FFNDown") }
 		
 		// 12. Residual Add 2
 		if t.dataType == DataTypeF32 {
@@ -1197,8 +1227,8 @@ func (t *Tensor) LinearF32_Into(weight *Tensor, out *Tensor) {
 			C.int(t.rows), C.int(weight.rows), C.int(weight.cols))
 	} else {
 		// F16 weights * FP32 input -> FP32 output
-		// Use Metal_MatMul_F16_F32 (Kernel linear_f16_f32) checks float* input
-		C.Metal_MatMul_F16_F32(t.ctx.ref, weight.buf, 0, t.buf, C.int(t.Offset), out.buf, C.int(out.Offset),
+		// Use Metal_MatMul_F16_F32_F32 (Kernel linear_f16_f32) checks float* input
+		C.Metal_MatMul_F16_F32_F32(t.ctx.ref, weight.buf, 0, t.buf, C.int(t.Offset), out.buf, C.int(out.Offset),
 			C.int(t.rows), C.int(weight.rows), C.int(weight.cols))
 	}
 }
@@ -1271,7 +1301,12 @@ func (t *Tensor) AddInPlace(other *Tensor) {
 
 func (t *Tensor) EmbeddingLookup(row int) *Tensor {
 	res := t.ctx.NewTensorPooled(1, t.cols)
-	C.Metal_Embedding_F16(t.ctx.ref, t.buf, 0, res.buf, 0, C.int(row), C.int(t.cols))
+	if t.dataType == DataTypeQ4K {
+		// fmt.Printf("DEBUG: Using Q4K Embedding Kernel for row %d\n", row)
+		C.Metal_Embedding_Q4K(t.ctx.ref, t.buf, 0, res.buf, 0, C.int(row), C.int(t.cols))
+	} else {
+		C.Metal_Embedding_F16(t.ctx.ref, t.buf, 0, res.buf, 0, C.int(row), C.int(t.cols))
+	}
 	return res
 }
 
@@ -1283,7 +1318,7 @@ func (t *Tensor) Attention(kCache, vCache *Tensor, pos, numHeads, kvHeads, headD
 	res := t.ctx.NewTensorPooled(1, numHeads*headDim)
 	scoresDim := numHeads * ctxLen
 	if scoresDim < 32768 { scoresDim = 32768 }
-	scores := t.ctx.NewTensorPooled(1, scoresDim)
+	scores := t.ctx.NewTensorFP32Pooled(1, scoresDim)
 	
 	C.Metal_Attention_F16(t.ctx.ref, t.buf, 0, kCache.buf, vCache.buf, res.buf, 0,
 		scores.buf, 0,
@@ -1305,6 +1340,7 @@ func (t *Tensor) RMSNormFP32_ToF16(weight *Tensor, eps float32) *Tensor {
 func (t *Tensor) RMSNormFP32_ToF16_Into(weight *Tensor, eps float32, out *Tensor) {
 	C.Metal_RMSNorm_F32_F16(t.ctx.ref, t.buf, C.int(t.Offset), weight.buf, 0, out.buf, C.int(out.Offset), 
 		C.int(t.rows), C.int(t.cols), C.float(eps))
+	out.ScanMax("DEBUG: RMSNorm Out")
 }
 
 func (t *Tensor) RMSNormFP32(weight *Tensor, eps float32) *Tensor {
@@ -1329,7 +1365,7 @@ func (t *Tensor) LinearIntoFP32(weight *Tensor, out *Tensor) {
 		C.Metal_MatMul_Q4K_F32(t.ctx.ref, weight.buf, 0, 0, t.buf, 0, 0, out.buf, 0,
 			C.int(t.rows), C.int(weight.rows), C.int(weight.cols))
 	} else if weight.dataType == DataTypeF16 {
-		C.Metal_MatMul_F16_F32(t.ctx.ref, weight.buf, 0, t.buf, 0, out.buf, 0,
+		C.Metal_MatMul_F16_F32_F32(t.ctx.ref, weight.buf, 0, t.buf, 0, out.buf, 0,
 			C.int(t.rows), C.int(weight.rows), C.int(weight.cols))
 	} else {
 		panic(fmt.Sprintf("LinearIntoFP32: unsupported weight data type %d", weight.dataType))
@@ -1384,3 +1420,51 @@ func (t *Tensor) CopyToF16_Into(dest *Tensor) {
 	C.Metal_Copy_F32_F16(t.ctx.ref, t.buf, 0, dest.buf, 0, C.int(t.rows*t.cols))
 }
 
+
+// Test helper methods
+
+// LoadFromF32 loads F32 data into tensor (converts to F16 if needed)
+func (t *Tensor) LoadFromF32(data []float32) {
+	t.LoadFrom(data)
+}
+
+// ToHostF32 retrieves tensor data as F32 (converts from F16 if needed)
+func (t *Tensor) ToHostF32() []float32 {
+	if t.dataType == DataTypeF32 {
+		return t.ToHost()
+	}
+	// Convert F16 to F32
+	t.ctx.Synchronize()
+	ptr := C.Metal_GetBufferContents(t.buf)
+	if ptr == nil {
+		return make([]float32, t.rows*t.cols)
+	}
+	f16Slice := unsafe.Slice((*uint16)(ptr), t.rows*t.cols)
+	f32Data := make([]float32, t.rows*t.cols)
+	for i, v := range f16Slice {
+		f32Data[i] = Float16ToFloat32(v)
+	}
+	return f32Data
+}
+
+// AttentionScores computes Q·K^T scores with scaling
+func (t *Tensor) AttentionScores(kCache *Tensor, scores *Tensor, pos, numHeads, kvHeads, headDim, stride int) {
+	C.Metal_AttScores_F16(
+		t.ctx.ref,
+		t.buf, 0,
+		kCache.buf,
+		scores.buf, 0,
+		C.int(pos),
+		C.int(numHeads),
+		C.int(kvHeads),
+		C.int(headDim),
+		C.int(stride),
+	)
+}
+
+// NewTensorF32 creates a new F32 tensor (alias for NewTensorFP32)
+func (c *Context) NewTensorF32(rows, cols int) *Tensor {
+	return c.NewTensorFP32(rows, cols)
+}
+
+// StoreKV stores K and V projections into their respective caches
