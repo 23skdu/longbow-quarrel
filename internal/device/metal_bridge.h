@@ -18,7 +18,7 @@ void Metal_Free(MetalContextRef ctx);
 void Metal_Synchronize(MetalContextRef ctx);
 
 // Buffer Management
-MetalBufferRef Metal_Alloc(MetalContextRef ctx, int size);
+MetalBufferRef Metal_Alloc(MetalContextRef ctx, long long size);
 void Metal_FreeBuffer(MetalContextRef ctx, MetalBufferRef buf);
 void Metal_CopyToDevice(MetalBufferRef buf, int offset, const void *data,
                         int size);

@@ -8,8 +8,8 @@ package device
 #include <stdlib.h>
 void* Metal_AutoreleasePoolPush();
 void Metal_AutoreleasePoolPop(void* pool);
-void* Metal_NewHeap(MetalContextRef ctx, int size);
-MetalBufferRef Metal_NewBufferFromHeap(void* heap, int size);
+void* Metal_NewHeap(MetalContextRef ctx, long long size);
+MetalBufferRef Metal_NewBufferFromHeap(void* heap, long long size);
 void Metal_FreeHeap(void* heap);
 */
 import "C"
@@ -110,7 +110,7 @@ func (c *Context) NewQ3KTensor(rows, cols int) *Tensor {
 	numBlocks := numElements / 256
 	sizeBytes := numBlocks * 110
 
-	buf := C.Metal_Alloc(c.ref, C.int(sizeBytes))
+	buf := C.Metal_Alloc(c.ref, C.longlong(sizeBytes))
 	return &Tensor{
 		ctx:       c,
 		rows:      rows,
@@ -130,7 +130,7 @@ func (c *Context) NewQ4KTensor(rows, cols int) *Tensor {
 	numBlocks := numElements / 256
 	sizeBytes := numBlocks * 144
 
-	buf := C.Metal_Alloc(c.ref, C.int(sizeBytes))
+	buf := C.Metal_Alloc(c.ref, C.longlong(sizeBytes))
 	return &Tensor{
 		ctx:       c,
 		rows:      rows,
@@ -149,7 +149,7 @@ func (c *Context) NewQ6KTensor(rows, cols int) *Tensor {
 	}
 	numBlocks := numElements / 256
 	sizeBytes := numBlocks * 210
-	buf := C.Metal_Alloc(c.ref, C.int(sizeBytes))
+	buf := C.Metal_Alloc(c.ref, C.longlong(sizeBytes))
 	return &Tensor{
 		ctx:       c,
 		rows:      rows,
@@ -171,7 +171,7 @@ func (c *Context) NewTensor(rows, cols int) *Tensor {
 		}
 	}
 
-	buf := C.Metal_Alloc(c.ref, C.int(sizeBytes))
+	buf := C.Metal_Alloc(c.ref, C.longlong(sizeBytes))
 	if buf == nil {
 		panic("Metal_Alloc returned nil!")
 	}
@@ -232,7 +232,7 @@ func (c *Context) NewTensorFP32Pooled(rows, cols int) *Tensor {
 
 func (c *Context) NewTensorFP32(rows, cols int) *Tensor {
 	sizeBytes := rows * cols * 4 // FP32
-	buf := C.Metal_Alloc(c.ref, C.int(sizeBytes))
+	buf := C.Metal_Alloc(c.ref, C.longlong(sizeBytes))
 	if buf == nil {
 		panic("Metal_Alloc returned nil!")
 	}
@@ -774,12 +774,12 @@ func (c *Context) AutoreleasePoolPop(pool unsafe.Pointer) {
 
 // NewHeap allocates a Metal Heap
 func (c *Context) NewHeap(size int) unsafe.Pointer {
-	return C.Metal_NewHeap(c.ref, C.int(size))
+	return C.Metal_NewHeap(c.ref, C.longlong(size))
 }
 
 // NewBufferFromHeap allocates from heap
 func (c *Context) NewBufferFromHeap(heap unsafe.Pointer, size, rows, cols, dt int) *Tensor {
-	buf := C.Metal_NewBufferFromHeap(heap, C.int(size))
+	buf := C.Metal_NewBufferFromHeap(heap, C.longlong(size))
 	if buf == nil {
 		return nil
 	}
@@ -827,13 +827,13 @@ func (c *Context) NewLayerScratch(batch, dim, hiddenDim, heads, kvHeads, headDim
 		szNormedFFN + szNormedFFN_F32 + szResFFN + szResFFN_F32 + szScores + szGate + szUp + szSwiOut + szLogits
 		
 	fmt.Printf("Alloc Heap: %d bytes\n", total)
-	heap := C.Metal_NewHeap(c.ref, C.int(total))
+	heap := C.Metal_NewHeap(c.ref, C.longlong(total))
 	if heap == nil {
 		panic("Heap Alloc failed")
 	}
 	
 	newT := func(sz, r, cols, dt int) *Tensor {
-		buf := C.Metal_NewBufferFromHeap(heap, C.int(sz))
+		buf := C.Metal_NewBufferFromHeap(heap, C.longlong(sz))
 		if buf == nil {
 			panic("Buffer from Heap failed")
 		}
