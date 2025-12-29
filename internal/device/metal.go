@@ -738,7 +738,8 @@ type LayerScratch struct {
 	Normed              *Tensor // F16
 	
 	// FFN Intermediates (FP32)
-	NormedFFN, GatePart, UpPart, SwiOut, 	ResFFN  *Tensor // [Batch, Dim]
+	NormedFFN, GatePart, UpPart, SwiOut, 	ResFFN  *Tensor // NormedFFN is F16.
+	NormedFFN_F32, ResFFN_F32 *Tensor // [Batch, Dim] FP32 (New)
 	
 	// Logits (FP32)
 	Logits *Tensor // [1, VocabSize]
@@ -809,7 +810,9 @@ func (c *Context) NewLayerScratch(batch, dim, hiddenDim, heads, kvHeads, headDim
 	szResAtt := align(batch * dim * 2)
 	
 	szNormedFFN := align(batch * dim * 2)
+	szNormedFFN_F32 := align(batch * dim * 4) // FP32
 	szResFFN := align(batch * dim * 2)
+	szResFFN_F32 := align(batch * dim * 4) // FP32
 	
 	szScores := align(heads * seqLen * 4) 
 	if szScores < align(32768*4) { szScores = align(32768 * 4) }
@@ -821,7 +824,7 @@ func (c *Context) NewLayerScratch(batch, dim, hiddenDim, heads, kvHeads, headDim
 	szLogits := align(1 * vocabSize * 4)
 	
 	total := szNormed + szQPart + szKPart + szVPart + szAttOut + szResAtt + 
-		szNormedFFN + szResFFN + szScores + szGate + szUp + szSwiOut + szLogits
+		szNormedFFN + szNormedFFN_F32 + szResFFN + szResFFN_F32 + szScores + szGate + szUp + szSwiOut + szLogits
 		
 	fmt.Printf("Alloc Heap: %d bytes\n", total)
 	heap := C.Metal_NewHeap(c.ref, C.int(total))
@@ -862,7 +865,9 @@ func (c *Context) NewLayerScratch(batch, dim, hiddenDim, heads, kvHeads, headDim
 	s.ResAtt = newT(szResAtt, batch, dim, DataTypeF16)
 	
 	s.NormedFFN = newT(szNormedFFN, batch, dim, DataTypeF16)
+	s.NormedFFN_F32 = newT(szNormedFFN_F32, batch, dim, DataTypeF32)
 	s.ResFFN = newT(szResFFN, batch, dim, DataTypeF16)
+	s.ResFFN_F32 = newT(szResFFN_F32, batch, dim, DataTypeF32)
 	
 	s.Scores = newT(szScores, 1, szScores/4, DataTypeF32)
 	
@@ -896,6 +901,8 @@ func (s *LayerScratch) Free() {
 	if s.Scores != nil { s.Scores.Free() }
 	if s.Normed != nil { s.Normed.Free() }
 	if s.NormedFFN != nil { s.NormedFFN.Free() }
+	if s.NormedFFN_F32 != nil { s.NormedFFN_F32.Free() }
+	if s.ResFFN_F32 != nil { s.ResFFN_F32.Free() }
 	if s.GatePart != nil { s.GatePart.Free() }
 	if s.UpPart != nil { s.UpPart.Free() }
 	if s.SwiOut != nil { s.SwiOut.Free() }
@@ -934,8 +941,12 @@ func (t *Tensor) Layer(attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, k
 	normed.LinearInto(k, kPart)
 	normed.LinearInto(v, vPart)
 	t.ctx.Synchronize()
-	// qPart.ScanScores("Q Part Out")
-	// kPart.ScanAbsMax("K Part Out AbsMax")
+	if pos < 2 {
+		if 3 == 3 { t.ScanMax("L-Input_Res") } // Hack to label input
+		normed.ScanMax("L-AttnNorm")
+		qPart.ScanMax("L-Q_PreRoPE")
+		kPart.ScanMax("L-K_PreRoPE")
+	}
 	
 	// 3. RoPE & 4. Store K/V & 5. Attention (Serial Loop for Prefill/Batch)
 	// Our RoPE, Attention and StoreKV kernels currently only support single-token processing.
@@ -1016,10 +1027,16 @@ func (t *Tensor) Layer(attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, k
 		t.ctx.Synchronize()
 	}
 	t.ctx.Synchronize()
+	if pos < 2 {
+		scratch.AttOut.ScanMax("L-AttnOut_PreProj")
+	}
 		
 	// 6. Attention Output Projection
 	attOut.LinearInto(o, resAtt)
 	t.ctx.Synchronize()
+	if pos < 2 {
+		resAtt.ScanMax("L-AttnOut_Proj")
+	}
 	
 	
 	// 7. Residual Add 1
@@ -1038,25 +1055,22 @@ func (t *Tensor) Layer(attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, k
 	// Use FP32 FFN for small models (dim < 1024) to prevent activation explosion
 	useF32FFN := t.cols < 1024
 	
-	// 8. FFN Norm
-	normedFFN := scratch.NormedFFN
-	if t.dataType == DataTypeF32 {
-		t.RMSNormFP32_ToF16_Into(ffnNorm, eps, normedFFN)
-	} else {
-		// normedFFN = t.RMSNorm(ffnNorm, eps) // Allocates
-	}
-	
+	// 8. FFN Block
 	
 	if useF32FFN {
-		// FP32 FFN Path for Small Models (SmolLM2, TinyLlama)
-		// Maintains FP32 precision through FFN to prevent explosion
+		// FP32 FFN Path for Small Models (SmolLM2)
+		// 8. FFN Norm (F32 -> F32)
+		normedFFN := scratch.NormedFFN_F32
+		if t.dataType == DataTypeF32 {
+			t.RMSNorm_F32_Into(ffnNorm, eps, normedFFN)
+		}
 		
-		// 9. Gate/Up Projections → FP32
+		// 9. Gate/Up Projections -> FP32
 		gatePart := scratch.GatePart
 		upPart := scratch.UpPart
 		
-		normedFFN.LinearToFP32_Into(ffnGate, gatePart)
-		normedFFN.LinearToFP32_Into(ffnUp, upPart)
+		normedFFN.LinearF32_Into(ffnGate, gatePart)
+		normedFFN.LinearF32_Into(ffnUp, upPart)
 		t.ctx.Synchronize()
 		
 		// 10. SwiGLU (FP32)
@@ -1065,30 +1079,33 @@ func (t *Tensor) Layer(attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, k
 		// swiOut.ScanMax("SwiGLU Out (FP32)")
 		
 		// 11. Down Projection (FP32 → FP16)
-		resFFN := scratch.ResFFN
-		swiOut.LinearFromFP32_Into(ffnDown, resFFN)
+
+		// 11. Down Projection (FP32 -> FP32)
+		resFFN := scratch.ResFFN_F32
+		swiOut.LinearF32_Into(ffnDown, resFFN) // Handles Q4K
 		t.ctx.Synchronize()
-		// resFFN.ScanMax("FFN Out (FP16)")
-		// resFFN.ScanNaNs("FFN Out")
-		
-		// Cleanup FP32 intermediates
 		
 		// 12. Residual Add 2
 		if t.dataType == DataTypeF32 {
-			t.AddMixedInPlace(resFFN)
+			t.AddInPlace(resFFN)
 		} else {
-			t2 := t.Add(resFFN)
+			// Fallback (Should not happen in useF32FFN path)
+			t2 := t.Add(resFFN) // Mixed
 			C.Metal_Copy_F16(t.ctx.ref, t2.buf, 0, t.buf, 0, C.int(t.rows*t.cols))
 			t2.ReturnToPool()
 		}
 		t.ctx.Synchronize()
-		// t.ScanMax("Layer Output (After FFN+Res)")
 		
 		// normedFFN.ReturnToPool() // Now a scratch buffer
 		// resFFN.ReturnToPool() // Now a scratch buffer
 		// t2 returned inside else block
 	} else {
 		// Standard FP16 FFN Path for Large Models (Mistral, Llama)
+		normedFFN := scratch.NormedFFN
+		if t.dataType == DataTypeF32 {
+			t.RMSNormFP32_ToF16_Into(ffnNorm, eps, normedFFN)
+			if pos < 2 { normedFFN.ScanMax("L-FFNNorm") }
+		}
 		
 		// 9. FFN Gate/Up
 		gatePart := t.ctx.NewTensorPooled(t.rows, ffnGate.rows)
@@ -1166,6 +1183,27 @@ func (t *Tensor) LinearToFP32(weight *Tensor) *Tensor {
 	return out
 }
 
+// RMSNorm_F32_Into performs RMSNorm (FP32 -> FP32)
+func (t *Tensor) RMSNorm_F32_Into(weight *Tensor, eps float32, out *Tensor) {
+	C.Metal_RMSNorm_F32(t.ctx.ref, t.buf, C.int(t.Offset), weight.buf, 0, out.buf, C.int(out.Offset),
+		C.int(t.rows), C.int(t.cols), C.float(eps))
+}
+
+// LinearF32_Into performs Linear with FP32 Input -> FP32 Output
+// Handling Q4K weights correctly
+func (t *Tensor) LinearF32_Into(weight *Tensor, out *Tensor) {
+	if weight.dataType == DataTypeQ4K {
+		// Q4K weights * FP32 input -> FP32 output
+		C.Metal_MatMul_Q4K_F32(t.ctx.ref, weight.buf, 0, 0, t.buf, C.int(t.Offset), 0, out.buf, C.int(out.Offset),
+			C.int(t.rows), C.int(weight.rows), C.int(weight.cols))
+	} else {
+		// F16 weights * FP32 input -> FP32 output
+		// Use Metal_MatMul_F16_F32 (Kernel linear_f16_f32) checks float* input
+		C.Metal_MatMul_F16_F32(t.ctx.ref, weight.buf, 0, t.buf, C.int(t.Offset), out.buf, C.int(out.Offset),
+			C.int(t.rows), C.int(weight.rows), C.int(weight.cols))
+	}
+}
+
 // SwiGLU_FP32 performs SwiGLU with FP32 inputs and outputs
 func (gate *Tensor) SwiGLU_FP32_Into(up *Tensor, out *Tensor) {
 	C.Metal_SwiGLU_F32(gate.ctx.ref, gate.buf, C.int(gate.Offset), up.buf, C.int(up.Offset), out.buf, C.int(out.Offset), C.int(gate.rows), C.int(gate.cols))
@@ -1216,6 +1254,19 @@ func (t *Tensor) Add(other *Tensor) *Tensor {
 	res := t.ctx.NewTensorPooled(t.rows, t.cols)
 	C.Metal_Add_F16(t.ctx.ref, t.buf, 0, other.buf, 0, res.buf, 0, C.int(t.rows*t.cols))
 	return res
+}
+
+// AddInPlace performs t += other (FP32)
+func (t *Tensor) AddInPlace(other *Tensor) {
+	if t.rows != other.rows || t.cols != other.cols {
+		panic("AddInPlace dim mismatch")
+	}
+	if t.dataType != DataTypeF32 || other.dataType != DataTypeF32 {
+		panic("AddInPlace requires FP32 inputs")
+	}
+	// a = a + b
+	// Metal_Add_F32(a, offA, b, offB, res, offRes, count)
+	C.Metal_Add_F32(t.ctx.ref, t.buf, C.int(t.Offset), other.buf, C.int(other.Offset), t.buf, C.int(t.Offset), C.int(t.rows*t.cols))
 }
 
 

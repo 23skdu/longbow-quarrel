@@ -126,7 +126,7 @@ kernel void linear_q4k_f16(device const uchar *weight [[ buffer(0) ]],
                          uint3 qid [[ thread_position_in_grid ]]) {
     uint row = qid.y; uint batch = qid.z;
     if (row >= (uint)dim_out) return; uint lane_id = tid.x;
-    int num_blocks = dim_in / 256;
+    int num_blocks = (dim_in + 255) / 256;
     device const uchar *row_ptr = weight + row * num_blocks * 144;
     device const half *in_ptr = input + batch * dim_in;
     float sum = 0;
@@ -506,7 +506,7 @@ kernel void linear_q4k_f32(device const uchar *weight [[ buffer(0) ]],
                          uint3 qid [[ thread_position_in_grid ]]) {
     uint row = qid.y; uint batch = qid.z;
     if (row >= (uint)dim_out) return; uint lane_id = tid.x;
-    int num_blocks = dim_in / 256;
+    int num_blocks = (dim_in + 255) / 256;
     device const uchar *row_ptr = weight + row * num_blocks * 144;
     device const float *in_ptr = input + batch * dim_in;
     float sum = 0;
