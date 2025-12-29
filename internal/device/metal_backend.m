@@ -732,8 +732,8 @@ void Metal_MatMul_F16_F16_F32(MetalContextRef ctx, MetalBufferRef a, int offA,
                               int offC, int M, int N, int K) {
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
   id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
-  [enc setComputePipelineState:mc.pipelineLinearF16ToF32]; // linear_f16_to_f32
-                                                           // (F16 input)
+  [enc setComputePipelineState:mc.pipelineMatMul_F16_F32]; // Corrected:
+                                                           // linear_f16_f32
   [enc setBuffer:(__bridge id<MTLBuffer>)a offset:offA atIndex:0];
   [enc setBuffer:(__bridge id<MTLBuffer>)b offset:offB atIndex:1];
   [enc setBuffer:(__bridge id<MTLBuffer>)c offset:offC atIndex:2];

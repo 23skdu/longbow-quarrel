@@ -56,6 +56,9 @@ func New(path string) (*Tokenizer, error) {
 		}
 	}
 
+	// Debug merges count
+	// fmt.Printf("Tokenizer: Loaded %d merges\n", len(merges))
+
 	return &Tokenizer{
 		Tokens: tokens,
 		Vocab:  vocab,
@@ -77,32 +80,56 @@ func (t *Tokenizer) Encode(text string) []int {
 		return nil
 	}
 
-	// 1. Basic pre-tokenization (Split by whitespace for now to be safe, or just full string?)
-	// GPT-2 style: treats space as part of next token (Ġ).
-	// "Hello World" -> "Hello", " World" -> "Hello", "ĠWorld"
-	
-	// Simple approach: Walk input, processing "words".
-	// A "word" is a sequence of non-space chars, OR a sequence of space chars?
-	// Actually, we can just replace spaces with Ġ and chars with bytes (if needed), then BPE.
-	// But usually, BPE is applied to pre-tokenized words.
-	
-	// Let's implement a simple whitespace splitter that preserves the space attached to the next word.
+	// 1. Basic pre-tokenization
 	words := splitWords(text)
 	
 	var allIDs []int
 	
+	// Fallback to Greedy Max Match if no merges available (e.g. Unigram)
+	useMaxMatch := len(t.Ranks) == 0
+	
 	for _, w := range words {
-		// Convert to BPE-clean format (replace space with Ġ)
-		// Note: The first word in sentence usually doesn't have Ġ unless it had leading space.
-		// "Hello World" -> ["Hello", " World"]
-		cleanW := strings.ReplaceAll(w, " ", "Ġ")
+		// Convert to BPE-clean format (replace space with U+2581 for Llama/Mistral)
+		// Note: GPT-2 uses Ġ, Llama uses  (U+2581)
+		cleanW := strings.ReplaceAll(w, " ", "\u2581")
 		
-		// Map characters to initial subwords
-		// "ĠWorld" -> ["Ġ", "W", "o", "r", "l", "d"]
-		// But care: Unicode? GGUF tokens are byte strings often.
-		// SmolLM (GPT-2) uses byte-level BPE.
-		// For verification, we assume ASCII/UTF-8 works with the Vocab's keys.
+		if useMaxMatch {
+			// Greedy Max Match
+			remaining := cleanW
+			for len(remaining) > 0 {
+				bestMatch := ""
+				bestLen := 0
+				found := false
+				
+				// Try to find longest prefix that exists in vocab
+				// Optimization: Search from full length down
+				// Or simple loop? 
+				// Max token length? 
+				// Limit search window? No, naive is fine for now.
+				for l := len(remaining); l > 0; l-- {
+					sub := remaining[:l]
+					if _, ok := t.Vocab[sub]; ok {
+						bestMatch = sub
+						bestLen = l
+						found = true
+						break
+					}
+				}
+				
+				if found {
+					allIDs = append(allIDs, t.Vocab[bestMatch])
+					remaining = remaining[bestLen:]
+				} else {
+					// Fallback: Skip one char (unknown)
+					// Or process as byte?
+					// fmt.Printf("Unknown char: %c\n", remaining[0])
+					remaining = remaining[1:]
+				}
+			}
+			continue
+		}
 		
+		// Normal BPE (Merges)
 		subwords := make([]string, 0, len(cleanW))
 		for _, r := range cleanW {
 			subwords = append(subwords, string(r))
@@ -134,9 +161,6 @@ func (t *Tokenizer) Encode(text string) []int {
 			}
 			
 			// Merge best pair
-			// subwords[bestPairIdx] += subwords[bestPairIdx+1]
-			// Remove subwords[bestPairIdx+1]
-			
 			merged := subwords[bestPairIdx] + subwords[bestPairIdx+1]
 			
 			// Rebuild slice (inefficient but safe)
@@ -151,13 +175,6 @@ func (t *Tokenizer) Encode(text string) []int {
 		for _, s := range subwords {
 			if id, ok := t.Vocab[s]; ok {
 				allIDs = append(allIDs, id)
-			} else {
-				// Fallback or Unknown?
-				// Try <unk> or byte fallback.
-				// For now, if not found, we skip or use 0?
-				// Let's assume the vocab covers all chars (byte level BPE).
-				// If not found, debug print?
-				// fmt.Printf("Unknown token: %s\n", s)
 			}
 		}
 	}
