@@ -1,105 +1,174 @@
-# Performance Optimization Roadmap
+# Quarrel Improvement Roadmap
 
-This document outlines the next 10 steps to improve the performance, efficiency, and scalability of the `Longbow-Quarrel` inference engine.
-Each step is broken down into granular sub-tasks to ensure steady progress and avoid complexity overload.
+This document outlines the next 20 steps to improve the performance, correctness, and capabilities of the `Longbow-Quarrel` inference engine. Priorities are based on recent debugging findings and production readiness requirements.
 
-## Step 1: Fused Attention Kernels
+## Priority 1: Correctness & Stability
 
-- [ ] Analysis & Profiling
-  - [ ] Profile current `AttScores`, `Softmax`, and `AttValues` kernels separately to establish a baseline.
-  - [ ] Identify memory bandwidth bottlenecks in the current split implementation.
-- [ ] Implementation
-  - [ ] Create a new Metal kernel `fused_attention_v1` combining `AttScores` and `Softmax`.
-  - [ ] Extend the kernel to include `AttValues` (generating `fused_attention_full`).
-- [ ] Verification
-  - [ ] Validate correctness against the split kernels using `TestAttentionLayer`.
-  - [ ] Benchmark `fused_attention_full` and record speedup in `benchmark.log`.
+### Step 1: Resolve Mistral Q4_K Precision Issues ⚠️ CRITICAL
 
-## Step 2: SIMD Reduction in Softmax
+- [ ] Test Mistral with F16 (non-quantized) weights to isolate Q4_K precision as root cause
+- [ ] Compare layer-by-layer activations with llama.cpp reference implementation
+- [ ] Implement activation clipping/scaling if needed (clip to ±20 after RMSNorm)
+- [ ] Add numerical stability checks for extreme activation ranges
+- [ ] Document Q4_K precision limitations for models with tiny embeddings
 
-- [ ] Research
-  - [ ] Review Metal Shading Language documentation for `simd_sum` and `simd_max`.
-- [ ] Implementation
-  - [ ] Modify `Softmax` kernel to use threadgroup SIMD operations.
-  - [ ] Adjust threadgroup sizes to align with SIMD width (32 threads).
-- [ ] Verification
-  - [ ] Verify numerical stability with edge case inputs (very large/small values).
-  - [ ] Confirm no regressions in perplexity or output quality.
+### Step 2: Fix Sequential KV Cache Overwrites
 
-## Step 3: Flash Attention-2 Implementation
+- [ ] Debug why `TestKVCacheSequential` shows cache corruption across positions
+- [ ] Verify `store_kv_f16` kernel doesn't overwrite previous positions
+- [ ] Add comprehensive KV cache integrity tests
+- [ ] Validate cache behavior with multi-token prefill
 
-- [ ] Planning
-  - [ ] Study Flash Attention-2 tiling and memory access patterns.
-- [ ] Implementation
-  - [ ] Implement the forward pass tiling loop in Metal.
-  - [ ] Optimize shared memory (threadgroup memory) usage for K and V blocks.
-- [ ] Verification
-  - [ ] Test with long context sequences (> 2048 tokens).
-  - [ ] Verify memory usage reduction compared to standard attention.
+### Step 3: Objective-C ARC Compliance
 
-## Step 4: Speculative Decoding
+- [ ] Fix 6 `__bridge_retained`/`__bridge_transfer` warnings in `metal_backend.m`
+- [ ] Enable ARC or remove unnecessary bridge casts
+- [ ] Ensure proper memory management for Metal objects
 
-- [ ] Setup
-  - [ ] Integrate a smaller "draft" model (e.g., SmolLM2-135M) alongside the main model.
-- [ ] Implementation
-  - [ ] Implement the "draft" generation loop (k steps).
-  - [ ] Implement the "verify" step in the main model (processing k+1 tokens in parallel).
-  - [ ] Add rejection sampling logic.
-- [ ] Verification
-  - [ ] Measure acceptance rate of draft tokens.
-  - [ ] Benchmark end-to-end wall clock speedup.
+### Step 4: Complete CPU Scan Safety
 
-## Step 5: KV Cache Quantization
+- [ ] Fix `ScanZeroes` and `ScanOCD` to handle DataTypeQ4K (currently incomplete)
+- [ ] Add unit tests for all Scan* functions with Q4_K tensors
+- [ ] Ensure no debug probes can crash on any data type
 
-- [ ] Implementation
-  - [ ] Define 8-bit and 4-bit types for K/V cache storage.
-  - [ ] Update `AttScores` and `AttValues` kernels to dequantize K/V on the fly.
-- [ ] Verification
-  - [ ] Verify potential accuracy loss (perplexity check).
-  - [ ] Measure memory savings (GBs saved).
+### Step 5: Q6_K Support Validation
 
-## Step 6: Multi-Token Prefill
+- [ ] Verify Q6_K dequantization correctness (currently untested)
+- [ ] Add unit tests for Q6_K embedding and linear kernels
+- [ ] Test with Q6_K quantized models
 
-- [ ] Refactoring
-  - [ ] Modify `Layer` signature to accept a batch of tokens/embeddings.
-- [ ] Implementation
-  - [ ] Update Metal kernels to handle `(Batch, Seq, Head, Dim)` tensors.
-- [ ] Verification
-  - [ ] Verify prompt processing speed (tokens/sec) for long prompts.
+## Priority 2: Performance Optimization
 
-## Step 7: Continuous Batching
+### Step 6: Fused Attention Kernels
 
-- [ ] Scheduler Design
-  - [ ] Design a request queue and scheduling loop (iteration-level).
-- [ ] Implementation
-  - [ ] Separate the KV cache management from the model execution.
-  - [ ] Implement "slot" based memory management for active requests.
-- [ ] Verification
-  - [ ] Test with concurrent requests (simulated load).
+- [ ] Profile current `AttScores`, `Softmax`, `AttValues` separately
+- [ ] Extend `att_fused_f16` to support all sequence lengths (currently limited to <1024)
+- [ ] Benchmark fused vs unfused attention performance
+- [ ] Validate numerical correctness with edge cases
 
-## Step 8: MPS Graph Integration
+### Step 7: Flash Attention-2 Implementation
 
-- [ ] Prototype
-  - [ ] Create a standalone `MPSGraph` prototype for the MLP (FeedForward) block.
-- [ ] Integration
-  - [ ] Integrate the MPSGraph MLP into the main inference loop.
-- [ ] Benchmarking
-  - [ ] Compare `MPSGraph` performance vs custom Metal kernels for FFN.
+- [ ] Study Flash Attention-2 tiling and memory access patterns
+- [ ] Implement forward pass tiling loop in Metal
+- [ ] Optimize threadgroup memory usage for K/V blocks
+- [ ] Test with long context sequences (>2048 tokens)
+- [ ] Measure memory bandwidth improvement
 
-## Step 9: Sampling Optimizations
+### Step 8: SIMD Optimization in Softmax
 
-- [ ] Kernels
-  - [ ] Implement parallel `ArgMax`, `TopK`, and `TopP` kernels in Metal.
-- [ ] Integration
-  - [ ] Move sampling logic from Go (CPU) to Metal (GPU).
-  - [ ] Only transfer the final selected token ID back to CPU.
-- [ ] Verification
-  - [ ] Verify distribution of generated tokens matches the CPU implementation.
+- [ ] Verify `simd_sum` and `simd_max` correctness across all threadgroup sizes
+- [ ] Ensure threadgroup size is always 32 for proper SIMD reduction
+- [ ] Add numerical stability tests for extreme input ranges
+- [ ] Profile softmax performance improvement
 
-## Step 10: Paged Attention
+### Step 9: Multi-Token Prefill
 
-- [ ] Memory Manager
-  - [ ] Implement a `BlockManager` to handle physical vs virtual blocks.
-  - [ ] Update Paged Attention kernels to use block tables.
-- [ ] Verification
-  - [ ] Verify memory handling under high concurrency (no OOM with fragmentation).
+- [ ] Refactor `Layer` to process batches of tokens in parallel
+- [ ] Update Metal kernels to handle `(Batch, Seq, Head, Dim)` tensors
+- [ ] Benchmark prompt processing speed (tokens/sec) for long prompts
+- [ ] Verify correctness with batch sizes 1, 4, 8, 16
+
+### Step 10: Zero-Allocation Inference Path
+
+- [ ] Audit all allocations in hot path (Layer, Attention, FFN)
+- [ ] Expand scratch buffer system to cover all temporary tensors
+- [ ] Profile memory allocations during inference
+- [ ] Achieve zero allocations per token in generation phase
+
+## Priority 3: Advanced Features
+
+### Step 11: KV Cache Quantization
+
+- [ ] Implement 8-bit and 4-bit KV cache storage
+- [ ] Update attention kernels to dequantize K/V on-the-fly
+- [ ] Measure memory savings vs accuracy tradeoff
+- [ ] Add configuration option for KV cache precision
+
+### Step 12: Speculative Decoding
+
+- [ ] Integrate draft model (SmolLM2-135M) alongside main model
+- [ ] Implement draft generation loop (k steps)
+- [ ] Implement verification step (k+1 tokens in parallel)
+- [ ] Add rejection sampling logic
+- [ ] Benchmark acceptance rate and wall-clock speedup
+
+### Step 13: Continuous Batching
+
+- [ ] Design request queue and scheduling loop
+- [ ] Implement slot-based KV cache memory management
+- [ ] Separate cache management from model execution
+- [ ] Test with concurrent requests (simulated load)
+- [ ] Measure throughput improvement
+
+### Step 14: Paged Attention
+
+- [ ] Implement BlockManager for physical vs virtual blocks
+- [ ] Update attention kernels to use block tables
+- [ ] Verify memory handling under high concurrency
+- [ ] Test with fragmented memory scenarios
+
+### Step 15: Sampling Optimizations
+
+- [ ] Implement GPU-side `ArgMax`, `TopK`, `TopP` kernels
+- [ ] Move sampling logic from CPU to GPU
+- [ ] Only transfer final token ID to CPU
+- [ ] Verify distribution matches CPU implementation
+- [ ] Measure latency reduction
+
+## Priority 4: Model Support & Quality
+
+### Step 16: Additional Model Architectures
+
+- [ ] Add Llama 3.x support (verify GQA, RoPE scaling)
+- [ ] Add Qwen 2.5 support
+- [ ] Add Gemma 2 support
+- [ ] Create architecture-specific test suites
+- [ ] Document model compatibility matrix
+
+### Step 17: Mixed Precision Strategies
+
+- [ ] Implement configurable precision per layer type
+- [ ] Test F32 attention + F16 FFN combinations
+- [ ] Measure accuracy vs performance tradeoffs
+- [ ] Add precision configuration to model config
+
+### Step 18: Quantization Improvements
+
+- [ ] Implement Q3_K support (currently stubbed)
+- [ ] Add Q5_K support
+- [ ] Optimize Q4_K dequantization for tiny activations
+- [ ] Add per-layer quantization configuration
+
+### Step 19: Context Length Extensions
+
+- [ ] Implement RoPE scaling for extended context
+- [ ] Add ALiBi positional encoding support
+- [ ] Test with 8K, 16K, 32K context lengths
+- [ ] Optimize memory usage for long contexts
+
+### Step 20: Production Readiness
+
+- [ ] Add comprehensive error handling and recovery
+- [ ] Implement request timeout and cancellation
+- [ ] Add detailed performance metrics and logging
+- [ ] Create production deployment guide
+- [ ] Add health check and monitoring endpoints
+- [ ] Implement graceful shutdown and resource cleanup
+
+## Recent Accomplishments ✅
+
+- Fixed Q4_K embedding lookup kernel (GPU-side dequantization)
+- Fixed KV cache storage pipeline (wrong pipeline bug)
+- Fixed CPU scan safety (DataTypeQ4K handling)
+- Added comprehensive unit tests (RoPE, attention, KV cache)
+- Verified Mistral architecture (pre-norm, GQA, attention scaling)
+- Documented Mistral debugging findings and root cause hypothesis
+
+## Notes
+
+- Steps 1-5 are critical for correctness and should be prioritized
+- Steps 6-10 focus on performance optimization
+- Steps 11-15 enable advanced inference features
+- Steps 16-20 expand model support and production readiness
+- Each step should include unit tests and benchmarks
+- Maintain backward compatibility where possible

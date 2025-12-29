@@ -111,23 +111,23 @@ func TestEngineLifecycle(t *testing.T) {
 	// NewEngine(path) -> (*Engine, error)
 	// e.Infer(prompt) -> tokens
 	
-	e, err := NewEngine(modelPath)
+	engine, err := NewEngine(modelPath, false)
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
-	if e == nil {
+	if engine == nil {
 		t.Fatal("Engine is nil")
 	}
-	defer e.Ctx.Free()
+	defer engine.Ctx.Free()
 	
-	if e.Weights.TokenEmb == nil {
+	if engine.Weights.TokenEmb == nil {
 		t.Fatal("Expected TokenEmb to be loaded")
 	}
 	
-	if len(e.Weights.AttnQ) < 1 {
+	if len(engine.Weights.AttnQ) < 1 {
 		t.Fatal("Expected AttnQ to be initialized with layers")
 	}
-	if e.Weights.AttnQ[0] == nil {
+	if engine.Weights.AttnQ[0] == nil {
 		t.Fatal("Expected blk.0.attn_q.weight to be loaded")
 	}
 	
@@ -138,7 +138,7 @@ func TestEngineLifecycle(t *testing.T) {
 	config := SamplerConfig{
 		Temperature: 0,
 	}
-	outputTokens, err := e.Infer(inputTokens, 10, config) // generate 10 tokens
+	outputTokens, err := engine.Infer(inputTokens, 10, config) // generate 10 tokens
 	if err != nil {
 		t.Logf("Inference returned error (expected for empty/stub engine): %v", err)
 	}

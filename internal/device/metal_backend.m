@@ -13,6 +13,8 @@
 @property(strong) id<MTLComputePipelineState> pipelineMatMul_Q6K_F16;
 @property(strong) id<MTLComputePipelineState> pipelineRoPE_F16;
 @property(strong) id<MTLComputePipelineState> pipelineEmbedding_F16;
+@property(strong) id<MTLComputePipelineState> pipelineEmbedding_Q4K;
+@property(strong) id<MTLComputePipelineState> pipelineStoreKV_F16;
 @property(strong) id<MTLComputePipelineState> pipelineAdd_F16;
 @property(strong) id<MTLComputePipelineState> pipelineCopy_F16;
 @property(strong) id<MTLComputePipelineState> pipelineSwiGLU_F16;
@@ -134,6 +136,8 @@ MetalContextRef Metal_Init(const char *libSource) {
   ctx.pipelineMatMul_Q6K_F16 = loadPipeline(ctx, @"linear_q6k_f16");
   ctx.pipelineRoPE_F16 = loadPipeline(ctx, @"rope_f16");
   ctx.pipelineEmbedding_F16 = loadPipeline(ctx, @"embedding_f16");
+  ctx.pipelineEmbedding_Q4K = loadPipeline(ctx, @"embedding_q4k_f16");
+  ctx.pipelineStoreKV_F16 = loadPipeline(ctx, @"store_kv_f16");
   ctx.pipelineAdd_F16 = loadPipeline(ctx, @"add_f16");
   ctx.pipelineCopy_F16 = loadPipeline(ctx, @"copy_f16");
   ctx.pipelineSwiGLU_F16 = loadPipeline(ctx, @"swiglu_f16");
@@ -206,7 +210,7 @@ void *Metal_NewHeap(MetalContextRef ctx, long long size) {
   id<MTLHeap> heap =
       [[(__bridge MetalWrapper *)ctx device] newHeapWithDescriptor:desc];
   if (!heap) {
-    printf("ERROR: Failed to allocate Metal Heap of size %d\n", size);
+    printf("ERROR: Failed to allocate Metal Heap of size %lld\n", size);
     return NULL;
   }
 #if !__has_feature(objc_arc)
@@ -220,7 +224,7 @@ MetalBufferRef Metal_NewBufferFromHeap(void *heapRef, long long size) {
   id<MTLBuffer> buf = [heap newBufferWithLength:size
                                         options:MTLResourceStorageModeShared];
   if (!buf) {
-    printf("ERROR: Failed to allocate Buffer from Heap size %d\n", size);
+    printf("ERROR: Failed to allocate Buffer from Heap size %lld\n", size);
     return NULL;
   }
 #if !__has_feature(objc_arc)
@@ -268,6 +272,21 @@ void Metal_Embedding_F16(MetalContextRef ctx, MetalBufferRef weights, int offW,
   [enc setBytes:&cols length:4 atIndex:3];
   [enc dispatchThreads:MTLSizeMake(cols, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(MIN(cols, 256), 1, 1)];
+  [mc barrier];
+}
+
+void Metal_Embedding_Q4K(MetalContextRef ctx, MetalBufferRef weights, int offW,
+                         MetalBufferRef result, int offRes, int rowIdx,
+                         int cols) {
+  MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
+  id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
+  [enc setComputePipelineState:mc.pipelineEmbedding_Q4K];
+  [enc setBuffer:(__bridge id<MTLBuffer>)weights offset:offW atIndex:0];
+  [enc setBuffer:(__bridge id<MTLBuffer>)result offset:offRes atIndex:1];
+  [enc setBytes:&rowIdx length:4 atIndex:2];
+  [enc setBytes:&cols length:4 atIndex:3];
+  [enc dispatchThreads:MTLSizeMake(1024, 1, 1)
+      threadsPerThreadgroup:MTLSizeMake(1024, 1, 1)];
   [mc barrier];
 }
 
@@ -438,14 +457,14 @@ void Metal_StoreKV_F16(MetalContextRef ctx, MetalBufferRef k, int oK,
                        MetalBufferRef vC, int p, int h, int hd) {
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
   id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
-  [enc setComputePipelineState:mc.pipelineCopy_F16];
+  [enc setComputePipelineState:mc.pipelineStoreKV_F16];
   int kv_dim = h * hd;
   [enc setBuffer:(__bridge id<MTLBuffer>)k offset:oK atIndex:0];
-  [enc setBuffer:(__bridge id<MTLBuffer>)kC offset:p * kv_dim * 2 atIndex:1];
-  [enc dispatchThreads:MTLSizeMake(kv_dim, 1, 1)
-      threadsPerThreadgroup:MTLSizeMake(MIN(kv_dim, 256), 1, 1)];
-  [enc setBuffer:(__bridge id<MTLBuffer>)v offset:oV atIndex:0];
-  [enc setBuffer:(__bridge id<MTLBuffer>)vC offset:p * kv_dim * 2 atIndex:1];
+  [enc setBuffer:(__bridge id<MTLBuffer>)v offset:oV atIndex:1];
+  [enc setBuffer:(__bridge id<MTLBuffer>)kC offset:0 atIndex:2];
+  [enc setBuffer:(__bridge id<MTLBuffer>)vC offset:0 atIndex:3];
+  [enc setBytes:&p length:4 atIndex:4];
+  [enc setBytes:&kv_dim length:4 atIndex:5];
   [enc dispatchThreads:MTLSizeMake(kv_dim, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(MIN(kv_dim, 256), 1, 1)];
   [mc barrier];
@@ -707,12 +726,32 @@ void Metal_Copy_F32_F16(MetalContextRef ctx, MetalBufferRef src, int oS,
   [mc barrier];
 }
 
-void Metal_MatMul_F16_F32(MetalContextRef ctx, MetalBufferRef a, int offA,
-                          MetalBufferRef b, int offB, MetalBufferRef c,
-                          int offC, int M, int N, int K) {
+// Weights: F16, Input: F16, Output: F32
+void Metal_MatMul_F16_F16_F32(MetalContextRef ctx, MetalBufferRef a, int offA,
+                              MetalBufferRef b, int offB, MetalBufferRef c,
+                              int offC, int M, int N, int K) {
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
   id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
-  [enc setComputePipelineState:mc.pipelineMatMul_F16_F32];
+  [enc setComputePipelineState:mc.pipelineLinearF16ToF32]; // linear_f16_to_f32
+                                                           // (F16 input)
+  [enc setBuffer:(__bridge id<MTLBuffer>)a offset:offA atIndex:0];
+  [enc setBuffer:(__bridge id<MTLBuffer>)b offset:offB atIndex:1];
+  [enc setBuffer:(__bridge id<MTLBuffer>)c offset:offC atIndex:2];
+  [enc setBytes:&K length:4 atIndex:3];
+  [enc setBytes:&N length:4 atIndex:4];
+  [enc dispatchThreads:MTLSizeMake(32, N, M)
+      threadsPerThreadgroup:MTLSizeMake(32, 4, 1)];
+  [mc barrier];
+}
+
+// Weights: F16, Input: F32, Output: F32
+void Metal_MatMul_F16_F32_F32(MetalContextRef ctx, MetalBufferRef a, int offA,
+                              MetalBufferRef b, int offB, MetalBufferRef c,
+                              int offC, int M, int N, int K) {
+  MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
+  id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
+  [enc setComputePipelineState:mc.pipelineMatMul_F16_F32]; // linear_f16_f32
+                                                           // (F32 input)
   [enc setBuffer:(__bridge id<MTLBuffer>)a offset:offA atIndex:0];
   [enc setBuffer:(__bridge id<MTLBuffer>)b offset:offB atIndex:1];
   [enc setBuffer:(__bridge id<MTLBuffer>)c offset:offC atIndex:2];
