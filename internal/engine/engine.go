@@ -8,7 +8,6 @@ import (
 	"math"
 	"runtime"
 
-	"sort"
 	"strings"
 	"time"
 
@@ -180,7 +179,7 @@ func (e *Engine) loadModel(path string) error {
 				}
 				
 				mt.LoadFrom(f32Data)
-				mt.ScanMax("W-LOAD: " + t.Name)
+
 				
 				// Heuristic for GlobalScale
 				if t.Name == "blk.0.attn_norm.weight" {
@@ -258,8 +257,7 @@ func (e *Engine) loadModel(path string) error {
 		
 		if mt != nil {
 			if t.Type == gguf.GGMLTypeF16 || t.Type == gguf.GGMLTypeF32 || t.Type == gguf.GGMLTypeQ6_K || t.Name == "token_embd.weight" {
-				mt.ScanNaNs(t.Name)
-				mt.ScanMax(t.Name)
+
 			} else if t.Type == gguf.GGMLTypeQ4_K {
 				mt.ScanQ4KScales(t.Name)
 			}
@@ -424,13 +422,13 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 		
 		// DEBUG: Print first 4 elements of embedding
 		e.Ctx.Synchronize()
-		embData := current.ToHost()
-		fmt.Printf("DEBUG_EMB: Token %d (pos %d) first 4: %v\n", lastToken, i, embData[:4])
+		// embData := current.ToHost()
+		// fmt.Printf("DEBUG_EMB: Token %d (pos %d) first 4: %v\n", lastToken, i, embData[:4])
 
 		// Convert embedding to FP32 for residual stream accumulation
 		currentF32 := current.ToF32()
-		fmt.Printf("DEBUG_PTR: currentF32 ptr=%p, buf=%p\n", currentF32, currentF32.BufRef())
-		currentF32.ScanMax("DEBUG: Embedding F32")
+		// fmt.Printf("DEBUG_PTR: currentF32 ptr=%p, buf=%p\n", currentF32, currentF32.BufRef())
+		// currentF32.ScanMax("DEBUG: Embedding F32")
 		current.ReturnToPool() // Release F16
 		
 		// Log embedding if first token
@@ -472,7 +470,7 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 			// Final Norm (F32 -> F16)
 			// Debug Output Norm Weights
 			if i == 0 {
-				e.Weights.OutputNorm.ScanMax("Output Norm Weights")
+				// e.Weights.OutputNorm.ScanMax("Output Norm Weights")
 			}
 			currentF32.RMSNormFP32_ToF16_Into(e.Weights.OutputNorm, e.Config.Eps, scratch.Normed)
 			
@@ -484,48 +482,15 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 			logitsData := logits.ToHost()
 			
 			// Logit Statistics
-			var min, max, sum float32
-			min = logitsData[0]
-			max = logitsData[0]
-			for _, v := range logitsData {
-				if v < min { min = v }
-				if v > max { max = v }
-				sum += v
-			}
-			mean := sum / float32(len(logitsData))
-			fmt.Printf("DEBUG_LOGITS_STATS: Min=%.4f Max=%.4f Mean=%.4f Range=%.4f\n", min, max, mean, max-min)
 
 			// Use Sampler
 			// History is just inputTokens for the first step
 			nextObj := sampler.Sample(logitsData, inputTokens, e.Config.VocabSize)
 			
-			// DEBUG: Top 100
-			type cand struct { id int; val float32 }
-			cands := make([]cand, len(logitsData))
-			for j, v := range logitsData { cands[j] = cand{j, v} }
-			sort.Slice(cands, func(a, b int) bool { return cands[a].val > cands[b].val })
-			fmt.Printf("DEBUG_LOGITS_TOP100:\n")
-			for j := 0; j < 100 && j < len(cands); j++ {
-				if j % 10 == 0 && j > 0 {
-					fmt.Printf("\n")
-				}
-				fmt.Printf("[%d:%.2f] ", cands[j].id, cands[j].val)
-			}
-			fmt.Printf("\n")
-			
-			// Check specific expected tokens
-			expectedTokens := []int{6233, 1183, 6333, 5611} // ▁Paris, ▁The, ▁capital, ▁France
-			fmt.Printf("DEBUG_EXPECTED_TOKENS: ")
-			for _, tid := range expectedTokens {
-				if tid < len(logitsData) {
-					fmt.Printf("[%d:%.2f] ", tid, logitsData[tid])
-				}
-			}
-			fmt.Printf("\n")
-			
 			// Log logits if enabled
 			if e.ActLogger.IsEnabled() {
-				e.ActLogger.LogLogits(logitsData, expectedTokens)
+				// We need to pass nil or a default list if we removed expectedTokens definition
+				e.ActLogger.LogLogits(logitsData, nil)
 			}
 
 			result = append(result, nextObj)
@@ -574,8 +539,8 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 			vCache := e.KVCacheV[l] // Corrected from VCache
 
 			if l == e.Config.Layers - 1 && i == 0 {
-				ffnDown.ScanMax("Last Layer FFN Down Weight")
-				fmt.Printf("DEBUG: Eps: %e\n", e.Config.Eps)
+				// ffnDown.ScanMax("Last Layer FFN Down Weight")
+				// fmt.Printf("DEBUG: Eps: %e\n", e.Config.Eps)
 			}
 
 			// Layer now handles F32 currentF32, using mixed precision
@@ -588,14 +553,14 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 		
 		// Use Into to avoid alloc
 		currentF32.RMSNormFP32_ToF16_Into(e.Weights.OutputNorm, e.Config.Eps, scratch.Normed)
-		scratch.Normed.ScanMax("DEBUG_FINAL: Normed")
+		// scratch.Normed.ScanMax("DEBUG_FINAL: Normed")
 		
 		// Output Head (F16 -> F32 Logits)
 		// Reuse pre-allocated logits buffer
 		// scratch.Normed contains result. Use it.
 		// Output into scratch.Logits (which is 'logits')
 		scratch.Normed.LinearInto(e.Weights.Output, logits, e.GlobalScale)
-		logits.ScanMax("DEBUG_FINAL: Logits")
+		// logits.ScanMax("DEBUG_FINAL: Logits")
 		
 		// Logic update: RMSNormFP32_ToF16_Into does NOT allocate.
 		// It writes to scratch.Normed.
