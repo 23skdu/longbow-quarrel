@@ -1226,12 +1226,12 @@ func (t *Tensor) RMSNorm_F32_Into(weight *Tensor, eps float32, out *Tensor) {
 func (t *Tensor) LinearF32_Into(weight *Tensor, out *Tensor) {
 	if weight.dataType == DataTypeQ4K {
 		// Q4K weights * FP32 input -> FP32 output
-		C.Metal_MatMul_Q4K_F32(t.ctx.ref, weight.buf, 0, 0, t.buf, C.int(t.Offset), 0, out.buf, C.int(out.Offset),
+		C.Metal_MatMul_Q4K_F32(t.ctx.ref, weight.buf, C.int(weight.Offset), 0, t.buf, C.int(t.Offset), 0, out.buf, C.int(out.Offset),
 			C.int(t.rows), C.int(weight.rows), C.int(weight.cols))
 	} else {
 		// F16 weights * FP32 input -> FP32 output
 		// Use Metal_MatMul_F16_F32_F32 (Kernel linear_f16_f32) checks float* input
-		C.Metal_MatMul_F16_F32_F32(t.ctx.ref, weight.buf, 0, t.buf, C.int(t.Offset), out.buf, C.int(out.Offset),
+		C.Metal_MatMul_F16_F32_F32(t.ctx.ref, weight.buf, C.int(weight.Offset), t.buf, C.int(t.Offset), out.buf, C.int(out.Offset),
 			C.int(t.rows), C.int(weight.rows), C.int(weight.cols))
 	}
 }
