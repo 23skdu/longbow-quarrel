@@ -16,6 +16,7 @@ import "C"
 import (
 	_ "embed"
 	"fmt"
+	"math"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -382,9 +383,35 @@ func (t *Tensor) ScanNaNs(name string) int {
 	return nanCount + infCount
 }
 
+
 func (t *Tensor) ScanMax(name string) float32 {
-	// DEBUG removed for performance
-	return 0.0
+	data := t.ToHostF32()
+	var maxVal float32 = 0.0
+	var minVal float32 = 0.0
+	var sum float32 = 0.0
+	var zeros int = 0
+	var nans int = 0
+	
+	if len(data) > 0 {
+		minVal = data[0]
+		maxVal = data[0]
+	}
+	
+	for _, v := range data {
+		if math.IsNaN(float64(v)) {
+			nans++
+			continue
+		}
+		if v == 0 { zeros++ }
+		if v > maxVal { maxVal = v }
+		if v < minVal { minVal = v }
+		sum += v
+	}
+	
+	// mean := sum / float32(len(data))
+	// Print removed
+	// fmt.Printf("[%s] Min: %.4f Max: %.4f Mean: %.4f Zeros: %d/%d NaNs: %d\n", name, minVal, maxVal, mean, zeros, len(data), nans)
+	return maxVal
 }
 
 func (t *Tensor) ScanQ4KScales(name string) float32 {
@@ -835,6 +862,9 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		// For now assume FP32 residual
 	}
 	t.ctx.Synchronize()
+	if layerIdx == 0 {
+
+	}
 		
 	// 2. QKV Projections (Using Scratch)
 	qPart := scratch.QPart
@@ -844,11 +874,11 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 	normed.LinearInto(q, qPart, globalScale)
 	normed.LinearInto(k, kPart, globalScale)
 	normed.LinearInto(v, vPart, globalScale)
+	normed.LinearInto(v, vPart, globalScale)
 	t.ctx.Synchronize()
-	if pos < 2 {
-			// normed.ScanMax("L-AttnNorm")
-			// qPart.ScanMax("L-Q_PreRoPE")
-			// kPart.ScanMax("L-K_PreRoPE")
+	if layerIdx == 0 {
+
+
 	}
 	
 	// 3. RoPE & 4. Store K/V & 5. Attention (Serial Loop for Prefill/Batch)
@@ -859,11 +889,6 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 	// Create outputs
 	attOut := scratch.AttOut
 	
-	// scores buffer: Max needed for one token attention [Heads, CtxLen]
-	// allocate once and reuse. MUST BE FP32 (4 bytes).
-	scoresDim := heads * ctxLen 
-	if scoresDim < 32768 { scoresDim = 32768 }
-	scores := scratch.Scores
 	resAtt := scratch.ResAtt // [Batch, 4096] - Output of O projection
 	
 	kvStride := kvHeads * headDim * 2 // bytes (F16)
@@ -881,22 +906,11 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		offAtt := i * qStride
 		
 		// 3. RoPE (In-place on qPart/kPart row i)
-		if layerIdx == 0 {
-			qLog := qPart.ToHostF32()
-			kLog := kPart.ToHostF32()
-			fmt.Printf("DEBUG_L0_RAW: P%d Q[0:4]=%v K[0:4]=%v\n", p, qLog[:4], kLog[:4])
-		}
 		
 		// Process Q (Heads)
 		C.Metal_RoPE_F16(t.ctx.ref, qPart.buf, C.int(qPart.Offset + offQ), 1, 1, C.int(heads), C.int(headDim), C.int(p), C.float(ropeTheta))
 		// Process K (KVHeads)
 		C.Metal_RoPE_F16(t.ctx.ref, kPart.buf, C.int(kPart.Offset + offK), 1, 1, C.int(kvHeads), C.int(headDim), C.int(p), C.float(ropeTheta))
-		
-		if layerIdx == 0 {
-			t.ctx.Synchronize()
-			qLog := qPart.ToHostF32()
-			fmt.Printf("DEBUG_L0_POST: P%d Q[0:4]=%v\n", p, qLog[:4])
-		}
 
 		// 4. Store K/V (Must append to KVCache at current pos)
 		C.Metal_StoreKV_F16(t.ctx.ref, kPart.buf, C.int(kPart.Offset + offK), vPart.buf, C.int(vPart.Offset + offV), 
@@ -905,83 +919,38 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		t.ctx.Synchronize()
 		
 		if p < 2 {
-			// kCache.ScanMax(fmt.Sprintf("KV-K (pos %d)", p))
-			// vCache.ScanMax(fmt.Sprintf("KV-V (pos %d)", p))
+
+
 		}
 		
 		// 5. Attention
-		if p < -1 { // Force non-fused for debugging
-			C.Metal_AttFused_F16(t.ctx.ref, qPart.buf, C.int(qPart.Offset + offQ),
-				kCache.buf, C.int(kCache.Offset),
-				vCache.buf, C.int(vCache.Offset),
-				attOut.buf, C.int(attOut.Offset + offAtt),
-				C.int(p), C.int(heads), C.int(kvHeads), C.int(headDim))
-		} else {
-			// 5a. Scores
-			C.Metal_AttScores_F16(t.ctx.ref, qPart.buf, C.int(qPart.Offset + offQ), kCache.buf, C.int(kCache.Offset),
-				scores.buf, 0,
-				C.int(p), C.int(heads), C.int(kvHeads), C.int(headDim), C.int(ctxLen))
-			t.ctx.Synchronize()
-			
-			if layerIdx == 31 && p == 2 {
-				// Debug Scores for Last Layer, Last Token
-				rawScores := make([]float32, heads * ctxLen)
-				t.ctx.Synchronize()
-				C.Metal_CopyBufferToF32(t.ctx.ref, scores.buf, unsafe.Pointer(&rawScores[0]), C.int(heads*ctxLen))
-				
-				fmt.Printf("\n--- PRE-SOFT ATTN L31 Head 0 ---\n")
-				for i := 0; i <= p; i++ {
-					fmt.Printf("Pos %d: %.4f\n", i, rawScores[i])
-				}
-				fmt.Printf("------------------------------\n")
-			}
-			
-			// 5b. Softmax
-			C.Metal_AttSoftmax_F16(t.ctx.ref, scores.buf, 0, C.int(p), C.int(heads), C.int(ctxLen))
-			t.ctx.Synchronize()
-			
-			if layerIdx == 31 && p == 2 {
-				rawScores := make([]float32, heads * ctxLen)
-				C.Metal_CopyBufferToF32(t.ctx.ref, scores.buf, unsafe.Pointer(&rawScores[0]), C.int(heads*ctxLen))
-				fmt.Printf("\n--- POST-SOFT ATTN L31 Head 0 ---\n")
-				for i := 0; i <= p; i++ {
-					fmt.Printf("Pos %d: %.4f\n", i, rawScores[i])
-				}
-				fmt.Printf("---------------------------------\n")
-			}
-			
-			// 5c. Values
-			C.Metal_AttValues_F16(t.ctx.ref, scores.buf, 0, vCache.buf, C.int(vCache.Offset), attOut.buf, C.int(offAtt),
-				C.int(p), C.int(heads), C.int(kvHeads), C.int(headDim), C.int(ctxLen))
-		}
+		C.Metal_AttFused_F16(t.ctx.ref, qPart.buf, C.int(qPart.Offset + offQ),
+			kCache.buf, C.int(kCache.Offset),
+			vCache.buf, C.int(vCache.Offset),
+			attOut.buf, C.int(attOut.Offset + offAtt),
+			C.int(p), C.int(heads), C.int(kvHeads), C.int(headDim))
 		t.ctx.Synchronize()
+		if layerIdx == 0 {
+
+		}
 	}
 	t.ctx.Synchronize()
 	// 6. Attention Output Projection
 	t.ctx.Synchronize()
-	// scratch.AttOut.ScanMax(fmt.Sprintf("DEBUG_ATTN_OUT: L%d AttOut_PreProj (pos %d)", layerIdx, pos))
+
 
 	// Output Projection
 	scratch.AttOut.LinearInto(o, resAtt, globalScale)
-	// resAtt.ScanMax(fmt.Sprintf("DEBUG_ATTN_OUT: L%d AttOut_Proj (pos %d)", layerIdx, pos))
+
 	
 	
 	// 7. Residual Add 1
-	if layerIdx == 0 {
-		hLog := t.ToHost()
-		fmt.Printf("DEBUG_L0_RES1_PRE: P%d H[0:4]=%v\n", pos, hLog[:4])
-	}
 	if t.dataType == DataTypeF32 {
 		t.AddMixedInPlace(resAtt)
 	} else {
 		t1 := t.Add(resAtt)
 		C.Metal_Copy_F16(t.ctx.ref, t1.buf, 0, t.buf, 0, C.int(t.rows*t.cols))
 		t1.ReturnToPool()
-	}
-	if layerIdx == 0 {
-		t.ctx.Synchronize()
-		hLog := t.ToHost()
-		fmt.Printf("DEBUG_L0_RES1_POST: P%d H[0:4]=%v\n", pos, hLog[:4])
 	}
 	
 	// --- No Cleanup needed for Scratch ---
@@ -999,7 +968,6 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		normedFFN := scratch.NormedFFN_F32
 		if t.dataType == DataTypeF32 {
 			t.RMSNorm_F32_Into(ffnNorm, eps, normedFFN)
-			if pos < 1 { normedFFN.ScanMax("L-FFNNorm_F32") }
 		}
 		
 		// 9. Gate/Up Projections -> FP32
@@ -1010,18 +978,14 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		normedFFN.LinearF32_Into(ffnUp, upPart, globalScale)
 		t.ctx.Synchronize()
 		
-		gatePart.ScanMax(fmt.Sprintf("L%d-GatePreSwi", layerIdx))
-		upPart.ScanMax(fmt.Sprintf("L%d-UpPreSwi", layerIdx))
 		
 		// 10. SwiGLU F32
 		swiOut := scratch.SwiOut
 		gatePart.SwiGLU_FP32_Into(upPart, swiOut)
-		swiOut.ScanMax(fmt.Sprintf("L%d-SwiOut", layerIdx))
 		
 		// 11. Down Projection (FP32 -> FP32)
 		resFFN := scratch.ResFFN_F32
 		swiOut.LinearF32_Into(ffnDown, resFFN, globalScale) // Handles Q4K
-		resFFN.ScanMax(fmt.Sprintf("L%d-FFN_Proj", layerIdx))
 		t.ctx.Synchronize()
 		
 		// 12. Residual Add 2
@@ -1255,14 +1219,14 @@ func (t *Tensor) RMSNormFP32_ToF16(weight *Tensor, eps float32) *Tensor {
 	C.Metal_RMSNorm_F32_F16(t.ctx.ref, t.buf, 0, weight.buf, 0, res.buf, 0, 
 		C.int(t.rows), C.int(t.cols), C.float(eps))
 	// DEBUG
-	// res.ScanMax("RMSNorm FP32->F16 Out")
+
 	return res
 }
 
 func (t *Tensor) RMSNormFP32_ToF16_Into(weight *Tensor, eps float32, out *Tensor) {
 	C.Metal_RMSNorm_F32_F16(t.ctx.ref, t.buf, C.int(t.Offset), weight.buf, C.int(weight.Offset), out.buf, C.int(out.Offset), 
 		C.int(t.rows), C.int(t.cols), C.float(eps))
-	// out.ScanMax("DEBUG: RMSNorm Out")
+
 }
 
 func (t *Tensor) RMSNormFP32(weight *Tensor, eps float32) *Tensor {

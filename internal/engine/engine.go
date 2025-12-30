@@ -8,9 +8,9 @@ import (
 	"math"
 	"runtime"
 
-	"strings"
 	"time"
 
+	"strings"
 	"github.com/23skdu/longbow-quarrel/internal/device"
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
 	"github.com/23skdu/longbow-quarrel/internal/metrics"
@@ -205,42 +205,10 @@ func (e *Engine) loadModel(path string) error {
 			} else if t.Type == gguf.GGMLTypeQ4_K {
 				// Type 12 (Q4_K). 
 				
-				// For Small Models (SmolLM2, TinyLlama), Q4K Kernels cause activation explosion
-				// or zero output due to alignment issues. We dequantize to F16 on load.
-				// This increases memory usage slightly but guarantees correctness.
-				// ALSO: Always dequantize embeddings due to subnormal float16 handling issues
-				if e.Config.Dim < 1024 || t.Name == "token_embd.weight" {
-					mt = e.Ctx.NewTensor(rows, cols) // Allocates F16
+				if e.Config.Dim < 1024 || strings.Contains(t.Name, "token_embd.weight") {
 					f32Data := gguf.DequantizeQ4K(t.Data, numElements)
-					
-					// Scan f32Data
-					var maxW float32
-					var sumW float64
-					for _, v := range f32Data {
-						if math.Abs(float64(v)) > math.Abs(float64(maxW)) { maxW = v }
-						sumW += math.Abs(float64(v))
-					}
-					fmt.Printf("DEBUG: %s dequantized. Max=%.6f, Avg=%.6f\n", t.Name, maxW, sumW/float64(numElements))
-
+					mt = e.Ctx.NewTensor(rows, cols)
 					mt.LoadFrom(f32Data)
-					
-					if t.Name == "token_embd.weight" {
-						parisIdx := 4684
-						if parisIdx < rows {
-							slice := f32Data[parisIdx*cols : (parisIdx+1)*cols]
-							var sum float64
-							for _, v := range slice { sum += float64(math.Abs(float64(v))) }
-							fmt.Printf("DEBUG: embedding row for Paris(4684): AvgAbs=%.6f FIRST_4=%v\n", float32(sum/float64(cols)), slice[:4])
-						}
-					}
-					
-					// Verify loaded
-					loadedMax := mt.ScanMax("DEBUG: " + t.Name + " (MT)")
-					if loadedMax == 0 && maxW != 0 {
-						gpuData := mt.ToHostF32()
-						fmt.Printf("CRITICAL: mt.LoadFrom(f32Data) result is ZERO! (maxW CPU=%.6f, Token 1 First 4: %v)\n", maxW, gpuData[4096:4100])
-					}
-					
 				} else {
 					// Large Models: Use Q4K Tensor and Kernels
 					mt = e.Ctx.NewQ4KTensor(rows, cols)
@@ -254,17 +222,9 @@ func (e *Engine) loadModel(path string) error {
 
 			} else if t.Type == gguf.GGMLTypeQ6_K {
 				// Type 14 (Q6_K).
-				// CPU Dequantize (No GPU Kernel yet)
 				f32Data := gguf.DequantizeQ6K(t.Data, numElements)
 				if t.Name == "output.weight" {
 					fmt.Printf("DEBUG: output.weight probe [0:10]: %v\n", f32Data[:10])
-					sinkIdx := 13735
-					if sinkIdx < rows {
-						slice := f32Data[sinkIdx*cols : (sinkIdx+1)*cols]
-						var sum float64
-						for _, v := range slice { sum += float64(math.Abs(float64(v))) }
-						fmt.Printf("DEBUG: lm_head row for sink(13735): AvgAbs=%.6f\n", float32(sum/float64(cols)))
-					}
 				}
 				mt = e.Ctx.NewTensor(rows, cols)
 				mt.LoadFrom(f32Data)
@@ -447,9 +407,7 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 		// embData := current.ToHost()
 		// fmt.Printf("DEBUG_EMB: Token %d (pos %d) first 4: %v\n", lastToken, i, embData[:4])
 
-		// Convert embedding to FP32 for residual stream accumulation
 		currentF32 := current.ToF32()
-		currentF32.ScanMax(fmt.Sprintf("DEBUG: currentF32 P%d", i))
 		current.ReturnToPool() // Release F16
 		
 		// Log embedding if first token
@@ -551,7 +509,6 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 		
 		current := e.Weights.TokenEmb.EmbeddingLookup(lastToken, e.GlobalScale)
 
-		// Convert embedding to FP32 for residual stream accumulation
 		currentF32 := current.ToF32()
 		current.ReturnToPool() // Release F16 embedding
 		
