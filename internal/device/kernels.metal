@@ -132,10 +132,65 @@ kernel void linear_q4k_f16(device const uchar *weight [[ buffer(0) ]],
     float sum = 0;
     for (int i = (int)lane_id; i < num_blocks; i += 32) {
         device const uchar *block = row_ptr + i * 144;
+        
+        // Read d and dmin as uint16, then convert with subnormal support
         ushort d_bits = *(device const ushort*)(block);
         ushort dmin_bits = *(device const ushort*)(block + 2);
-        float d = (float)as_type<half>(d_bits);
-        float dmin = (float)as_type<half>(dmin_bits);
+        
+        // Manual FP16->FP32 conversion with subnormal handling
+        // This preserves tiny values like 0.00001 that would underflow in direct half cast
+        uint d_sign = (d_bits & 0x8000u) << 16;
+        uint d_exp_raw = (d_bits & 0x7C00u) >> 10;
+        uint d_mant = d_bits & 0x03FFu;
+        
+        float d;
+        if (d_exp_raw == 0) {
+            // Subnormal or zero
+            if (d_mant == 0) {
+                d = 0.0f;
+            } else {
+                // Subnormal: normalize it
+                // Find leading 1 in mantissa
+                uint shift = 0;
+                uint test_mant = d_mant;
+                while ((test_mant & 0x0400) == 0) {
+                    test_mant <<= 1;
+                    shift++;
+                }
+                d_mant = (test_mant & 0x03FF) << 13;
+                uint d_exp = (1 - shift + (127 - 15)) << 23;
+                d = as_type<float>(d_sign | d_exp | d_mant);
+            }
+        } else {
+            // Normal number
+            uint d_exp = (d_exp_raw + (127 - 15)) << 23;
+            d = as_type<float>(d_sign | d_exp | (d_mant << 13));
+        }
+        
+        // Same for dmin
+        uint dmin_sign = (dmin_bits & 0x8000u) << 16;
+        uint dmin_exp_raw = (dmin_bits & 0x7C00u) >> 10;
+        uint dmin_mant = dmin_bits & 0x03FFu;
+        
+        float dmin;
+        if (dmin_exp_raw == 0) {
+            if (dmin_mant == 0) {
+                dmin = 0.0f;
+            } else {
+                uint shift = 0;
+                uint test_mant = dmin_mant;
+                while ((test_mant & 0x0400) == 0) {
+                    test_mant <<= 1;
+                    shift++;
+                }
+                dmin_mant = (test_mant & 0x03FF) << 13;
+                uint dmin_exp = (1 - shift + (127 - 15)) << 23;
+                dmin = as_type<float>(dmin_sign | dmin_exp | dmin_mant);
+            }
+        } else {
+            uint dmin_exp = (dmin_exp_raw + (127 - 15)) << 23;
+            dmin = as_type<float>(dmin_sign | dmin_exp | (dmin_mant << 13));
+        }
         
         device const uchar *scales = block + 4;
         device const uchar *qs = block + 16;
@@ -153,7 +208,7 @@ kernel void linear_q4k_f16(device const uchar *weight [[ buffer(0) ]],
             float d_val = d * (float)sc[j], m_val = dmin * (float)m[j];
             int sub_offset = j * 32, qs_offset = j * 16;
             for (int k = 0; k < 16; k++) {
-                uchar b = qs[qs_offset + k];
+				uchar b = qs[qs_offset + k];
                 float w0 = d_val * (float)(b & 0xF) - m_val;
                 float w1 = d_val * (float)(b >> 4) - m_val;
                 int idx0 = i * 256 + sub_offset + k;
