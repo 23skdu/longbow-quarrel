@@ -63,6 +63,9 @@ type Engine struct {
 	
 	// Activation Logger
 	ActLogger *ActivationLogger
+
+	// Heuristic Global Scale (1.0 default, 100.0 if detected underscaling)
+	GlobalScale float32
 }
 
 

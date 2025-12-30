@@ -590,7 +590,7 @@ func (t *Tensor) MatMul(b *Tensor) *Tensor {
 			t.buf, 0, C.bool(false),
 			b.buf, 0, C.bool(false),
 			c.buf, 0,
-			C.int(M), C.int(N), C.int(K));
+			C.int(M), C.int(N), C.int(K), C.float(1.0));
 		
 		metrics.RecordKernelDuration("MatMul", time.Since(t0))
 		return c
@@ -612,7 +612,7 @@ func (t *Tensor) MatMul(b *Tensor) *Tensor {
 			t.buf, 0, C.bool(false),
 			b.buf, 0, C.bool(false),
 			c.buf, 0,
-			C.int(M), C.int(N), C.int(K));
+			C.int(M), C.int(N), C.int(K), C.float(1.0));
 		
 		metrics.RecordKernelDuration("MatMul", time.Since(t0))
 		return c
@@ -645,7 +645,7 @@ func (t *Tensor) Linear(weight *Tensor) *Tensor {
 	
 	if weight.dataType == DataTypeQ4K {
 		C.Metal_MatMul_Q4K_F16(t.ctx.ref, weight.buf, 0, false, t.buf, 0, false, res.buf, 0,
-			C.int(t.rows), C.int(weight.rows), C.int(weight.cols))
+			C.int(t.rows), C.int(weight.rows), C.int(weight.cols), C.float(1.0))
 	} else {
 		// BatchedMatMul_F16 using MPS
 		M := t.rows
@@ -666,37 +666,25 @@ func (t *Tensor) Linear(weight *Tensor) *Tensor {
 }
 
 // LinearInto performs Linear using existing output tensor (scratch buffer)
-func (t *Tensor) LinearInto(weight *Tensor, out *Tensor) {
-	// t.cols (K) must match weight.cols (K)
-	if t.cols != weight.cols {
-		panic(fmt.Sprintf("LinearInto dim mismatch: input cols %d != weight cols %d", t.cols, weight.cols))
+func (t *Tensor) LinearInto(weight *Tensor, out *Tensor, scale float32) {
+	if t.rows != out.rows || weight.rows != out.cols {
+		panic(fmt.Sprintf("LinearInto dim mismatch: [%d,%d] * [%d,%d] -> [%d,%d]", t.rows, t.cols, weight.rows, weight.cols, out.rows, out.cols))
 	}
 	
+	// Use MatMul Kernel
 	if weight.dataType == DataTypeQ4K {
-		if out.dataType == DataTypeF32 {
-			C.Metal_MatMul_Q4K_F32(t.ctx.ref, weight.buf, C.int(weight.Offset), 0, t.buf, C.int(t.Offset), 0, out.buf, C.int(out.Offset),
-				C.int(t.rows), C.int(weight.rows), C.int(weight.cols))
-		} else {
-			C.Metal_MatMul_Q4K_F16(t.ctx.ref, weight.buf, C.int(weight.Offset), false, t.buf, C.int(t.Offset), false, out.buf, C.int(out.Offset),
-				C.int(t.rows), C.int(weight.rows), C.int(weight.cols))
-		}
-	} else if weight.dataType == DataTypeQ3K {
-		C.Metal_MatMul_Q3K_F16(t.ctx.ref, weight.buf, C.int(weight.Offset), false, t.buf, C.int(t.Offset), false, out.buf, C.int(out.Offset),
-			C.int(t.rows), C.int(weight.rows), C.int(weight.cols))
+		// Q4K weights * F16 input -> F16 output
+		// Pass scaleFactor
+		C.Metal_MatMul_Q4K_F16(t.ctx.ref, weight.buf, C.int(weight.Offset), C.bool(false), t.buf, C.int(t.Offset), C.bool(false), out.buf, C.int(out.Offset),
+			C.int(t.rows), C.int(weight.rows), C.int(weight.cols), C.float(scale))
 	} else if weight.dataType == DataTypeQ6K {
-		C.Metal_MatMul_Q6K_F16(t.ctx.ref, weight.buf, C.int(weight.Offset), false, t.buf, C.int(t.Offset), false, out.buf, C.int(out.Offset),
-			C.int(t.rows), C.int(weight.rows), C.int(weight.cols))
+		// Q6K weights * F16 input -> F16 output
+		C.Metal_MatMul_Q6K_F16(t.ctx.ref, weight.buf, C.int(weight.Offset), C.bool(false), t.buf, C.int(t.Offset), C.bool(false), out.buf, C.int(out.Offset),
+			C.int(t.rows), C.int(weight.rows), C.int(weight.cols), C.float(scale))
 	} else {
-		// F16 weights
-		if out.dataType == DataTypeF32 {
-			C.Metal_LinearF16ToF32(t.ctx.ref, weight.buf, C.int(weight.Offset), t.buf, C.int(t.Offset), out.buf, C.int(out.Offset), 
-				C.int(t.rows), C.int(weight.cols), C.int(weight.rows))
-		} else {
-			// Weights: F16, Input: F16, Output: F16
-			// Uses kernel linear_f16
-			C.Metal_MatMul_F16(t.ctx.ref, weight.buf, C.int(weight.Offset), true, t.buf, C.int(t.Offset), false, out.buf, C.int(out.Offset),
-				C.int(t.rows), C.int(weight.rows), C.int(weight.cols))
-		}
+		// Fallback F16
+		C.Metal_MatMul_F16(t.ctx.ref, weight.buf, C.int(weight.Offset), C.bool(false), t.buf, C.int(t.Offset), C.bool(false), out.buf, C.int(out.Offset),
+			C.int(t.rows), C.int(weight.rows), C.int(weight.cols))
 	}
 }
 
@@ -934,7 +922,7 @@ func (s *LayerScratch) Free() {
 
 func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, kCache, vCache *Tensor, 
 	scratch *LayerScratch, 
-	pos, heads, kvHeads, headDim int, ropeTheta, eps float32, hiddenDim, ctxLen int) {
+	pos, heads, kvHeads, headDim int, ropeTheta, eps float32, hiddenDim, ctxLen int, globalScale float32) {
 	
 	if true { 
 		fmt.Printf("DEBUG_LAYER_PTRS: pos=%d, t=%p (buf=%p), attnNorm=%p (buf=%p), normed=%p (buf=%p)\n", 
@@ -960,9 +948,9 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 	kPart := scratch.KPart
 	vPart := scratch.VPart
 	
-	normed.LinearInto(q, qPart)
-	normed.LinearInto(k, kPart)
-	normed.LinearInto(v, vPart)
+	normed.LinearInto(q, qPart, globalScale)
+	normed.LinearInto(k, kPart, globalScale)
+	normed.LinearInto(v, vPart, globalScale)
 	t.ctx.Synchronize()
 	if pos < 2 {
 		if 3 == 3 { t.ScanMax("L-Input_Res") } // Hack to label input
@@ -1061,7 +1049,7 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 	t.ctx.Synchronize()
 	scratch.AttOut.ScanMax(fmt.Sprintf("DEBUG_ATTN_OUT: L%d AttOut_PreProj (pos %d)", layerIdx, pos))
 
-	attOut.LinearInto(o, resAtt)
+	attOut.LinearInto(o, resAtt, globalScale)
 	t.ctx.Synchronize()
 	resAtt.ScanMax(fmt.Sprintf("DEBUG_ATTN_OUT: L%d AttOut_Proj (pos %d)", layerIdx, pos))
 	
@@ -1097,8 +1085,8 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		gatePart := scratch.GatePart
 		upPart := scratch.UpPart
 		
-		normedFFN.LinearF32_Into(ffnGate, gatePart)
-		normedFFN.LinearF32_Into(ffnUp, upPart)
+		normedFFN.LinearF32_Into(ffnGate, gatePart, globalScale)
+		normedFFN.LinearF32_Into(ffnUp, upPart, globalScale)
 		t.ctx.Synchronize()
 		
 		gatePart.ScanMax(fmt.Sprintf("L%d-GatePreSwi", layerIdx))
@@ -1111,7 +1099,7 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		
 		// 11. Down Projection (FP32 -> FP32)
 		resFFN := scratch.ResFFN_F32
-		swiOut.LinearF32_Into(ffnDown, resFFN) // Handles Q4K
+		swiOut.LinearF32_Into(ffnDown, resFFN, globalScale) // Handles Q4K
 		resFFN.ScanMax(fmt.Sprintf("L%d-FFN_Proj", layerIdx))
 		t.ctx.Synchronize()
 		
@@ -1139,8 +1127,8 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		// scratch.GatePart and scratch.UpPart are assumed to be FP32 for the 'if' block.
 		gatePartF16 := t.ctx.NewTensorPooled(t.rows, ffnGate.rows)
 		upPartF16 := t.ctx.NewTensorPooled(t.rows, ffnUp.rows)
-		normedFFN.LinearInto(ffnGate, gatePartF16)
-		normedFFN.LinearInto(ffnUp, upPartF16)
+		normedFFN.LinearInto(ffnGate, gatePartF16, globalScale)
+		normedFFN.LinearInto(ffnUp, upPartF16, globalScale)
 		t.ctx.Synchronize()
 		
 		// 10. SwiGLU
@@ -1148,7 +1136,7 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		
 		// 11. Down Projection
 		resFFN := t.ctx.NewTensorPooled(t.rows, ffnDown.rows)
-		swiOut.LinearInto(ffnDown, resFFN)
+		swiOut.LinearInto(ffnDown, resFFN, globalScale)
 		t.ctx.Synchronize()
 		
 		// 12. Residual Add 2
@@ -1220,11 +1208,11 @@ func (t *Tensor) RMSNorm_F32_Into(weight *Tensor, eps float32, out *Tensor) {
 
 // LinearF32_Into performs Linear with FP32 Input -> FP32 Output
 // Handling Q4K weights correctly
-func (t *Tensor) LinearF32_Into(weight *Tensor, out *Tensor) {
+func (t *Tensor) LinearF32_Into(weight *Tensor, out *Tensor, scale float32) {
 	if weight.dataType == DataTypeQ4K {
 		// Q4K weights * FP32 input -> FP32 output
-		C.Metal_MatMul_Q4K_F32(t.ctx.ref, weight.buf, C.int(weight.Offset), 0, t.buf, C.int(t.Offset), 0, out.buf, C.int(out.Offset),
-			C.int(t.rows), C.int(weight.rows), C.int(weight.cols))
+		C.Metal_MatMul_Q4K_F32(t.ctx.ref, weight.buf, C.int(weight.Offset), C.int(0), t.buf, C.int(t.Offset), C.int(0), out.buf, C.int(out.Offset),
+			C.int(t.rows), C.int(weight.rows), C.int(weight.cols), C.float(scale))
 	} else {
 		// F16 weights * FP32 input -> FP32 output
 		// Use Metal_MatMul_F16_F32_F32 (Kernel linear_f16_f32) checks float* input
@@ -1299,11 +1287,11 @@ func (t *Tensor) AddInPlace(other *Tensor) {
 }
 
 
-func (t *Tensor) EmbeddingLookup(row int) *Tensor {
+func (t *Tensor) EmbeddingLookup(row int, scale float32) *Tensor {
 	res := t.ctx.NewTensorPooled(1, t.cols)
 	if t.dataType == DataTypeQ4K {
 		// fmt.Printf("DEBUG: Using Q4K Embedding Kernel for row %d\n", row)
-		C.Metal_Embedding_Q4K(t.ctx.ref, t.buf, C.int(t.Offset), res.buf, 0, C.int(row), C.int(t.cols))
+		C.Metal_Embedding_Q4K(t.ctx.ref, t.buf, C.int(t.Offset), res.buf, 0, C.int(row), C.int(t.cols), C.float(scale))
 	} else {
 		C.Metal_Embedding_F16(t.ctx.ref, t.buf, C.int(t.Offset), res.buf, 0, C.int(row), C.int(t.cols))
 	}
@@ -1375,8 +1363,8 @@ func (t *Tensor) LinearIntoFP32(weight *Tensor, out *Tensor) {
 	}
 	
 	if weight.dataType == DataTypeQ4K {
-		C.Metal_MatMul_Q4K_F32(t.ctx.ref, weight.buf, 0, 0, t.buf, 0, 0, out.buf, 0,
-			C.int(t.rows), C.int(weight.rows), C.int(weight.cols))
+		C.Metal_MatMul_Q4K_F32(t.ctx.ref, weight.buf, C.int(weight.Offset), C.int(0), t.buf, C.int(t.Offset), C.int(0), out.buf, C.int(out.Offset),
+			C.int(t.rows), C.int(weight.rows), C.int(weight.cols), C.float(1.0))
 	} else if weight.dataType == DataTypeF16 {
 		C.Metal_MatMul_F16_F32_F32(t.ctx.ref, weight.buf, 0, t.buf, 0, out.buf, 0,
 			C.int(t.rows), C.int(weight.rows), C.int(weight.cols))

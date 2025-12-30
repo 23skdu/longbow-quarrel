@@ -182,6 +182,22 @@ func (e *Engine) loadModel(path string) error {
 				mt.LoadFrom(f32Data)
 				mt.ScanMax("W-LOAD: " + t.Name)
 				
+				// Heuristic for GlobalScale
+				if t.Name == "blk.0.attn_norm.weight" {
+					var sum float64
+					for _, v := range f32Data {
+						sum += float64(math.Abs(float64(v)))
+					}
+					mean := float32(sum / float64(numElements))
+					
+					if mean < 0.1 && mean > 0 {
+						e.GlobalScale = 1.0 / mean
+						fmt.Printf("GlobalScale Heuristic: Mean=%.6f Scale=%.6f\n", mean, e.GlobalScale)
+					} else {
+						if e.GlobalScale == 0 { e.GlobalScale = 1.0 }
+						fmt.Printf("GlobalScale Heuristic: Mean=%.6f Scale=%.6f (Normal)\n", mean, e.GlobalScale)
+					}
+				}
 			} else if t.Type == gguf.GGMLTypeF16 {
 				mt = e.Ctx.NewTensor(rows, cols)
 				// ... F16 load ...
@@ -404,7 +420,7 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 		
 
 		
-		current := e.Weights.TokenEmb.EmbeddingLookup(lastToken)
+		current := e.Weights.TokenEmb.EmbeddingLookup(lastToken, e.GlobalScale)
 		
 		// DEBUG: Print first 4 elements of embedding
 		e.Ctx.Synchronize()
@@ -439,7 +455,7 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 
 			currentF32.Layer(l, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, kCache, vCache,
 				scratch, // Pass scratch
-				e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen)
+				e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen, e.GlobalScale)
 			
 			// Log layer output if enabled and first token
 			if i == 0 && e.ActLogger.IsEnabled() {
@@ -463,7 +479,7 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 			// Output Head (F16 -> F32 Logits)
 			// Reuse pre-allocated logits buffer
 			// scratch.Normed contains result. Use it.
-			scratch.Normed.LinearInto(e.Weights.Output, logits)
+			scratch.Normed.LinearInto(e.Weights.Output, logits, e.GlobalScale)
 			
 			logitsData := logits.ToHost()
 			
@@ -535,7 +551,7 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 			return nil, fmt.Errorf("token %d is out of vocab range", lastToken)
 		}
 		
-		current := e.Weights.TokenEmb.EmbeddingLookup(lastToken)
+		current := e.Weights.TokenEmb.EmbeddingLookup(lastToken, e.GlobalScale)
 
 		// Convert embedding to FP32 for residual stream accumulation
 		currentF32 := current.ToF32()
@@ -565,7 +581,7 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 			// Layer now handles F32 currentF32, using mixed precision
 			currentF32.Layer(l, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, kCache, vCache,
 				scratch, // Pass scratch
-				e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen) // Corrected variable names
+				e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen, e.GlobalScale) // Corrected variable names
 		}
 		
 		// Final Norm (F32 -> F16)
@@ -578,7 +594,7 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 		// Reuse pre-allocated logits buffer
 		// scratch.Normed contains result. Use it.
 		// Output into scratch.Logits (which is 'logits')
-		scratch.Normed.LinearInto(e.Weights.Output, logits)
+		scratch.Normed.LinearInto(e.Weights.Output, logits, e.GlobalScale)
 		logits.ScanMax("DEBUG_FINAL: Logits")
 		
 		// Logic update: RMSNormFP32_ToF16_Into does NOT allocate.

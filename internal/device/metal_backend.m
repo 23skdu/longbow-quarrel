@@ -281,7 +281,7 @@ void Metal_Embedding_F16(MetalContextRef ctx, MetalBufferRef weights, int offW,
 
 void Metal_Embedding_Q4K(MetalContextRef ctx, MetalBufferRef weights, int offW,
                          MetalBufferRef result, int offRes, int rowIdx,
-                         int cols) {
+                         int cols, float scale) {
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
   id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
   [enc setComputePipelineState:mc.pipelineEmbedding_Q4K];
@@ -289,6 +289,7 @@ void Metal_Embedding_Q4K(MetalContextRef ctx, MetalBufferRef weights, int offW,
   [enc setBuffer:(__bridge id<MTLBuffer>)result offset:offRes atIndex:1];
   [enc setBytes:&rowIdx length:4 atIndex:2];
   [enc setBytes:&cols length:4 atIndex:3];
+  [enc setBytes:&scale length:4 atIndex:4];
   [enc dispatchThreads:MTLSizeMake(1024, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(1024, 1, 1)];
   [mc barrier];
@@ -332,7 +333,8 @@ void Metal_MatMul_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
 
 void Metal_MatMul_Q4K_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
                           bool transA, MetalBufferRef b, int offB, bool transB,
-                          MetalBufferRef c, int offC, int M, int N, int K) {
+                          MetalBufferRef c, int offC, int M, int N, int K,
+                          float scale) {
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
   id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
   [enc setComputePipelineState:mc.pipelineMatMul_Q4K_F16];
@@ -342,6 +344,7 @@ void Metal_MatMul_Q4K_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
   [enc setBuffer:(__bridge id<MTLBuffer>)c offset:offC atIndex:2];
   [enc setBytes:&K length:4 atIndex:3];
   [enc setBytes:&N length:4 atIndex:4];
+  [enc setBytes:&scale length:4 atIndex:5];
 
   [enc dispatchThreads:MTLSizeMake(32, N, M)
       threadsPerThreadgroup:MTLSizeMake(32, 4, 1)];
@@ -368,7 +371,8 @@ void Metal_MatMul_Q3K_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
 
 void Metal_MatMul_Q6K_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
                           bool transA, MetalBufferRef b, int offB, bool transB,
-                          MetalBufferRef c, int offC, int M, int N, int K) {
+                          MetalBufferRef c, int offC, int M, int N, int K,
+                          float scale) {
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
   id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
   [enc setComputePipelineState:mc.pipelineMatMul_Q6K_F16];
@@ -377,6 +381,7 @@ void Metal_MatMul_Q6K_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
   [enc setBuffer:(__bridge id<MTLBuffer>)c offset:offC atIndex:2];
   [enc setBytes:&K length:4 atIndex:3];
   [enc setBytes:&N length:4 atIndex:4];
+  [enc setBytes:&scale length:4 atIndex:5];
   [enc dispatchThreads:MTLSizeMake(32, N, M)
       threadsPerThreadgroup:MTLSizeMake(32, 4, 1)];
   [mc barrier];
@@ -648,7 +653,8 @@ void Metal_Add_F32(MetalContextRef ctx, MetalBufferRef a, int oA,
 
 void Metal_MatMul_Q4K_F32(MetalContextRef ctx, MetalBufferRef a, int offA,
                           int transA, MetalBufferRef b, int offB, int transB,
-                          MetalBufferRef c, int offC, int M, int N, int K) {
+                          MetalBufferRef c, int offC, int M, int N, int K,
+                          float scale) {
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
   id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
 
@@ -674,6 +680,7 @@ void Metal_MatMul_Q4K_F32(MetalContextRef ctx, MetalBufferRef a, int offA,
          atIndex:2]; // Output (F32)
   [enc setBytes:&K length:4 atIndex:3];
   [enc setBytes:&N length:4 atIndex:4];
+  [enc setBytes:&scale length:4 atIndex:5];
 
   [enc dispatchThreads:MTLSizeMake(32, N, M)
       threadsPerThreadgroup:MTLSizeMake(32, 4, 1)];
