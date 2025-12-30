@@ -1057,16 +1057,13 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		t.ctx.Synchronize()
 	}
 	t.ctx.Synchronize()
-	if pos < 2 {
-		scratch.AttOut.ScanMax("L-AttnOut_PreProj")
-	}
-		
 	// 6. Attention Output Projection
+	t.ctx.Synchronize()
+	scratch.AttOut.ScanMax(fmt.Sprintf("DEBUG_ATTN_OUT: L%d AttOut_PreProj (pos %d)", layerIdx, pos))
+
 	attOut.LinearInto(o, resAtt)
 	t.ctx.Synchronize()
-	if pos < 2 {
-		resAtt.ScanMax("L-AttnOut_Proj")
-	}
+	resAtt.ScanMax(fmt.Sprintf("DEBUG_ATTN_OUT: L%d AttOut_Proj (pos %d)", layerIdx, pos))
 	
 	
 	// 7. Residual Add 1

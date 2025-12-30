@@ -165,7 +165,6 @@ kernel void linear_q4k_f16(device const uchar *weight [[ buffer(0) ]],
                 d = as_type<float>(d_sign | d_exp | d_mant);
             }
         } else {
-            // Normal number
             uint d_exp = (d_exp_raw + (127 - 15)) << 23;
             d = as_type<float>(d_sign | d_exp | (d_mant << 13));
         }
@@ -214,8 +213,8 @@ kernel void linear_q4k_f16(device const uchar *weight [[ buffer(0) ]],
 				uchar b = qs[qs_offset + k];
                 float w0 = d_val * (float)(b & 0xF) - m_val;
                 float w1 = d_val * (float)(b >> 4) - m_val;
-                int idx0 = i * 256 + sub_offset + k;
-                int idx1 = idx0 + 16;
+                int idx0 = i * 256 + sub_offset + 2*k;
+                int idx1 = idx0 + 1;
                 sum += w0 * (float)in_ptr[idx0] + w1 * (float)in_ptr[idx1];
             }
         }
@@ -327,9 +326,9 @@ kernel void rope_f16(device half *x [[ buffer(0) ]],
     device half *token_ptr = x + gid.y * numHeads * headDim;
     device half *q_ptr = token_ptr + h * headDim;
     
-    // FIX: Mistral uses Adjacent Pairs (x[i], x[i+1]), not Half-Half
-    int idx0 = 2 * i;
-    int idx1 = 2 * i + 1;
+    // Standard Llama/Mistral uses Half-Half rotation (0 with 64, 1 with 65...)
+    int idx0 = i;
+    int idx1 = i + headDim/2;
     
     float x0 = (float)q_ptr[idx0];
     float x1 = (float)q_ptr[idx1];
@@ -429,8 +428,8 @@ kernel void embedding_q4k_f16(device const uchar *weight [[ buffer(0) ]],
             int sub_offset = j * 32, qs_offset = j * 16;
             for (int k = 0; k < 16; k++) {
                 uchar b = qs[qs_offset + k];
-                output[i * 256 + sub_offset + k] = (half)(d_val * (float)(b & 0xF) - m_val);
-                output[i * 256 + sub_offset + k + 16] = (half)(d_val * (float)(b >> 4) - m_val);
+                output[i * 256 + sub_offset + 2*k]     = (half)(d_val * (float)(b & 0xF) - m_val);
+                output[i * 256 + sub_offset + 2*k + 1] = (half)(d_val * (float)(b >> 4) - m_val);
             }
         }
     }
@@ -472,11 +471,19 @@ kernel void att_scores_f16(device const half *q [[ buffer(0) ]],
     // scale = 1.0 / sqrt(head_dim)
     // DEBUG: Force scale 1.0 because signals are small?
     float scale = 1.0f / sqrt((float)headDim);
+    // float scale = 100.0f; // BOOST 1000xsqrt((float)headDim);
  device const half *mq = q + h * headDim;
     for (int t = 0; t <= pos; t++) {
         float d = 0; device const half *mk = k_cache + t * kv_dim + kvh * headDim;
         for (int i = (int)lane; i < headDim; i += 32) d += (float)mq[i] * (float)mk[i];
-        d = simd_sum(d); if (lane == 0) scores [h * stride + t] = d * scale;
+        d = simd_sum(d); 
+        if (lane == 0) {
+            scores[h * stride + t] = d * scale;
+            // DEBUG PROBE: If head 0, pos 0, log raw d into scores[0]
+             if (h == 0 && t == 0) {
+                 scores[h * stride + t] = d; // Overwrite with raw unscaled d
+             }
+        }
     }
 }
 
@@ -736,6 +743,7 @@ kernel void linear_q4k_f32(device const uchar *weight [[ buffer(0) ]],
             dmin = as_type<float>(dmin_sign | dmin_exp | (dmin_mant << 13));
         }
 
+
         device const uchar *scales = block + 4;
         device const uchar *qs = block + 16;
         uchar sc[8], m[8];
@@ -755,8 +763,8 @@ kernel void linear_q4k_f32(device const uchar *weight [[ buffer(0) ]],
                 uchar b = qs[qs_offset + k];
                 float w0 = d_val * (float)(b & 0xF) - m_val;
                 float w1 = d_val * (float)(b >> 4) - m_val;
-                int idx0 = i * 256 + sub_offset + k;
-                int idx1 = idx0 + 16;
+                int idx0 = i * 256 + sub_offset + 2*k;
+                int idx1 = idx0 + 1;
                 sum += w0 * in_ptr[idx0] + w1 * in_ptr[idx1];
             }
         }
