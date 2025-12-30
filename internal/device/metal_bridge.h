@@ -59,7 +59,8 @@ void Metal_Softmax_F16(MetalContextRef ctx, MetalBufferRef input, int offIn,
 
 void Metal_StoreKV_F16(MetalContextRef ctx, MetalBufferRef k, int offK,
                        MetalBufferRef v, int offV, MetalBufferRef kCache,
-                       MetalBufferRef vCache, int pos, int heads, int headDim);
+                       int offKC, MetalBufferRef vCache, int offVC, int pos,
+                       int heads, int headDim);
 
 void Metal_Attention_F16(MetalContextRef ctx, MetalBufferRef q, int offQ,
                          MetalBufferRef kC, int offK, MetalBufferRef vC,
