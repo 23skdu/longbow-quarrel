@@ -15,7 +15,6 @@ void Metal_FreeHeap(void* heap);
 import "C"
 import (
 	_ "embed"
-	"encoding/binary"
 	"fmt"
 	"runtime"
 	"sync"
@@ -372,136 +371,24 @@ func (t *Tensor) ScanNaNs(name string) int {
 		}
 	}
 	if nanCount > 0 || infCount > 0 {
-		fmt.Printf("DEBUG_SCAN: %s has %d NaNs and %d Infs!\n", name, nanCount, infCount)
-	} else {
-		fmt.Printf("DEBUG_SCAN: %s is OCD Clean.\n", name)
+
 	}
 	return nanCount + infCount
 }
 
 func (t *Tensor) ScanMax(name string) float32 {
-	t.ctx.Synchronize()
-	ptr := C.Metal_GetBufferContents(t.buf)
-	if ptr == nil {
-		return 0
-	}
-	var maxVal float32 = 0
-	if t.dataType == DataTypeQ4K {
-		// return ScanQ4KScales(name) // Too much detail?
-		return 0
-	}
-	if t.dataType == DataTypeF32 {
-		f32Slice := unsafe.Slice((*float32)(ptr), t.rows*t.cols)
-		for _, v := range f32Slice {
-			abs := v
-			if abs < 0 {
-				abs = -abs
-			}
-			if abs > maxVal {
-				maxVal = abs
-			}
-		}
-	} else {
-		f16Slice := unsafe.Slice((*uint16)(ptr), t.rows*t.cols)
-		for _, v := range f16Slice {
-			f := Float16ToFloat32(v)
-			abs := f
-			if abs < 0 {
-				abs = -abs
-			}
-			if abs > maxVal {
-				maxVal = abs
-			}
-		}
-	}
-	fmt.Printf("DEBUG_MAX: %s Max Value: %f\n", name, maxVal)
-	return maxVal
+	// DEBUG removed for performance
+	return 0.0
 }
 
 func (t *Tensor) ScanQ4KScales(name string) float32 {
-	t.ctx.Synchronize()
-	ptr := C.Metal_GetBufferContents(t.buf)
-	if ptr == nil { return 0 }
-	// Unsafe cast to byte slice to handle stride
-	// Total bytes?
-	// Q4K size logic: (elements / 256) * 144?
-	// But t.sizeBytes is available.
-	data := unsafe.Slice((*byte)(ptr), t.sizeBytes)
-	
-	numBlocks := (t.rows * t.cols) / 256
-	var maxScale float32 = 0
-	
-	for i := 0; i < numBlocks; i++ {
-		offset := i * 144
-		if offset+2 > len(data) { break }
-		// d is bytes 0-1 (FP16)
-		block := data[offset : offset+2]
-		dbits := binary.LittleEndian.Uint16(block)
-		d := Float16ToFloat32(dbits)
-		if d > maxScale { maxScale = d }
-		if i == 0 {
-			// Print first block details for debugging
-			fmt.Printf("DEBUG_Q4K_HEX: %s Block 0 dbits=0x%04x d=%f\n", name, dbits, d)
-		}
-	}
-	fmt.Printf("DEBUG_SCALES: %s Max Scale (d): %f\n", name, maxScale)
-	return maxScale
+	// DEBUG removed for performance
+	return 0.0
 }
 
-func (t *Tensor) ScanMean(name string) float32 {
-	t.ctx.Synchronize()
-	ptr := C.Metal_GetBufferContents(t.buf)
-	if ptr == nil { return 0 }
-	f16Slice := unsafe.Slice((*uint16)(ptr), t.rows*t.cols)
-	var sum float64 = 0
-	for _, v := range f16Slice {
-		sum += float64(Float16ToFloat32(v))
-	}
-	mean := float32(sum / float64(len(f16Slice)))
-	fmt.Printf("DEBUG_MEAN: %s Mean Value: %f\n", name, mean)
-	return mean
-}
-
-// ScanScores prints the first N raw values (handles F16/F32)
-func (t *Tensor) ScanScores(name string) {
-	t.ctx.Synchronize()
-	ptr := C.Metal_GetBufferContents(t.buf)
-	if ptr == nil { return }
-	
-	count := 32
-	if t.rows*t.cols < count { count = t.rows*t.cols }
-	
-	fmt.Printf("DEBUG_SCORES: %s [Head 0, 0-%d]: ", name, count)
-	
-	if t.dataType == DataTypeF16 || t.dataType == DataTypeQ4K || t.dataType == DataTypeQ3K { // Q4K/Q3K stored as F16 in debug? No, but let's assume F16
-		f16Slice := unsafe.Slice((*uint16)(ptr), t.rows*t.cols)
-		for i := 0; i < count; i++ {
-			f := Float16ToFloat32(f16Slice[i])
-			fmt.Printf("%.4f ", f)
-		}
-	} else {
-		// F32
-		f32Slice := unsafe.Slice((*float32)(ptr), t.rows*t.cols)
-		for i := 0; i < count; i++ {
-			fmt.Printf("%.4f ", f32Slice[i])
-		}
-	}
-	fmt.Println()
-}
-
-func (t *Tensor) ScanAbsMax(name string) float32 {
-	t.ctx.Synchronize()
-	ptr := C.Metal_GetBufferContents(t.buf)
-	if ptr == nil { return 0 }
-	f16Slice := unsafe.Slice((*uint16)(ptr), t.rows*t.cols)
-	var maxVal float32 = 0
-	for _, v := range f16Slice {
-		f := Float16ToFloat32(v)
-		if f < 0 { f = -f }
-		if f > maxVal { maxVal = f }
-	}
-	fmt.Printf("DEBUG_ABSMAX: %s Max Abs Value: %f\n", name, maxVal)
-	return maxVal
+func (t *Tensor) LoadQ4KFrom(raw []byte) {
+	// Debug checks removed
+	t.LoadFromRaw(raw)
 }
 
 // LoadFromRaw copies raw bytes directly to the GPU buffer.
@@ -924,11 +811,7 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 	scratch *LayerScratch, 
 	pos, heads, kvHeads, headDim int, ropeTheta, eps float32, hiddenDim, ctxLen int, globalScale float32) {
 	
-	if true { 
-		fmt.Printf("DEBUG_LAYER_PTRS: pos=%d, t=%p (buf=%p), attnNorm=%p (buf=%p), normed=%p (buf=%p)\n", 
-			pos, t, t.buf, attnNorm, attnNorm.buf, scratch.Normed, scratch.Normed.buf)
-		t.ScanMax("L-Input_Res_START") 
-	}
+
 	
 	// Use scratch buffers instead of allocating
 	normed := scratch.Normed
@@ -953,10 +836,9 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 	normed.LinearInto(v, vPart, globalScale)
 	t.ctx.Synchronize()
 	if pos < 2 {
-		if 3 == 3 { t.ScanMax("L-Input_Res") } // Hack to label input
-		normed.ScanMax("L-AttnNorm")
-		qPart.ScanMax("L-Q_PreRoPE")
-		kPart.ScanMax("L-K_PreRoPE")
+			// normed.ScanMax("L-AttnNorm")
+			// qPart.ScanMax("L-Q_PreRoPE")
+			// kPart.ScanMax("L-K_PreRoPE")
 	}
 	
 	// 3. RoPE & 4. Store K/V & 5. Attention (Serial Loop for Prefill/Batch)
@@ -1001,8 +883,8 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		t.ctx.Synchronize()
 		
 		if p < 2 {
-			kCache.ScanMax(fmt.Sprintf("KV-K (pos %d)", p))
-			vCache.ScanMax(fmt.Sprintf("KV-V (pos %d)", p))
+			// kCache.ScanMax(fmt.Sprintf("KV-K (pos %d)", p))
+			// vCache.ScanMax(fmt.Sprintf("KV-V (pos %d)", p))
 		}
 		
 		// 5. Attention
@@ -1023,21 +905,6 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 			C.Metal_AttSoftmax_F16(t.ctx.ref, scores.buf, 0, C.int(p), C.int(heads), C.int(ctxLen))
 			t.ctx.Synchronize()
 			
-			// DEBUG: Dump Scores
-			if p == 5 { // Check at end of prefill
-			    sData := scores.ToHost() // FP32 slice
-			    // Slice for Head 0: [0..ctxLen]
-			    head0 := sData[:ctxLen]
-			    // Find Top 3
-			    fmt.Printf("DEBUG_SCORES: Head 0 (Pos %d) Scores: ", p)
-			    for k := 0; k <= p; k++ {
-			        if k < 10 || head0[k] > 0.1 {
-			            fmt.Printf("[%d]:%.4f ", k, head0[k])
-			        }
-			    }
-			    fmt.Println()
-			}
-
 			// 5c. Values
 			C.Metal_AttValues_F16(t.ctx.ref, scores.buf, 0, vCache.buf, C.int(vCache.Offset), attOut.buf, C.int(offAtt),
 				C.int(p), C.int(heads), C.int(kvHeads), C.int(headDim), C.int(ctxLen))
@@ -1047,11 +914,11 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 	t.ctx.Synchronize()
 	// 6. Attention Output Projection
 	t.ctx.Synchronize()
-	scratch.AttOut.ScanMax(fmt.Sprintf("DEBUG_ATTN_OUT: L%d AttOut_PreProj (pos %d)", layerIdx, pos))
+	// scratch.AttOut.ScanMax(fmt.Sprintf("DEBUG_ATTN_OUT: L%d AttOut_PreProj (pos %d)", layerIdx, pos))
 
-	attOut.LinearInto(o, resAtt, globalScale)
-	t.ctx.Synchronize()
-	resAtt.ScanMax(fmt.Sprintf("DEBUG_ATTN_OUT: L%d AttOut_Proj (pos %d)", layerIdx, pos))
+	// Output Projection
+	scratch.AttOut.LinearInto(o, resAtt, globalScale)
+	// resAtt.ScanMax(fmt.Sprintf("DEBUG_ATTN_OUT: L%d AttOut_Proj (pos %d)", layerIdx, pos))
 	
 	
 	// 7. Residual Add 1
@@ -1341,7 +1208,7 @@ func (t *Tensor) RMSNormFP32_ToF16(weight *Tensor, eps float32) *Tensor {
 func (t *Tensor) RMSNormFP32_ToF16_Into(weight *Tensor, eps float32, out *Tensor) {
 	C.Metal_RMSNorm_F32_F16(t.ctx.ref, t.buf, C.int(t.Offset), weight.buf, C.int(weight.Offset), out.buf, C.int(out.Offset), 
 		C.int(t.rows), C.int(t.cols), C.float(eps))
-	out.ScanMax("DEBUG: RMSNorm Out")
+	// out.ScanMax("DEBUG: RMSNorm Out")
 }
 
 func (t *Tensor) RMSNormFP32(weight *Tensor, eps float32) *Tensor {
