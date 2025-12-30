@@ -39,8 +39,11 @@
 // Mixed Precision
 @property(strong) id<MTLComputePipelineState> pipelineRMSNorm_F32_F16;
 @property(strong) id<MTLComputePipelineState> pipelineAdd_F32_F16;
+@property(strong) id<MTLComputePipelineState> pipelineRMSNormLinear_Q4K_F16;
+@property(strong) id<MTLComputePipelineState> pipelineSwiGLULinear_Q4K_F16;
 @property(strong) id<MTLCommandBuffer> currentCommandBuffer;
 @property(strong) id<MTLComputeCommandEncoder> currentEncoder;
+@property(strong) id<MTLCommandBuffer> lastCommandBuffer;
 @end
 
 @implementation MetalWrapper
@@ -58,9 +61,25 @@
     self.currentEncoder = nil;
   }
   if (self.currentCommandBuffer) {
+#if !__has_feature(objc_arc)
+    if (self.lastCommandBuffer)
+      [self.lastCommandBuffer release];
+    self.lastCommandBuffer = [self.currentCommandBuffer retain];
+#else
+    self.lastCommandBuffer = self.currentCommandBuffer;
+#endif
     [self.currentCommandBuffer commit];
-    [self.currentCommandBuffer waitUntilCompleted];
     self.currentCommandBuffer = nil;
+  }
+}
+- (void)synchronize {
+  [self flush];
+  if (self.lastCommandBuffer) {
+    [self.lastCommandBuffer waitUntilCompleted];
+#if !__has_feature(objc_arc)
+    [self.lastCommandBuffer release];
+#endif
+    self.lastCommandBuffer = nil;
   }
 }
 - (void)barrier {
@@ -165,22 +184,43 @@ MetalContextRef Metal_Init(const char *libSource) {
   ctx.pipelineLinearF32ToF16 = loadPipeline(ctx, @"linear_f32_to_f16");
   ctx.pipelineRMSNorm_F32_F16 = loadPipeline(ctx, @"rmsnorm_f32_to_f16_v4");
   ctx.pipelineAdd_F32_F16 = loadPipeline(ctx, @"add_f32_f16");
+  ctx.pipelineRMSNormLinear_Q4K_F16 =
+      loadPipeline(ctx, @"rmsnorm_linear_q4k_f16");
+  ctx.pipelineSwiGLULinear_Q4K_F16 =
+      loadPipeline(ctx, @"swiglu_linear_q4k_f16");
 
+#if __has_feature(objc_arc)
   return (__bridge_retained MetalContextRef)ctx;
+#else
+  return (MetalContextRef)ctx;
+#endif
 }
 
 void Metal_Free(MetalContextRef ctx) {
+#if __has_feature(objc_arc)
   MetalWrapper *mc = (__bridge_transfer MetalWrapper *)ctx;
+#else
+  MetalWrapper *mc = (MetalWrapper *)ctx;
+#endif
   [mc flush];
 }
 void Metal_Synchronize(MetalContextRef ctx) {
+#if __has_feature(objc_arc)
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
-  [mc flush];
+#else
+  MetalWrapper *mc = (MetalWrapper *)ctx;
+#endif
+  [mc synchronize];
 }
 MetalBufferRef Metal_Alloc(MetalContextRef ctx, long long size) {
-  id<MTLBuffer> buf = [[(__bridge MetalWrapper *)ctx device]
-      newBufferWithLength:size
-                  options:MTLResourceStorageModeShared];
+#if __has_feature(objc_arc)
+  MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
+#else
+  MetalWrapper *mc = (MetalWrapper *)ctx;
+#endif
+  id<MTLBuffer> buf =
+      [[mc device] newBufferWithLength:size
+                               options:MTLResourceStorageModeShared];
 #if !__has_feature(objc_arc)
   [buf retain];
 #endif
@@ -188,16 +228,25 @@ MetalBufferRef Metal_Alloc(MetalContextRef ctx, long long size) {
 }
 
 MetalBufferRef Metal_AllocPrivate(MetalContextRef ctx, long long size) {
-  id<MTLBuffer> buf = [[(__bridge MetalWrapper *)ctx device]
-      newBufferWithLength:size
-                  options:MTLResourceStorageModePrivate];
+#if __has_feature(objc_arc)
+  MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
+#else
+  MetalWrapper *mc = (MetalWrapper *)ctx;
+#endif
+  id<MTLBuffer> buf =
+      [[mc device] newBufferWithLength:size
+                               options:MTLResourceStorageModePrivate];
 #if !__has_feature(objc_arc)
   [buf retain];
 #endif
   return (__bridge_retained MetalBufferRef)buf;
 }
 void Metal_FreeBuffer(MetalContextRef ctx, MetalBufferRef buf) {
+#if __has_feature(objc_arc)
   id<MTLBuffer> b = (__bridge id<MTLBuffer>)buf;
+#else
+  id<MTLBuffer> b = (id<MTLBuffer>)buf;
+#endif
 #if !__has_feature(objc_arc)
   [b release];
 #endif
@@ -212,19 +261,29 @@ void *Metal_NewHeap(MetalContextRef ctx, long long size) {
   desc.hazardTrackingMode = MTLHazardTrackingModeDefault;
 
   id<MTLHeap> heap =
+#if __has_feature(objc_arc)
       [[(__bridge MetalWrapper *)ctx device] newHeapWithDescriptor:desc];
+#else
+      [[(MetalWrapper *)ctx device] newHeapWithDescriptor:desc];
+#endif
   if (!heap) {
     printf("ERROR: Failed to allocate Metal Heap of size %lld\n", size);
     return NULL;
   }
 #if !__has_feature(objc_arc)
   [heap retain];
-#endif
+  return (void *)heap;
+#else
   return (__bridge_retained void *)heap;
+#endif
 }
 
 MetalBufferRef Metal_NewBufferFromHeap(void *heapRef, long long size) {
+#if __has_feature(objc_arc)
   id<MTLHeap> heap = (__bridge id<MTLHeap>)heapRef;
+#else
+  id<MTLHeap> heap = (id<MTLHeap>)heapRef;
+#endif
   id<MTLBuffer> buf = [heap newBufferWithLength:size
                                         options:MTLResourceStorageModeShared];
   if (!buf) {
@@ -238,7 +297,11 @@ MetalBufferRef Metal_NewBufferFromHeap(void *heapRef, long long size) {
 }
 
 void Metal_FreeHeap(void *heap) {
-  id<MTLHeap> h = (__bridge id<MTLHeap>)heap;
+#if __has_feature(objc_arc)
+  id<MTLHeap> h = (__bridge_transfer id<MTLHeap>)heap;
+#else
+  id<MTLHeap> h = (id<MTLHeap>)heap;
+#endif
 #if !__has_feature(objc_arc)
   [h release];
 #endif
@@ -554,6 +617,54 @@ void Metal_RMSNormLinear_F16(MetalContextRef ctx, MetalBufferRef i, int oI,
                              MetalBufferRef nW, int oNW, MetalBufferRef w,
                              int oW, MetalBufferRef r, int oR, int iD, int oD,
                              float e) {}
+
+void Metal_RMSNormLinear_Q4K_F16(MetalContextRef ctx, MetalBufferRef input,
+                                 int offIn, MetalBufferRef normWeight,
+                                 int offNormWeight, MetalBufferRef weight,
+                                 int offWeight, MetalBufferRef result,
+                                 int offRes, int M, int N, int K, float eps,
+                                 float scale) {
+  MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
+  id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
+  [enc setComputePipelineState:mc.pipelineRMSNormLinear_Q4K_F16];
+  [enc setBuffer:(__bridge id<MTLBuffer>)input offset:offIn atIndex:0];
+  [enc setBuffer:(__bridge id<MTLBuffer>)normWeight
+          offset:offNormWeight
+         atIndex:1];
+  [enc setBuffer:(__bridge id<MTLBuffer>)weight offset:offWeight atIndex:2];
+  [enc setBuffer:(__bridge id<MTLBuffer>)result offset:0 atIndex:3];
+  [enc setBytes:&offRes length:4 atIndex:4];
+  [enc setBytes:&eps length:4 atIndex:5];
+  [enc setBytes:&K length:4 atIndex:6];
+  [enc setBytes:&N length:4 atIndex:7];
+  [enc setBytes:&scale length:4 atIndex:8];
+
+  [enc dispatchThreads:MTLSizeMake(1024, N, M)
+      threadsPerThreadgroup:MTLSizeMake(1024, 1, 1)];
+  [mc barrier];
+}
+
+void Metal_SwiGLULinear_Q4K_F16(MetalContextRef ctx, MetalBufferRef gateIn,
+                                int offGate, MetalBufferRef upIn, int offUp,
+                                MetalBufferRef weight, int offWeight,
+                                MetalBufferRef result, int offRes, int M, int N,
+                                int K, float scale) {
+  MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
+  id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
+  [enc setComputePipelineState:mc.pipelineSwiGLULinear_Q4K_F16];
+  [enc setBuffer:(__bridge id<MTLBuffer>)gateIn offset:offGate atIndex:0];
+  [enc setBuffer:(__bridge id<MTLBuffer>)upIn offset:offUp atIndex:1];
+  [enc setBuffer:(__bridge id<MTLBuffer>)weight offset:offWeight atIndex:2];
+  [enc setBuffer:(__bridge id<MTLBuffer>)result offset:0 atIndex:3];
+  [enc setBytes:&offRes length:4 atIndex:4];
+  [enc setBytes:&K length:4 atIndex:5];
+  [enc setBytes:&N length:4 atIndex:6];
+  [enc setBytes:&scale length:4 atIndex:7];
+
+  [enc dispatchThreads:MTLSizeMake(32, N, M)
+      threadsPerThreadgroup:MTLSizeMake(32, 4, 1)];
+  [mc barrier];
+}
 void Metal_BatchedMatMul_F16(MetalContextRef ctx, MetalBufferRef a, int oA,
                              int sA, bool tA, MetalBufferRef b, int oB, int sB,
                              bool tB, MetalBufferRef c, int oC, int sC, int M,

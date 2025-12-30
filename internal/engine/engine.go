@@ -96,6 +96,7 @@ func (e *Engine) loadModel(path string) error {
 	} else {
 		e.Config.RopeTheta = 10000.0
 	}
+
 	
 	// RMS Norm Eps
 	if val, ok := f.KV["llama.attention.layer_norm_rms_epsilon"]; ok {
@@ -189,7 +190,7 @@ func (e *Engine) loadModel(path string) error {
 						sum += float64(math.Abs(float64(v)))
 					}
 					mean := float32(sum / float64(numElements))
-					fmt.Printf("GlobalScale (Disabled): Mean=%.6f Scale=1.0 FIRST_4=%v\n", mean, f32Data[:4])
+					fmt.Printf("GlobalScale (Disabled): Mean=%e Scale=1.0 FIRST_4=%x\n", mean, rawBytes[:16])
 				}
 			} else if t.Type == gguf.GGMLTypeF16 {
 				mt = e.Ctx.NewTensor(rows, cols)
@@ -436,12 +437,8 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 				e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen, e.GlobalScale)
 			
 			// Log layer output if enabled and first token
-			if i == 0 && e.ActLogger.IsEnabled() {
-				layerOut := currentF32.ToHost()
-				outMax := GetMaxFromTensor(layerOut)
-				outSample := GetSampleFromTensor(layerOut, 10)
-				// For now, log with placeholders for Q/K/V (we don't have easy access)
-				e.ActLogger.LogLayer(l, 0, 0, 0, 0, outMax, outSample, outSample, outSample)
+			if i == 0 {
+				currentF32.ScanMax(fmt.Sprintf("Layer %d Output", l))
 			}
 		}
 
