@@ -80,12 +80,22 @@ func main() {
 	)
 	
 	e.Ctx.Synchronize()
+	
+	// DEBUG: Check KV Cache contents
+	kCacheData := kCache.ToHost()
+	vCacheData := vCache.ToHost()
+	fmt.Printf("DEBUG: K Cache (first 10): %v\n", kCacheData[:10])
+	fmt.Printf("DEBUG: V Cache (first 10): %v\n", vCacheData[:10])
+	
 	// gpuOutput := tInput.ToHost() // Read back modified input (Residual)
 	
 	// Read Intermediate Tensors from Scratch for finer Debugging
 	gpuNormed := scratch.Normed.ToHost()
 	gpuQ := scratch.QPart.ToHost()
-	// gpuK := scratch.KPart.ToHost()
+	gpuK := scratch.KPart.ToHost()
+	
+	fmt.Printf("DEBUG: GPU Q (first 10): %v\n", gpuQ[:10])
+	fmt.Printf("DEBUG: GPU K (first 10): %v\n", gpuK[:10])
 	
 	// --- 2. CPU Execution ---
 	fmt.Println("Running CPU Reference...")
@@ -103,7 +113,7 @@ func main() {
 	assertClose("RMSNorm", cpuNormed, gpuNormed, 1e-3)
 	
 	// 2b. Q/K/V Projections
-	wQ := loadW(fmt.Sprintf("blk.%d.attn_q.weight", layerIdx))
+	// wQ := loadW(fmt.Sprintf("blk.%d.attn_q.weight", layerIdx))
 
 	// 2c. K/V Projections
 	wK := loadW(fmt.Sprintf("blk.%d.attn_k.weight", layerIdx))
@@ -121,8 +131,8 @@ func main() {
 	
 	// Apply RoPE to CPU Q/K
 	// RoPE(data, pos, heads, headDim, theta)
-	cpuQ_RoPE := device.CPURoPE(cpuQ, 0, e.Config.Heads, e.Config.HeadDim, e.Config.RopeTheta)
-	cpuK_RoPE := device.CPURoPE(cpuK, 0, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta)
+	// cpuQ_RoPE := device.CPURoPE(cpuQ, 0, e.Config.Heads, e.Config.HeadDim, e.Config.RopeTheta)
+	// cpuK_RoPE := device.CPURoPE(cpuK, 0, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta)
 	
 	// Check RoPE
 	// GPU Q/K are modified in place? 
