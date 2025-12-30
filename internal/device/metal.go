@@ -892,7 +892,7 @@ func (s *LayerScratch) Free() {
 
 func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, kCache, vCache *Tensor, 
 	scratch *LayerScratch, 
-	pos, heads, kvHeads, headDim int, ropeTheta, eps float32, hiddenDim, ctxLen int, globalScale float32) {
+	pos, heads, kvHeads, headDim int, ropeTheta, eps float32, hiddenDim, ctxLen, windowSize int, globalScale float32) {
 	
 
 	
@@ -964,7 +964,7 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		// 4. Store K/V (Must append to KVCache at current pos)
 		C.Metal_StoreKV_F16(t.ctx.ref, kPart.buf, C.int(kPart.Offset + offK), vPart.buf, C.int(vPart.Offset + offV), 
 			kCache.buf, C.int(kCache.Offset), vCache.buf, C.int(vCache.Offset), 
-			C.int(p), C.int(kvHeads), C.int(headDim))
+			C.int(p), C.int(kvHeads), C.int(headDim), C.int(windowSize))
 
 		
 		if p < 2 {
@@ -999,14 +999,14 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 				kCache.buf, C.int(kCache.Offset),
 				vCache.buf, C.int(vCache.Offset),
 				attOut.buf, C.int(attOut.Offset + offAtt),
-				C.int(p), C.int(heads), C.int(kvHeads), C.int(headDim))
+				C.int(p), C.int(heads), C.int(kvHeads), C.int(headDim), C.int(windowSize))
 		} else {
 			// Split Path
 			scores := scratch.Scores
 			C.Metal_AttScores_F16(t.ctx.ref, qPart.buf, C.int(qPart.Offset + offQ),
 				kCache.buf, C.int(kCache.Offset),
 				scores.buf, C.int(scores.Offset), // Dst
-				C.int(p), C.int(heads), C.int(kvHeads), C.int(headDim), C.int(ctxLen))
+				C.int(p), C.int(heads), C.int(kvHeads), C.int(headDim), C.int(ctxLen), C.int(windowSize))
 			
 			// DEBUG: Dump Scores (Pre-Softmax)
 			if layerIdx == 0 && i == 0 && p < 5 {
@@ -1023,7 +1023,7 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 			C.Metal_AttValues_F16(t.ctx.ref, scores.buf, C.int(scores.Offset),
 				vCache.buf, C.int(vCache.Offset),
 				attOut.buf, C.int(attOut.Offset + offAtt),
-				C.int(p), C.int(heads), C.int(kvHeads), C.int(headDim), C.int(ctxLen))
+				C.int(p), C.int(heads), C.int(kvHeads), C.int(headDim), C.int(ctxLen), C.int(windowSize))
 		}
 	}
 
@@ -1309,11 +1309,11 @@ func (t *Tensor) EmbeddingLookup(row int, scale float32) *Tensor {
 	return res
 }
 
-func (t *Tensor) StoreKV(v *Tensor, kCache, vCache *Tensor, pos, heads, headDim int) {
-	C.Metal_StoreKV_F16(t.ctx.ref, t.buf, 0, v.buf, 0, kCache.buf, C.int(kCache.Offset), vCache.buf, C.int(vCache.Offset), C.int(pos), C.int(heads), C.int(headDim))
+func (t *Tensor) StoreKV(v *Tensor, kCache, vCache *Tensor, pos, heads, headDim, windowSize int) {
+	C.Metal_StoreKV_F16(t.ctx.ref, t.buf, 0, v.buf, 0, kCache.buf, C.int(kCache.Offset), vCache.buf, C.int(vCache.Offset), C.int(pos), C.int(heads), C.int(headDim), C.int(windowSize))
 }
 
-func (t *Tensor) Attention(kCache, vCache *Tensor, pos, numHeads, kvHeads, headDim, ctxLen int) *Tensor {
+func (t *Tensor) Attention(kCache, vCache *Tensor, pos, numHeads, kvHeads, headDim, ctxLen, windowSize int) *Tensor {
 	res := t.ctx.NewTensorPooled(1, numHeads*headDim)
 	scoresDim := numHeads * ctxLen
 	if scoresDim < 32768 { scoresDim = 32768 }
@@ -1322,20 +1322,17 @@ func (t *Tensor) Attention(kCache, vCache *Tensor, pos, numHeads, kvHeads, headD
 	C.Metal_Attention_F16(t.ctx.ref, t.buf, 0, kCache.buf, C.int(kCache.Offset), 
 		vCache.buf, C.int(vCache.Offset), res.buf, 0,
 		scores.buf, 0,
-		C.int(pos), C.int(numHeads), C.int(kvHeads), C.int(headDim), C.int(ctxLen))
+		C.int(pos), C.int(numHeads), C.int(kvHeads), C.int(headDim), C.int(ctxLen), C.int(windowSize))
 	return res
 }
 
 // AttFused performs fused attention (Score + Softmax + Value Aggregation)
-// t is Query [1, Heads*HeadDim]
-// kCache, vCache are caches
-// out is Output [1, Heads*HeadDim]
-func (t *Tensor) AttFused(kCache, vCache *Tensor, out *Tensor, pos, numHeads, kvHeads, headDim int) {
+func (t *Tensor) AttFused(kCache, vCache *Tensor, out *Tensor, pos, numHeads, kvHeads, headDim, windowSize int) {
 	C.Metal_AttFused_F16(t.ctx.ref, t.buf, C.int(t.Offset),
 		kCache.buf, C.int(kCache.Offset),
 		vCache.buf, C.int(vCache.Offset),
 		out.buf, C.int(out.Offset),
-		C.int(pos), C.int(numHeads), C.int(kvHeads), C.int(headDim))
+		C.int(pos), C.int(numHeads), C.int(kvHeads), C.int(headDim), C.int(windowSize))
 }
 
 // FP32 Operations
@@ -1443,7 +1440,7 @@ func (t *Tensor) ToHostF32() []float32 {
 }
 
 // AttentionScores computes Q·K^T scores with scaling
-func (t *Tensor) AttentionScores(kCache *Tensor, scores *Tensor, pos, numHeads, kvHeads, headDim, stride int) {
+func (t *Tensor) AttentionScores(kCache *Tensor, scores *Tensor, pos, numHeads, kvHeads, headDim, stride, windowSize int) {
 	C.Metal_AttScores_F16(
 		t.ctx.ref,
 		t.buf, C.int(t.Offset),
@@ -1454,6 +1451,7 @@ func (t *Tensor) AttentionScores(kCache *Tensor, scores *Tensor, pos, numHeads, 
 		C.int(kvHeads),
 		C.int(headDim),
 		C.int(stride),
+		C.int(windowSize),
 	)
 }
 

@@ -17,6 +17,7 @@ type LlamaConfig struct {
 	SeqLen     int
 	Eps        float32
 	RopeTheta  float32
+	WindowSize int // Sliding window size for attention (4096 for Mistral)
 	
 	// Debug Flags
 	DebugDequant bool

@@ -70,7 +70,7 @@ func TestAttention_GQA(t *testing.T) {
 	q.LoadFrom(qData)
 	
 	// Run Attention (Pos 0)
-	q.AttFused(kCache, vCache, out, 0, heads, kvHeads, headDim)
+	q.AttFused(kCache, vCache, out, 0, heads, kvHeads, headDim, 0)
 	
 	res := out.ToHost()
 	

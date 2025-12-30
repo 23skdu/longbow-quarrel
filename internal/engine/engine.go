@@ -82,6 +82,11 @@ func (e *Engine) loadModel(path string) error {
 	
 	// Head Dim
 	e.Config.HeadDim = e.Config.Dim / e.Config.Heads
+
+	log.Printf("GGUF Metadata Keys:")
+	for k := range f.KV {
+		log.Printf("  %s", k)
+	}
 	
 	// Seq Len (Context)
 	if val, ok := f.KV["llama.context_length"]; ok {
@@ -91,10 +96,12 @@ func (e *Engine) loadModel(path string) error {
 	}
 	
 	// RoPE Freq
-	if _, ok := f.KV["llama.rope.freq_base"]; ok {
-		// FORCE 10k for Debug
-		e.Config.RopeTheta = 10000.0
+	if val, ok := f.KV["llama.rope.freq_base"]; ok {
+		e.Config.RopeTheta = float32(toFloat64(val))
+		log.Printf("[MODEL] RoPE Theta: %.0f", e.Config.RopeTheta)
 	} else {
+		// Default to 10k for Llama 2, but Mistral v0.3 uses 1M
+		// We'll set it properly based on architecture below
 		e.Config.RopeTheta = 10000.0
 	}
 
@@ -106,9 +113,42 @@ func (e *Engine) loadModel(path string) error {
 		e.Config.Eps = 1e-5
 	}
 	
+	// Sliding Window Size (for Mistral)
+	// Mistral uses 4096-token sliding window attention
+	// If not specified in GGUF, default to 4096 for Mistral, 0 (disabled) for others
+	if val, ok := f.KV["llama.attention.sliding_window"]; ok {
+		e.Config.WindowSize = int(toFloat64(val))
+		log.Printf("[MODEL] Sliding Window Size: %d", e.Config.WindowSize)
+	} else {
+		// Check if this is Mistral (heuristic: has specific architecture name)
+		if arch, ok := f.KV["general.architecture"].(string); ok && arch == "llama" {
+			// For Mistral models, default to 4096
+			// For other models (Llama, etc.), use 0 (full attention)
+			e.Config.WindowSize = 4096
+			log.Printf("[MODEL] Sliding Window Size (Default for Mistral): %d", e.Config.WindowSize)
+		} else {
+			e.Config.WindowSize = 0 // Full attention
+		}
+	}
+	
 	// Log Model Architecture
 	if arch, ok := f.KV["general.architecture"].(string); ok {
 		log.Printf("[MODEL] Architecture: %s", arch)
+		
+		// Heuristic: If it's llama or mistral and WindowSize not set, 
+		// check if we should assume Mistral SWA.
+		if strings.Contains(strings.ToLower(arch), "llama") || strings.Contains(strings.ToLower(arch), "mistral") {
+			if e.Config.WindowSize == 0 {
+				// Most Mistral models in GGUF don't have the sliding_window key set correctly,
+				// but they still require it for correctness if they are v0.3+.
+				// However, Llama 2 also uses "llama" arch. 
+				// Heuristic: If RopeTheta is 1M, it's likely Mistral v0.3.
+				if e.Config.RopeTheta >= 1000000.0 {
+					e.Config.WindowSize = 4096
+					log.Printf("[MODEL] Heuristic: Mistral v0.3 detected, using 4096 SWA")
+				}
+			}
+		}
 	}
 	if vSize, ok := f.KV["llama.vocab_size"]; ok {
 		e.Config.VocabSize = int(toFloat64(vSize))
@@ -117,6 +157,13 @@ func (e *Engine) loadModel(path string) error {
 		// Fallback for Smollm2 / Llama3 if missing
 		e.Config.VocabSize = 49152 
 		log.Printf("[MODEL] Vocab Size (Default): %d", e.Config.VocabSize)
+	}
+
+	if val, ok := f.KV["tokenizer.ggml.bos_token_id"]; ok {
+		log.Printf("[MODEL] BOS Token ID: %d", int(toFloat64(val)))
+	}
+	if val, ok := f.KV["tokenizer.ggml.eos_token_id"]; ok {
+		log.Printf("[MODEL] EOS Token ID: %d", int(toFloat64(val)))
 	}
 
 	// Initialize KV Cache (now that we have dimensions)
@@ -441,7 +488,7 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 
 			currentF32.Layer(l, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, kCache, vCache,
 				scratch, // Pass scratch
-				e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen, e.GlobalScale)
+				e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen, e.Config.WindowSize, e.GlobalScale)
 			
 			// Log layer output if enabled and first token
 			if i == 0 {
@@ -540,7 +587,7 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 			// Layer now handles F32 currentF32, using mixed precision
 			currentF32.Layer(l, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, kCache, vCache,
 				scratch, // Pass scratch
-				e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen, e.GlobalScale) // Corrected variable names
+				e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen, e.Config.WindowSize, e.GlobalScale) // Corrected variable names
 		}
 		
 		// Final Norm (F32 -> F16)
@@ -607,7 +654,11 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 
 func (e *Engine) initKVCache() error {
 	layers := e.Config.Layers
-	seqLen := e.Config.SeqLen
+	windowSize := e.Config.WindowSize
+	if windowSize == 0 {
+		// Default to full sequence length if not specified
+		windowSize = e.Config.SeqLen
+	}
 	kvHeads := e.Config.KVHeads
 	headDim := e.Config.HeadDim
 	
@@ -619,19 +670,13 @@ func (e *Engine) initKVCache() error {
 	e.KVCacheK = make([]*device.Tensor, layers)
 	e.KVCacheV = make([]*device.Tensor, layers)
 	
-	// Total size per layer:
-	// Rows = seqLen
-	// Cols = kvHeads * headDim (dim of K/V per token)
-	// We store as [SeqLen, KVDim] usually?
-	// Metal MatMul prefers [M, K] x [K, N] -> [M, N]
-	// Attention Q * K^T.
-	// K cache usually needs to be [KVDim, SeqLen] or transposable.
-	// Let's stick to row-major [SeqLen, kvHeads * headDim] for storage?
-	// Actually, for flash attention / efficient access, we often want [Heads, SeqLen, HeadDim].
-	// But our basic kernels are 2D.
-	// Let's allocate [SeqLen, kvHeads * headDim].
+	// SLIDING WINDOW ATTENTION:
+	// For Mistral, we use a rolling buffer KV cache of size WindowSize (4096)
+	// instead of full SeqLen. This bounds memory usage and implements
+	// the sliding window attention mechanism.
+	// Cache is indexed as: cacheIdx = pos % windowSize
 	
-	rows := seqLen
+	rows := windowSize  // Changed from seqLen to windowSize
 	cols := kvHeads * headDim
 	
 	// Align 4096
