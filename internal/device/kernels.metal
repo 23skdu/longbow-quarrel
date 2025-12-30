@@ -269,11 +269,15 @@ kernel void rope_f16(device half *x [[ buffer(0) ]],
     device half *token_ptr = x + gid.y * numHeads * headDim;
     device half *q_ptr = token_ptr + h * headDim;
     
-    float x0 = (float)q_ptr[i];
-    float x1 = (float)q_ptr[i + headDim / 2];
+    // FIX: Mistral uses Adjacent Pairs (x[i], x[i+1]), not Half-Half
+    int idx0 = 2 * i;
+    int idx1 = 2 * i + 1;
     
-    q_ptr[i] = (half)(x0 * ct - x1 * st);
-    q_ptr[i + headDim / 2] = (half)(x0 * st + x1 * ct);
+    float x0 = (float)q_ptr[idx0];
+    float x1 = (float)q_ptr[idx1];
+    
+    q_ptr[idx0] = (half)(x0 * ct - x1 * st);
+    q_ptr[idx1] = (half)(x0 * st + x1 * ct);
 }
 
 kernel void embedding_f16(device const half *weight [[ buffer(0) ]], device half *output [[ buffer(1) ]], constant int &idx [[ buffer(2) ]], constant int &cols [[ buffer(3) ]], uint qid [[ thread_position_in_grid ]]) {
@@ -380,7 +384,7 @@ kernel void att_fused_f16(device const half *q [[ buffer(0) ]],
                         constant int &headDim [[ buffer(7) ]],
                         uint3 tid [[ thread_position_in_threadgroup ]],
                         uint3 group_id [[ threadgroup_position_in_grid ]]) {
-    uint h = group_id.x; if (h >= (uint)num_heads) return;
+    uint h = group_id.y; if (h >= (uint)num_heads) return;
     uint kvh = h / (num_heads / kv_heads);
     uint kv_dim = kv_heads * headDim;
     float scale = 1.0f / sqrt((float)headDim);
@@ -389,7 +393,8 @@ kernel void att_fused_f16(device const half *q [[ buffer(0) ]],
     device const half *mq = q + h * headDim;
     
     // Parallel score calculation
-    for (int t = tid.x; t < 1024; t += 1024) {
+    // FIX: Stride should cover all tokens if threads < 1024
+    for (int t = tid.x; t < 1024; t += headDim) { // Stride by headDim (128)
         if (t <= pos) {
             float d = 0; device const half *mk = k_cache + t * kv_dim + kvh * headDim;
             for (int i = 0; i < headDim; i++) d += (float)mq[i] * (float)mk[i];
@@ -400,26 +405,30 @@ kernel void att_fused_f16(device const half *q [[ buffer(0) ]],
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    // Softmax
+    // Softmax Max Reduction
     threadgroup float tg_mv;
     float l_mv = -10000.0f;
-    for (int i = tid.x; i <= pos; i += 1024) if (s_mem[i] > l_mv) l_mv = s_mem[i];
+    for (int i = tid.x; i <= pos; i += headDim) if (s_mem[i] > l_mv) l_mv = s_mem[i];
     l_mv = simd_max(l_mv);
     
     threadgroup float scratch[32];
-    if ((tid.x & 31) == 0) scratch[tid.x / 32] = l_mv;
+    if ((tid.x & 31) == 0) scratch[tid.x / 32] = l_mv; // Write per subgroup
     threadgroup_barrier(mem_flags::mem_threadgroup);
+    
     if (tid.x < 32) {
-        float m = (tid.x < 32) ? scratch[tid.x] : -10000.0f;
+        // FIX: Mask garbage scratch entries
+        int subgroups = (headDim + 31) / 32;
+        float m = (tid.x < subgroups) ? scratch[tid.x] : -10000.0f;
         m = simd_max(m);
         if (tid.x == 0) tg_mv = m;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     float mv = tg_mv;
     
+    // Softmax Sum Reduction
     threadgroup float tg_se;
     float l_se = 0;
-    for (int i = tid.x; i <= pos; i += 1024) {
+    for (int i = tid.x; i <= pos; i += headDim) {
         float e = exp(s_mem[i] - mv);
         s_mem[i] = e;
         l_se += e;
@@ -428,7 +437,9 @@ kernel void att_fused_f16(device const half *q [[ buffer(0) ]],
     if ((tid.x & 31) == 0) scratch[tid.x / 32] = l_se;
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (tid.x < 32) {
-        float s = (tid.x < 32) ? scratch[tid.x] : 0.0f;
+        // FIX: Mask garbage scratch entries
+        int subgroups = (headDim + 31) / 32;
+        float s = (tid.x < subgroups) ? scratch[tid.x] : 0.0f;
         s = simd_sum(s);
         if (tid.x == 0) tg_se = s;
     }
@@ -455,6 +466,7 @@ kernel void att_values_f16(device const float *scores [[ buffer(0) ]],
                          constant int &stride [[ buffer(7) ]],
                          uint qid [[ thread_position_in_grid ]]) {
     uint h = qid / headDim, idx = qid % headDim; if (h >= (uint)num_heads) return;
+
     uint kvh = h / (num_heads / kv_heads), kv_dim = kv_heads * headDim;
     float r = 0; for (int t = 0; t <= pos; t++) r += scores[h * stride + t] * (float)v_cache[t * kv_dim + kvh * headDim + idx];
     output[qid] = safe_half(r);
@@ -604,6 +616,31 @@ kernel void swiglu_f32(device const float *gate [[ buffer(0) ]],
     float g = gate[qid]; 
     float val = up[qid] * (g / (1.0f + exp(-g)));
     out[qid] = val;
+}
+
+// Weights: F16, Input: F16, Output: F32
+kernel void linear_f16_in_f16_out_f32(device const half *weight [[ buffer(0) ]],
+                         device const half *input [[ buffer(1) ]],
+                         device float *output [[ buffer(2) ]],
+                         constant int &dim_in [[ buffer(3) ]],
+                         constant int &dim_out [[ buffer(4) ]],
+                         uint3 tid [[ thread_position_in_threadgroup ]],
+                         uint3 qid [[ thread_position_in_grid ]]) {
+    uint row = qid.y; uint batch = qid.z;
+    if (row >= (uint)dim_out) return; uint lane_id = tid.x;
+    
+    device const half4 *w4 = (device const half4 *)(weight + row * dim_in);
+    device const half4 *i4 = (device const half4 *)(input + batch * dim_in);
+    int n4 = dim_in / 4;
+    
+    float sum = 0;
+    for (int i = (int)lane_id; i < n4; i += 32) {
+        float4 v_w = float4(w4[i]);
+        float4 v_i = float4(i4[i]);
+        sum += dot(v_w.xy, v_i.xy) + dot(v_w.zw, v_i.zw);
+    }
+    sum = simd_sum(sum); 
+    if (lane_id == 0) output[batch * dim_out + row] = sum;
 }
 
 kernel void linear_f16_f32(device const half *weight [[ buffer(0) ]],
