@@ -38,7 +38,7 @@ void Metal_Embedding_F16(MetalContextRef ctx, MetalBufferRef weights, int offW,
                          int cols);
 void Metal_Embedding_Q4K(MetalContextRef ctx, MetalBufferRef weights, int offW,
                          MetalBufferRef result, int offRes, int rowIdx,
-                         int cols);
+                         int cols, float scale);
 
 // Llama Specific Kernels
 void Metal_RMSNorm_F16(MetalContextRef ctx, MetalBufferRef input, int offIn,
@@ -91,7 +91,8 @@ void Metal_MatMul_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
 
 void Metal_MatMul_Q4K_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
                           bool transA, MetalBufferRef b, int offB, bool transB,
-                          MetalBufferRef c, int offC, int M, int N, int K);
+                          MetalBufferRef c, int offC, int M, int N, int K,
+                          float scale);
 
 void Metal_MatMul_Q3K_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
                           bool transA, MetalBufferRef b, int offB, bool transB,
@@ -99,7 +100,8 @@ void Metal_MatMul_Q3K_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
 
 void Metal_MatMul_Q6K_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
                           bool transA, MetalBufferRef b, int offB, bool transB,
-                          MetalBufferRef c, int offC, int M, int N, int K);
+                          MetalBufferRef c, int offC, int M, int N, int K,
+                          float scale);
 
 void Metal_BatchedMatMul_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
                              int strideA, bool transA, MetalBufferRef b,
@@ -132,7 +134,8 @@ void Metal_RMSNorm_F32(MetalContextRef ctx, MetalBufferRef input, int offIn,
 
 void Metal_MatMul_Q4K_F32(MetalContextRef ctx, MetalBufferRef a, int offA,
                           int transA, MetalBufferRef b, int offB, int transB,
-                          MetalBufferRef c, int offC, int M, int N, int K);
+                          MetalBufferRef c, int offC, int M, int N, int K,
+                          float scale);
 
 void Metal_Add_F32(MetalContextRef ctx, MetalBufferRef a, int offA,
                    MetalBufferRef b, int offB, MetalBufferRef result,

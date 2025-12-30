@@ -122,6 +122,7 @@ kernel void linear_q4k_f16(device const uchar *weight [[ buffer(0) ]],
                          device half *output [[ buffer(2) ]],
                          constant int &dim_in [[ buffer(3) ]],
                          constant int &dim_out [[ buffer(4) ]],
+                         constant float &scale [[ buffer(5) ]],
                          uint3 tid [[ thread_position_in_threadgroup ]],
                          uint3 qid [[ thread_position_in_grid ]]) {
     uint row = qid.y; uint batch = qid.z;
@@ -207,7 +208,7 @@ kernel void linear_q4k_f16(device const uchar *weight [[ buffer(0) ]],
             }
         }
         for (int j = 0; j < 8; j++) {
-            float d_val = d * (float)sc[j], m_val = dmin * (float)m[j];
+            float d_val = d * scale * (float)sc[j], m_val = dmin * scale * (float)m[j];
             int sub_offset = j * 32, qs_offset = j * 16;
             for (int k = 0; k < 16; k++) {
 				uchar b = qs[qs_offset + k];
@@ -269,6 +270,7 @@ kernel void linear_q6k_f16(device const uchar *weight [[ buffer(0) ]],
                          device half *output [[ buffer(2) ]],
                          constant int &dim_in [[ buffer(3) ]],
                          constant int &dim_out [[ buffer(4) ]],
+                         constant float &scale [[ buffer(5) ]],
                          uint3 tid [[ thread_position_in_threadgroup ]],
                          uint3 qid [[ thread_position_in_grid ]]) {
     uint row = qid.y; uint batch = qid.z;
@@ -286,7 +288,7 @@ kernel void linear_q6k_f16(device const uchar *weight [[ buffer(0) ]],
         float d = (float)*(device const half*)(block + 208);
         
         for (int l = 0; l < 16; l++) {
-            float s = d * (float)sc[l];
+            float s = d * scale * (float)sc[l];
             int sub_off = l * 16;
             for (int k = 0; k < 16; k += 2) {
                 int idx = sub_off + k;
@@ -346,6 +348,7 @@ kernel void embedding_q4k_f16(device const uchar *weight [[ buffer(0) ]],
                              device half *output [[ buffer(1) ]],
                              constant int &idx [[ buffer(2) ]],
                              constant int &cols [[ buffer(3) ]],
+                             constant float &scale [[ buffer(4) ]],
                              uint tid [[ thread_index_in_threadgroup ]]) {
     int num_blocks = (cols + 255) / 256;
     device const uchar *row_ptr = weight + (uint)idx * num_blocks * 144;
@@ -424,7 +427,7 @@ kernel void embedding_q4k_f16(device const uchar *weight [[ buffer(0) ]],
             }
         }
         for (int j = 0; j < 8; j++) {
-            float d_val = d * (float)sc[j], m_val = dmin * (float)m[j];
+            float d_val = d * scale * (float)sc[j], m_val = dmin * scale * (float)m[j];
             int sub_offset = j * 32, qs_offset = j * 16;
             for (int k = 0; k < 16; k++) {
                 uchar b = qs[qs_offset + k];
@@ -678,6 +681,7 @@ kernel void linear_q4k_f32(device const uchar *weight [[ buffer(0) ]],
                          device float *output [[ buffer(2) ]],
                          constant int &dim_in [[ buffer(3) ]],
                          constant int &dim_out [[ buffer(4) ]],
+                         constant float &scale [[ buffer(5) ]],
                          uint3 tid [[ thread_position_in_threadgroup ]],
                          uint3 qid [[ thread_position_in_grid ]]) {
     uint row = qid.y; uint batch = qid.z;
@@ -757,7 +761,7 @@ kernel void linear_q4k_f32(device const uchar *weight [[ buffer(0) ]],
             }
         }
         for (int j = 0; j < 8; j++) {
-            float d_val = d * (float)sc[j], m_val = dmin * (float)m[j];
+            float d_val = d * scale * (float)sc[j], m_val = dmin * scale * (float)m[j];
             int sub_offset = j * 32, qs_offset = j * 16;
             for (int k = 0; k < 16; k++) {
                 uchar b = qs[qs_offset + k];
