@@ -547,7 +547,7 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 		
 		// Use Into to avoid alloc
 		currentF32.RMSNormFP32_ToF16_Into(e.Weights.OutputNorm, e.Config.Eps, scratch.Normed)
-		// scratch.Normed.ScanMax("DEBUG_FINAL: Normed")
+		scratch.Normed.ScanMax("DEBUG_FINAL: Normed")
 		
 		// Output Head (F16 -> F32 Logits)
 		// Reuse pre-allocated logits buffer
