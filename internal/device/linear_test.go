@@ -66,7 +66,7 @@ func TestLinearF16(t *testing.T) {
 	
 	// We need to implement LinearInto call or call it.
 	// Since we are in `device` package, we can access Tensor methods.
-	tensorA.LinearInto(tensorB, tensorOut)
+	tensorA.LinearInto(tensorB, tensorOut, 1.0)
 	
 	if err := ctx.WaitWithTimeout(2 * time.Second); err != nil {
 		t.Fatal(err)

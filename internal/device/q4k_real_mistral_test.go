@@ -60,7 +60,7 @@ func TestQ4K_RealMistralBlock(t *testing.T) {
 	output := ctx.NewTensorFP32(1, 1)
 	defer output.Free()
 	
-	input.LinearInto(weight, output)
+	input.LinearInto(weight, output, 1.0)
 	
 	gpuResult := output.ToHostF32()
 	t.Logf("GPU Result: %f", gpuResult[0])
@@ -87,7 +87,7 @@ func TestEmbeddingQ4K_RealMistralBlock(t *testing.T) {
 	defer weight.Free()
 	weight.LoadRaw(blockData)
 	
-	res := weight.EmbeddingLookup(0) 
+	res := weight.EmbeddingLookup(0, 1.0) 
 	defer res.Free()
 	ctx.Synchronize()
 	
@@ -138,7 +138,7 @@ func TestLinearQ4K_RealMistralBlock(t *testing.T) {
 	output := ctx.NewTensorFP32(1, 1)
 	defer output.Free()
 	
-	input.LinearInto(weight, output)
+	input.LinearInto(weight, output, 1.0)
 	
 	ctx.Synchronize()
 	gpuResult := output.ToHostF32()
@@ -185,7 +185,7 @@ func TestLinearQ4K_F16_RealMistralBlock(t *testing.T) {
 	output := ctx.NewTensor(1, 1) // Default F16
 	defer output.Free()
 	
-	input.LinearInto(weight, output)
+	input.LinearInto(weight, output, 1.0)
 	
 	ctx.Synchronize()
 	gpuResult := output.ToHost() // Read F16 as float32 slice
@@ -278,7 +278,7 @@ func TestLinearQ6K_RealMistralBlock(t *testing.T) {
 	output := ctx.NewTensor(1, 1)
 	defer output.Free()
 	
-	input.LinearInto(weight, output)
+	input.LinearInto(weight, output, 1.0)
 	ctx.Synchronize()
 	
 	gpuResult := output.ToHost()

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: quarrel
+description: A Helm chart for longbow-quarrel LLM inference engine
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

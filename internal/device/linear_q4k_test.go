@@ -168,7 +168,7 @@ func TestLinear_Q4K_F16_Verification(t *testing.T) {
 	// Run Linear
 	// output = input * weight^T
 	// [1, 256] * [256, 256]^T = [1, 256]
-	input.LinearInto(weight, output)
+	input.LinearInto(weight, output, 1.0)
 	
 	res := output.ToHost()
 	

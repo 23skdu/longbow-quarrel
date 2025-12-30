@@ -564,10 +564,14 @@ func (t *Tensor) LinearInto(weight *Tensor, out *Tensor, scale float32) {
 		panic(fmt.Sprintf("LinearInto dim mismatch: [%d,%d] * [%d,%d] -> [%d,%d]", t.rows, t.cols, weight.rows, weight.cols, out.rows, out.cols))
 	}
 	
+	if t.dataType == DataTypeF32 {
+		t.LinearF32_Into(weight, out, scale)
+		return
+	}
+
 	// Use MatMul Kernel
 	if weight.dataType == DataTypeQ4K {
 		// Q4K weights * F16 input -> F16 output
-		// Pass scaleFactor
 		C.Metal_MatMul_Q4K_F16(t.ctx.ref, weight.buf, C.int(weight.Offset), C.bool(false), t.buf, C.int(t.Offset), C.bool(false), out.buf, C.int(out.Offset),
 			C.int(t.rows), C.int(weight.rows), C.int(weight.cols), C.float(scale))
 	} else if weight.dataType == DataTypeQ6K {
@@ -1269,25 +1273,8 @@ func (t *Tensor) RMSNormFP32(weight *Tensor, eps float32) *Tensor {
 	return res
 }
 
-func (t *Tensor) LinearIntoFP32(weight *Tensor, out *Tensor) {
-	if t.cols != weight.cols {
-		panic(fmt.Sprintf("LinearIntoFP32 mismatch: %d != %d", t.cols, weight.cols))
-	}
-	
-	// Guardrail: Kernel uses float4/half4, so dim_in must be multiple of 4
-	if t.cols%4 != 0 {
-		panic(fmt.Sprintf("LinearIntoFP32: row dimension %d must be multiple of 4", t.cols))
-	}
-	
-	if weight.dataType == DataTypeQ4K {
-		C.Metal_MatMul_Q4K_F32(t.ctx.ref, weight.buf, C.int(weight.Offset), C.int(0), t.buf, C.int(t.Offset), C.int(0), out.buf, C.int(out.Offset),
-			C.int(t.rows), C.int(weight.rows), C.int(weight.cols), C.float(1.0))
-	} else if weight.dataType == DataTypeF16 {
-		C.Metal_MatMul_F16_F32_F32(t.ctx.ref, weight.buf, 0, t.buf, 0, out.buf, 0,
-			C.int(t.rows), C.int(weight.rows), C.int(weight.cols))
-	} else {
-		panic(fmt.Sprintf("LinearIntoFP32: unsupported weight data type %d", weight.dataType))
-	}
+func (t *Tensor) LinearIntoFP32(weight *Tensor, out *Tensor, scale float32) {
+	t.LinearF32_Into(weight, out, scale)
 }
 
 func (t *Tensor) AddMixedInPlace(other *Tensor) {
@@ -1386,3 +1373,7 @@ func (c *Context) NewTensorF32(rows, cols int) *Tensor {
 }
 
 // StoreKV stores K and V projections into their respective caches
+// AttSoftmax performs attention softmax [Heads, Stride]
+func (t *Tensor) AttSoftmax(pos, heads, stride int) {
+	C.Metal_AttSoftmax_F16(t.ctx.ref, t.buf, C.int(t.Offset), C.int(pos), C.int(heads), C.int(stride))
+}

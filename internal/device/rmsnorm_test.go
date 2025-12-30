@@ -16,14 +16,7 @@ func TestRMSNorm_Mistral_Correctness(t *testing.T) {
 
 	// Create Tensors
 	x := ctx.NewTensorFP32(rows, cols) // F32 Input (Correct)
-	w := ctx.NewTensorFP32(1, cols)    // F32 Weights (Correct for Type 0)
-	// metal_backend.m: rmsnorm_f32_to_f16 takes (float* x, half* out, float* w)
-	// Let's check `RMSNormFP32_ToF16` sig.
-	// It expects `weight *Tensor`. If loaded from GGUF, it's F16? 
-	// The kernel `rmsnorm_f32_to_f16` takes `device const float *w`.
-	// Let's assume weights are F32 for this specific kernel or we cast.
-	// Wait, if weights are F16 in memory, we need a kernel that takes F16 weights.
-	// Let's verify `metal.go` -> `RMSNormFP32_ToF16`.
+	w := ctx.NewTensor(1, cols)        // F16 Weights (Matches new kernel)
 	
 	// Create Random Data
 	xData := make([]float32, rows*cols)

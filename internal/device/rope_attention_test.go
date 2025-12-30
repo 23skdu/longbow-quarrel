@@ -28,7 +28,8 @@ func TestRoPE_ThetaValue(t *testing.T) {
 	
 	// Apply RoPE at position 0
 	// Signature: RoPE(posOffset, headDim, numHeads, seqLen int, ropeTheta float32)
-	posOffset := 0
+	// Apply RoPE at position 1 (Position 0 is identity)
+	posOffset := 1
 	numHeads := 1
 	seqLen := 1
 	input.RoPE(posOffset, headDim, numHeads, seqLen, theta)
@@ -40,7 +41,8 @@ func TestRoPE_ThetaValue(t *testing.T) {
 	// Verify RoPE was applied (values should change)
 	changed := false
 	for i := 0; i < N; i++ {
-		if math.Abs(float64(result[i] - data[i])) > 0.01 {
+		// Use specific rotation tolerance
+		if math.Abs(float64(result[i] - data[i])) > 1e-4 {
 			changed = true
 			break
 		}

@@ -43,8 +43,7 @@ __pycache__/
 *.pyc
 
 # Binaries
-longbow-quarrel
-quarrel
+/quarrel
 quarrel_bin
 
 *.log
