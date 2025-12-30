@@ -134,66 +134,11 @@ kernel void linear_q4k_f16(device const uchar *weight [[ buffer(0) ]],
     for (int i = (int)lane_id; i < num_blocks; i += 32) {
         device const uchar *block = row_ptr + i * 144;
         
-        // Read d and dmin as uint16, then convert with subnormal support
-        ushort d_bits = *(device const ushort*)(block);
-        ushort dmin_bits = *(device const ushort*)(block + 2);
+        // Direct Half Cast
+        float d = (float)*(device const half*)(block);
         
-        // Manual FP16->FP32 conversion with subnormal handling
-        // This preserves tiny values like 0.00001 that would underflow in direct half cast
-        uint d_sign = (d_bits & 0x8000u) << 16;
-        uint d_exp_raw = (d_bits & 0x7C00u) >> 10;
-        uint d_mant = d_bits & 0x03FFu;
-        
-        float d;
-        if (d_exp_raw == 0) {
-            // Subnormal or zero
-            if (d_mant == 0) {
-                d = 0.0f;
-            } else {
-                // Subnormal: normalize it
-                // Find leading 1 in mantissa
-                uint shift = 0;
-                uint test_mant = d_mant;
-                while ((test_mant & 0x0400) == 0) {
-                    test_mant <<= 1;
-                    shift++;
-                }
-                d_mant = (test_mant & 0x03FF) << 13;
-                // FP16 subnormal has exponent -14 (biased 0), plus normalization shift
-                // FP32 bias is 127, FP16 bias is 15
-                // Exponent = -14 - shift + 127 = 113 - shift
-                uint d_exp = (113 - shift) << 23;
-                d = as_type<float>(d_sign | d_exp | d_mant);
-            }
-        } else {
-            uint d_exp = (d_exp_raw + (127 - 15)) << 23;
-            d = as_type<float>(d_sign | d_exp | (d_mant << 13));
-        }
-        
-        // Same for dmin
-        uint dmin_sign = (dmin_bits & 0x8000u) << 16;
-        uint dmin_exp_raw = (dmin_bits & 0x7C00u) >> 10;
-        uint dmin_mant = dmin_bits & 0x03FFu;
-        
-        float dmin;
-        if (dmin_exp_raw == 0) {
-            if (dmin_mant == 0) {
-                dmin = 0.0f;
-            } else {
-                uint shift = 0;
-                uint test_mant = dmin_mant;
-                while ((test_mant & 0x0400) == 0) {
-                    test_mant <<= 1;
-                    shift++;
-                }
-                dmin_mant = (test_mant & 0x03FF) << 13;
-                uint dmin_exp = (113 - shift) << 23;
-                dmin = as_type<float>(dmin_sign | dmin_exp | dmin_mant);
-            }
-        } else {
-            uint dmin_exp = (dmin_exp_raw + (127 - 15)) << 23;
-            dmin = as_type<float>(dmin_sign | dmin_exp | (dmin_mant << 13));
-        }
+        // Direct Half Cast for dmin
+        float dmin = (float)*(device const half*)(block + 2);
         
         device const uchar *scales = block + 4;
         device const uchar *qs = block + 16;
@@ -644,33 +589,42 @@ kernel void rmsnorm_f32(device const float *x [[ buffer(0) ]],
     }
 }
 
-kernel void rmsnorm_f32_to_f16(device const float *x [[ buffer(0) ]],
+kernel void rmsnorm_f32_to_f16_v4(device const float *x [[ buffer(0) ]],
                       device half *out [[ buffer(1) ]],
-                      device const half *w [[ buffer(2) ]],
+                      device const float *w [[ buffer(2) ]], // Adjusted to float
                       constant float &eps [[ buffer(3) ]],
                       constant int &cols [[ buffer(4) ]],
-                      uint tid [[ thread_index_in_threadgroup ]],
-                      uint2 qid [[ thread_position_in_grid ]]) {
+                      uint3 tid [[ thread_position_in_threadgroup ]],
+                      uint3 qid [[ thread_position_in_grid ]]) {
     threadgroup float s[1024]; 
     float sum = 0.0f;
     int row_offset = qid.y * cols;
-    for (int i = tid; i < cols; i += 1024) {
+    // Sum squares
+    for (int i = tid.x; i < cols; i += 1024) {
         float val = x[row_offset + i];
         sum += val * val;
     }
-    s[tid] = sum;
+    s[tid.x] = sum;
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (tid == 0) { 
+    
+    // Reduce
+    if (tid.x == 0) { 
         float t = 0; 
         int active_threads = (cols < 1024) ? cols : 1024;
         for (int i = 0; i < active_threads; i++) t += s[i]; 
         s[0] = 1.0f / sqrt(t / (float)cols + eps); 
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
+    
     float scale = s[0];
-    for (int i = tid; i < cols; i += 1024) {
+    
+    // Write Output
+    for (int i = tid.x; i < cols; i += 1024) {
         int idx = row_offset + i;
-        out[idx] = safe_half(x[idx] * scale * w[i]);
+        float val_x = x[idx];
+        float val_w = w[i]; 
+        // Correct logic
+        out[idx] = safe_half(val_x * scale * val_w);
     }
 }
 

@@ -163,7 +163,7 @@ MetalContextRef Metal_Init(const char *libSource) {
   // FP32 FFN Pipelines for Small Models
   ctx.pipelineLinearF16ToF32 = loadPipeline(ctx, @"linear_f16_to_f32");
   ctx.pipelineLinearF32ToF16 = loadPipeline(ctx, @"linear_f32_to_f16");
-  ctx.pipelineRMSNorm_F32_F16 = loadPipeline(ctx, @"rmsnorm_f32_to_f16");
+  ctx.pipelineRMSNorm_F32_F16 = loadPipeline(ctx, @"rmsnorm_f32_to_f16_v4");
   ctx.pipelineAdd_F32_F16 = loadPipeline(ctx, @"add_f32_f16");
 
   return (__bridge_retained MetalContextRef)ctx;
