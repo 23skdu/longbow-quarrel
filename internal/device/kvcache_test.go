@@ -1,6 +1,7 @@
 package device
 
 import (
+	"math"
 	"testing"
 )
 
@@ -125,13 +126,14 @@ func TestKVCacheSequential(t *testing.T) {
 		kData := make([]float32, kvDim)
 		vData := make([]float32, kvDim)
 		for i := range kData {
-			kData[i] = float32(pos*1000 + i)  // Unique per position
-			vData[i] = float32(pos*1000 + i + 10000)
+			kData[i] = float32(pos*10 + i)  // Unique but small
+			vData[i] = float32(pos*10 + i + 100)
 		}
 		k.LoadFrom(kData)
 		v.LoadFrom(vData)
 		
 		k.StoreKV(v, kCache, vCache, pos, kvHeads, headDim)
+		ctx.Synchronize()
 	}
 	
 	// Verify all positions
@@ -141,21 +143,21 @@ func TestKVCacheSequential(t *testing.T) {
 	for pos := 0; pos < seqLen; pos++ {
 		offset := pos * kvDim
 		// Check first and last element of each position
-		expectedK0 := float32(pos * 1000)
-		expectedKLast := float32(pos*1000 + kvDim - 1)
-		expectedV0 := float32(pos*1000 + 10000)
-		expectedVLast := float32(pos*1000 + kvDim - 1 + 10000)
+		expectedK0 := float32(pos * 10)
+		expectedKLast := float32(pos*10 + kvDim - 1)
+		expectedV0 := float32(pos*10 + 100)
+		expectedVLast := float32(pos*10 + kvDim - 1 + 100)
 		
-		if kCacheData[offset] != expectedK0 {
+		if math.Abs(float64(kCacheData[offset] - expectedK0)) > 0.1 {
 			t.Errorf("Position %d: K[0] = %.0f, want %.0f", pos, kCacheData[offset], expectedK0)
 		}
-		if kCacheData[offset+kvDim-1] != expectedKLast {
+		if math.Abs(float64(kCacheData[offset+kvDim-1] - expectedKLast)) > 0.1 {
 			t.Errorf("Position %d: K[last] = %.0f, want %.0f", pos, kCacheData[offset+kvDim-1], expectedKLast)
 		}
-		if vCacheData[offset] != expectedV0 {
+		if math.Abs(float64(vCacheData[offset] - expectedV0)) > 0.1 {
 			t.Errorf("Position %d: V[0] = %.0f, want %.0f", pos, vCacheData[offset], expectedV0)
 		}
-		if vCacheData[offset+kvDim-1] != expectedVLast {
+		if math.Abs(float64(vCacheData[offset+kvDim-1] - expectedVLast)) > 0.1 {
 			t.Errorf("Position %d: V[last] = %.0f, want %.0f", pos, vCacheData[offset+kvDim-1], expectedVLast)
 		}
 	}

@@ -69,7 +69,7 @@ kernel void swiglu_f16(device const half *gate [[ buffer(0) ]],
 
 kernel void rmsnorm_f16(device const half *x [[ buffer(0) ]],
                       device half *out [[ buffer(1) ]],
-                      device const float *w [[ buffer(2) ]],
+                      device const half *w [[ buffer(2) ]],
                       constant float &eps [[ buffer(3) ]],
                       constant int &cols [[ buffer(4) ]],
                       uint tid [[ thread_index_in_threadgroup ]],
@@ -214,8 +214,8 @@ kernel void linear_q4k_f16(device const uchar *weight [[ buffer(0) ]],
 				uchar b = qs[qs_offset + k];
                 float w0 = d_val * (float)(b & 0xF) - m_val;
                 float w1 = d_val * (float)(b >> 4) - m_val;
-                int idx0 = i * 256 + sub_offset + 2*k;
-                int idx1 = idx0 + 1;
+                int idx0 = i * 256 + sub_offset + k;
+                int idx1 = idx0 + 16;
                 sum += w0 * (float)in_ptr[idx0] + w1 * (float)in_ptr[idx1];
             }
         }
@@ -431,8 +431,8 @@ kernel void embedding_q4k_f16(device const uchar *weight [[ buffer(0) ]],
             int sub_offset = j * 32, qs_offset = j * 16;
             for (int k = 0; k < 16; k++) {
                 uchar b = qs[qs_offset + k];
-                output[i * 256 + sub_offset + 2*k]     = (half)(d_val * (float)(b & 0xF) - m_val);
-                output[i * 256 + sub_offset + 2*k + 1] = (half)(d_val * (float)(b >> 4) - m_val);
+                output[i * 256 + sub_offset + k]      = (half)(d_val * (float)(b & 0xF) - m_val);
+                output[i * 256 + sub_offset + k + 16] = (half)(d_val * (float)(b >> 4) - m_val);
             }
         }
     }
@@ -495,52 +495,57 @@ kernel void att_fused_f16(device const half *q [[ buffer(0) ]],
                         constant int &kv_heads [[ buffer(6) ]],
                         constant int &headDim [[ buffer(7) ]],
                         uint3 tid [[ thread_position_in_threadgroup ]],
+                        uint3 nthreads [[ threads_per_threadgroup ]],
                         uint3 group_id [[ threadgroup_position_in_grid ]]) {
-    uint h = group_id.y; if (h >= (uint)num_heads) return;
+    uint h = group_id.x; if (h >= (uint)num_heads) return;
     uint kvh = h / (num_heads / kv_heads);
     uint kv_dim = kv_heads * headDim;
     float scale = 1.0f / sqrt((float)headDim);
 
-    threadgroup float s_mem[1024]; // Max fused length
+    // Limit fused path to 4000 tokens to stay within 32KB (including other TG vars)
+    threadgroup float s_mem[4000]; 
+    if (pos >= 4000) return;
+
     device const half *mq = q + h * headDim;
+    uint nt = nthreads.x;
     
-    // Parallel score calculation
-    // FIX: Stride should cover all tokens if threads < 1024
-    for (int t = tid.x; t < 1024; t += headDim) { // Stride by headDim (128)
+    // 1. Parallel score calculation
+    for (int t = tid.x; t < 4000; t += nt) {
         if (t <= pos) {
             float d = 0; device const half *mk = k_cache + t * kv_dim + kvh * headDim;
             for (int i = 0; i < headDim; i++) d += (float)mq[i] * (float)mk[i];
             s_mem[t] = d * scale;
         } else {
-            s_mem[t] = -10000.0f; // -inf for softmax
+            s_mem[t] = -10000.0f;
         }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    // Softmax Max Reduction
+    // 2. Softmax Max Reduction
     threadgroup float tg_mv;
     float l_mv = -10000.0f;
-    for (int i = tid.x; i <= pos; i += headDim) if (s_mem[i] > l_mv) l_mv = s_mem[i];
+    for (int i = tid.x; i <= pos; i += nt) {
+        if (s_mem[i] > l_mv) l_mv = s_mem[i];
+    }
     l_mv = simd_max(l_mv);
     
-    threadgroup float scratch[32];
-    if ((tid.x & 31) == 0) scratch[tid.x / 32] = l_mv; // Write per subgroup
+    threadgroup float scratch[32]; 
+    if ((tid.x & 31) == 0) scratch[tid.x / 32] = l_mv;
     threadgroup_barrier(mem_flags::mem_threadgroup);
     
     if (tid.x < 32) {
-        // FIX: Mask garbage scratch entries
-        int subgroups = (headDim + 31) / 32;
-        float m = (tid.x < subgroups) ? scratch[tid.x] : -10000.0f;
+        uint n_subgroups = (nt + 31) / 32;
+        float m = (tid.x < n_subgroups) ? scratch[tid.x] : -10000.0f;
         m = simd_max(m);
         if (tid.x == 0) tg_mv = m;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     float mv = tg_mv;
     
-    // Softmax Sum Reduction
+    // 3. Softmax Sum Reduction
     threadgroup float tg_se;
     float l_se = 0;
-    for (int i = tid.x; i <= pos; i += headDim) {
+    for (int i = tid.x; i <= pos; i += nt) {
         float e = exp(s_mem[i] - mv);
         s_mem[i] = e;
         l_se += e;
@@ -548,17 +553,18 @@ kernel void att_fused_f16(device const half *q [[ buffer(0) ]],
     l_se = simd_sum(l_se);
     if ((tid.x & 31) == 0) scratch[tid.x / 32] = l_se;
     threadgroup_barrier(mem_flags::mem_threadgroup);
+    
     if (tid.x < 32) {
-        // FIX: Mask garbage scratch entries
-        int subgroups = (headDim + 31) / 32;
-        float s = (tid.x < subgroups) ? scratch[tid.x] : 0.0f;
+        uint n_subgroups = (nt + 31) / 32;
+        float s = (tid.x < n_subgroups) ? scratch[tid.x] : 0.0f;
         s = simd_sum(s);
         if (tid.x == 0) tg_se = s;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     float se = tg_se;
+    if (se == 0) se = 1e-6f;
     
-    // Result Accumulation
+    // 4. Result Accumulation
     if (tid.x < (uint)headDim) {
         float r = 0;
         for (int i = 0; i <= pos; i++) {
@@ -610,7 +616,7 @@ kernel void add_f32(device const float *a [[ buffer(0) ]], device const float *b
 
 kernel void rmsnorm_f32(device const float *x [[ buffer(0) ]],
                       device float *out [[ buffer(1) ]],
-                      device const float *w [[ buffer(2) ]],
+                      device const half *w [[ buffer(2) ]],
                       constant float &eps [[ buffer(3) ]],
                       constant int &cols [[ buffer(4) ]],
                       uint tid [[ thread_index_in_threadgroup ]],
@@ -640,7 +646,7 @@ kernel void rmsnorm_f32(device const float *x [[ buffer(0) ]],
 
 kernel void rmsnorm_f32_to_f16(device const float *x [[ buffer(0) ]],
                       device half *out [[ buffer(1) ]],
-                      device const float *w [[ buffer(2) ]],
+                      device const half *w [[ buffer(2) ]],
                       constant float &eps [[ buffer(3) ]],
                       constant int &cols [[ buffer(4) ]],
                       uint tid [[ thread_index_in_threadgroup ]],
@@ -763,8 +769,8 @@ kernel void linear_q4k_f32(device const uchar *weight [[ buffer(0) ]],
                 uchar b = qs[qs_offset + k];
                 float w0 = d_val * (float)(b & 0xF) - m_val;
                 float w1 = d_val * (float)(b >> 4) - m_val;
-                int idx0 = i * 256 + sub_offset + 2*k;
-                int idx1 = idx0 + 1;
+                int idx0 = i * 256 + sub_offset + k;
+                int idx1 = idx0 + 16;
                 sum += w0 * in_ptr[idx0] + w1 * in_ptr[idx1];
             }
         }

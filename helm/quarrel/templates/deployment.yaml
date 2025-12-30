@@ -1,0 +1,26 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: { { include "quarrel.fullname" . } }
+  labels: { { - include "quarrel.labels" . | nindent 4 } }
+spec:
+  replicas: { { .Values.replicaCount } }
+  selector:
+    matchLabels: { { - include "quarrel.selectorLabels" . | nindent 6 } }
+  template:
+    metadata:
+      labels: { { - include "quarrel.selectorLabels" . | nindent 8 } }
+    spec:
+      containers:
+        - name: { { .Chart.Name } }
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: { { .Values.image.pullPolicy } }
+          command: ["./quarrel"]
+          args:
+            - "-model"
+            - "{{ .Values.model.name }}"
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          resources: { { - toYaml .Values.resources | nindent 12 } }

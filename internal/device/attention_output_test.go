@@ -62,7 +62,7 @@ func TestAttentionOutputProjection_RealScales(t *testing.T) {
 	
 	// Compute output
 	output := ctx.NewTensorPooled(M, N)
-	input.LinearInto(weight, output)
+	input.LinearInto(weight, output, 1.0)
 	ctx.Synchronize()
 	
 	// Check output
@@ -101,7 +101,7 @@ func TestAttentionOutputProjection_RealScales(t *testing.T) {
 	}
 	input.LoadFrom(inputData2)
 	
-	input.LinearInto(weight, output)
+	input.LinearInto(weight, output, 1.0)
 	ctx.Synchronize()
 	
 	outputData2 := output.ToHost()
@@ -148,7 +148,7 @@ func TestAttentionOutputProjection_Comparison(t *testing.T) {
 	
 	// Compute F16 output
 	outputF16 := ctx.NewTensorPooled(M, N)
-	input.LinearInto(weightF16, outputF16)
+	input.LinearInto(weightF16, outputF16, 1.0)
 	ctx.Synchronize()
 	
 	outputDataF16 := outputF16.ToHost()

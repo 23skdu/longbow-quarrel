@@ -72,7 +72,7 @@ func TestLinearF16_F32_Kernel(t *testing.T) {
 	// Run LinearF32_Into (which calls Metal_MatMul_F16_F32)
 	// func (t *Tensor) LinearF32_Into(weight *Tensor, out *Tensor)
 	// t is Input.
-	inT.LinearF32_Into(wT, outT)
+	inT.LinearF32_Into(wT, outT, 1.0)
 	ctx.Synchronize()
 	
 	gpuOut := outT.ToHost()

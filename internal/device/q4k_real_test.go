@@ -71,8 +71,8 @@ func DequantizeQ4K_Reference(block []byte) []float32 {
 			q1 := qs[idx] & 0x0F
 			q2 := (qs[idx] & 0xF0) >> 4
 			
-			out[j*32 + k*2] = dVal*float32(q1) - mVal
-			out[j*32 + k*2 + 1] = dVal*float32(q2) - mVal
+			out[j*32 + k] = dVal*float32(q1) - mVal
+			out[j*32 + k + 16] = dVal*float32(q2) - mVal
 		}
 	}
 	
@@ -129,7 +129,7 @@ func TestQ4K_RealWeights_Mistral(t *testing.T) {
 	
 	// Run GPU kernel
 	output := ctx.NewTensorPooled(1, 1)
-	input.LinearInto(weight, output)
+	input.LinearInto(weight, output, 1.0)
 	ctx.Synchronize()
 	
 	gpuResult := output.ToHost()

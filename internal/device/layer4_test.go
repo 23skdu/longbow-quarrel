@@ -185,7 +185,7 @@ func TestLayer4_Q4KMatMul_FP32(t *testing.T) {
 	// grep showed `LinearIntoFP32` on line 717.
 	// Let's use that.
 	
-	tInput.LinearIntoFP32(tWeight, tOut)
+	tInput.LinearIntoFP32(tWeight, tOut, 1.0)
 	
 	// Use safer synchronization with timeout
 	if err := ctx.WaitWithTimeout(5 * time.Second); err != nil {
