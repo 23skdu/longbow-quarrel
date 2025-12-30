@@ -340,6 +340,7 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 	if len(inputTokens) == 0 {
 		return nil, errors.New("empty input tokens")
 	}
+	fmt.Printf("DEBUG: Input Tokens: %v\n", inputTokens)
 
 	fmt.Printf("DEBUG CONFIG: RopeTheta=%.2f HeadDim=%d Heads=%d KVHeads=%d Eps=%.6f\n",
 		e.Config.RopeTheta, e.Config.HeadDim, e.Config.Heads, e.Config.KVHeads, e.Config.Eps)

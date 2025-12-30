@@ -34,6 +34,8 @@
 @property(strong) id<MTLComputePipelineState> pipelineLinearF16ToF32;
 @property(strong) id<MTLComputePipelineState> pipelineLinearF32ToF16;
 @property(strong) id<MTLComputePipelineState> pipelineCopy_F32_F16;
+// Specialized Mixed Precision
+@property(strong) id<MTLComputePipelineState> pipelineMatMul_F16_F16_F32;
 // Mixed Precision
 @property(strong) id<MTLComputePipelineState> pipelineRMSNorm_F32_F16;
 @property(strong) id<MTLComputePipelineState> pipelineAdd_F32_F16;
@@ -155,6 +157,8 @@ MetalContextRef Metal_Init(const char *libSource) {
   ctx.pipelineMatMul_F16_F32 = loadPipeline(ctx, @"linear_f16_f32");
   ctx.pipelineCopy_F16_F32 = loadPipeline(ctx, @"copy_f16_to_f32");
   ctx.pipelineCopy_F32_F16 = loadPipeline(ctx, @"copy_f32_to_f16");
+  ctx.pipelineMatMul_F16_F16_F32 =
+      loadPipeline(ctx, @"linear_f16_in_f16_out_f32");
 
   // FP32 FFN Pipelines for Small Models
   ctx.pipelineLinearF16ToF32 = loadPipeline(ctx, @"linear_f16_to_f32");
@@ -732,8 +736,9 @@ void Metal_MatMul_F16_F16_F32(MetalContextRef ctx, MetalBufferRef a, int offA,
                               int offC, int M, int N, int K) {
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
   id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
-  [enc setComputePipelineState:mc.pipelineMatMul_F16_F32]; // Corrected:
-                                                           // linear_f16_f32
+  [enc setComputePipelineState:
+           mc.pipelineMatMul_F16_F16_F32]; // Corrected:
+                                           // linear_f16_in_f16_out_f32
   [enc setBuffer:(__bridge id<MTLBuffer>)a offset:offA atIndex:0];
   [enc setBuffer:(__bridge id<MTLBuffer>)b offset:offB atIndex:1];
   [enc setBuffer:(__bridge id<MTLBuffer>)c offset:offC atIndex:2];
