@@ -553,7 +553,7 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 		// Reuse pre-allocated logits buffer
 		// scratch.Normed contains result. Use it.
 		// Output into scratch.Logits (which is 'logits')
-		scratch.Normed.LinearInto(e.Weights.Output, logits, e.GlobalScale)
+		scratch.Normed.LinearToFP32_Into(e.Weights.Output, logits)
 		// logits.ScanMax("DEBUG_FINAL: Logits")
 		
 		// Logic update: RMSNormFP32_ToF16_Into does NOT allocate.
@@ -569,6 +569,23 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 		fullHistory := make([]int, 0, len(inputTokens)+len(result))
 		fullHistory = append(fullHistory, inputTokens...)
 		fullHistory = append(fullHistory, result...)
+		
+		// DEBUG: Print top 3 logits for each generation
+		var m1, m2, m3 float32 = -1e9, -1e9, -1e9
+		var i1, i2, i3 int = -1, -1, -1
+		for idx, v := range logitsData {
+			if v > m1 {
+				m3, i3 = m2, i2
+				m2, i2 = m1, i1
+				m1, i1 = v, idx
+			} else if v > m2 {
+				m3, i3 = m2, i2
+				m2, i2 = v, idx
+			} else if v > m3 {
+				m3, i3 = v, idx
+			}
+		}
+		fmt.Printf("Gen %d Top 3: [%d:%.2f] [%d:%.2f] [%d:%.2f]\n", i, i1, m1, i2, m2, i3, m3)
 		
 		maxIdx := sampler.Sample(logitsData, fullHistory, e.Config.VocabSize)
 		
