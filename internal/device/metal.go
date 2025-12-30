@@ -296,11 +296,17 @@ func (t *Tensor) LoadFrom(data []float32) {
 		return
 	}
 
+	if t.dataType == DataTypeF32 {
+		C.Metal_CopyToDevice(t.buf, 0, unsafe.Pointer(&data[0]), C.int(t.sizeBytes))
+		return
+	}
+	
 	// Convert to FP16
 	f16 := make([]uint16, len(data))
 	for i, v := range data {
 		f16[i] = Float32ToFloat16(v)
 	}
+	
 	C.Metal_CopyToDevice(t.buf, 0, unsafe.Pointer(&f16[0]), C.int(t.sizeBytes))
 }
 
@@ -871,11 +877,23 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		offAtt := i * qStride
 		
 		// 3. RoPE (In-place on qPart/kPart row i)
+		if layerIdx == 0 {
+			qLog := qPart.ToHostF32()
+			kLog := kPart.ToHostF32()
+			fmt.Printf("DEBUG_L0_RAW: P%d Q[0:4]=%v K[0:4]=%v\n", p, qLog[:4], kLog[:4])
+		}
+		
 		// Process Q (Heads)
 		C.Metal_RoPE_F16(t.ctx.ref, qPart.buf, C.int(qPart.Offset + offQ), 1, 1, C.int(heads), C.int(headDim), C.int(p), C.float(ropeTheta))
 		// Process K (KVHeads)
 		C.Metal_RoPE_F16(t.ctx.ref, kPart.buf, C.int(kPart.Offset + offK), 1, 1, C.int(kvHeads), C.int(headDim), C.int(p), C.float(ropeTheta))
 		
+		if layerIdx == 0 {
+			t.ctx.Synchronize()
+			qLog := qPart.ToHostF32()
+			fmt.Printf("DEBUG_L0_POST: P%d Q[0:4]=%v\n", p, qLog[:4])
+		}
+
 		// 4. Store K/V (Must append to KVCache at current pos)
 		C.Metal_StoreKV_F16(t.ctx.ref, kPart.buf, C.int(kPart.Offset + offK), vPart.buf, C.int(vPart.Offset + offV), 
 			kCache.buf, C.int(kCache.Offset), vCache.buf, C.int(vCache.Offset), 
@@ -901,9 +919,32 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 				C.int(p), C.int(heads), C.int(kvHeads), C.int(headDim), C.int(ctxLen))
 			t.ctx.Synchronize()
 			
+			if layerIdx == 31 && p == 2 {
+				// Debug Scores for Last Layer, Last Token
+				rawScores := make([]float32, heads * ctxLen)
+				t.ctx.Synchronize()
+				C.Metal_CopyBufferToF32(t.ctx.ref, scores.buf, unsafe.Pointer(&rawScores[0]), C.int(heads*ctxLen))
+				
+				fmt.Printf("\n--- PRE-SOFT ATTN L31 Head 0 ---\n")
+				for i := 0; i <= p; i++ {
+					fmt.Printf("Pos %d: %.4f\n", i, rawScores[i])
+				}
+				fmt.Printf("------------------------------\n")
+			}
+			
 			// 5b. Softmax
 			C.Metal_AttSoftmax_F16(t.ctx.ref, scores.buf, 0, C.int(p), C.int(heads), C.int(ctxLen))
 			t.ctx.Synchronize()
+			
+			if layerIdx == 31 && p == 2 {
+				rawScores := make([]float32, heads * ctxLen)
+				C.Metal_CopyBufferToF32(t.ctx.ref, scores.buf, unsafe.Pointer(&rawScores[0]), C.int(heads*ctxLen))
+				fmt.Printf("\n--- POST-SOFT ATTN L31 Head 0 ---\n")
+				for i := 0; i <= p; i++ {
+					fmt.Printf("Pos %d: %.4f\n", i, rawScores[i])
+				}
+				fmt.Printf("---------------------------------\n")
+			}
 			
 			// 5c. Values
 			C.Metal_AttValues_F16(t.ctx.ref, scores.buf, 0, vCache.buf, C.int(vCache.Offset), attOut.buf, C.int(offAtt),
@@ -922,12 +963,21 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 	
 	
 	// 7. Residual Add 1
+	if layerIdx == 0 {
+		hLog := t.ToHost()
+		fmt.Printf("DEBUG_L0_RES1_PRE: P%d H[0:4]=%v\n", pos, hLog[:4])
+	}
 	if t.dataType == DataTypeF32 {
 		t.AddMixedInPlace(resAtt)
 	} else {
 		t1 := t.Add(resAtt)
 		C.Metal_Copy_F16(t.ctx.ref, t1.buf, 0, t.buf, 0, C.int(t.rows*t.cols))
 		t1.ReturnToPool()
+	}
+	if layerIdx == 0 {
+		t.ctx.Synchronize()
+		hLog := t.ToHost()
+		fmt.Printf("DEBUG_L0_RES1_POST: P%d H[0:4]=%v\n", pos, hLog[:4])
 	}
 	
 	// --- No Cleanup needed for Scratch ---

@@ -4,58 +4,52 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"os"
 
 	"github.com/23skdu/longbow-quarrel/internal/tokenizer"
 )
 
 func main() {
-	modelPath := flag.String("model", "", "Path to GGUF model")
-	prompt := flag.String("prompt", "Hello World", "Prompt to tokenize")
+	modelPath := flag.String("model", "mistral", "Model path")
 	flag.Parse()
 
-	if *modelPath == "" {
-		log.Fatal("Please provide -model")
+	mPath := *modelPath
+	if mPath == "mistral" {
+		home, _ := os.UserHomeDir()
+		mPath = home + "/.ollama/models/blobs/sha256-f5074b1221da0f5a2910d33b642efa5b9eb58cfdddca1c79e16d7ad28aa2b31f"
 	}
 
-	// Load Tokenizer
-	tok, err := tokenizer.New(*modelPath)
+	tok, err := tokenizer.New(mPath)
 	if err != nil {
-		log.Fatalf("Failed to load tokenizer: %v", err)
+		log.Fatal(err)
 	}
 
-	fmt.Printf("Loaded Tokenizer. Vocab Size: %d, Merges: %d\n", len(tok.Tokens), len(tok.Merges))
-
-	// Dump first 50 tokens
-	fmt.Println("--- First 50 Tokens ---")
-	for i := 0; i < 50 && i < len(tok.Tokens); i++ {
-		fmt.Printf("[%d]: %q\n", i, tok.Tokens[i])
-	}
-
-	// Check Special Tokens
-	special := []string{"<|im_start|>", "<|im_end|>", "<s>", "</s>", "<unk>"}
-	fmt.Println("\n--- Special Tokens ---")
-	for _, s := range special {
-		id, ok := tok.Vocab[s]
-		if ok {
-			fmt.Printf("'%s': %d\n", s, id)
-		} else {
-			fmt.Printf("'%s': NOT FOUND\n", s)
+	// If args provided, decode them
+	args := flag.Args()
+	if len(args) > 0 {
+		for _, arg := range args {
+			var id int
+			fmt.Sscanf(arg, "%d", &id)
+			if id > 0 || arg == "0" {
+				text := tok.Decode([]int{id})
+				fmt.Printf("ID %d -> %q\n", id, text)
+			} else {
+				encoded := tok.Encode(arg)
+				fmt.Printf("Text %q -> %v\n", arg, encoded)
+			}
 		}
+		return
 	}
 
-	// Test Tokenization
-	fmt.Printf("\n--- Tokenization Test ---\n")
-	fmt.Printf("Input: %q\n", *prompt)
-	ids := tok.Encode(*prompt)
-	fmt.Printf("IDs: %v\n", ids)
-	
-	decoded := tok.Decode(ids)
-	fmt.Printf("Decoded: %q\n", decoded)
-
-	// Dump components to see how it was split
-	fmt.Printf("Split: ")
+	ids := []int{25076, 19072, 4684, 1046, 1}
 	for _, id := range ids {
-		fmt.Printf("'%s' ", tok.Tokens[id])
+		text := tok.Decode([]int{id})
+		fmt.Printf("ID %d -> %q\n", id, text)
 	}
-	fmt.Println()
+
+	targets := []string{"Paris", " Paris", "aurus"}
+	for _, t := range targets {
+		encoded := tok.Encode(t)
+		fmt.Printf("Text %q -> %v\n", t, encoded)
+	}
 }

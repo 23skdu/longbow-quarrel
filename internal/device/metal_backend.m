@@ -544,6 +544,12 @@ void Metal_Attention_F16(MetalContextRef ctx, MetalBufferRef q, int oQ,
   Metal_AttValues_F16(ctx, s, oS, vC, oV, r, oR, p, nh, kh, hd, ctxLen);
 }
 
+void Metal_CopyBufferToF32(MetalContextRef ctx, MetalBufferRef src, void *dst,
+                           int count) {
+  id<MTLBuffer> buf = (__bridge id<MTLBuffer>)src;
+  memcpy(dst, [buf contents], count * sizeof(float));
+}
+
 void Metal_RMSNormLinear_F16(MetalContextRef ctx, MetalBufferRef i, int oI,
                              MetalBufferRef nW, int oNW, MetalBufferRef w,
                              int oW, MetalBufferRef r, int oR, int iD, int oD,

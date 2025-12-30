@@ -32,18 +32,10 @@ func main() {
 	}
     fmt.Println("----------------------------------------------------------------")
     
-    // Also check for any weird tensors like layer_scale
-    fmt.Println("\n=== Tensor Search: 'scale' ===")
-    foundScale := false
-    for _, t := range f.Tensors {
-        if contains(t.Name, "scale") {
-            fmt.Printf("Tensor: %s (Type: %d, Dims: %v)\n", t.Name, t.Type, t.Dimensions)
-            foundScale = true
-        }
-    }
-    if !foundScale {
-        fmt.Println("No tensors with 'scale' in name found.")
-    }
+	fmt.Println("\n=== Tensors ===")
+	for _, t := range f.Tensors {
+		fmt.Printf("Tensor: %-40s | Type: %-3d | Dims: %-12v | Offset: %d\n", t.Name, t.Type, t.Dimensions, t.Offset)
+	}
 }
 
 func contains(s, substr string) bool {

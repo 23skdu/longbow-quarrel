@@ -138,8 +138,11 @@ void Metal_MatMul_Q4K_F32(MetalContextRef ctx, MetalBufferRef a, int offA,
                           float scale);
 
 void Metal_Add_F32(MetalContextRef ctx, MetalBufferRef a, int offA,
-                   MetalBufferRef b, int offB, MetalBufferRef result,
-                   int offRes, int count);
+                   MetalBufferRef b, int offB, MetalBufferRef c, int offC,
+                   int count);
+
+void Metal_CopyBufferToF32(MetalContextRef ctx, MetalBufferRef src, void *dst,
+                           int count);
 
 void Metal_Copy_F16(MetalContextRef ctx, MetalBufferRef src, int oS,
                     MetalBufferRef dst, int oD, int count);

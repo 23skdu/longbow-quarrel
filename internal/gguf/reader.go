@@ -60,6 +60,8 @@ func LoadFile(path string) (*GGUFFile, error) {
 	file.Header.KVCount = binary.LittleEndian.Uint64(data[offset:])
 	offset += 8
 
+	fmt.Printf("GGUF: Version=%d, Tensors=%d, KV=%d\n", file.Header.Version, file.Header.TensorCount, file.Header.KVCount)
+
 	// Read KV Pairs
 	for i := uint64(0); i < file.Header.KVCount; i++ {
 		k, n, err := readString(data, offset)

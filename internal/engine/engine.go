@@ -181,21 +181,15 @@ func (e *Engine) loadModel(path string) error {
 				mt.LoadFrom(f32Data)
 
 				
-				// Heuristic for GlobalScale
+				// Heuristic for GlobalScale disabled
+				e.GlobalScale = 1.0
 				if t.Name == "blk.0.attn_norm.weight" {
 					var sum float64
 					for _, v := range f32Data {
 						sum += float64(math.Abs(float64(v)))
 					}
 					mean := float32(sum / float64(numElements))
-					
-					if mean < 0.1 && mean > 0 {
-						e.GlobalScale = 1.0 / mean
-						fmt.Printf("GlobalScale Heuristic: Mean=%.6f Scale=%.6f\n", mean, e.GlobalScale)
-					} else {
-						if e.GlobalScale == 0 { e.GlobalScale = 1.0 }
-						fmt.Printf("GlobalScale Heuristic: Mean=%.6f Scale=%.6f (Normal)\n", mean, e.GlobalScale)
-					}
+					fmt.Printf("GlobalScale (Disabled): Mean=%.6f Scale=1.0 FIRST_4=%v\n", mean, f32Data[:4])
 				}
 			} else if t.Type == gguf.GGMLTypeF16 {
 				mt = e.Ctx.NewTensor(rows, cols)
@@ -216,15 +210,36 @@ func (e *Engine) loadModel(path string) error {
 				// This increases memory usage slightly but guarantees correctness.
 				// ALSO: Always dequantize embeddings due to subnormal float16 handling issues
 				if e.Config.Dim < 1024 || t.Name == "token_embd.weight" {
-					if t.Name == "token_embd.weight" {
-						fmt.Printf("DEBUG: CPU-dequantizing %s for subnormal handling\n", t.Name)
-					} else {
-						fmt.Printf("DEBUG: Converting %s Q4K to F16 (Small Model)\n", t.Name)
-					}
-					
 					mt = e.Ctx.NewTensor(rows, cols) // Allocates F16
 					f32Data := gguf.DequantizeQ4K(t.Data, numElements)
+					
+					// Scan f32Data
+					var maxW float32
+					var sumW float64
+					for _, v := range f32Data {
+						if math.Abs(float64(v)) > math.Abs(float64(maxW)) { maxW = v }
+						sumW += math.Abs(float64(v))
+					}
+					fmt.Printf("DEBUG: %s dequantized. Max=%.6f, Avg=%.6f\n", t.Name, maxW, sumW/float64(numElements))
+
 					mt.LoadFrom(f32Data)
+					
+					if t.Name == "token_embd.weight" {
+						parisIdx := 4684
+						if parisIdx < rows {
+							slice := f32Data[parisIdx*cols : (parisIdx+1)*cols]
+							var sum float64
+							for _, v := range slice { sum += float64(math.Abs(float64(v))) }
+							fmt.Printf("DEBUG: embedding row for Paris(4684): AvgAbs=%.6f FIRST_4=%v\n", float32(sum/float64(cols)), slice[:4])
+						}
+					}
+					
+					// Verify loaded
+					loadedMax := mt.ScanMax("DEBUG: " + t.Name + " (MT)")
+					if loadedMax == 0 && maxW != 0 {
+						gpuData := mt.ToHostF32()
+						fmt.Printf("CRITICAL: mt.LoadFrom(f32Data) result is ZERO! (maxW CPU=%.6f, Token 1 First 4: %v)\n", maxW, gpuData[4096:4100])
+					}
 					
 				} else {
 					// Large Models: Use Q4K Tensor and Kernels
@@ -243,6 +258,13 @@ func (e *Engine) loadModel(path string) error {
 				f32Data := gguf.DequantizeQ6K(t.Data, numElements)
 				if t.Name == "output.weight" {
 					fmt.Printf("DEBUG: output.weight probe [0:10]: %v\n", f32Data[:10])
+					sinkIdx := 13735
+					if sinkIdx < rows {
+						slice := f32Data[sinkIdx*cols : (sinkIdx+1)*cols]
+						var sum float64
+						for _, v := range slice { sum += float64(math.Abs(float64(v))) }
+						fmt.Printf("DEBUG: lm_head row for sink(13735): AvgAbs=%.6f\n", float32(sum/float64(cols)))
+					}
 				}
 				mt = e.Ctx.NewTensor(rows, cols)
 				mt.LoadFrom(f32Data)
@@ -427,8 +449,7 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 
 		// Convert embedding to FP32 for residual stream accumulation
 		currentF32 := current.ToF32()
-		// fmt.Printf("DEBUG_PTR: currentF32 ptr=%p, buf=%p\n", currentF32, currentF32.BufRef())
-		// currentF32.ScanMax("DEBUG: Embedding F32")
+		currentF32.ScanMax(fmt.Sprintf("DEBUG: currentF32 P%d", i))
 		current.ReturnToPool() // Release F16
 		
 		// Log embedding if first token
@@ -478,13 +499,25 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 			// Reuse pre-allocated logits buffer
 			// scratch.Normed contains result. Use it.
 			scratch.Normed.LinearInto(e.Weights.Output, logits, e.GlobalScale)
-			
 			logitsData := logits.ToHost()
 			
-			// Logit Statistics
-
 			// Use Sampler
-			// History is just inputTokens for the first step
+			// DEBUG: Print top 3 manually
+			var m1, m2, m3 float32 = -1e9, -1e9, -1e9
+			var i1, i2, i3 int = -1, -1, -1
+			for idx, v := range logitsData {
+				if v > m1 {
+					m3, i3 = m2, i2
+					m2, i2 = m1, i1
+					m1, i1 = v, idx
+				} else if v > m2 {
+					m3, i3 = m2, i2
+					m2, i2 = v, idx
+				} else if v > m3 {
+					m3, i3 = v, idx
+				}
+			}
+			fmt.Printf("Top 3: [%d:%.2f] [%d:%.2f] [%d:%.2f]\n", i1, m1, i2, m2, i3, m3)
 			nextObj := sampler.Sample(logitsData, inputTokens, e.Config.VocabSize)
 			
 			// Log logits if enabled
