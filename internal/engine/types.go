@@ -57,6 +57,12 @@ type Engine struct {
 	
 	// Cache State
 	CachePos int
+	
+	// Tokenizer
+	Tokenizer interface{} // Will be *tokenizer.Tokenizer
+	
+	// Activation Logger
+	ActLogger *ActivationLogger
 }
 
 

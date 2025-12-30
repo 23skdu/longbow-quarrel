@@ -24,6 +24,7 @@ func NewEngine(modelPath string, debugDequant bool) (*Engine, error) {
 	e := &Engine{
 		Ctx: ctx,
 		Weights: &LlamaWeights{},
+		ActLogger: NewActivationLogger(),
 	}
 	e.Config.DebugDequant = debugDequant
 	
@@ -416,6 +417,12 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 		currentF32.ScanMax("DEBUG: Embedding F32")
 		current.ReturnToPool() // Release F16
 		
+		// Log embedding if first token
+		if i == 0 && e.ActLogger.IsEnabled() {
+			embData := currentF32.ToHost()
+			e.ActLogger.LogEmbedding(embData)
+		}
+		
 		// Layers (Attention + FFN)
 		for l := 0; l < e.Config.Layers; l++ {
 			attnNorm := e.Weights.AttnNorm[l]
@@ -433,6 +440,15 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 			currentF32.Layer(l, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, kCache, vCache,
 				scratch, // Pass scratch
 				e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen)
+			
+			// Log layer output if enabled and first token
+			if i == 0 && e.ActLogger.IsEnabled() {
+				layerOut := currentF32.ToHost()
+				outMax := GetMaxFromTensor(layerOut)
+				outSample := GetSampleFromTensor(layerOut, 10)
+				// For now, log with placeholders for Q/K/V (we don't have easy access)
+				e.ActLogger.LogLayer(l, 0, 0, 0, 0, outMax, outSample, outSample, outSample)
+			}
 		}
 
 		// If this is the LAST prompt token, sample the first next token
@@ -490,6 +506,11 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 				}
 			}
 			fmt.Printf("\n")
+			
+			// Log logits if enabled
+			if e.ActLogger.IsEnabled() {
+				e.ActLogger.LogLogits(logitsData, expectedTokens)
+			}
 
 			result = append(result, nextObj)
 		}
