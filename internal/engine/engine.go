@@ -450,6 +450,18 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 			scratch.Normed.LinearInto(e.Weights.Output, logits)
 			
 			logitsData := logits.ToHost()
+			
+			// Logit Statistics
+			var min, max, sum float32
+			min = logitsData[0]
+			max = logitsData[0]
+			for _, v := range logitsData {
+				if v < min { min = v }
+				if v > max { max = v }
+				sum += v
+			}
+			mean := sum / float32(len(logitsData))
+			fmt.Printf("DEBUG_LOGITS_STATS: Min=%.4f Max=%.4f Mean=%.4f Range=%.4f\n", min, max, mean, max-min)
 
 			// Use Sampler
 			// History is just inputTokens for the first step
@@ -462,7 +474,7 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 			sort.Slice(cands, func(a, b int) bool { return cands[a].val > cands[b].val })
 			fmt.Printf("DEBUG_LOGITS: Top 5 candidates for next token: ")
 			for j := 0; j < 5; j++ {
-				fmt.Printf("[%d: %f] ", cands[j].id, cands[j].val)
+				fmt.Printf("[%d: %.4f] ", cands[j].id, cands[j].val)
 			}
 			fmt.Printf("\n")
 
