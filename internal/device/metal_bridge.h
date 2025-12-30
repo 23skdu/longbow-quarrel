@@ -126,6 +126,19 @@ void Metal_FusedFFN_F16(MetalContextRef ctx, MetalBufferRef input, int offIn,
                         MetalBufferRef output, int offOut, int inDim,
                         int interDim, float eps);
 
+void Metal_RMSNormLinear_Q4K_F16(MetalContextRef ctx, MetalBufferRef input,
+                                 int offIn, MetalBufferRef normWeight,
+                                 int offNormWeight, MetalBufferRef weight,
+                                 int offWeight, MetalBufferRef result,
+                                 int offRes, int M, int N, int K, float eps,
+                                 float scale);
+
+void Metal_SwiGLULinear_Q4K_F16(MetalContextRef ctx, MetalBufferRef gateIn,
+                                int offGate, MetalBufferRef upIn, int offUp,
+                                MetalBufferRef weight, int offWeight,
+                                MetalBufferRef result, int offRes, int M, int N,
+                                int K, float scale);
+
 // FP32 Ops
 void Metal_RMSNorm_F32(MetalContextRef ctx, MetalBufferRef input, int offIn,
                        MetalBufferRef weight, int offWeight,

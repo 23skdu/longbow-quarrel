@@ -15,8 +15,8 @@ func TestRMSNorm_Mistral_Correctness(t *testing.T) {
 	eps := float32(1e-5) // Mistral Epsilon
 
 	// Create Tensors
-	x := ctx.NewTensorFP32(rows, cols) // F32 Input (Correct)
-	w := ctx.NewTensor(1, cols)        // F16 Weights (Matches new kernel)
+	x := ctx.NewTensorFP32(rows, cols) // F32 Input
+	w := ctx.NewTensorFP32(1, cols)    // F32 Weights (Corrected)
 	
 	// Create Random Data
 	xData := make([]float32, rows*cols)

@@ -641,6 +641,48 @@ func (t *Tensor) RMSNormLinear(normWeight, weight *Tensor, eps float32) *Tensor 
 	return res
 }
 
+// RMSNormLinearQ4K performs fused RMSNorm + Linear (Q4_K)
+func (t *Tensor) RMSNormLinearQ4K(normWeight, weight *Tensor, eps float32, scale float32) *Tensor {
+	M := t.rows
+	N := weight.rows
+	res := t.ctx.NewTensorPooled(M, N)
+	t.RMSNormLinearIntoQ4K(normWeight, weight, res, eps, scale)
+	return res
+}
+
+// RMSNormLinearIntoQ4K performs fused RMSNorm + Linear (Q4_K) into existing destination
+func (t *Tensor) RMSNormLinearIntoQ4K(normWeight, weight, out *Tensor, eps float32, scale float32) {
+	M := t.rows
+	N := weight.rows
+	K := weight.cols
+	C.Metal_RMSNormLinear_Q4K_F16(t.ctx.ref, t.buf, C.int(t.Offset),
+		normWeight.buf, C.int(normWeight.Offset),
+		weight.buf, C.int(weight.Offset),
+		out.buf, C.int(out.Offset),
+		C.int(M), C.int(N), C.int(K), C.float(eps), C.float(scale))
+}
+
+// SwiGLULinearQ4K performs fused SwiGLU + Linear (Q4_K)
+func (t *Tensor) SwiGLULinearQ4K(up, weight *Tensor, scale float32) *Tensor {
+	M := t.rows
+	N := weight.rows
+	res := t.ctx.NewTensorPooled(M, N)
+	t.SwiGLULinearIntoQ4K(up, weight, res, scale)
+	return res
+}
+
+// SwiGLULinearIntoQ4K performs fused SwiGLU + Linear (Q4_K) into existing destination
+func (t *Tensor) SwiGLULinearIntoQ4K(up, weight, out *Tensor, scale float32) {
+	M := t.rows
+	N := weight.rows
+	K := weight.cols
+	C.Metal_SwiGLULinear_Q4K_F16(t.ctx.ref, t.buf, C.int(t.Offset),
+		up.buf, C.int(up.Offset),
+		weight.buf, C.int(weight.Offset),
+		out.buf, C.int(out.Offset),
+		C.int(M), C.int(N), C.int(K), C.float(scale))
+}
+
 // RMSNormQKV performs fused RMSNorm + QKV Linear projections
 func (t *Tensor) RMSNormQKV(normWeight, wQ, wK, wV *Tensor, eps float32) (*Tensor, *Tensor, *Tensor) {
 	q := t.ctx.NewTensorPooled(t.rows, wQ.rows)
@@ -864,25 +906,28 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		// t.RMSNorm(attnNorm, eps) // Allocates. Need Into.
 		// For now assume FP32 residual
 	}
-	t.ctx.Synchronize()
-	if layerIdx == 0 {
-		normed.ScanMax("L0-Normed")
-	}
 		
 	// 2. QKV Projections (Using Scratch)
 	qPart := scratch.QPart
 	kPart := scratch.KPart
 	vPart := scratch.VPart
 	
-	normed.LinearInto(q, qPart, globalScale)
-	normed.LinearInto(k, kPart, globalScale)
-	normed.LinearInto(v, vPart, globalScale)
-	normed.LinearInto(v, vPart, globalScale)
-	t.ctx.Synchronize()
-	if layerIdx == 0 {
-
-
+	if q.dataType == DataTypeQ4K && t.dataType == DataTypeF32 {
+		// Use Fused RMSNorm + Linear (Q4K) Into scratch
+		t.RMSNormLinearIntoQ4K(attnNorm, q, qPart, eps, globalScale)
+		t.RMSNormLinearIntoQ4K(attnNorm, k, kPart, eps, globalScale)
+		t.RMSNormLinearIntoQ4K(attnNorm, v, vPart, eps, globalScale)
+	} else {
+		normed.LinearInto(q, qPart, globalScale)
+		normed.LinearInto(k, kPart, globalScale)
+		normed.LinearInto(v, vPart, globalScale)
 	}
+	
+	/*
+	if layerIdx == 0 || layerIdx == 31 {
+		vPart.ScanMax(fmt.Sprintf("Layer %d V-Proj", layerIdx))
+	}
+	*/
 	
 	// 3. RoPE & 4. Store K/V & 5. Attention (Serial Loop for Prefill/Batch)
 	// Our RoPE, Attention and StoreKV kernels currently only support single-token processing.
@@ -909,26 +954,17 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		offAtt := i * qStride
 		
 		// 3. RoPE (In-place on qPart/kPart row i)
-		if layerIdx == 0 && i == 0 {
-			qPart.ScanMax("L0-Q-PreRoPE")
-			kPart.ScanMax("L0-K-PreRoPE")
-		}
 		
 		// Process Q (Heads)
 		C.Metal_RoPE_F16(t.ctx.ref, qPart.buf, C.int(qPart.Offset + offQ), 1, 1, C.int(heads), C.int(headDim), C.int(p), C.float(ropeTheta))
 		// Process K (KVHeads)
 		C.Metal_RoPE_F16(t.ctx.ref, kPart.buf, C.int(kPart.Offset + offK), 1, 1, C.int(kvHeads), C.int(headDim), C.int(p), C.float(ropeTheta))
-		
-		t.ctx.Synchronize()
-		if layerIdx == 0 && i == 0 {
-			qPart.ScanMax("L0-Q-PostRoPE")
-		}
 
 		// 4. Store K/V (Must append to KVCache at current pos)
 		C.Metal_StoreKV_F16(t.ctx.ref, kPart.buf, C.int(kPart.Offset + offK), vPart.buf, C.int(vPart.Offset + offV), 
 			kCache.buf, C.int(kCache.Offset), vCache.buf, C.int(vCache.Offset), 
 			C.int(p), C.int(kvHeads), C.int(headDim))
-		t.ctx.Synchronize()
+
 		
 		if p < 2 {
 
@@ -964,97 +1000,32 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 				C.int(p), C.int(heads), C.int(kvHeads), C.int(headDim))
 		} else {
 			// Split Path
-			// 1. Scores [Heads, P+1] (FP32)
-			// Use scratch.Scores.
-			// Metal_AttScores_F16 currently writes to 'dst' which is floats.
-			// It expects 'dst' to be [Heads, CtxLen].
-			// We need to pass offset 0 for now as it reuses buffer per token loop? 
-			// Yes, 'scores' is scratch.
-			
 			scores := scratch.Scores
-			// Reset scores? (Not needed, overwritten)
-			
 			C.Metal_AttScores_F16(t.ctx.ref, qPart.buf, C.int(qPart.Offset + offQ),
 				kCache.buf, C.int(kCache.Offset),
 				scores.buf, C.int(scores.Offset), // Dst
 				C.int(p), C.int(heads), C.int(kvHeads), C.int(headDim), C.int(ctxLen))
 				
-			t.ctx.Synchronize()
-			if layerIdx == 0 && i == 0 {
-				scores.ScanMax("L0-Scores-PreSoftmax")
-				
-				// CPU Softmax Verification
-				cpuScores := scores.ToHostF32() // [Heads * CtxLen] but we only care about first p+1 per head
-				// Compute Softmax for Head 0
-				var cpuProbs []float32
-				start := 0
-				end := p + 1 // First head
-				head0 := cpuScores[start:end]
-				
-				// Max
-				maxV := float32(-1e9)
-				for _, v := range head0 {
-					if v > maxV { maxV = v }
-				}
-				// Exp Sum
-				sumE := float32(0.0)
-				exps := make([]float32, len(head0))
-				for k, v := range head0 {
-					e := float32(math.Exp(float64(v - maxV)))
-					exps[k] = e
-					sumE += e
-				}
-				// Normalize
-				for k := range exps {
-					cpuProbs = append(cpuProbs, exps[k] / sumE)
-				}
-				fmt.Printf("DEBUG: CPU Softmax Head 0: Sample: %.4f\n", cpuProbs[:min(32, len(cpuProbs))])
-			}
-			
-			// 2. Softmax [Heads, P+1]
-			// Metal_Softmax_F16(ctx, in, offIn, res, offRes, rows, cols)
-			// rows=heads, cols=p+1?
-			// The kernel likely expects [rows x cols].
-			// Here we have [heads x ctxLen] buffer.
-			// We only want to normalize up to p+1.
-			// Metal_AttSoftmax_F16 is likely better?
-			// See metal_bridge.h line 74: Metal_AttSoftmax_F16(ctx, s, oS, p, nh, ctxLen)
-			// This performs softmax in-place on 's'. Correct.
-			
 			C.Metal_AttSoftmax_F16(t.ctx.ref, scores.buf, C.int(scores.Offset), 
 				C.int(p), C.int(heads), C.int(ctxLen))
-			
-			t.ctx.Synchronize()
-			if layerIdx == 0 && i == 0 {
-				scores.ScanMax("L0-Probs-PostSoftmax")
-			}
-			
-			// 3. Values [Heads, HeadDim] -> AttOut
-			// Metal_AttValues_F16(ctx, s, oS, vC, oV, r, oR, p, nh, kh, hd, ctxLen)
 			
 			C.Metal_AttValues_F16(t.ctx.ref, scores.buf, C.int(scores.Offset),
 				vCache.buf, C.int(vCache.Offset),
 				attOut.buf, C.int(attOut.Offset + offAtt),
 				C.int(p), C.int(heads), C.int(kvHeads), C.int(headDim), C.int(ctxLen))
 		}
-		t.ctx.Synchronize()
-		if layerIdx == 0 {
-
-		}
 	}
-	t.ctx.Synchronize()
+
 	// 6. Attention Output Projection
-	t.ctx.Synchronize()
-	if layerIdx == 0 {
-		attOut.ScanMax("L0-AttOut_PostFused")
-	}
-
 
 	// Output Projection
 	scratch.AttOut.LinearInto(o, resAtt, globalScale)
-	if layerIdx == 0 {
-		resAtt.ScanMax("L0-AttOut_PostProj")
+	
+	/*
+	if layerIdx == 0 || layerIdx == 31 {
+		resAtt.ScanMax(fmt.Sprintf("Layer %d Att-Final", layerIdx))
 	}
+	*/
 
 	
 	
@@ -1090,7 +1061,7 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		
 		normedFFN.LinearF32_Into(ffnGate, gatePart, globalScale)
 		normedFFN.LinearF32_Into(ffnUp, upPart, globalScale)
-		t.ctx.Synchronize()
+
 		
 		
 		// 10. SwiGLU F32
@@ -1100,7 +1071,7 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		// 11. Down Projection (FP32 -> FP32)
 		resFFN := scratch.ResFFN_F32
 		swiOut.LinearF32_Into(ffnDown, resFFN, globalScale) // Handles Q4K
-		t.ctx.Synchronize()
+
 		
 		// 12. Residual Add 2
 		if t.dataType == DataTypeF32 {
@@ -1111,7 +1082,7 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 			C.Metal_Copy_F16(t.ctx.ref, t2.buf, 0, t.buf, 0, C.int(t.rows*t.cols))
 			t2.ReturnToPool()
 		}
-		t.ctx.Synchronize()
+
 		
 		// normedFFN.ReturnToPool() // Now a scratch buffer
 		// resFFN.ReturnToPool() // Now a scratch buffer
@@ -1124,19 +1095,33 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		// 9. FFN Gate/Up
 		// For FP16 path, we need new F16 tensors for gate/up parts.
 		// scratch.GatePart and scratch.UpPart are assumed to be FP32 for the 'if' block.
-		gatePartF16 := t.ctx.NewTensorPooled(t.rows, ffnGate.rows)
-		upPartF16 := t.ctx.NewTensorPooled(t.rows, ffnUp.rows)
-		normedFFN.LinearInto(ffnGate, gatePartF16, globalScale)
-		normedFFN.LinearInto(ffnUp, upPartF16, globalScale)
-		t.ctx.Synchronize()
+		// Actually scratch has GatePart and UpPart but they are FP32.
+		// Let's just use NewTensorPooled for safety and ReturnToPool.
 		
-		// 10. SwiGLU
-		swiOut := upPartF16.SwiGLU(gatePartF16)
+		gatePartF16_P := t.ctx.NewTensorPooled(t.rows, ffnGate.rows)
+		upPartF16_P := t.ctx.NewTensorPooled(t.rows, ffnUp.rows)
+
+		if ffnGate.dataType == DataTypeQ4K {
+			t.RMSNormLinearIntoQ4K(ffnNorm, ffnGate, gatePartF16_P, eps, globalScale)
+			t.RMSNormLinearIntoQ4K(ffnNorm, ffnUp, upPartF16_P, eps, globalScale)
+		} else {
+			normedFFN.LinearInto(ffnGate, gatePartF16_P, globalScale)
+			normedFFN.LinearInto(ffnUp, upPartF16_P, globalScale)
+		}
+
+		// 10. SwiGLU + 11. Down Projection
+		resFFN := scratch.ResFFN // F16 scratch
+		if ffnDown.dataType == DataTypeQ4K {
+			gatePartF16_P.SwiGLULinearIntoQ4K(upPartF16_P, ffnDown, resFFN, globalScale)
+		} else {
+			swiOut := upPartF16_P.SwiGLU(gatePartF16_P)
+			swiOut.LinearInto(ffnDown, resFFN, globalScale)
+			swiOut.ReturnToPool()
+		}
 		
-		// 11. Down Projection
-		resFFN := t.ctx.NewTensorPooled(t.rows, ffnDown.rows)
-		swiOut.LinearInto(ffnDown, resFFN, globalScale)
-		t.ctx.Synchronize()
+		gatePartF16_P.ReturnToPool()
+		upPartF16_P.ReturnToPool()
+
 		
 		// 12. Residual Add 2
 		if t.dataType == DataTypeF32 {
@@ -1149,10 +1134,8 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		
 		// --- Final Cleanup ---
 		normedFFN.ReturnToPool()
-		gatePartF16.ReturnToPool()
-		upPartF16.ReturnToPool()
-		swiOut.ReturnToPool()
 		resFFN.ReturnToPool()
+		// t2 returned if used
 		// t2 returned if used
 	}
 }
