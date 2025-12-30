@@ -651,3 +651,43 @@ func (e *Engine) Close() {
 		e.Ctx.Free()
 	}
 }
+
+// LoadWeightFromGGUF decodes weights to F32 for CPU reference
+func LoadWeightFromGGUF(e *Engine, name string) []float32 {
+	var t *gguf.TensorInfo
+	for _, tensor := range e.Model.Tensors {
+		if tensor.Name == name {
+			t = tensor
+			break
+		}
+	}
+	if t == nil {
+		panic(fmt.Sprintf("Tensor %s not found in GGUF", name))
+	}
+	
+	numElements := int(t.Dimensions[0])
+	for i := 1; i < len(t.Dimensions); i++ {
+		numElements *= int(t.Dimensions[i])
+	}
+	
+	if t.Type == gguf.GGMLTypeQ4_K {
+		return gguf.DequantizeQ4K(t.Data, numElements)
+	} else if t.Type == gguf.GGMLTypeQ6_K {
+		return gguf.DequantizeQ6K(t.Data, numElements)
+	} else if t.Type == gguf.GGMLTypeF32 {
+		out := make([]float32, numElements)
+		for i := 0; i < numElements; i++ {
+			bits := binary.LittleEndian.Uint32(t.Data[i*4 : (i+1)*4])
+			out[i] = math.Float32frombits(bits)
+		}
+		return out
+	} else if t.Type == gguf.GGMLTypeF16 {
+		out := make([]float32, numElements)
+		for i := 0; i < numElements; i++ {
+			bits := binary.LittleEndian.Uint16(t.Data[i*2 : (i+1)*2])
+			out[i] = device.Float16ToFloat32(bits)
+		}
+		return out
+	}
+	panic(fmt.Sprintf("Unsupported type %d for %s", t.Type, name))
+}
