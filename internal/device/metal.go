@@ -795,7 +795,7 @@ func (c *Context) NewLayerScratch(batch, dim, hiddenDim, heads, kvHeads, headDim
 	szUp := align(batch * hiddenDim * 4)
 	szSwiOut := align(batch * hiddenDim * 4)
 	
-	szLogits := align(1 * vocabSize * 2) // F16
+	szLogits := align(1 * vocabSize * 4) // F32 Logits
 	
 	total := szNormed + szQPart + szKPart + szVPart + szAttOut + szResAtt + 
 		szNormedFFN + szNormedFFN_F32 + szResFFN + szResFFN_F32 + szScores + szGate + szUp + szSwiOut + szLogits
@@ -849,7 +849,8 @@ func (c *Context) NewLayerScratch(batch, dim, hiddenDim, heads, kvHeads, headDim
 	s.UpPart = newT(szUp, batch, hiddenDim, DataTypeF32)
 	s.SwiOut = newT(szSwiOut, batch, hiddenDim, DataTypeF32)
 	
-	s.Logits = newT(szLogits, 1, vocabSize, DataTypeF16)
+	// Logits must be F32 to preserve precision during accumulation and sampling
+	s.Logits = newT(szLogits, 1, vocabSize, DataTypeF32)
 	
 	return s
 }
@@ -991,6 +992,7 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		// scores := t.ctx.NewTensorPooled(heads, ctxLen) // [Heads, CtxLen]
 		// But we need to handle the loop.
 		
+		// Force Split Path for Debug
 		if false {
 			// Fused Path (Current)
 			C.Metal_AttFused_F16(t.ctx.ref, qPart.buf, C.int(qPart.Offset + offQ),
@@ -1005,6 +1007,15 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 				kCache.buf, C.int(kCache.Offset),
 				scores.buf, C.int(scores.Offset), // Dst
 				C.int(p), C.int(heads), C.int(kvHeads), C.int(headDim), C.int(ctxLen))
+			
+			// DEBUG: Dump Scores (Pre-Softmax)
+			if layerIdx == 0 && i == 0 && p < 5 {
+				t.ctx.Synchronize()
+				rawScores := scores.ToHostF32() // F16 -> F32
+				// scores is [Heads, CtxLen]
+				// Print Head 0, first p+1 values
+				fmt.Printf("DEBUG: Layer 0, Head 0, Pos %d Scores: %v\n", p, rawScores[:p+2])
+			}
 				
 			C.Metal_AttSoftmax_F16(t.ctx.ref, scores.buf, C.int(scores.Offset), 
 				C.int(p), C.int(heads), C.int(ctxLen))
@@ -1021,11 +1032,9 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 	// Output Projection
 	scratch.AttOut.LinearInto(o, resAtt, globalScale)
 	
-	/*
-	if layerIdx == 0 || layerIdx == 31 {
+	if layerIdx == 0 {
 		resAtt.ScanMax(fmt.Sprintf("Layer %d Att-Final", layerIdx))
 	}
-	*/
 
 	
 	
@@ -1084,6 +1093,12 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		}
 
 		
+
+		// Debug FFN Output
+		if layerIdx == 0 || layerIdx == 5 {
+			resFFN.ScanMax(fmt.Sprintf("Layer %d FFN-Final", layerIdx))
+		}
+
 		// normedFFN.ReturnToPool() // Now a scratch buffer
 		// resFFN.ReturnToPool() // Now a scratch buffer
 		// t2 returned inside else block
@@ -1107,6 +1122,14 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		} else {
 			normedFFN.LinearInto(ffnGate, gatePartF16_P, globalScale)
 			normedFFN.LinearInto(ffnUp, upPartF16_P, globalScale)
+			normedFFN.LinearInto(ffnGate, gatePartF16_P, globalScale)
+			normedFFN.LinearInto(ffnUp, upPartF16_P, globalScale)
+		}
+
+		if layerIdx == 0 {
+			normedFFN.ScanMax("Layer 0 FFN-Input (Normed)")
+			gatePartF16_P.ScanMax("Layer 0 FFN-Gate")
+			upPartF16_P.ScanMax("Layer 0 FFN-Up")
 		}
 
 		// 10. SwiGLU + 11. Down Projection
@@ -1132,6 +1155,12 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 			t2.ReturnToPool()
 		}
 		
+
+		// Debug FFN Output (Correct Location)
+		if layerIdx == 0 || layerIdx == 5 {
+			resFFN.ScanMax(fmt.Sprintf("Layer %d FFN-Final", layerIdx))
+		}
+
 		// --- Final Cleanup ---
 		normedFFN.ReturnToPool()
 		resFFN.ReturnToPool()

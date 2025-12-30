@@ -13,9 +13,13 @@ func main() {
 		return
 	}
 	
-	words := []string{" Paris", " France", " is", " capital"}
+	words := []string{"Hello", " Hello", "world"}
 	for _, w := range words {
 		ids := tok.Encode(w)
 		fmt.Printf("%q -> %v\n", w, ids)
+		for _, id := range ids {
+			decoded := tok.Decode([]int{id})
+			fmt.Printf("  %d -> %q\n", id, decoded)
+		}
 	}
 }

@@ -91,8 +91,9 @@ func (e *Engine) loadModel(path string) error {
 	}
 	
 	// RoPE Freq
-	if val, ok := f.KV["llama.rope.freq_base"]; ok {
-		e.Config.RopeTheta = float32(toFloat64(val))
+	if _, ok := f.KV["llama.rope.freq_base"]; ok {
+		// FORCE 10k for Debug
+		e.Config.RopeTheta = 10000.0
 	} else {
 		e.Config.RopeTheta = 10000.0
 	}
@@ -418,6 +419,12 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 			e.ActLogger.LogEmbedding(embData)
 		}
 		
+		// Debug Embedding
+		if i < 2 {
+			embData := currentF32.ToHost()
+			fmt.Printf("DEBUG: Token %d Embedding (First 10): %v\n", lastToken, embData[:10])
+		}
+		
 		// Layers (Attention + FFN)
 		for l := 0; l < e.Config.Layers; l++ {
 			attnNorm := e.Weights.AttnNorm[l]
@@ -452,9 +459,8 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 			currentF32.RMSNormFP32_ToF16_Into(e.Weights.OutputNorm, e.Config.Eps, scratch.Normed)
 			
 			// Output Head (F16 -> F32 Logits)
-			// Reuse pre-allocated logits buffer
 			// scratch.Normed contains result. Use it.
-			scratch.Normed.LinearInto(e.Weights.Output, logits, e.GlobalScale)
+			scratch.Normed.LinearToFP32_Into(e.Weights.Output, logits)
 			logitsData := logits.ToHost()
 			
 			// Use Sampler
