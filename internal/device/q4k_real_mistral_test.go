@@ -87,7 +87,7 @@ func TestQ4K_RealMistralBlock(t *testing.T) {
 	
 	// Create weight tensor and load the real Q4K block
 	// For a single block: rows=1, cols=256
-	weight := ctx.NewTensor(1, 256)
+	weight := ctx.NewQ4KTensor(1, 256)
 	defer weight.Free()
 	weight.LoadRaw(blockData)
 	

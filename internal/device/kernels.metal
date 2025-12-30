@@ -361,8 +361,56 @@ kernel void embedding_q4k_f16(device const uchar *weight [[ buffer(0) ]],
         device const uchar *block = row_ptr + i * 144;
         ushort d_bits = *(device const ushort*)(block);
         ushort dmin_bits = *(device const ushort*)(block + 2);
-        float d = (float)as_type<half>(d_bits);
-        float dmin = (float)as_type<half>(dmin_bits);
+        
+        // Manual FP16->FP32 conversion with subnormal handling
+        uint d_sign = (d_bits & 0x8000u) << 16;
+        uint d_exp_raw = (d_bits & 0x7C00u) >> 10;
+        uint d_mant = d_bits & 0x03FFu;
+        
+        float d;
+        if (d_exp_raw == 0) {
+            if (d_mant == 0) {
+                d = 0.0f;
+            } else {
+                uint shift = 0;
+                uint test_mant = d_mant;
+                while ((test_mant & 0x0400) == 0) {
+                    test_mant <<= 1;
+                    shift++;
+                }
+                uint normalized_mant = (test_mant & 0x03FF) << 13;
+                uint d_exp = (113 - shift) << 23;
+                d = as_type<float>(d_sign | d_exp | normalized_mant);
+            }
+        } else {
+            uint d_exp = (d_exp_raw + (127 - 15)) << 23;
+            d = as_type<float>(d_sign | d_exp | (d_mant << 13));
+        }
+        
+        // Same for dmin
+        uint dmin_sign = (dmin_bits & 0x8000u) << 16;
+        uint dmin_exp_raw = (dmin_bits & 0x7C00u) >> 10;
+        uint dmin_mant = dmin_bits & 0x03FFu;
+        
+        float dmin;
+        if (dmin_exp_raw == 0) {
+            if (dmin_mant == 0) {
+                dmin = 0.0f;
+            } else {
+                uint shift = 0;
+                uint test_mant = dmin_mant;
+                while ((test_mant & 0x0400) == 0) {
+                    test_mant <<= 1;
+                    shift++;
+                }
+                uint normalized_mant = (test_mant & 0x03FF) << 13;
+                uint dmin_exp = (113 - shift) << 23;
+                dmin = as_type<float>(dmin_sign | dmin_exp | normalized_mant);
+            }
+        } else {
+            uint dmin_exp = (dmin_exp_raw + (127 - 15)) << 23;
+            dmin = as_type<float>(dmin_sign | dmin_exp | (dmin_mant << 13));
+        }
         
         device const uchar *scales = block + 4;
         device const uchar *qs = block + 16;
@@ -652,9 +700,11 @@ kernel void linear_q4k_f32(device const uchar *weight [[ buffer(0) ]],
                     test_mant <<= 1;
                     shift++;
                 }
-                d_mant = (test_mant & 0x03FF) << 13;
+                // After normalization, bit 10 is set (the implicit leading 1)
+                // For FP32, we need to remove this bit and place remaining 10 bits in upper mantissa
+                uint normalized_mant = (test_mant & 0x03FF) << 13;  // Bits 0-9 -> bits 13-22
                 uint d_exp = (113 - shift) << 23;
-                d = as_type<float>(d_sign | d_exp | d_mant);
+                d = as_type<float>(d_sign | d_exp | normalized_mant);
             }
         } else {
             uint d_exp = (d_exp_raw + (127 - 15)) << 23;
@@ -677,9 +727,9 @@ kernel void linear_q4k_f32(device const uchar *weight [[ buffer(0) ]],
                     test_mant <<= 1;
                     shift++;
                 }
-                dmin_mant = (test_mant & 0x03FF) << 13;
+                uint normalized_mant = (test_mant & 0x03FF) << 13;
                 uint dmin_exp = (113 - shift) << 23;
-                dmin = as_type<float>(dmin_sign | dmin_exp | dmin_mant);
+                dmin = as_type<float>(dmin_sign | dmin_exp | normalized_mant);
             }
         } else {
             uint dmin_exp = (dmin_exp_raw + (127 - 15)) << 23;
