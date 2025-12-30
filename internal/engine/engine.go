@@ -218,6 +218,7 @@ func (e *Engine) loadModel(path string) error {
 						return fmt.Errorf("tensor %s data truncated (Need %d, Has %d)", t.Name, dataBytes, len(t.Data))
 					}
 					mt.LoadFromRaw(t.Data[:dataBytes])
+					
 				}
 
 			} else if t.Type == gguf.GGMLTypeQ6_K {

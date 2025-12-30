@@ -408,9 +408,12 @@ func (t *Tensor) ScanMax(name string) float32 {
 		sum += v
 	}
 	
-	// mean := sum / float32(len(data))
+	mean := sum / float32(len(data))
 	// Print removed
-	// fmt.Printf("[%s] Min: %.4f Max: %.4f Mean: %.4f Zeros: %d/%d NaNs: %d\n", name, minVal, maxVal, mean, zeros, len(data), nans)
+	fmt.Printf("[%s] Min: %.4f Max: %.4f Mean: %.4f Zeros: %d/%d NaNs: %d\n", name, minVal, maxVal, mean, zeros, len(data), nans)
+	if len(data) >= 32 {
+		fmt.Printf("[%s] Sample: %.4f\n", name, data[:32])
+	}
 	return maxVal
 }
 
@@ -863,7 +866,7 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 	}
 	t.ctx.Synchronize()
 	if layerIdx == 0 {
-
+		normed.ScanMax("L0-Normed")
 	}
 		
 	// 2. QKV Projections (Using Scratch)
@@ -906,11 +909,20 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		offAtt := i * qStride
 		
 		// 3. RoPE (In-place on qPart/kPart row i)
+		if layerIdx == 0 && i == 0 {
+			qPart.ScanMax("L0-Q-PreRoPE")
+			kPart.ScanMax("L0-K-PreRoPE")
+		}
 		
 		// Process Q (Heads)
 		C.Metal_RoPE_F16(t.ctx.ref, qPart.buf, C.int(qPart.Offset + offQ), 1, 1, C.int(heads), C.int(headDim), C.int(p), C.float(ropeTheta))
 		// Process K (KVHeads)
 		C.Metal_RoPE_F16(t.ctx.ref, kPart.buf, C.int(kPart.Offset + offK), 1, 1, C.int(kvHeads), C.int(headDim), C.int(p), C.float(ropeTheta))
+		
+		t.ctx.Synchronize()
+		if layerIdx == 0 && i == 0 {
+			qPart.ScanMax("L0-Q-PostRoPE")
+		}
 
 		// 4. Store K/V (Must append to KVCache at current pos)
 		C.Metal_StoreKV_F16(t.ctx.ref, kPart.buf, C.int(kPart.Offset + offK), vPart.buf, C.int(vPart.Offset + offV), 
@@ -924,11 +936,107 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		}
 		
 		// 5. Attention
-		C.Metal_AttFused_F16(t.ctx.ref, qPart.buf, C.int(qPart.Offset + offQ),
-			kCache.buf, C.int(kCache.Offset),
-			vCache.buf, C.int(vCache.Offset),
-			attOut.buf, C.int(attOut.Offset + offAtt),
-			C.int(p), C.int(heads), C.int(kvHeads), C.int(headDim))
+
+		// 5. Attention (Split Debug Path)
+		// We need scratch buffers for Scores and Probs.
+		// Since we don't have dedicated scratch in Tensor struct yet, we can use a temporary buffer or repurpose.
+		// However, to keep it simple and clean, let's just create them temporarily using pool if performance is not key.
+		// Or assume 'scratch' has them? It does not.
+		// Let's implement the split call IF we had the buffers.
+		//
+		// Wait, 'att_fused' is much better.
+		// If we want to debug, we can use the Fused kernel but maybe print inside the shader? No printf in Metal.
+		
+		// To debug Scores, we MUST use split kernels.
+		// Let's use `Metal_AttScores_F16` -> `Metal_Softmax_F16` -> `Metal_AttValues_F16`.
+		// We need an intermediate buffer for scores: [Heads, MaxSeqLen].
+		// MaxSeqLen=4096. Heads=32. Size = 32*4096*2 = 256KB. Small.
+		
+		// scores := t.ctx.NewTensorPooled(heads, ctxLen) // [Heads, CtxLen]
+		// But we need to handle the loop.
+		
+		if false {
+			// Fused Path (Current)
+			C.Metal_AttFused_F16(t.ctx.ref, qPart.buf, C.int(qPart.Offset + offQ),
+				kCache.buf, C.int(kCache.Offset),
+				vCache.buf, C.int(vCache.Offset),
+				attOut.buf, C.int(attOut.Offset + offAtt),
+				C.int(p), C.int(heads), C.int(kvHeads), C.int(headDim))
+		} else {
+			// Split Path
+			// 1. Scores [Heads, P+1] (FP32)
+			// Use scratch.Scores.
+			// Metal_AttScores_F16 currently writes to 'dst' which is floats.
+			// It expects 'dst' to be [Heads, CtxLen].
+			// We need to pass offset 0 for now as it reuses buffer per token loop? 
+			// Yes, 'scores' is scratch.
+			
+			scores := scratch.Scores
+			// Reset scores? (Not needed, overwritten)
+			
+			C.Metal_AttScores_F16(t.ctx.ref, qPart.buf, C.int(qPart.Offset + offQ),
+				kCache.buf, C.int(kCache.Offset),
+				scores.buf, C.int(scores.Offset), // Dst
+				C.int(p), C.int(heads), C.int(kvHeads), C.int(headDim), C.int(ctxLen))
+				
+			t.ctx.Synchronize()
+			if layerIdx == 0 && i == 0 {
+				scores.ScanMax("L0-Scores-PreSoftmax")
+				
+				// CPU Softmax Verification
+				cpuScores := scores.ToHostF32() // [Heads * CtxLen] but we only care about first p+1 per head
+				// Compute Softmax for Head 0
+				var cpuProbs []float32
+				start := 0
+				end := p + 1 // First head
+				head0 := cpuScores[start:end]
+				
+				// Max
+				maxV := float32(-1e9)
+				for _, v := range head0 {
+					if v > maxV { maxV = v }
+				}
+				// Exp Sum
+				sumE := float32(0.0)
+				exps := make([]float32, len(head0))
+				for k, v := range head0 {
+					e := float32(math.Exp(float64(v - maxV)))
+					exps[k] = e
+					sumE += e
+				}
+				// Normalize
+				for k := range exps {
+					cpuProbs = append(cpuProbs, exps[k] / sumE)
+				}
+				fmt.Printf("DEBUG: CPU Softmax Head 0: Sample: %.4f\n", cpuProbs[:min(32, len(cpuProbs))])
+			}
+			
+			// 2. Softmax [Heads, P+1]
+			// Metal_Softmax_F16(ctx, in, offIn, res, offRes, rows, cols)
+			// rows=heads, cols=p+1?
+			// The kernel likely expects [rows x cols].
+			// Here we have [heads x ctxLen] buffer.
+			// We only want to normalize up to p+1.
+			// Metal_AttSoftmax_F16 is likely better?
+			// See metal_bridge.h line 74: Metal_AttSoftmax_F16(ctx, s, oS, p, nh, ctxLen)
+			// This performs softmax in-place on 's'. Correct.
+			
+			C.Metal_AttSoftmax_F16(t.ctx.ref, scores.buf, C.int(scores.Offset), 
+				C.int(p), C.int(heads), C.int(ctxLen))
+			
+			t.ctx.Synchronize()
+			if layerIdx == 0 && i == 0 {
+				scores.ScanMax("L0-Probs-PostSoftmax")
+			}
+			
+			// 3. Values [Heads, HeadDim] -> AttOut
+			// Metal_AttValues_F16(ctx, s, oS, vC, oV, r, oR, p, nh, kh, hd, ctxLen)
+			
+			C.Metal_AttValues_F16(t.ctx.ref, scores.buf, C.int(scores.Offset),
+				vCache.buf, C.int(vCache.Offset),
+				attOut.buf, C.int(attOut.Offset + offAtt),
+				C.int(p), C.int(heads), C.int(kvHeads), C.int(headDim), C.int(ctxLen))
+		}
 		t.ctx.Synchronize()
 		if layerIdx == 0 {
 
@@ -937,10 +1045,16 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 	t.ctx.Synchronize()
 	// 6. Attention Output Projection
 	t.ctx.Synchronize()
+	if layerIdx == 0 {
+		attOut.ScanMax("L0-AttOut_PostFused")
+	}
 
 
 	// Output Projection
 	scratch.AttOut.LinearInto(o, resAtt, globalScale)
+	if layerIdx == 0 {
+		resAtt.ScanMax("L0-AttOut_PostProj")
+	}
 
 	
 	
