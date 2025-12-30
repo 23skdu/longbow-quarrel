@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"strconv"
 	"github.com/23skdu/longbow-quarrel/internal/tokenizer"
 )
 
@@ -13,6 +15,19 @@ func main() {
 		return
 	}
 	
+	if len(os.Args) > 1 {
+		fmt.Printf("Decoding IDs from arguments:\n")
+		for _, arg := range os.Args[1:] {
+			id, err := strconv.Atoi(arg)
+			if err != nil {
+				continue
+			}
+			decoded := tok.Decode([]int{id})
+			fmt.Printf("  %d -> %q\n", id, decoded)
+		}
+		return
+	}
+
 	words := []string{"Hello", " Hello", "world"}
 	for _, w := range words {
 		ids := tok.Encode(w)

@@ -60,23 +60,26 @@ void Metal_Softmax_F16(MetalContextRef ctx, MetalBufferRef input, int offIn,
 void Metal_StoreKV_F16(MetalContextRef ctx, MetalBufferRef k, int offK,
                        MetalBufferRef v, int offV, MetalBufferRef kCache,
                        int offKC, MetalBufferRef vCache, int offVC, int pos,
-                       int heads, int headDim);
+                       int heads, int headDim, int windowSize);
 
 void Metal_Attention_F16(MetalContextRef ctx, MetalBufferRef q, int offQ,
                          MetalBufferRef kC, int offK, MetalBufferRef vC,
                          int offV, MetalBufferRef r, int oR, MetalBufferRef s,
-                         int oS, int p, int nh, int kh, int hd, int ctxLen);
+                         int oS, int p, int nh, int kh, int hd, int ctxLen,
+                         int windowSize);
 
 void Metal_AttScores_F16(MetalContextRef ctx, MetalBufferRef q, int offQ,
                          MetalBufferRef kC, int offK, MetalBufferRef s, int oS,
-                         int p, int nh, int kh, int hd, int ctxLen);
+                         int p, int nh, int kh, int hd, int ctxLen,
+                         int windowSize);
 
 void Metal_AttSoftmax_F16(MetalContextRef ctx, MetalBufferRef s, int oS, int p,
                           int nh, int ctxLen);
 
 void Metal_AttValues_F16(MetalContextRef ctx, MetalBufferRef s, int oS,
                          MetalBufferRef vC, int offV, MetalBufferRef r, int oR,
-                         int p, int nh, int kh, int hd, int ctxLen);
+                         int p, int nh, int kh, int hd, int ctxLen,
+                         int windowSize);
 
 void Metal_RMSNormLinear_F16(MetalContextRef ctx, MetalBufferRef input,
                              int offIn, MetalBufferRef normWeight,
@@ -183,7 +186,7 @@ void Metal_MatMul_F16_F32_F32(MetalContextRef ctx, MetalBufferRef weight,
 void Metal_AttFused_F16(MetalContextRef ctx, MetalBufferRef q, int offQ,
                         MetalBufferRef kC, int offK, MetalBufferRef vC,
                         int offV, MetalBufferRef r, int oR, int p, int nh,
-                        int kh, int hd);
+                        int kh, int hd, int windowSize);
 
 // FP32 FFN Kernels for Small Models
 void Metal_LinearF16ToF32(MetalContextRef ctx, MetalBufferRef weight,

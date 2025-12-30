@@ -37,7 +37,7 @@ func TestKVCacheGQA_Mistral(t *testing.T) {
 	
 	// Store at position 2
 	pos := 2
-	k.StoreKV(v, kCache, vCache, pos, kvHeads, headDim)
+	k.StoreKV(v, kCache, vCache, pos, kvHeads, headDim, 0)
 	
 	// Retrieve and verify
 	kCacheData := kCache.ToHostF32()
@@ -132,7 +132,7 @@ func TestKVCacheSequential(t *testing.T) {
 		k.LoadFrom(kData)
 		v.LoadFrom(vData)
 		
-		k.StoreKV(v, kCache, vCache, pos, kvHeads, headDim)
+		k.StoreKV(v, kCache, vCache, pos, kvHeads, headDim, 0)
 		ctx.Synchronize()
 	}
 	

@@ -233,8 +233,8 @@ func TestLayer0_Attention(t *testing.T) {
 	tVCache := ctx.NewTensor(CtxLen, KVHeads*HeadDim)
 	tVCache.LoadFrom(vData)
 	
-	// Attention(k, v, pos, numHeads, kvHeads, headDim, ctxLen)
-	tOut := tQ.Attention(tKCache, tVCache, Pos, Heads, KVHeads, HeadDim, CtxLen)
+	// Attention(k, v, pos, numHeads, kvHeads, headDim, ctxLen, windowSize)
+	tOut := tQ.Attention(tKCache, tVCache, Pos, Heads, KVHeads, HeadDim, CtxLen, 0)
 	
 	if err := ctx.WaitWithTimeout(2 * time.Second); err != nil {
 		t.Fatal(err)

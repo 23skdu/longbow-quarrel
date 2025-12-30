@@ -34,7 +34,7 @@ func TestAttention_Fused_Correctness(t *testing.T) {
 	vCache.LoadFrom(kvData)
 	
 	// Run fused attention
-	q.AttFused(kCache, vCache, out, pos, numHeads, kvHeads, headDim)
+	q.AttFused(kCache, vCache, out, pos, numHeads, kvHeads, headDim, 0)
 	ctx.Synchronize()
 	
 	res := out.ToHost()
@@ -74,7 +74,7 @@ func TestAttention_Fused_LongContext(t *testing.T) {
 	kCache.LoadFrom(kvData)
 	vCache.LoadFrom(kvData)
 	
-	q.AttFused(kCache, vCache, out, pos, numHeads, kvHeads, headDim)
+	q.AttFused(kCache, vCache, out, pos, numHeads, kvHeads, headDim, 0)
 	ctx.Synchronize()
 	
 	res := out.ToHost()

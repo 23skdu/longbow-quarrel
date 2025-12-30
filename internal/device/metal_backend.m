@@ -526,7 +526,8 @@ void Metal_Softmax_F16(MetalContextRef ctx, MetalBufferRef i, int oI,
 
 void Metal_StoreKV_F16(MetalContextRef ctx, MetalBufferRef k, int oK,
                        MetalBufferRef v, int oV, MetalBufferRef kC, int oKC,
-                       MetalBufferRef vC, int oVC, int p, int h, int hd) {
+                       MetalBufferRef vC, int oVC, int p, int h, int hd,
+                       int windowSize) {
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
   id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
   [enc setComputePipelineState:mc.pipelineStoreKV_F16];
@@ -537,6 +538,7 @@ void Metal_StoreKV_F16(MetalContextRef ctx, MetalBufferRef k, int oK,
   [enc setBuffer:(__bridge id<MTLBuffer>)vC offset:oVC atIndex:3];
   [enc setBytes:&p length:4 atIndex:4];
   [enc setBytes:&kv_dim length:4 atIndex:5];
+  [enc setBytes:&windowSize length:4 atIndex:6]; // Add window size
   [enc dispatchThreads:MTLSizeMake(kv_dim, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(MIN(kv_dim, 256), 1, 1)];
   [mc barrier];
@@ -545,7 +547,8 @@ void Metal_StoreKV_F16(MetalContextRef ctx, MetalBufferRef k, int oK,
 // Granular Attention Steps for Debugging
 void Metal_AttScores_F16(MetalContextRef ctx, MetalBufferRef q, int oQ,
                          MetalBufferRef kC, int oK, MetalBufferRef s, int oS,
-                         int p, int nh, int kh, int hd, int ctxLen) {
+                         int p, int nh, int kh, int hd, int ctxLen,
+                         int windowSize) {
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
   id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
   int stride = ctxLen;
@@ -558,6 +561,7 @@ void Metal_AttScores_F16(MetalContextRef ctx, MetalBufferRef q, int oQ,
   [enc setBytes:&kh length:4 atIndex:5];
   [enc setBytes:&hd length:4 atIndex:6];
   [enc setBytes:&stride length:4 atIndex:7];
+  [enc setBytes:&windowSize length:4 atIndex:8];
   [enc dispatchThreads:MTLSizeMake(nh * 32, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
   [mc barrier];
@@ -579,7 +583,8 @@ void Metal_AttSoftmax_F16(MetalContextRef ctx, MetalBufferRef s, int oS, int p,
 
 void Metal_AttValues_F16(MetalContextRef ctx, MetalBufferRef s, int oS,
                          MetalBufferRef vC, int oV, MetalBufferRef r, int oR,
-                         int p, int nh, int kh, int hd, int ctxLen) {
+                         int p, int nh, int kh, int hd, int ctxLen,
+                         int windowSize) {
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
   id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
   int stride = ctxLen;
@@ -592,6 +597,7 @@ void Metal_AttValues_F16(MetalContextRef ctx, MetalBufferRef s, int oS,
   [enc setBytes:&kh length:4 atIndex:5];
   [enc setBytes:&hd length:4 atIndex:6];
   [enc setBytes:&stride length:4 atIndex:7];
+  [enc setBytes:&windowSize length:4 atIndex:8];
   int dim = nh * hd;
   [enc dispatchThreads:MTLSizeMake(dim, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(MIN(dim, 256), 1, 1)];
@@ -601,10 +607,13 @@ void Metal_AttValues_F16(MetalContextRef ctx, MetalBufferRef s, int oS,
 void Metal_Attention_F16(MetalContextRef ctx, MetalBufferRef q, int oQ,
                          MetalBufferRef kC, int oK, MetalBufferRef vC, int oV,
                          MetalBufferRef r, int oR, MetalBufferRef s, int oS,
-                         int p, int nh, int kh, int hd, int ctxLen) {
-  Metal_AttScores_F16(ctx, q, oQ, kC, oK, s, oS, p, nh, kh, hd, ctxLen);
+                         int p, int nh, int kh, int hd, int ctxLen,
+                         int windowSize) {
+  Metal_AttScores_F16(ctx, q, oQ, kC, oK, s, oS, p, nh, kh, hd, ctxLen,
+                      windowSize);
   Metal_AttSoftmax_F16(ctx, s, oS, p, nh, ctxLen);
-  Metal_AttValues_F16(ctx, s, oS, vC, oV, r, oR, p, nh, kh, hd, ctxLen);
+  Metal_AttValues_F16(ctx, s, oS, vC, oV, r, oR, p, nh, kh, hd, ctxLen,
+                      windowSize);
 }
 
 void Metal_CopyBufferToF32(MetalContextRef ctx, MetalBufferRef src, void *dst,
@@ -893,8 +902,8 @@ void Metal_MatMul_F16_F32_F32(MetalContextRef ctx, MetalBufferRef a, int offA,
 
 void Metal_AttFused_F16(MetalContextRef ctx, MetalBufferRef q, int oQ,
                         MetalBufferRef kC, int oK, MetalBufferRef vC, int oV,
-                        MetalBufferRef r, int oR, int p, int nh, int kh,
-                        int hd) {
+                        MetalBufferRef r, int oR, int p, int nh, int kh, int hd,
+                        int windowSize) {
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
   id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
   [enc setComputePipelineState:mc.pipelineAttFused_F16];
@@ -906,6 +915,7 @@ void Metal_AttFused_F16(MetalContextRef ctx, MetalBufferRef q, int oQ,
   [enc setBytes:&nh length:4 atIndex:5];
   [enc setBytes:&kh length:4 atIndex:6];
   [enc setBytes:&hd length:4 atIndex:7];
+  [enc setBytes:&windowSize length:4 atIndex:8];
   [enc dispatchThreadgroups:MTLSizeMake(nh, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(1024, 1, 1)];
   [mc barrier];

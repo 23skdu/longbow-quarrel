@@ -61,9 +61,9 @@ func TestAttentionKV_Retrieval_Mistral(t *testing.T) {
 	// Or use `t.Layer` but that runs everything.
 	
 	// Run Attention Fused Kernel
-	// Signature: AttFused(kCache, vCache, out, pos, numHeads, kvHeads, headDim)
+	// Signature: AttFused(kCache, vCache, out, pos, numHeads, kvHeads, headDim, windowSize)
 	// We are at pos 2 (attending to 0,1,2).
-	q.AttFused(kCache, vCache, out, 2, heads, kvHeads, dim)
+	q.AttFused(kCache, vCache, out, 2, heads, kvHeads, dim, 0)
 	
 	// Get Result
 	outData := out.ToHost()

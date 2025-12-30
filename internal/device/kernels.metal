@@ -562,18 +562,28 @@ kernel void att_scores_f16(device const half *q [[ buffer(0) ]],
                          constant int &kv_heads [[ buffer(5) ]],
                          constant int &headDim [[ buffer(6) ]],
                          constant int &stride [[ buffer(7) ]],
+                         constant int &window_size [[ buffer(8) ]],
                          uint qid [[ thread_position_in_grid ]]) {
     uint h = qid / 32, lane = qid % 32; if (h >= (uint)num_heads) return;
     uint kvh = h / (num_heads / kv_heads), kv_dim = kv_heads * headDim;
-// kernel void att_scores_f16 ...
-// ...
-    // scale = 1.0 / sqrt(head_dim)
-    // DEBUG: Force scale 1.0 because signals are small?
     float scale = 1.0f / sqrt((float)headDim);
-    // float scale = 100.0f; // BOOST 1000xsqrt((float)headDim);
- device const half *mq = q + h * headDim;
-    for (int t = 0; t <= pos; t++) {
-        float d = 0; device const half *mk = k_cache + t * kv_dim + kvh * headDim;
+    device const half *mq = q + h * headDim;
+
+    // SLIDING WINDOW: Determine window bounds
+    int start = (window_size > 0 && pos >= window_size) ? (pos - window_size + 1) : 0;
+
+    // Initialize all scores to -inf (or masked value) before the window
+    if (lane == 0) {
+        for (int t = 0; t < start; t++) {
+            scores[h * stride + t] = -10000.0f;
+        }
+    }
+
+    for (int t = start; t <= pos; t++) {
+        float d = 0; 
+        // Use rolling buffer index
+        int cache_idx = (window_size > 0) ? (t % window_size) : t;
+        device const half *mk = k_cache + cache_idx * kv_dim + kvh * headDim;
         for (int i = (int)lane; i < headDim; i += 32) d += (float)mq[i] * (float)mk[i];
         d = simd_sum(d); 
         if (lane == 0) {
@@ -590,6 +600,7 @@ kernel void att_fused_f16(device const half *q [[ buffer(0) ]],
                         constant int &num_heads [[ buffer(5) ]],
                         constant int &kv_heads [[ buffer(6) ]],
                         constant int &headDim [[ buffer(7) ]],
+                        constant int &window_size [[ buffer(8) ]],
                         uint3 tid [[ thread_position_in_threadgroup ]],
                         uint3 nthreads [[ threads_per_threadgroup ]],
                         uint3 group_id [[ threadgroup_position_in_grid ]]) {
@@ -598,7 +609,10 @@ kernel void att_fused_f16(device const half *q [[ buffer(0) ]],
     uint kv_dim = kv_heads * headDim;
     float scale = 1.0f / sqrt((float)headDim);
 
-    // Limit fused path to 4000 tokens to stay within 32KB (including other TG vars)
+    // SLIDING WINDOW: Determine window bounds
+    int start = (window_size > 0 && pos >= window_size) ? (pos - window_size + 1) : 0;
+
+    // Limit fused path to 4000 tokens to stay within 32KB
     threadgroup float s_mem[4000]; 
     if (pos >= 4000) return;
 
@@ -607,8 +621,10 @@ kernel void att_fused_f16(device const half *q [[ buffer(0) ]],
     
     // 1. Parallel score calculation
     for (int t = tid.x; t < 4000; t += nt) {
-        if (t <= pos) {
-            float d = 0; device const half *mk = k_cache + t * kv_dim + kvh * headDim;
+        if (t >= start && t <= pos) {
+            float d = 0; 
+            int cache_idx = (window_size > 0) ? (t % window_size) : t;
+            device const half *mk = k_cache + cache_idx * kv_dim + kvh * headDim;
             for (int i = 0; i < headDim; i++) d += (float)mq[i] * (float)mk[i];
             s_mem[t] = d * scale;
         } else {
@@ -663,8 +679,9 @@ kernel void att_fused_f16(device const half *q [[ buffer(0) ]],
     // 4. Result Accumulation
     if (tid.x < (uint)headDim) {
         float r = 0;
-        for (int i = 0; i <= pos; i++) {
-            r += (s_mem[i] / se) * (float)v_cache[i * kv_dim + kvh * headDim + tid.x];
+        for (int t = start; t <= pos; t++) {
+            int cache_idx = (window_size > 0) ? (t % window_size) : t;
+            r += (s_mem[t] / se) * (float)v_cache[cache_idx * kv_dim + kvh * headDim + tid.x];
         }
         output[h * headDim + tid.x] = safe_half(r);
     }
@@ -678,11 +695,20 @@ kernel void att_values_f16(device const float *scores [[ buffer(0) ]],
                          constant int &kv_heads [[ buffer(5) ]],
                          constant int &headDim [[ buffer(6) ]],
                          constant int &stride [[ buffer(7) ]],
+                         constant int &window_size [[ buffer(8) ]],
                          uint qid [[ thread_position_in_grid ]]) {
     uint h = qid / headDim, idx = qid % headDim; if (h >= (uint)num_heads) return;
 
     uint kvh = h / (num_heads / kv_heads), kv_dim = kv_heads * headDim;
-    float r = 0; for (int t = 0; t <= pos; t++) r += scores[h * stride + t] * (float)v_cache[t * kv_dim + kvh * headDim + idx];
+    float r = 0; 
+    
+    // SLIDING WINDOW: Determine window bounds
+    int start = (window_size > 0 && pos >= window_size) ? (pos - window_size + 1) : 0;
+
+    for (int t = start; t <= pos; t++) {
+        int cache_idx = (window_size > 0) ? (t % window_size) : t;
+        r += scores[h * stride + t] * (float)v_cache[cache_idx * kv_dim + kvh * headDim + idx];
+    }
     output[qid] = safe_half(r);
 }
 
@@ -1003,9 +1029,15 @@ kernel void store_kv_f16(device const half *k [[ buffer(0) ]],
                         device half *v_cache [[ buffer(3) ]],
                         constant int &pos [[ buffer(4) ]],
                         constant int &kv_dim [[ buffer(5) ]],
+                        constant int &window_size [[ buffer(6) ]],
                         uint tid [[ thread_position_in_grid ]]) {
     if (tid >= (uint)kv_dim) return;
-    int offset = pos * kv_dim + tid;
+    
+    // SLIDING WINDOW: Use rolling buffer indexing
+    // If window_size == 0, use full sequence (backward compat)
+    int cache_pos = (window_size > 0) ? (pos % window_size) : pos;
+    int offset = cache_pos * kv_dim + tid;
+    
     k_cache[offset] = k[tid];
     v_cache[offset] = v[tid];
 }
