@@ -12,10 +12,11 @@ This document outlines the next 20 steps to improve the performance, correctness
 - [ ] Add numerical stability checks for extreme activation ranges
 - [ ] Document Q4_K precision limitations for models with tiny embeddings
 
-### Step 2: Fix Sequential KV Cache Overwrites
+### Step 2: Fix Sequential KV Cache Overwrites [IN PROGRESS]
 
-- [ ] Debug why `TestKVCacheSequential` shows cache corruption across positions
-- [ ] Verify `store_kv_f16` kernel doesn't overwrite previous positions
+- [x] Debug why prompt tokens were being overwritten by first generated token
+- [x] Fix `CachePos` increment logic in `engine.go`
+- [x] Fix missing buffer offsets in `Metal_StoreKV_F16` for Heap allocation
 - [ ] Add comprehensive KV cache integrity tests
 - [ ] Validate cache behavior with multi-token prefill
 
@@ -31,9 +32,10 @@ This document outlines the next 20 steps to improve the performance, correctness
 - [ ] Add unit tests for all Scan* functions with Q4_K tensors
 - [ ] Ensure no debug probes can crash on any data type
 
-### Step 5: Q6_K Support Validation
+### Step 5: Q6_K Support Validation [IN PROGRESS]
 
-- [ ] Verify Q6_K dequantization correctness (currently untested)
+- [/] Verify Q6_K dequantization correctness (Found potential block stride mismatch)
+- [ ] Fix block size (210 vs 256) in `linear_q6k_f16` kernel
 - [ ] Add unit tests for Q6_K embedding and linear kernels
 - [ ] Test with Q6_K quantized models
 
@@ -158,11 +160,12 @@ This document outlines the next 20 steps to improve the performance, correctness
 ## Recent Accomplishments ✅
 
 - Fixed Q4_K embedding lookup kernel (GPU-side dequantization)
-- Fixed KV cache storage pipeline (wrong pipeline bug)
-- Fixed CPU scan safety (DataTypeQ4K handling)
-- Added comprehensive unit tests (RoPE, attention, KV cache)
-- Verified Mistral architecture (pre-norm, GQA, attention scaling)
-- Documented Mistral debugging findings and root cause hypothesis
+- Fixed RoPE convention mismatch (Adjacent -> Half-Half for GGUF compatibility)
+- Fixed KV cache storage heap corruption (added buffer offsets)
+- Fixed prompt-token overwrite bug in inference loop
+- Fixed head indexing in `att_fused_f16` kernel
+- Verified Mistral architecture activation stability (~1.0-2.5 max activations)
+- Added logit top-candidate debugging to engine path
 
 ## Notes
 

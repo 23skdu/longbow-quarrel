@@ -457,16 +457,16 @@ void Metal_Softmax_F16(MetalContextRef ctx, MetalBufferRef i, int oI,
 }
 
 void Metal_StoreKV_F16(MetalContextRef ctx, MetalBufferRef k, int oK,
-                       MetalBufferRef v, int oV, MetalBufferRef kC,
-                       MetalBufferRef vC, int p, int h, int hd) {
+                       MetalBufferRef v, int oV, MetalBufferRef kC, int oKC,
+                       MetalBufferRef vC, int oVC, int p, int h, int hd) {
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
   id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
   [enc setComputePipelineState:mc.pipelineStoreKV_F16];
   int kv_dim = h * hd;
   [enc setBuffer:(__bridge id<MTLBuffer>)k offset:oK atIndex:0];
   [enc setBuffer:(__bridge id<MTLBuffer>)v offset:oV atIndex:1];
-  [enc setBuffer:(__bridge id<MTLBuffer>)kC offset:0 atIndex:2];
-  [enc setBuffer:(__bridge id<MTLBuffer>)vC offset:0 atIndex:3];
+  [enc setBuffer:(__bridge id<MTLBuffer>)kC offset:oKC atIndex:2];
+  [enc setBuffer:(__bridge id<MTLBuffer>)vC offset:oVC atIndex:3];
   [enc setBytes:&p length:4 atIndex:4];
   [enc setBytes:&kv_dim length:4 atIndex:5];
   [enc dispatchThreads:MTLSizeMake(kv_dim, 1, 1)

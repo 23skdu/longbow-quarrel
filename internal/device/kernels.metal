@@ -269,9 +269,9 @@ kernel void rope_f16(device half *x [[ buffer(0) ]],
     device half *token_ptr = x + gid.y * numHeads * headDim;
     device half *q_ptr = token_ptr + h * headDim;
     
-    // FIX: Mistral uses Adjacent Pairs (x[i], x[i+1]), not Half-Half
-    int idx0 = 2 * i;
-    int idx1 = 2 * i + 1;
+    // GGUF handles permutation such that RoPE applies to Half-Half pairs (i, i + headDim/2)
+    int idx0 = i;
+    int idx1 = i + headDim / 2;
     
     float x0 = (float)q_ptr[idx0];
     float x1 = (float)q_ptr[idx1];
@@ -384,7 +384,7 @@ kernel void att_fused_f16(device const half *q [[ buffer(0) ]],
                         constant int &headDim [[ buffer(7) ]],
                         uint3 tid [[ thread_position_in_threadgroup ]],
                         uint3 group_id [[ threadgroup_position_in_grid ]]) {
-    uint h = group_id.y; if (h >= (uint)num_heads) return;
+    uint h = group_id.x; if (h >= (uint)num_heads) return;
     uint kvh = h / (num_heads / kv_heads);
     uint kv_dim = kv_heads * headDim;
     float scale = 1.0f / sqrt((float)headDim);
