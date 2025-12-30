@@ -467,14 +467,27 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 			// History is just inputTokens for the first step
 			nextObj := sampler.Sample(logitsData, inputTokens, e.Config.VocabSize)
 			
-			// DEBUG: Top 5
+			// DEBUG: Top 100
 			type cand struct { id int; val float32 }
 			cands := make([]cand, len(logitsData))
 			for j, v := range logitsData { cands[j] = cand{j, v} }
 			sort.Slice(cands, func(a, b int) bool { return cands[a].val > cands[b].val })
-			fmt.Printf("DEBUG_LOGITS: Top 5 candidates for next token: ")
-			for j := 0; j < 5; j++ {
-				fmt.Printf("[%d: %.4f] ", cands[j].id, cands[j].val)
+			fmt.Printf("DEBUG_LOGITS_TOP100:\n")
+			for j := 0; j < 100 && j < len(cands); j++ {
+				if j % 10 == 0 && j > 0 {
+					fmt.Printf("\n")
+				}
+				fmt.Printf("[%d:%.2f] ", cands[j].id, cands[j].val)
+			}
+			fmt.Printf("\n")
+			
+			// Check specific expected tokens
+			expectedTokens := []int{6233, 1183, 6333, 5611} // ▁Paris, ▁The, ▁capital, ▁France
+			fmt.Printf("DEBUG_EXPECTED_TOKENS: ")
+			for _, tid := range expectedTokens {
+				if tid < len(logitsData) {
+					fmt.Printf("[%d:%.2f] ", tid, logitsData[tid])
+				}
 			}
 			fmt.Printf("\n")
 
