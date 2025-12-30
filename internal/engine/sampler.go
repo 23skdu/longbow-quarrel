@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"fmt"
 	"math"
 	"math/rand"
 	"sort"
@@ -129,6 +130,7 @@ func argMax(logits []float32) int {
 			maxIdx = i
 		}
 	}
+	fmt.Printf("DEBUG: argMax found idx=%d val=%.4f (logits[0]=%.4f, len=%d)\n", maxIdx, maxVal, logits[0], len(logits))
 	return maxIdx
 }
 

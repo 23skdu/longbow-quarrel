@@ -482,10 +482,6 @@ kernel void att_scores_f16(device const half *q [[ buffer(0) ]],
         d = simd_sum(d); 
         if (lane == 0) {
             scores[h * stride + t] = d * scale;
-            // DEBUG PROBE: If head 0, pos 0, log raw d into scores[0]
-             if (h == 0 && t == 0) {
-                 scores[h * stride + t] = d; // Overwrite with raw unscaled d
-             }
         }
     }
 }
