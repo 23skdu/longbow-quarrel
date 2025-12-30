@@ -19,64 +19,75 @@ func main() {
 		log.Fatalf("Failed to load model: %v", err)
 	}
 	
-	// Find blk.0.attn_q.weight
-	var targetTensor *gguf.TensorInfo
-	for _, t := range f.Tensors {
-		if t.Name == "blk.0.attn_q.weight" {
-			targetTensor = t
+	// Find tensor
+	tensorName := "output_norm.weight"
+	tensorIdx := -1
+	for i, info := range f.Tensors {
+		if info.Name == tensorName {
+			tensorIdx = i
 			break
 		}
 	}
 	
+	var targetTensor *gguf.TensorInfo
+	if tensorIdx != -1 {
+		targetTensor = f.Tensors[tensorIdx]
+	}
+
 	if targetTensor == nil {
-		log.Fatal("Could not find blk.0.attn_q.weight")
+		log.Fatalf("Could not find %s", tensorName)
 	}
 	
 	fmt.Printf("Found tensor: %s\n", targetTensor.Name)
 	fmt.Printf("  Type: %d (Q4_K)\n", targetTensor.Type)
 	fmt.Printf("  Dimensions: %v\n", targetTensor.Dimensions)
-	fmt.Printf("  Data size: %d bytes\n", len(targetTensor.Data))
+	// Calculate offset for Token 1782 from output.weight
+	// output.weight is [4096, 32768].
+	// We want row 1782.
+	// Row size = 4096 elements.
+	// Q6K: 256 elements per block. Size 210 bytes.
+	// Blocks per row = 4096 / 256 = 16 blocks.
+	// Row bytes = 16 * 210 = 3360 bytes.
+	// Offset = 1782 * 3360.
 	
-	// Extract first Q4K block (144 bytes)
-	if len(targetTensor.Data) < 144 {
-		log.Fatalf("Tensor data too small: %d bytes", len(targetTensor.Data))
+	byteOffset := uint64(1782) * 16 * 210
+	
+	fmt.Printf("Extracting Q6K block %d for Token 1782 (Byte Offset %d)...\n", 1782*16, byteOffset)
+	
+	blockLen := 210
+	
+	if byteOffset+uint64(blockLen) > uint64(len(targetTensor.Data)) {
+		log.Fatalf("Offset out of bounds")
 	}
 	
-	block := targetTensor.Data[0:144]
+	blockData := targetTensor.Data[byteOffset : byteOffset+uint64(blockLen)]
 	
-	// Parse and display block info
-	d_bits := binary.LittleEndian.Uint16(block[0:2])
-	dmin_bits := binary.LittleEndian.Uint16(block[2:4])
+	// Q6K Structure:
+	// ql: 128 bytes
+	// qh: 64 bytes
+	// scales: 16 bytes
+	// d: 2 bytes (FP16)
 	
-	// Convert FP16 to FP32 (simple, may not handle subnormals)
+	d_bits := binary.LittleEndian.Uint16(blockData[208:210])
 	d := float16ToFloat32(d_bits)
-	dmin := float16ToFloat32(dmin_bits)
 	
-	fmt.Printf("\nFirst Q4K Block Analysis:\n")
+	fmt.Printf("\nFirst Q6K Block Analysis:\n")
 	fmt.Printf("  d (scale):     %.12f (bits: %04x)\n", d, d_bits)
-	fmt.Printf("  dmin (offset): %.12f (bits: %04x)\n", dmin, dmin_bits)
 	
-	// Show first few scale bytes
-	fmt.Printf("  scales[0:4]: %v\n", block[4:8])
-	fmt.Printf("  quants[0:4]: %v\n", block[16:20])
+	ql := blockData[0:128]
+	qh := blockData[128:192]
+	scales := blockData[192:208]
 	
-	// Save block to file
-	outputPath := "mistral_q4k_block_0.bin"
-	err = os.WriteFile(outputPath, block, 0644)
+	fmt.Printf("  ql[0:4]: %v\n", ql[:4])
+	fmt.Printf("  qh[0:4]: %v\n", qh[:4])
+	fmt.Printf("  sc[0:4]: %v\n", scales[:4])
+	
+	// Save to file
+	err = os.WriteFile("token_the_q6k_block.bin", blockData, 0644)
 	if err != nil {
-		log.Fatalf("Failed to write block: %v", err)
-	}
-	
-	fmt.Printf("\nSaved first Q4K block to: %s\n", outputPath)
-	
-	// Also extract a few more blocks for comparison
-	for i := 1; i < 5; i++ {
-		if len(targetTensor.Data) >= (i+1)*144 {
-			blockN := targetTensor.Data[i*144 : (i+1)*144]
-			d_n := float16ToFloat32(binary.LittleEndian.Uint16(blockN[0:2]))
-			dmin_n := float16ToFloat32(binary.LittleEndian.Uint16(blockN[2:4]))
-			fmt.Printf("Block %d: d=%.12f, dmin=%.12f\n", i, d_n, dmin_n)
-		}
+		log.Printf("Error writing file: %v", err)
+	} else {
+		fmt.Println("Saved Q6K block to token_the_q6k_block.bin")
 	}
 }
 
