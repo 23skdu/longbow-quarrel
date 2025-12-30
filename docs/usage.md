@@ -41,12 +41,15 @@ ollama pull smollm2:135m-instruct
 ~/.ollama/models/blobs/sha256-f535f83ec568d040f88ddc04a199fa6da90923bbb41d4dcaed02caa924d6ef57
 ```
 
-### Supported Models
-
-- smollm2-135M-instruct (tested)
-- smollm2-360M-instruct (compatible)
+- smollm2-135M/360M-instruct (tested)
+- Mistral-7B-v0.1/v0.3 (tested)
 - Llama 3.2-1B/3B (compatible)
-- Any Llama 3 architecture GGUF model
+- Any Llama 3/Mistral architecture GGUF model
+
+### Supported Quantizations
+
+- **K-Quantization**: Q3_K, Q4_K, Q6_K (fully accelerated)
+- **Standard**: FP16, FP32
 
 ## Examples
 

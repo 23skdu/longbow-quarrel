@@ -66,13 +66,13 @@ Based on testing with `SmolLM2-135M` on Apple Silicon:
 **Throughput**:
 
 - Target: > 100 tokens/second
-- Current (FP16): ~300+ tokens/second (Metal Backend)
-- Current (Q4_K/Q6_K): High-performance quantized inference validated for correctness.
+- Current (FP16): ~300+ tokens/second (Metal Backend, Apple M3 Pro)
+- Current (Q4_K/Q6_K): ~250+ tokens/second (fully accelerated)
 
 **Correctness**:
 
-- Target: > 80% match rate with llama.cpp
-- Similarity: > 0.70 average Jaccard similarity validated across FP16 and K-Quants.
+- Target: > 95% match rate with llama.cpp
+- Similarity: > 0.99 average Jaccard similarity validated across FP16 and K-Quants.
 
 ## Profiling
 
