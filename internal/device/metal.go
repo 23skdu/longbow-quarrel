@@ -932,8 +932,8 @@ func (s *LayerScratch) Free() {
 	}
 }
 
-func (t *Tensor) Layer(attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, kCache, vCache *Tensor, 
-	scratch *LayerScratch, // NEW ARG
+func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, kCache, vCache *Tensor, 
+	scratch *LayerScratch, 
 	pos, heads, kvHeads, headDim int, ropeTheta, eps float32, hiddenDim, ctxLen int) {
 	
 	if true { 
@@ -1008,7 +1008,7 @@ func (t *Tensor) Layer(attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, k
 		
 		// 4. Store K/V (Must append to KVCache at current pos)
 		C.Metal_StoreKV_F16(t.ctx.ref, kPart.buf, C.int(kPart.Offset + offK), vPart.buf, C.int(vPart.Offset + offV), 
-			kCache.buf, vCache.buf, 
+			kCache.buf, C.int(kCache.Offset), vCache.buf, C.int(vCache.Offset), 
 			C.int(p), C.int(kvHeads), C.int(headDim))
 		t.ctx.Synchronize()
 		
@@ -1098,23 +1098,20 @@ func (t *Tensor) Layer(attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, k
 		normedFFN.LinearF32_Into(ffnGate, gatePart)
 		normedFFN.LinearF32_Into(ffnUp, upPart)
 		t.ctx.Synchronize()
-		if pos < 1 {
-			gatePart.ScanMax("L-FFNGate")
-			upPart.ScanMax("L-FFNUp")
-		}
 		
-		// 10. SwiGLU (FP32)
+		gatePart.ScanMax(fmt.Sprintf("L%d-GatePreSwi", layerIdx))
+		upPart.ScanMax(fmt.Sprintf("L%d-UpPreSwi", layerIdx))
+		
+		// 10. SwiGLU F32
 		swiOut := scratch.SwiOut
 		gatePart.SwiGLU_FP32_Into(upPart, swiOut)
-		if pos < 1 { swiOut.ScanMax("L-SwiGLU") }
-		
-		// 11. Down Projection (FP32 -> FP16)
+		swiOut.ScanMax(fmt.Sprintf("L%d-SwiOut", layerIdx))
 		
 		// 11. Down Projection (FP32 -> FP32)
 		resFFN := scratch.ResFFN_F32
 		swiOut.LinearF32_Into(ffnDown, resFFN) // Handles Q4K
+		resFFN.ScanMax(fmt.Sprintf("L%d-FFN_Proj", layerIdx))
 		t.ctx.Synchronize()
-		if pos < 1 { resFFN.ScanMax("L-FFNDown") }
 		
 		// 12. Residual Add 2
 		if t.dataType == DataTypeF32 {
@@ -1131,22 +1128,21 @@ func (t *Tensor) Layer(attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, k
 		// resFFN.ReturnToPool() // Now a scratch buffer
 		// t2 returned inside else block
 	} else {
-		// Standard FP16 FFN Path for Large Models (Mistral, Llama)
+		// FP16 FFN Path (Original)
 		normedFFN := scratch.NormedFFN
-		if t.dataType == DataTypeF32 {
-			t.RMSNormFP32_ToF16_Into(ffnNorm, eps, normedFFN)
-			if pos < 2 { normedFFN.ScanMax("L-FFNNorm") }
-		}
+		t.RMSNormFP32_ToF16_Into(ffnNorm, eps, normedFFN)
 		
 		// 9. FFN Gate/Up
-		gatePart := t.ctx.NewTensorPooled(t.rows, ffnGate.rows)
-		upPart := t.ctx.NewTensorPooled(t.rows, ffnUp.rows)
-		normedFFN.LinearInto(ffnGate, gatePart)
-		normedFFN.LinearInto(ffnUp, upPart)
+		// For FP16 path, we need new F16 tensors for gate/up parts.
+		// scratch.GatePart and scratch.UpPart are assumed to be FP32 for the 'if' block.
+		gatePartF16 := t.ctx.NewTensorPooled(t.rows, ffnGate.rows)
+		upPartF16 := t.ctx.NewTensorPooled(t.rows, ffnUp.rows)
+		normedFFN.LinearInto(ffnGate, gatePartF16)
+		normedFFN.LinearInto(ffnUp, upPartF16)
 		t.ctx.Synchronize()
 		
 		// 10. SwiGLU
-		swiOut := upPart.SwiGLU(gatePart)
+		swiOut := upPartF16.SwiGLU(gatePartF16)
 		
 		// 11. Down Projection
 		resFFN := t.ctx.NewTensorPooled(t.rows, ffnDown.rows)
@@ -1164,8 +1160,8 @@ func (t *Tensor) Layer(attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, k
 		
 		// --- Final Cleanup ---
 		normedFFN.ReturnToPool()
-		gatePart.ReturnToPool()
-		upPart.ReturnToPool()
+		gatePartF16.ReturnToPool()
+		upPartF16.ReturnToPool()
 		swiOut.ReturnToPool()
 		resFFN.ReturnToPool()
 		// t2 returned if used
@@ -1313,7 +1309,7 @@ func (t *Tensor) EmbeddingLookup(row int) *Tensor {
 }
 
 func (t *Tensor) StoreKV(v *Tensor, kCache, vCache *Tensor, pos, heads, headDim int) {
-	C.Metal_StoreKV_F16(t.ctx.ref, t.buf, 0, v.buf, 0, kCache.buf, vCache.buf, C.int(pos), C.int(heads), C.int(headDim))
+	C.Metal_StoreKV_F16(t.ctx.ref, t.buf, 0, v.buf, 0, kCache.buf, C.int(kCache.Offset), vCache.buf, C.int(vCache.Offset), C.int(pos), C.int(heads), C.int(headDim))
 }
 
 func (t *Tensor) Attention(kCache, vCache *Tensor, pos, numHeads, kvHeads, headDim, ctxLen int) *Tensor {

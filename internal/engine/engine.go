@@ -8,6 +8,7 @@ import (
 	"math"
 	"runtime"
 
+	"sort"
 	"strings"
 	"time"
 
@@ -429,7 +430,7 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 			kCache := e.KVCacheK[l]
 			vCache := e.KVCacheV[l]
 
-			currentF32.Layer(attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, kCache, vCache,
+			currentF32.Layer(l, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, kCache, vCache,
 				scratch, // Pass scratch
 				e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen)
 		}
@@ -453,19 +454,26 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 			// Use Sampler
 			// History is just inputTokens for the first step
 			nextObj := sampler.Sample(logitsData, inputTokens, e.Config.VocabSize)
+			
+			// DEBUG: Top 5
+			type cand struct { id int; val float32 }
+			cands := make([]cand, len(logitsData))
+			for j, v := range logitsData { cands[j] = cand{j, v} }
+			sort.Slice(cands, func(a, b int) bool { return cands[a].val > cands[b].val })
+			fmt.Printf("DEBUG_LOGITS: Top 5 candidates for next token: ")
+			for j := 0; j < 5; j++ {
+				fmt.Printf("[%d: %f] ", cands[j].id, cands[j].val)
+			}
+			fmt.Printf("\n")
+
 			result = append(result, nextObj)
 		}
 		
 		currentF32.ReturnToPool()
 
-		isLastPrefill := i == len(inputTokens)-1
-		if !isLastPrefill {
-			e.CachePos++
-			metrics.RecordInference(1, time.Since(tToken))
-			e.Ctx.AutoreleasePoolPop(pool)
-			continue
-		}
-		// Flush Pool
+		// Increment CachePos after processing the token
+		e.CachePos++
+		metrics.RecordInference(1, time.Since(tToken))
 		e.Ctx.AutoreleasePoolPop(pool)
 	}
 
@@ -509,7 +517,7 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 			}
 
 			// Layer now handles F32 currentF32, using mixed precision
-			currentF32.Layer(attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, kCache, vCache,
+			currentF32.Layer(l, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, kCache, vCache,
 				scratch, // Pass scratch
 				e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen) // Corrected variable names
 		}
@@ -534,12 +542,6 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 		logitsData := logits.ToHost()
 		
 		currentF32.ReturnToPool()
-
-		if i == len(inputTokens)-1 { // This is the `isLastPrefill` check
-		    e.CachePos++
-		    metrics.RecordInference(1, time.Since(tToken))
-		    continue
-		}
 		
 		// Construct full history for Repetition Penalty
 		// We need to include input tokens + generated tokens
