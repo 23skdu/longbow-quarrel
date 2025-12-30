@@ -37,3 +37,18 @@ go.work.sum
 *.log
 *.txt
 *.pprof
+
+venv/
+__pycache__/
+*.pyc
+
+# Binaries
+longbow-quarrel
+quarrel
+quarrel_bin
+
+*.log
+*.txt
+
+*.out
+*.pprof
