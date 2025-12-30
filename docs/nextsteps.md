@@ -1,177 +1,160 @@
 # Quarrel Improvement Roadmap
 
-This document outlines the next 20 steps to improve the performance, correctness, and capabilities of the `Longbow-Quarrel` inference engine. Priorities are based on recent debugging findings and production readiness requirements.
+This document outlines the next steps to improve the performance, correctness, and capabilities of the `Longbow-Quarrel` inference engine.
 
-## Priority 1: Correctness & Stability
+## Immediate Next 10 Steps (Priority Order)
 
-### Step 1: Resolve Mistral Q4_K Precision Issues ⚠️ CRITICAL
+### Step 1: Debug Mistral Attention Output Magnitude ⚠️ CRITICAL
 
-- [ ] Test Mistral with F16 (non-quantized) weights to isolate Q4_K precision as root cause
-- [ ] Compare layer-by-layer activations with llama.cpp reference implementation
-- [ ] Implement activation clipping/scaling if needed (clip to ±20 after RMSNorm)
-- [ ] Add numerical stability checks for extreme activation ranges
-- [ ] Document Q4_K precision limitations for models with tiny embeddings
+**Status**: Blocking coherent text generation
 
-### Step 2: Fix Sequential KV Cache Overwrites [IN PROGRESS]
+- [ ] Investigate why attention outputs are extremely small (~0.07-0.25 max)
+- [ ] Compare attention scores distribution with reference implementation
+- [ ] Verify attention projection weights are being applied correctly
+- [ ] Check if attention output scaling factor is missing
+- [ ] Add layer-by-layer comparison with llama.cpp for same input
 
-- [x] Debug why prompt tokens were being overwritten by first generated token
-- [x] Fix `CachePos` increment logic in `engine.go`
-- [x] Fix missing buffer offsets in `Metal_StoreKV_F16` for Heap allocation
-- [ ] Add comprehensive KV cache integrity tests
-- [ ] Validate cache behavior with multi-token prefill
+**Why**: Attention outputs are 10-100x smaller than expected, suggesting a fundamental issue in the attention mechanism that's causing downstream layers to receive weak signals.
 
-### Step 3: Objective-C ARC Compliance
+### Step 2: Validate Output Head Linear Transformation
 
-- [ ] Fix 6 `__bridge_retained`/`__bridge_transfer` warnings in `metal_backend.m`
-- [ ] Enable ARC or remove unnecessary bridge casts
-- [ ] Ensure proper memory management for Metal objects
+**Status**: Suspected numerical precision issue
 
-### Step 4: Complete CPU Scan Safety
+- [ ] Verify `Metal_LinearF16ToF32` kernel correctness with unit tests
+- [ ] Compare output head weights between Q4K and F16 versions
+- [ ] Check if logit scaling is applied correctly (temperature, etc.)
+- [ ] Validate that F16->F32 conversion preserves precision
+- [ ] Test with known-good input activations to isolate kernel vs upstream issues
 
-- [ ] Fix `ScanZeroes` and `ScanOCD` to handle DataTypeQ4K (currently incomplete)
-- [ ] Add unit tests for all Scan* functions with Q4_K tensors
-- [ ] Ensure no debug probes can crash on any data type
+**Why**: The output head is the final transformation before token selection. Even small errors here can cause completely wrong token predictions.
 
-### Step 5: Q6_K Support Validation [IN PROGRESS]
+### Step 3: Fix LinearF32_Into Weight Offset Bug
 
-- [/] Verify Q6_K dequantization correctness (Found potential block stride mismatch)
-- [ ] Fix block size (210 vs 256) in `linear_q6k_f16` kernel
-- [ ] Add unit tests for Q6_K embedding and linear kernels
-- [ ] Test with Q6_K quantized models
+**Status**: Critical bug found during debugging
 
-## Priority 2: Performance Optimization
+- [ ] Add `C.int(weight.Offset)` to `Metal_MatMul_Q4K_F32` call in `LinearF32_Into`
+- [ ] Add `C.int(weight.Offset)` to `Metal_MatMul_F16_F32_F32` call in `LinearF32_Into`
+- [ ] Add unit test to verify F32 linear transformations use correct weight offsets
+- [ ] Test SmolLM2 inference to ensure F32 path still works correctly
 
-### Step 6: Fused Attention Kernels
+**Why**: The same offset bug that affected F16 paths also exists in the F32 linear transformation path used by SmolLM2.
 
-- [ ] Profile current `AttScores`, `Softmax`, `AttValues` separately
-- [ ] Extend `att_fused_f16` to support all sequence lengths (currently limited to <1024)
-- [ ] Benchmark fused vs unfused attention performance
-- [ ] Validate numerical correctness with edge cases
+### Step 4: Implement Comprehensive Kernel Unit Tests
 
-### Step 7: Flash Attention-2 Implementation
+**Status**: Essential for debugging and regression prevention
 
-- [ ] Study Flash Attention-2 tiling and memory access patterns
-- [ ] Implement forward pass tiling loop in Metal
-- [ ] Optimize threadgroup memory usage for K/V blocks
-- [ ] Test with long context sequences (>2048 tokens)
-- [ ] Measure memory bandwidth improvement
+- [ ] Create reference outputs from llama.cpp for each kernel type
+- [ ] Add unit tests for `linear_q4k_f16`, `linear_f16`, `linear_f16_f32`
+- [ ] Add unit tests for `att_scores_f16`, `att_softmax_f16`, `att_values_f16`
+- [ ] Add unit tests for `rope_f16` with various theta values
+- [ ] Add unit tests for `rmsnorm_f32_f16` and `rmsnorm_f32`
 
-### Step 8: SIMD Optimization in Softmax
+**Why**: Without kernel-level unit tests, it's impossible to isolate whether bugs are in kernels, weight loading, or inference logic.
 
-- [ ] Verify `simd_sum` and `simd_max` correctness across all threadgroup sizes
-- [ ] Ensure threadgroup size is always 32 for proper SIMD reduction
-- [ ] Add numerical stability tests for extreme input ranges
-- [ ] Profile softmax performance improvement
+### Step 5: Add Layer-by-Layer Activation Logging
 
-### Step 9: Multi-Token Prefill
+**Status**: Needed for systematic debugging
 
-- [ ] Refactor `Layer` to process batches of tokens in parallel
-- [ ] Update Metal kernels to handle `(Batch, Seq, Head, Dim)` tensors
-- [ ] Benchmark prompt processing speed (tokens/sec) for long prompts
-- [ ] Verify correctness with batch sizes 1, 4, 8, 16
+- [ ] Implement configurable activation logging (env var or flag)
+- [ ] Log Q, K, V projections before and after RoPE
+- [ ] Log attention scores, softmax outputs, and attention results
+- [ ] Log FFN gate/up activations and final outputs
+- [ ] Create comparison script to diff against llama.cpp outputs
 
-### Step 10: Zero-Allocation Inference Path
+**Why**: Systematic layer-by-layer comparison is the only way to pinpoint exactly where the inference diverges from reference.
 
-- [ ] Audit all allocations in hot path (Layer, Attention, FFN)
+### Step 6: Optimize Fused Attention Kernel
+
+**Status**: Performance improvement opportunity
+
+- [ ] Remove the `p < -1` debug condition and re-enable fused path
+- [ ] Profile fused vs unfused attention performance
+- [ ] Extend fused kernel to support all sequence lengths (currently disabled)
+- [ ] Verify numerical correctness matches unfused path
+- [ ] Benchmark memory bandwidth improvement
+
+**Why**: Fused attention can provide 2-3x speedup by reducing memory traffic, but it's currently disabled for debugging.
+
+### Step 7: Implement Zero-Allocation Inference
+
+**Status**: Performance and stability improvement
+
+- [ ] Audit all allocations in hot path (use profiler)
 - [ ] Expand scratch buffer system to cover all temporary tensors
-- [ ] Profile memory allocations during inference
-- [ ] Achieve zero allocations per token in generation phase
+- [ ] Pre-allocate all buffers during model initialization
+- [ ] Verify no allocations occur during token generation phase
+- [ ] Measure latency improvement from reduced allocation overhead
 
-## Priority 3: Advanced Features
+**Why**: Allocations during inference cause unpredictable latency spikes and potential memory fragmentation.
 
-### Step 11: KV Cache Quantization
+### Step 8: Add Multi-Token Prefill
 
-- [ ] Implement 8-bit and 4-bit KV cache storage
+**Status**: Major performance improvement for long prompts
+
+- [ ] Refactor `Layer` to accept batch dimension for parallel token processing
+- [ ] Update Metal kernels to handle `(Batch, Seq, Head, Dim)` tensors
+- [ ] Implement parallel KV cache storage for multiple positions
+- [ ] Benchmark prompt processing speed (tokens/sec) improvement
+- [ ] Verify correctness with various batch sizes (1, 4, 8, 16)
+
+**Why**: Current single-token prefill is extremely slow for long prompts. Batched prefill can provide 10-50x speedup.
+
+### Step 9: Implement KV Cache Quantization
+
+**Status**: Memory optimization for long contexts
+
+- [ ] Add 8-bit and 4-bit KV cache storage options
 - [ ] Update attention kernels to dequantize K/V on-the-fly
-- [ ] Measure memory savings vs accuracy tradeoff
+- [ ] Measure memory savings (expect 2-4x reduction)
+- [ ] Benchmark accuracy vs memory tradeoff
 - [ ] Add configuration option for KV cache precision
 
-### Step 12: Speculative Decoding
+**Why**: KV cache is the primary memory bottleneck for long contexts. Quantization can enable 2-4x longer contexts with minimal accuracy loss.
 
-- [ ] Integrate draft model (SmolLM2-135M) alongside main model
-- [ ] Implement draft generation loop (k steps)
-- [ ] Implement verification step (k+1 tokens in parallel)
-- [ ] Add rejection sampling logic
-- [ ] Benchmark acceptance rate and wall-clock speedup
+### Step 10: Add Llama 3.x and Qwen 2.5 Support
 
-### Step 13: Continuous Batching
+**Status**: Expand model compatibility
 
-- [ ] Design request queue and scheduling loop
-- [ ] Implement slot-based KV cache memory management
-- [ ] Separate cache management from model execution
-- [ ] Test with concurrent requests (simulated load)
-- [ ] Measure throughput improvement
-
-### Step 14: Paged Attention
-
-- [ ] Implement BlockManager for physical vs virtual blocks
-- [ ] Update attention kernels to use block tables
-- [ ] Verify memory handling under high concurrency
-- [ ] Test with fragmented memory scenarios
-
-### Step 15: Sampling Optimizations
-
-- [ ] Implement GPU-side `ArgMax`, `TopK`, `TopP` kernels
-- [ ] Move sampling logic from CPU to GPU
-- [ ] Only transfer final token ID to CPU
-- [ ] Verify distribution matches CPU implementation
-- [ ] Measure latency reduction
-
-## Priority 4: Model Support & Quality
-
-### Step 16: Additional Model Architectures
-
-- [ ] Add Llama 3.x support (verify GQA, RoPE scaling)
-- [ ] Add Qwen 2.5 support
-- [ ] Add Gemma 2 support
+- [ ] Verify GQA (Grouped Query Attention) implementation
+- [ ] Add RoPE scaling support for extended context
+- [ ] Test with Llama 3.1 8B and Qwen 2.5 7B models
 - [ ] Create architecture-specific test suites
 - [ ] Document model compatibility matrix
 
-### Step 17: Mixed Precision Strategies
+**Why**: Supporting popular open models increases the utility and adoption of Quarrel.
 
-- [ ] Implement configurable precision per layer type
-- [ ] Test F32 attention + F16 FFN combinations
-- [ ] Measure accuracy vs performance tradeoffs
-- [ ] Add precision configuration to model config
-
-### Step 18: Quantization Improvements
-
-- [ ] Implement Q3_K support (currently stubbed)
-- [ ] Add Q5_K support
-- [ ] Optimize Q4_K dequantization for tiny activations
-- [ ] Add per-layer quantization configuration
-
-### Step 19: Context Length Extensions
-
-- [ ] Implement RoPE scaling for extended context
-- [ ] Add ALiBi positional encoding support
-- [ ] Test with 8K, 16K, 32K context lengths
-- [ ] Optimize memory usage for long contexts
-
-### Step 20: Production Readiness
-
-- [ ] Add comprehensive error handling and recovery
-- [ ] Implement request timeout and cancellation
-- [ ] Add detailed performance metrics and logging
-- [ ] Create production deployment guide
-- [ ] Add health check and monitoring endpoints
-- [ ] Implement graceful shutdown and resource cleanup
+---
 
 ## Recent Accomplishments ✅
 
+- Fixed critical tensor offset bug affecting all linear transformations
 - Fixed Q4_K embedding lookup kernel (GPU-side dequantization)
 - Fixed RoPE convention mismatch (Adjacent -> Half-Half for GGUF compatibility)
 - Fixed KV cache storage heap corruption (added buffer offsets)
 - Fixed prompt-token overwrite bug in inference loop
 - Fixed head indexing in `att_fused_f16` kernel
-- Verified Mistral architecture activation stability (~1.0-2.5 max activations)
-- Added logit top-candidate debugging to engine path
+- Fixed value cache mix-up in fused attention kernel
+- Verified Mistral architecture activation stability
+- Added comprehensive logit debugging (top-5 candidates, statistics)
+- Added KV cache integrity checks during prefill
+
+## Long-Term Roadmap (Steps 11-20)
+
+1. **Flash Attention-2 Implementation** - Tiled attention for memory efficiency
+2. **Speculative Decoding** - Draft model + verification for 2-3x speedup
+3. **Continuous Batching** - Request queue and slot-based KV cache management
+4. **Paged Attention** - Virtual memory for KV cache to handle fragmentation
+5. **GPU-Side Sampling** - Move ArgMax/TopK/TopP to GPU to reduce latency
+6. **Mixed Precision Strategies** - Per-layer precision configuration
+7. **Q3_K and Q5_K Support** - Additional quantization formats
+8. **Context Length Extensions** - RoPE scaling and ALiBi support
+9. **Production Monitoring** - Metrics, health checks, graceful shutdown
+10. **Comprehensive Documentation** - Deployment guide, API reference, examples
 
 ## Notes
 
-- Steps 1-5 are critical for correctness and should be prioritized
-- Steps 6-10 focus on performance optimization
-- Steps 11-15 enable advanced inference features
-- Steps 16-20 expand model support and production readiness
+- Steps 1-5 are **critical for correctness** and block all other work
+- Steps 6-10 focus on **performance and capabilities**
+- Steps 11-20 are **advanced features** for production deployment
 - Each step should include unit tests and benchmarks
 - Maintain backward compatibility where possible
