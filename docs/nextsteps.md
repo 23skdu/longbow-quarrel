@@ -1,160 +1,212 @@
-# Quarrel Improvement Roadmap
+# Quarrel Next Steps - Weight Pipeline Debugging
 
-This document outlines the next steps to improve the performance, correctness, and capabilities of the `Longbow-Quarrel` inference engine.
+## Current Status
 
-## Immediate Next 10 Steps (Priority Order)
+**✅ Confirmed Root Cause Area:**
 
-### Step 1: Debug Mistral Attention Output Magnitude ⚠️ CRITICAL
+- llama.cpp produces "Paris" ✅
+- Quarrel produces "̣uszNV" ❌
+- Logit gap: 8.5 (correct -1.27, wrong 7.10)
+- Issue is NOT RoPE, NOT tensor offsets, NOT basic Q4K kernel
 
-**Status**: Blocking coherent text generation
-
-- [ ] Investigate why attention outputs are extremely small (~0.07-0.25 max)
-- [ ] Compare attention scores distribution with reference implementation
-- [ ] Verify attention projection weights are being applied correctly
-- [ ] Check if attention output scaling factor is missing
-- [ ] Add layer-by-layer comparison with llama.cpp for same input
-
-**Why**: Attention outputs are 10-100x smaller than expected, suggesting a fundamental issue in the attention mechanism that's causing downstream layers to receive weak signals.
-
-### Step 2: Validate Output Head Linear Transformation
-
-**Status**: Suspected numerical precision issue
-
-- [ ] Verify `Metal_LinearF16ToF32` kernel correctness with unit tests
-- [ ] Compare output head weights between Q4K and F16 versions
-- [ ] Check if logit scaling is applied correctly (temperature, etc.)
-- [ ] Validate that F16->F32 conversion preserves precision
-- [ ] Test with known-good input activations to isolate kernel vs upstream issues
-
-**Why**: The output head is the final transformation before token selection. Even small errors here can cause completely wrong token predictions.
-
-### Step 3: Fix LinearF32_Into Weight Offset Bug
-
-**Status**: Critical bug found during debugging
-
-- [ ] Add `C.int(weight.Offset)` to `Metal_MatMul_Q4K_F32` call in `LinearF32_Into`
-- [ ] Add `C.int(weight.Offset)` to `Metal_MatMul_F16_F32_F32` call in `LinearF32_Into`
-- [ ] Add unit test to verify F32 linear transformations use correct weight offsets
-- [ ] Test SmolLM2 inference to ensure F32 path still works correctly
-
-**Why**: The same offset bug that affected F16 paths also exists in the F32 linear transformation path used by SmolLM2.
-
-### Step 4: Implement Comprehensive Kernel Unit Tests
-
-**Status**: Essential for debugging and regression prevention
-
-- [ ] Create reference outputs from llama.cpp for each kernel type
-- [ ] Add unit tests for `linear_q4k_f16`, `linear_f16`, `linear_f16_f32`
-- [ ] Add unit tests for `att_scores_f16`, `att_softmax_f16`, `att_values_f16`
-- [ ] Add unit tests for `rope_f16` with various theta values
-- [ ] Add unit tests for `rmsnorm_f32_f16` and `rmsnorm_f32`
-
-**Why**: Without kernel-level unit tests, it's impossible to isolate whether bugs are in kernels, weight loading, or inference logic.
-
-### Step 5: Add Layer-by-Layer Activation Logging
-
-**Status**: Needed for systematic debugging
-
-- [ ] Implement configurable activation logging (env var or flag)
-- [ ] Log Q, K, V projections before and after RoPE
-- [ ] Log attention scores, softmax outputs, and attention results
-- [ ] Log FFN gate/up activations and final outputs
-- [ ] Create comparison script to diff against llama.cpp outputs
-
-**Why**: Systematic layer-by-layer comparison is the only way to pinpoint exactly where the inference diverges from reference.
-
-### Step 6: Optimize Fused Attention Kernel
-
-**Status**: Performance improvement opportunity
-
-- [ ] Remove the `p < -1` debug condition and re-enable fused path
-- [ ] Profile fused vs unfused attention performance
-- [ ] Extend fused kernel to support all sequence lengths (currently disabled)
-- [ ] Verify numerical correctness matches unfused path
-- [ ] Benchmark memory bandwidth improvement
-
-**Why**: Fused attention can provide 2-3x speedup by reducing memory traffic, but it's currently disabled for debugging.
-
-### Step 7: Implement Zero-Allocation Inference
-
-**Status**: Performance and stability improvement
-
-- [ ] Audit all allocations in hot path (use profiler)
-- [ ] Expand scratch buffer system to cover all temporary tensors
-- [ ] Pre-allocate all buffers during model initialization
-- [ ] Verify no allocations occur during token generation phase
-- [ ] Measure latency improvement from reduced allocation overhead
-
-**Why**: Allocations during inference cause unpredictable latency spikes and potential memory fragmentation.
-
-### Step 8: Add Multi-Token Prefill
-
-**Status**: Major performance improvement for long prompts
-
-- [ ] Refactor `Layer` to accept batch dimension for parallel token processing
-- [ ] Update Metal kernels to handle `(Batch, Seq, Head, Dim)` tensors
-- [ ] Implement parallel KV cache storage for multiple positions
-- [ ] Benchmark prompt processing speed (tokens/sec) improvement
-- [ ] Verify correctness with various batch sizes (1, 4, 8, 16)
-
-**Why**: Current single-token prefill is extremely slow for long prompts. Batched prefill can provide 10-50x speedup.
-
-### Step 9: Implement KV Cache Quantization
-
-**Status**: Memory optimization for long contexts
-
-- [ ] Add 8-bit and 4-bit KV cache storage options
-- [ ] Update attention kernels to dequantize K/V on-the-fly
-- [ ] Measure memory savings (expect 2-4x reduction)
-- [ ] Benchmark accuracy vs memory tradeoff
-- [ ] Add configuration option for KV cache precision
-
-**Why**: KV cache is the primary memory bottleneck for long contexts. Quantization can enable 2-4x longer contexts with minimal accuracy loss.
-
-### Step 10: Add Llama 3.x and Qwen 2.5 Support
-
-**Status**: Expand model compatibility
-
-- [ ] Verify GQA (Grouped Query Attention) implementation
-- [ ] Add RoPE scaling support for extended context
-- [ ] Test with Llama 3.1 8B and Qwen 2.5 7B models
-- [ ] Create architecture-specific test suites
-- [ ] Document model compatibility matrix
-
-**Why**: Supporting popular open models increases the utility and adoption of Quarrel.
+**🔍 Leading Hypothesis:**
+Q4K weight dequantization has subtle precision/accumulation issues at model scale despite passing small unit tests.
 
 ---
 
-## Recent Accomplishments ✅
+## Next 10 Steps: Weight Pipeline Tracing
 
-- Fixed critical tensor offset bug affecting all linear transformations
-- Fixed Q4_K embedding lookup kernel (GPU-side dequantization)
-- Fixed RoPE convention mismatch (Adjacent -> Half-Half for GGUF compatibility)
-- Fixed KV cache storage heap corruption (added buffer offsets)
-- Fixed prompt-token overwrite bug in inference loop
-- Fixed head indexing in `att_fused_f16` kernel
-- Fixed value cache mix-up in fused attention kernel
-- Verified Mistral architecture activation stability
-- Added comprehensive logit debugging (top-5 candidates, statistics)
-- Added KV cache integrity checks during prefill
+### Step 1: Extract Real Q4K Block from Mistral Model
 
-## Long-Term Roadmap (Steps 11-20)
+**Goal:** Get actual Q4K weight data from blk.0.attn_q.weight to test with
 
-1. **Flash Attention-2 Implementation** - Tiled attention for memory efficiency
-2. **Speculative Decoding** - Draft model + verification for 2-3x speedup
-3. **Continuous Batching** - Request queue and slot-based KV cache management
-4. **Paged Attention** - Virtual memory for KV cache to handle fragmentation
-5. **GPU-Side Sampling** - Move ArgMax/TopK/TopP to GPU to reduce latency
-6. **Mixed Precision Strategies** - Per-layer precision configuration
-7. **Q3_K and Q5_K Support** - Additional quantization formats
-8. **Context Length Extensions** - RoPE scaling and ALiBi support
-9. **Production Monitoring** - Metrics, health checks, graceful shutdown
-10. **Comprehensive Documentation** - Deployment guide, API reference, examples
+**Tasks:**
 
-## Notes
+- [ ] Load GGUF file and locate blk.0.attn_q.weight tensor
+- [ ] Extract first Q4K block (144 bytes)
+- [ ] Save to test file for repeatability
+- [ ] Log d, dmin, scales values from actual data
 
-- Steps 1-5 are **critical for correctness** and block all other work
-- Steps 6-10 focus on **performance and capabilities**
-- Steps 11-20 are **advanced features** for production deployment
-- Each step should include unit tests and benchmarks
-- Maintain backward compatibility where possible
+**Implementation:**
+
+```go
+// cmd/extract_q4k_block/main.go
+func main() {
+    f := gguf.LoadFile(modelPath)
+    tensor := findTensor(f, "blk.0.attn_q.weight")
+    block := tensor.Data[0:144]
+    os.WriteFile("mistral_q4k_block_0.bin", block, 0644)
+}
+```
+
+### Step 2: Validate CPU Q4K Dequantization Reference
+
+**Goal:** Ensure Go reference implementation matches llama.cpp exactly
+
+**Tasks:**
+
+- [ ] Port llama.cpp's dequantize_row_q4_K verbatim to Go
+- [ ] Test with actual Mistral block from Step 1
+- [ ] Compare element-wise with known-good llama.cpp output
+- [ ] Document any differences
+
+**Expected:** Should match llama.cpp within float epsilon
+
+### Step 3: Test GPU Kernel with Real Block
+
+**Goal:** Compare GPU Q4K dequant vs CPU reference on real data
+
+**Test:**
+
+```go
+func TestQ4K_RealMistralBlock(t *testing.T) {
+    block := loadFile("mistral_q4k_block_0.bin")
+    
+    cpuResult := DequantizeQ4K_Reference(block)
+    
+    // GPU via dot product
+    gpuWeight := NewQ4KTensor(1, 256)
+    gpuWeight.LoadRaw(block)
+    input := onesVector(256)
+    gpuDot := LinearInto(input, gpuWeight)
+    
+    expectedDot := sum(cpuResult)
+    
+    if abs(gpuDot - expectedDot) > 0.001 {
+        t.Errorf("GPU != CPU")
+    }
+}
+```
+
+### Step 4: Add Dequant Logging to Metal Kernel
+
+**Goal:** See actual d, dmin, d_val values inside GPU kernel
+
+**Tasks:**
+
+- [ ] Add Metal printf to log first block's d, dmin
+- [ ] Log d_val, m_val for first group
+- [ ] Compare with CPU reference values
+- [ ] Identify any divergence in conversion
+
+**Check:** Are subnormal values being preserved correctly?
+
+### Step 5: Test Full Matrix Dequantization
+
+**Goal:** Verify 4096x4096 Q4K matrix dequantizes correctly
+
+**Tasks:**
+
+- [ ] Load entire blk.0.attn_q.weight (4096x4096, Q4K)
+- [ ] Dequantize on GPU
+- [ ] Spot-check values against CPU dequant
+- [ ] Measure min/max/mean of dequantized weights
+
+**Expected:** Min ~-0.5, Max ~0.5 (typical for Q4K)
+
+### Step 6: Trace First Linear Transformation
+
+**Goal:** Verify blk.0.attn_q produces correct Q projection
+
+**Tasks:**
+
+- [ ] Get actual embedding from token 1782 ("The")
+- [ ] Run through blk.0.attn_q on CPU (reference)
+- [ ] Run through blk.0.attn_q on GPU
+- [ ] Compare output element-wise
+
+**Critical:** This is where divergence likely occurs
+
+### Step 7: Add Checkpoint Logging in Layer Method
+
+**Goal:** Capture intermediate values at each step
+
+**Add logging after:**
+
+- [ ] Embedding lookup
+- [ ] Each RMSNorm
+- [ ] Q/K/V projections
+- [ ] Attention output
+- [ ] FFN output
+
+**Output:** JSON with max/mean/sample for each checkpoint
+
+### Step 8: Binary Search for Divergence Layer
+
+**Goal:** Find exact layer where output diverges
+
+**Tasks:**
+
+- [ ] Run Mistral, capture outputs after each layer
+- [ ] Compare layer N output with expected pattern
+- [ ] Binary search: if layer 16 wrong, check layer 8, etc.
+- [ ] Identify first bad layer
+
+**Hypothesis:** If layer 0 is wrong, issue is in weights/embedding
+
+### Step 9: Test with F16 Model (if available)
+
+**Goal:** Rule out Q4K quantization entirely
+
+**Tasks:**
+
+- [ ] Find/download Mistral F16 GGUF
+- [ ] Run same prompt
+- [ ] If F16 works → Q4K bug confirmed
+- [ ] If F16 fails → deeper architecture issue
+
+### Step 10: Cross-Reference with llama.cpp Code
+
+**Goal:** Find what llama.cpp does differently
+
+**Tasks:**
+
+- [ ] Review llama.cpp's Q4K dequant implementation
+- [ ] Check for any special handling of subnormals
+- [ ] Look for scale factor adjustments
+- [ ] Identify any Metal-specific optimizations
+
+---
+
+## Quick Wins to Try First
+
+### A. Test Simpler Model
+
+Try Qwen-2.5-0.5B or TinyLlama to see if issue is Mistral-specific
+
+### B. Disable Q4K Altogether
+
+Force dequant Q4K → F16 on load, test if that fixes it
+
+### C. Compare Metal vs CPU
+
+Run first layer on CPU, rest on GPU - does it work?
+
+---
+
+## Success Criteria
+
+**Phase 1 (Steps 1-3):** Confirm GPU Q4K matches CPU reference  
+**Phase 2 (Steps 4-6):** Identify where first divergence occurs  
+**Phase 3 (Steps 7-10):** Root cause identified and fixed  
+
+**Final:** Mistral outputs "Paris" with logit > 7.0
+
+---
+
+## Tools & Scripts Needed
+
+1. `cmd/extract_q4k_block/` - Extract real weight data
+2. `cmd/trace_layer_outputs/` - Checkpoint logging
+3. `scripts/compare_with_llama.py` - Diff analysis
+4. `internal/device/q4k_reference.go` - Exact llama.cpp port
+
+---
+
+## Time Estimates
+
+- Steps 1-3: 2-3 hours (weight extraction & validation)
+- Steps 4-6: 3-4 hours (tracing pipeline)
+- Steps 7-10: 2-3 hours (binary search & fix)
+
+**Total:** 7-10 hours focused debugging to root cause
