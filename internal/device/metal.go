@@ -464,6 +464,16 @@ func (t *Tensor) ToHost() []float32 {
 	return f32
 }
 
+func (t *Tensor) ToHostBytes() []byte {
+	if err := t.ctx.WaitWithTimeout(10 * time.Second); err != nil {
+		panic(fmt.Sprintf("ToHostBytes failed: %v", err))
+	}
+	// Copy raw bytes
+	out := make([]byte, t.sizeBytes)
+	C.Metal_CopyToHost(t.buf, 0, unsafe.Pointer(&out[0]), C.int(t.sizeBytes))
+	return out
+}
+
 // ZeroInit initializes tensor buffer with zeros
 func (t *Tensor) ZeroInit() {
 	C.Metal_ZeroBuffer(t.buf, 0, C.int(t.sizeBytes))
@@ -892,9 +902,16 @@ func (s *LayerScratch) Free() {
 
 func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, kCache, vCache *Tensor, 
 	scratch *LayerScratch, 
-	pos, heads, kvHeads, headDim int, ropeTheta, eps float32, hiddenDim, ctxLen, windowSize int, globalScale float32) {
+	pos, heads, kvHeads, headDim int, ropeTheta, eps float32, hiddenDim, ctxLen, windowSize int, globalScale float32, debug bool) {
 	
+	// Probes for debugging activations
+	probe := func(tag string, t *Tensor) {
+		if debug {
+			t.ScanMax(fmt.Sprintf("[Layer %d %s]", layerIdx, tag))
+		}
+	}
 
+	probe("Input", t)
 	
 	// Use scratch buffers instead of allocating
 	normed := scratch.Normed
@@ -907,28 +924,25 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		// t.RMSNorm(attnNorm, eps) // Allocates. Need Into.
 		// For now assume FP32 residual
 	}
+	probe("Norm-1", normed)
 		
 	// 2. QKV Projections (Using Scratch)
 	qPart := scratch.QPart
 	kPart := scratch.KPart
 	vPart := scratch.VPart
 	
-	if q.dataType == DataTypeQ4K && t.dataType == DataTypeF32 {
-		// Use Fused RMSNorm + Linear (Q4K) Into scratch
-		t.RMSNormLinearIntoQ4K(attnNorm, q, qPart, eps, globalScale)
-		t.RMSNormLinearIntoQ4K(attnNorm, k, kPart, eps, globalScale)
-		t.RMSNormLinearIntoQ4K(attnNorm, v, vPart, eps, globalScale)
-	} else {
-		normed.LinearInto(q, qPart, globalScale)
-		normed.LinearInto(k, kPart, globalScale)
-		normed.LinearInto(v, vPart, globalScale)
+	doLin := func(w, dst *Tensor, tag string) {
+		if w.dataType == DataTypeQ4K && t.dataType == DataTypeF32 {
+			t.RMSNormLinearIntoQ4K(attnNorm, w, dst, eps, globalScale)
+		} else {
+			normed.LinearInto(w, dst, globalScale)
+		}
+		probe(tag, dst)
 	}
-	
-	/*
-	if layerIdx == 0 || layerIdx == 31 {
-		vPart.ScanMax(fmt.Sprintf("Layer %d V-Proj", layerIdx))
-	}
-	*/
+
+	doLin(q, qPart, "Q-Proj")
+	doLin(k, kPart, "K-Proj")
+	doLin(v, vPart, "V-Proj")
 	
 	// 3. RoPE & 4. Store K/V & 5. Attention (Serial Loop for Prefill/Batch)
 	// Our RoPE, Attention and StoreKV kernels currently only support single-token processing.
@@ -1003,6 +1017,12 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		} else {
 			// Split Path
 			scores := scratch.Scores
+			
+			// DEBUG: Check heads
+			// if i == 0 {
+			// 	fmt.Printf("[Metal Layer] C.Metal_AttScores_F16 Call: p=%d heads=%d kvHeads=%d dim=%d stride=%d\n", p, heads, kvHeads, headDim, ctxLen)
+			// }
+			
 			C.Metal_AttScores_F16(t.ctx.ref, qPart.buf, C.int(qPart.Offset + offQ),
 				kCache.buf, C.int(kCache.Offset),
 				scores.buf, C.int(scores.Offset), // Dst
@@ -1031,10 +1051,8 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 
 	// Output Projection
 	scratch.AttOut.LinearInto(o, resAtt, globalScale)
-	
-	if layerIdx == 0 {
-		resAtt.ScanMax(fmt.Sprintf("Layer %d Att-Final", layerIdx))
-	}
+	probe("Att-Final", resAtt)
+	probe("Att-Out", scratch.AttOut)
 
 	
 	
@@ -1095,9 +1113,9 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		
 
 		// Debug FFN Output
-		if layerIdx == 0 || layerIdx == 5 {
-			resFFN.ScanMax(fmt.Sprintf("Layer %d FFN-Final", layerIdx))
-		}
+		probe("FFN-Final", resFFN)
+		probe("Gate", gatePart)
+		probe("Up", upPart)
 
 		// normedFFN.ReturnToPool() // Now a scratch buffer
 		// resFFN.ReturnToPool() // Now a scratch buffer
@@ -1221,9 +1239,21 @@ func (t *Tensor) RMSNorm_F32_Into(weight *Tensor, eps float32, out *Tensor) {
 // Handling Q4K weights correctly
 func (t *Tensor) LinearF32_Into(weight *Tensor, out *Tensor, scale float32) {
 	if weight.dataType == DataTypeQ4K {
-		// Q4K weights * FP32 input -> FP32 output
-		C.Metal_MatMul_Q4K_F32(t.ctx.ref, weight.buf, C.int(weight.Offset), C.int(0), t.buf, C.int(t.Offset), C.int(0), out.buf, C.int(out.Offset),
-			C.int(t.rows), C.int(weight.rows), C.int(weight.cols), C.float(scale))
+		if out.dataType == DataTypeF16 {
+			C.Metal_MatMul_Q4K_F32_F16(t.ctx.ref, weight.buf, C.int(weight.Offset), t.buf, C.int(t.Offset), out.buf, C.int(out.Offset),
+				C.int(t.rows), C.int(weight.rows), C.int(weight.cols), C.float(scale))
+		} else {
+			C.Metal_MatMul_Q4K_F32(t.ctx.ref, weight.buf, C.int(weight.Offset), 0, t.buf, C.int(t.Offset), 0, out.buf, C.int(out.Offset),
+				C.int(t.rows), C.int(weight.rows), C.int(weight.cols), C.float(scale))
+		}
+	} else if weight.dataType == DataTypeQ6K {
+		if out.dataType == DataTypeF16 {
+			C.Metal_MatMul_Q6K_F32_F16(t.ctx.ref, weight.buf, C.int(weight.Offset), t.buf, C.int(t.Offset), out.buf, C.int(out.Offset),
+				C.int(t.rows), C.int(weight.rows), C.int(weight.cols), C.float(scale))
+		} else {
+			C.Metal_MatMul_Q6K_F32(t.ctx.ref, weight.buf, C.int(weight.Offset), 0, t.buf, C.int(t.Offset), 0, out.buf, C.int(out.Offset),
+				C.int(t.rows), C.int(weight.rows), C.int(weight.cols), C.float(scale))
+		}
 	} else {
 		// F16 weights * FP32 input -> FP32 output
 		// Use Metal_MatMul_F16_F32_F32 (Kernel linear_f16_f32) checks float* input
@@ -1441,6 +1471,9 @@ func (t *Tensor) ToHostF32() []float32 {
 
 // AttentionScores computes Q·K^T scores with scaling
 func (t *Tensor) AttentionScores(kCache *Tensor, scores *Tensor, pos, numHeads, kvHeads, headDim, stride, windowSize int) {
+	// DEBUG: Trace args
+	fmt.Printf("[Metal] AttentionScores: pos=%d heads=%d kvheads=%d dim=%d stride=%d win=%d\n", pos, numHeads, kvHeads, headDim, stride, windowSize)
+	
 	C.Metal_AttScores_F16(
 		t.ctx.ref,
 		t.buf, C.int(t.Offset),
@@ -1458,6 +1491,16 @@ func (t *Tensor) AttentionScores(kCache *Tensor, scores *Tensor, pos, numHeads, 
 // NewTensorF32 creates a new F32 tensor (alias for NewTensorFP32)
 func (c *Context) NewTensorF32(rows, cols int) *Tensor {
 	return c.NewTensorFP32(rows, cols)
+}
+
+// DebugRoPEFreq runs the debug kernel to compute RoPE Frequencies
+func (t *Tensor) DebugRoPEFreq(headDim int, theta float32, pos int) {
+	C.Metal_DebugRoPEFreq(t.ctx.ref, t.buf, C.int(headDim), C.float(theta), C.int(pos))
+}
+
+// DebugDot computes dot product using debug kernel
+func (t *Tensor) DebugDot(b *Tensor, output *Tensor, dim int) {
+	C.Metal_DebugDot(t.ctx.ref, t.buf, b.buf, output.buf, C.int(dim))
 }
 
 // StoreKV stores K and V projections into their respective caches

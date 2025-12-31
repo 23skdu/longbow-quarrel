@@ -26,6 +26,9 @@
 // FP32 Pipelines
 @property(strong) id<MTLComputePipelineState> pipelineRMSNorm_F32;
 @property(strong) id<MTLComputePipelineState> pipelineMatMul_Q4K_F32;
+@property(strong) id<MTLComputePipelineState> pipelineMatMul_Q6K_F32;
+@property(strong) id<MTLComputePipelineState> pipelineMatMul_Q4K_F32_F16;
+@property(strong) id<MTLComputePipelineState> pipelineMatMul_Q6K_F32_F16;
 @property(strong) id<MTLComputePipelineState> pipelineAdd_F32;
 @property(strong) id<MTLComputePipelineState> pipelineSwiGLU_F32;
 @property(strong) id<MTLComputePipelineState> pipelineMatMul_F16_F32;
@@ -40,6 +43,8 @@
 @property(strong) id<MTLComputePipelineState> pipelineRMSNorm_F32_F16;
 @property(strong) id<MTLComputePipelineState> pipelineAdd_F32_F16;
 @property(strong) id<MTLComputePipelineState> pipelineRMSNormLinear_Q4K_F16;
+@property(strong) id<MTLComputePipelineState> pipelineDebugRoPEFreq;
+@property(strong) id<MTLComputePipelineState> pipelineDebugDot;
 @property(strong) id<MTLComputePipelineState> pipelineSwiGLULinear_Q4K_F16;
 @property(strong) id<MTLCommandBuffer> currentCommandBuffer;
 @property(strong) id<MTLComputeCommandEncoder> currentEncoder;
@@ -163,7 +168,7 @@ MetalContextRef Metal_Init(const char *libSource) {
   ctx.pipelineCopy_F16 = loadPipeline(ctx, @"copy_f16");
   ctx.pipelineSwiGLU_F16 = loadPipeline(ctx, @"swiglu_f16");
   ctx.pipelineSoftmax_F16 = loadPipeline(ctx, @"softmax_f16");
-  ctx.pipelineAttScores_F16 = loadPipeline(ctx, @"att_scores_f16");
+  ctx.pipelineAttScores_F16 = loadPipeline(ctx, @"att_scores_f16_v2");
   ctx.pipelineAttValues_F16 = loadPipeline(ctx, @"att_values_f16");
   ctx.pipelineAttFused_F16 = loadPipeline(ctx, @"att_fused_f16");
   ctx.pipelineScale_F16 = loadPipeline(ctx, @"scale_f16");
@@ -171,6 +176,9 @@ MetalContextRef Metal_Init(const char *libSource) {
   // FP32 Load
   ctx.pipelineRMSNorm_F32 = loadPipeline(ctx, @"rmsnorm_f32");
   ctx.pipelineMatMul_Q4K_F32 = loadPipeline(ctx, @"linear_q4k_f32");
+  ctx.pipelineMatMul_Q6K_F32 = loadPipeline(ctx, @"linear_q6k_f32");
+  ctx.pipelineMatMul_Q4K_F32_F16 = loadPipeline(ctx, @"linear_q4k_f32_f16");
+  ctx.pipelineMatMul_Q6K_F32_F16 = loadPipeline(ctx, @"linear_q6k_f32_f16");
   ctx.pipelineAdd_F32 = loadPipeline(ctx, @"add_f32");
   ctx.pipelineSwiGLU_F32 = loadPipeline(ctx, @"swiglu_f32");
   ctx.pipelineMatMul_F16_F32 = loadPipeline(ctx, @"linear_f16_f32");
@@ -186,6 +194,8 @@ MetalContextRef Metal_Init(const char *libSource) {
   ctx.pipelineAdd_F32_F16 = loadPipeline(ctx, @"add_f32_f16");
   ctx.pipelineRMSNormLinear_Q4K_F16 =
       loadPipeline(ctx, @"rmsnorm_linear_q4k_f16");
+  ctx.pipelineDebugRoPEFreq = loadPipeline(ctx, @"debug_rope_freq");
+  ctx.pipelineDebugDot = loadPipeline(ctx, @"debug_dot");
   ctx.pipelineSwiGLULinear_Q4K_F16 =
       loadPipeline(ctx, @"swiglu_linear_q4k_f16");
 
@@ -224,7 +234,11 @@ MetalBufferRef Metal_Alloc(MetalContextRef ctx, long long size) {
 #if !__has_feature(objc_arc)
   [buf retain];
 #endif
+#if __has_feature(objc_arc)
   return (__bridge_retained MetalBufferRef)buf;
+#else
+  return (MetalBufferRef)buf;
+#endif
 }
 
 MetalBufferRef Metal_AllocPrivate(MetalContextRef ctx, long long size) {
@@ -239,7 +253,11 @@ MetalBufferRef Metal_AllocPrivate(MetalContextRef ctx, long long size) {
 #if !__has_feature(objc_arc)
   [buf retain];
 #endif
+#if __has_feature(objc_arc)
   return (__bridge_retained MetalBufferRef)buf;
+#else
+  return (MetalBufferRef)buf;
+#endif
 }
 void Metal_FreeBuffer(MetalContextRef ctx, MetalBufferRef buf) {
 #if __has_feature(objc_arc)
@@ -293,7 +311,11 @@ MetalBufferRef Metal_NewBufferFromHeap(void *heapRef, long long size) {
 #if !__has_feature(objc_arc)
   [buf retain];
 #endif
+#if __has_feature(objc_arc)
   return (__bridge_retained MetalBufferRef)buf;
+#else
+  return (MetalBufferRef)buf;
+#endif
 }
 
 void Metal_FreeHeap(void *heap) {
@@ -339,6 +361,41 @@ void Metal_Embedding_F16(MetalContextRef ctx, MetalBufferRef weights, int offW,
   [enc setBytes:&cols length:4 atIndex:3];
   [enc dispatchThreads:MTLSizeMake(cols, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(MIN(cols, 256), 1, 1)];
+  [mc barrier];
+}
+
+void Metal_DebugRoPEFreq(MetalContextRef ctx, MetalBufferRef output,
+                         int headDim, float theta, int pos) {
+  MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
+  id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
+  [enc setComputePipelineState:mc.pipelineDebugRoPEFreq];
+  [enc setBuffer:(__bridge id<MTLBuffer>)output offset:0 atIndex:0];
+  [enc setBytes:&headDim length:4 atIndex:1];
+  [enc setBytes:&theta length:4 atIndex:2];
+  [enc setBytes:&pos length:4 atIndex:3];
+
+  // Launch threads for HeadDim/2 (pairs)
+  // Actually kernel uses i = tid, tid < headDim/2.
+  // So we launch headDim/2 threads.
+  int threads = headDim / 2;
+  [enc dispatchThreads:MTLSizeMake(threads, 1, 1)
+      threadsPerThreadgroup:MTLSizeMake(MIN(threads, 32), 1, 1)];
+  [mc barrier];
+}
+
+void Metal_DebugDot(MetalContextRef ctx, MetalBufferRef a, MetalBufferRef b,
+                    MetalBufferRef output, int dim) {
+  MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
+  id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
+  [enc setComputePipelineState:mc.pipelineDebugDot];
+  [enc setBuffer:(__bridge id<MTLBuffer>)a offset:0 atIndex:0];
+  [enc setBuffer:(__bridge id<MTLBuffer>)b offset:0 atIndex:1];
+  [enc setBuffer:(__bridge id<MTLBuffer>)output offset:0 atIndex:2];
+  [enc setBytes:&dim length:4 atIndex:3];
+
+  // Single group, 32 threads
+  [enc dispatchThreads:MTLSizeMake(32, 1, 1)
+      threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
   [mc barrier];
 }
 
@@ -808,6 +865,69 @@ void Metal_MatMul_Q4K_F32(MetalContextRef ctx, MetalBufferRef a, int offA,
   [enc setBytes:&N length:4 atIndex:4];
   [enc setBytes:&scale length:4 atIndex:5];
 
+  [enc dispatchThreads:MTLSizeMake(32, N, M)
+      threadsPerThreadgroup:MTLSizeMake(32, 4, 1)];
+  [mc barrier];
+}
+
+void Metal_MatMul_Q6K_F32(MetalContextRef ctx, MetalBufferRef a, int offA,
+                          int transA, MetalBufferRef b, int offB, int transB,
+                          MetalBufferRef c, int offC, int M, int N, int K,
+                          float scale) {
+  MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
+  id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
+
+  if (!mc.pipelineMatMul_Q6K_F32) {
+    fprintf(
+        stderr,
+        "ERROR: pipelineMatMul_Q6K_F32 is NULL! Kernel failed to compile.\n");
+    fflush(stderr);
+    return;
+  }
+
+  [enc setComputePipelineState:mc.pipelineMatMul_Q6K_F32];
+
+  [enc setBuffer:(__bridge id<MTLBuffer>)a offset:offA atIndex:0]; // Weights
+  [enc setBuffer:(__bridge id<MTLBuffer>)b offset:offB atIndex:1]; // Input
+  [enc setBuffer:(__bridge id<MTLBuffer>)c offset:offC atIndex:2]; // Output
+  [enc setBytes:&K length:4 atIndex:3];
+  [enc setBytes:&N length:4 atIndex:4];
+  [enc setBytes:&scale length:4 atIndex:5];
+
+  [enc dispatchThreads:MTLSizeMake(32, N, M)
+      threadsPerThreadgroup:MTLSizeMake(32, 4, 1)];
+  [mc barrier];
+}
+
+void Metal_MatMul_Q4K_F32_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
+                              MetalBufferRef b, int offB, MetalBufferRef c,
+                              int offC, int M, int N, int K, float scale) {
+  MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
+  id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
+  [enc setComputePipelineState:mc.pipelineMatMul_Q4K_F32_F16];
+  [enc setBuffer:(__bridge id<MTLBuffer>)a offset:offA atIndex:0]; // Weights
+  [enc setBuffer:(__bridge id<MTLBuffer>)b offset:offB atIndex:1]; // Input
+  [enc setBuffer:(__bridge id<MTLBuffer>)c offset:offC atIndex:2]; // Output
+  [enc setBytes:&K length:4 atIndex:3];
+  [enc setBytes:&N length:4 atIndex:4];
+  [enc setBytes:&scale length:4 atIndex:5];
+  [enc dispatchThreads:MTLSizeMake(32, N, M)
+      threadsPerThreadgroup:MTLSizeMake(32, 4, 1)];
+  [mc barrier];
+}
+
+void Metal_MatMul_Q6K_F32_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
+                              MetalBufferRef b, int offB, MetalBufferRef c,
+                              int offC, int M, int N, int K, float scale) {
+  MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
+  id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
+  [enc setComputePipelineState:mc.pipelineMatMul_Q6K_F32_F16];
+  [enc setBuffer:(__bridge id<MTLBuffer>)a offset:offA atIndex:0]; // Weights
+  [enc setBuffer:(__bridge id<MTLBuffer>)b offset:offB atIndex:1]; // Input
+  [enc setBuffer:(__bridge id<MTLBuffer>)c offset:offC atIndex:2]; // Output
+  [enc setBytes:&K length:4 atIndex:3];
+  [enc setBytes:&N length:4 atIndex:4];
+  [enc setBytes:&scale length:4 atIndex:5];
   [enc dispatchThreads:MTLSizeMake(32, N, M)
       threadsPerThreadgroup:MTLSizeMake(32, 4, 1)];
   [mc barrier];

@@ -49,14 +49,16 @@ func main() {
 	// --- 1. GPU Execution ---
 	fmt.Println("Running GPU Layer...")
 	
-	// Need Scratch
-	scratch := e.Ctx.NewLayerScratch(1, dim, e.Config.HiddenDim, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, 1, e.Config.VocabSize)
+	// Use adequate capacity for debugging
+	debugSeqLen := 128 
+	scratch := e.Ctx.NewLayerScratch(1, dim, e.Config.HiddenDim, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, debugSeqLen, e.Config.VocabSize)
 	defer scratch.Free()
 	
 	// Need KV Cache (Dummy)
 	kvDim := e.Config.KVHeads * e.Config.HeadDim
-	kCache := e.Ctx.NewTensor(1, kvDim) // 1 token capacity
-	vCache := e.Ctx.NewTensor(1, kvDim)
+	// Must be large enough for debugSeqLen positions!
+	kCache := e.Ctx.NewTensor(debugSeqLen, kvDim) 
+	vCache := e.Ctx.NewTensor(debugSeqLen, kvDim)
 	
 	// Run Layer
 	// func (t *Tensor) Layer(...)
@@ -75,8 +77,10 @@ func main() {
 		0, // CachePos
 		e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim,
 		e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim,
-		1, // SeqLen
+		debugSeqLen, // SeqLen (Stride)
+		e.Config.WindowSize,
 		e.GlobalScale,
+		true, // DebugActivations
 	)
 	
 	e.Ctx.Synchronize()
@@ -111,57 +115,173 @@ func main() {
 	
 	// Compare Norm
 	assertClose("RMSNorm", cpuNormed, gpuNormed, 1e-3)
+	fmt.Printf("RMSNorm Sample: CPU %v GPU %v\n", cpuNormed[:4], gpuNormed[:4])
 	
-	// 2b. Q/K/V Projections
-	// wQ := loadW(fmt.Sprintf("blk.%d.attn_q.weight", layerIdx))
+	wQ := loadW(fmt.Sprintf("blk.%d.attn_q.weight", layerIdx))
+	cpuQ := device.CPUMatMul(cpuNormed, wQ, 1, e.Config.Heads*e.Config.HeadDim, e.Config.Dim)
 
-	// 2c. K/V Projections
 	wK := loadW(fmt.Sprintf("blk.%d.attn_k.weight", layerIdx))
-	cpuK := device.CPUMatMul(cpuNormed, wK, 1, e.Config.KVHeads * e.Config.HeadDim, e.Config.Dim)
-	assertClose("K Projection", cpuK, gpuK, 5e-2)
-	
-	// wV
-	// gpuV := scratch.VPart.ToHost() // Need to read GPU V
-	// (Add GPU read above first)
-	
-	// Q, K, V are correct.
-	// Now Check RoPE?
-	// GPU RoPE is in-place on Q/K.
-	// cpuQ is raw. We need to RoPE it.
-	
-	// Apply RoPE to CPU Q/K
-	// RoPE(data, pos, heads, headDim, theta)
-	// cpuQ_RoPE := device.CPURoPE(cpuQ, 0, e.Config.Heads, e.Config.HeadDim, e.Config.RopeTheta)
-	// cpuK_RoPE := device.CPURoPE(cpuK, 0, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta)
-	
-	// Check RoPE
-	// GPU Q/K are modified in place? 
-	// scratch.QPart is modified in place by Layer?
-	// Yes, Layer calls QPart.RoPE().
-	// So gpuQ in `gpuQ := scratch.QPart.ToHost()` (done after Sync) IS RoPE'd.
-	// So `Q Projection` check ABOVE passed RoPE'd Q against Raw Q?
-	// Wait. 
-	// If GPU Q is RoPE'd. And CPU Q is Raw.
-	// They shouldn't match!
-	// Unless Pos=0 RoPE is Identity?
-	// RoPE(pos=0).
-	// theta = 10000^-0 = 1.
-	// freq = 0.
-	// cos(0)=1. sin(0)=0.
-	// out = x*1 - y*0 = x.
-	// YES. At Pos 0, RoPE is IDENTITY.
-	// So my check passed because Pos=0.
-	// This does NOT verify RoPE logic for Pos > 0.
-	// But it implies MatMul is correct.
-	
-	// Let's check Attention Logic.
-	// Attn = Softmax(Q.K) . V
-	// We need V.
+	cpuK := device.CPUMatMul(cpuNormed, wK, 1, e.Config.KVHeads*e.Config.HeadDim, e.Config.Dim)
 
+	wV := loadW(fmt.Sprintf("blk.%d.attn_v.weight", layerIdx))
+	cpuV := device.CPUMatMul(cpuNormed, wV, 1, e.Config.KVHeads*e.Config.HeadDim, e.Config.Dim)
+
+	// Since GPU Layer call above modified QPart/KPart in place with RoPE @ pos 0
+	// We should first check them @ pos 0 where RoPE is identity.
+	gpuQ_pos0 := scratch.QPart.ToHost()
+	gpuK_pos0 := scratch.KPart.ToHost()
+	gpuV := scratch.VPart.ToHost()
+
+	assertClose("Q Projection", cpuQ, gpuQ_pos0, 0.05)
+	fmt.Printf("Q Projection Sample: CPU %v GPU %v\n", cpuQ[:4], gpuQ_pos0[:4])
+	assertClose("K Projection", cpuK, gpuK_pos0, 0.05)
+	assertClose("V Projection", cpuV, gpuV, 0.05)
+
+	// Now check RoPE at Pos 1
+	// check RoPE at Pos 1 (it was applied during the first Layer call)
+	gpuQ_RoPE := scratch.QPart.ToHost()
+	// cpuQ already has both tokens? No, cpuQ was computed for rows.
+	// We need cpuQ for rows 0 and 1.
+	cpuQ_RoPE := device.CPURoPE(cpuQ, 0, e.Config.Heads, e.Config.HeadDim, e.Config.RopeTheta)
+	assertClose("RoPE Q @ Pos 0/1", cpuQ_RoPE, gpuQ_RoPE, 1e-2)
+
+	// Check Scores (Q*K)
+	// GPU scores are in scratch.Scores (which is not copied to host yet)
+	gpuScores := scratch.Scores.ToHost()
 	
-	// ... (Rest of layer)
-	// For now, let's just check up to Q projection. 
-	// If Q matches, then weights are correct.
+	// Q_pos1 is computed above as cpuQ_RoPE
+	// K_pos0 and K_pos1:
+	cpuK_Pos0 := device.CPURoPE(cpuK, 0, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta)
+	cpuK_Pos1 := device.CPURoPE(cpuK, 1, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta)
+	
+	scale := 1.0 / float32(math.Sqrt(float64(e.Config.HeadDim)))
+	
+	// Compute manual dot product for Head 0
+	// Head 0 Q is cpuQ_RoPE[0:HeadDim]
+	// Head 0 K is cpuK_Pos0[0:HeadDim]
+	
+	// Dot 0 (Pos 1 vs Pos 0)
+	var dot0 float32
+	for i := 0; i < e.Config.HeadDim; i++ {
+		dot0 += cpuQ_RoPE[i] * cpuK_Pos0[i]
+	}
+	dot0 *= scale
+	
+	// Dot 1 (Pos 1 vs Pos 1)
+	var dot1 float32
+	for i := 0; i < e.Config.HeadDim; i++ {
+		dot1 += cpuQ_RoPE[i] * cpuK_Pos1[i]
+	}
+	dot1 *= scale
+	
+	// --- CPU Softmax ---
+	maxScore := dot0
+	if dot1 > maxScore { maxScore = dot1 }
+	exp0 := float32(math.Exp(float64(dot0 - maxScore)))
+	exp1 := float32(math.Exp(float64(dot1 - maxScore)))
+	sumExp := exp0 + exp1
+	prob0 := exp0 / sumExp
+	prob1 := exp1 / sumExp
+	
+	fmt.Printf("Softmax Probabilities (CPU): [0] %f [1] %f\n", prob0, prob1)
+	fmt.Printf("Attention Scores (GPU Probs): [0] %f [1] %f\n", gpuScores[0], gpuScores[1])
+	
+	diffProb0 := float32(math.Abs(float64(prob0 - gpuScores[0])))
+	diffProb1 := float32(math.Abs(float64(prob1 - gpuScores[1])))
+	
+	if diffProb0 > 0.05 || diffProb1 > 0.05 {
+		fmt.Printf("FAIL: Softmax Mismatch > 0.05\n")
+	} else {
+		fmt.Printf("PASS: Softmax Proabilities Match (Scores are correct).\n")
+	}
+	
+	// --- Check Attention Values (Weighted Sum) ---
+	// Need vCache
+	gpuVCacheData := vCache.ToHost()
+	// vCache shape: [debugSeqLen, KVHeads * HeadDim] or [debugSeqLen, KVHeads, HeadDim]?
+	// Tensor is flat. 
+	// Stride per row = KVHeads * HeadDim = 8 * 128 = 1024 floats.
+	// Head 0 is first 128 elements of row.
+	
+	row0Offset := 0 * 1024
+	row1Offset := 1 * 1024
+	
+	// Read V0 and V1 for Head 0
+	v0 := gpuVCacheData[row0Offset : row0Offset+128]
+	v1 := gpuVCacheData[row1Offset : row1Offset+128]
+	
+	// Compute Expected Weighted Sum for Head 0
+	expectedOut := make([]float32, 128)
+	for i := 0; i < 128; i++ {
+		expectedOut[i] = prob0 * v0[i] + prob1 * v1[i]
+	}
+	
+	// Read GPU AttOut
+	// AttOut is [1, Heads * HeadDim] = [1, 4096]
+	// Head 0 is first 128 elements.
+	gpuAttOut := scratch.AttOut.ToHost() // This might be overwritten by O-Projection?
+	// Wait. Layer code:
+	// Output Projection: scratch.AttOut.LinearInto(...) -> scratch.ResAtt
+	// So scratch.AttOut is INPUT to Linear. It should be preserved?
+	// LinearInto reads w and src, writes dst.
+	// scratch.AttOut is src.
+	// So it should be preserved.
+	
+	gpuHead0Out := gpuAttOut[:128]
+	
+	fmt.Printf("AttOut Sample (First 5): CPU %v GPU %v\n", expectedOut[:5], gpuHead0Out[:5])
+	assertClose("Attention Values (Head 0)", expectedOut, gpuHead0Out, 0.05)
+
+	// --- Debug RoPE Frequencies ---
+	fmt.Println("Debugging RoPE Frequencies...")
+	freqBuf := e.Ctx.NewTensorFP32(1, e.Config.HeadDim/2)
+	freqBuf.DebugRoPEFreq(e.Config.HeadDim, e.Config.RopeTheta, 1) // Pos 1
+	e.Ctx.Synchronize()
+	gpuFreq := freqBuf.ToHost()
+	
+	// CPU Freq
+	cpuFreq := make([]float32, e.Config.HeadDim/2)
+	for i := 0; i < e.Config.HeadDim/2; i++ {
+		expVar := -2.0 * float32(i) / float32(e.Config.HeadDim)
+		cpuFreq[i] = 1.0 * float32(math.Pow(float64(e.Config.RopeTheta), float64(expVar)))
+	}
+	
+	fmt.Printf("RoPE Freq Sample (First 5): CPU %v GPU %v\n", cpuFreq[:5], gpuFreq[:5])
+	fmt.Printf("RoPE Freq Sample (Last 5): CPU %v GPU %v\n", cpuFreq[59:], gpuFreq[59:]) // idx 0..63
+	assertClose("RoPE Frequencies", cpuFreq, gpuFreq, 1e-3)
+
+	// --- Check Dot Product of GPU Tensors ---
+	gpuK_Pos0 := gpuK_pos0 // From line 130
+	// gpuQ_RoPE is Q @ Pos 1
+	
+	var gpuDot0 float32
+	for i := 0; i < e.Config.HeadDim; i++ {
+		gpuDot0 += gpuQ_RoPE[i] * gpuK_Pos0[i]
+	}
+	gpuDot0 *= scale
+	
+	fmt.Printf("GPU Dot Product (Host Calc): %f\n", gpuDot0)
+	fmt.Printf("GPU Attn Score (Kernel):     %f\n", gpuScores[0])
+	
+	diffGpu := float32(math.Abs(float64(gpuDot0 - gpuScores[0])))
+	if diffGpu > 0.01 {
+		fmt.Printf("FAIL: Kernel Logic Mismatch! Host-calculated dot product of GPU tensors %f != Kernel output %f\n", gpuDot0, gpuScores[0])
+	} else {
+		fmt.Printf("PASS: Kernel Logic Matches Host Dot Product. Mismatch is in Data values.\n")
+	}
+	
+	// --- GPU Debug Dot ---
+	fmt.Println("Running GPU Debug Dot Kernel...")
+	debugDotBuf := e.Ctx.NewTensorFP32(1, 1)
+	// Compute Dot(QPart, kCache) for first HeadDim elements
+	scratch.QPart.DebugDot(kCache, debugDotBuf, e.Config.HeadDim)
+	e.Ctx.Synchronize()
+	gpuDebugDot := debugDotBuf.ToHost()[0]
+	// debug_dot returns unscaled sum.
+	// scale it
+	gpuDebugDotScaled := gpuDebugDot * scale
+	
+	fmt.Printf("GPU Debug Dot (Kernel): %f (Scaled: %f)\n", gpuDebugDot, gpuDebugDotScaled)
 }
 
 func assertClose(name string, cpu, gpu []float32, tol float64) {

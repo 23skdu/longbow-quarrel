@@ -135,6 +135,65 @@ func CPUSwiGLU(gate, up []float32) []float32 {
 const BlockSize = 256
 const Q4KBlockSize = 144
 
+// DeQuantizeQ4KRow decodes a single row of Q4K/Q4_K data into F32 weights.
+// rowData: Raw bytes for the row (length = dim/256 * 144)
+// dim: Number of weights (must be multiple of 256)
+func DeQuantizeQ4KRow(rowData []byte, dim int) []float32 {
+	if len(rowData) != (dim/BlockSize)*Q4KBlockSize {
+		// Try strict check
+		if len(rowData) < (dim/BlockSize)*Q4KBlockSize {
+			panic(fmt.Sprintf("Q4K row size too small: %d vs expected %d", len(rowData), (dim/BlockSize)*Q4KBlockSize))
+		}
+	}
+	out := make([]float32, dim)
+	
+	numBlocks := dim / BlockSize
+	for bIdx := 0; bIdx < numBlocks; bIdx++ {
+		blockOff := bIdx * Q4KBlockSize
+		
+		// Decode Block (Same logic as MatMul)
+		d16 := uint16(rowData[blockOff]) | (uint16(rowData[blockOff+1]) << 8)
+		dm16 := uint16(rowData[blockOff+2]) | (uint16(rowData[blockOff+3]) << 8)
+		
+		d := Float16ToFloat32(d16)
+		dmin := Float16ToFloat32(dm16)
+		
+		scales := rowData[blockOff+4 : blockOff+16]
+		qs := rowData[blockOff+16 : blockOff+144]
+		
+		var sc [8]uint8
+		var m [8]uint8
+		
+		for k := 0; k < 8; k++ {
+			if k < 4 {
+				sc[k] = scales[k] & 63
+				m[k] = scales[k+4] & 63
+			} else {
+				sc[k] = (scales[k+4] & 0xF) | ((scales[k-4] >> 6) << 4)
+				m[k] = (scales[k+4] >> 4) | ((scales[k] >> 6) << 4)
+			}
+		}
+		
+		// Fill 256 weights
+		outBlockOff := bIdx * BlockSize
+		for sb := 0; sb < 8; sb++ {
+			dVal := d * float32(sc[sb])
+			mVal := dmin * float32(m[sb])
+			
+			for l := 0; l < 16; l++ {
+				val := qs[sb*16+l]
+				w0 := dVal * float32(val & 0xF) - mVal
+				w1 := dVal * float32(val >> 4) - mVal
+				
+				// Sequential layout logic
+				out[outBlockOff + sb*32 + l] = w0
+				out[outBlockOff + sb*32 + l + 16] = w1
+			}
+		}
+	}
+	return out
+}
+
 // CPUQ4KMatMul computes A * B^T where B is Q4K quantized byte array.
 // A: [M, K] (F32), B: [N, K] (Q4K bytes). Out: [M, N]
 // Input A is F32 here for simplicity, but we can verify F16 accuracy.

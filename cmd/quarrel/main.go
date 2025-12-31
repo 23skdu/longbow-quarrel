@@ -29,6 +29,7 @@ var (
 	repPenalty  = flag.Float64("penalty", 1.1, "Repetition penalty")
 	chatML      = flag.Bool("chatml", false, "Wrap prompt in ChatML template")
 	debugDequant = flag.Bool("debug-dequant", false, "Enable dequantization debug dump")
+	debugActivations = flag.Bool("debug-activations", false, "Enable layer-by-layer activation dumping")
 )
 
 func main() {
@@ -141,10 +142,11 @@ func main() {
 			TopP:        *topP,
 			RepPenalty:  *repPenalty,
 			Seed:        time.Now().UnixNano(),
+			DebugActivations: *debugActivations,
 		}
 		
-		log.Printf("Sampling Config: Temp=%.2f TopK=%d TopP=%.2f Penalty=%.2f", 
-			*temperature, *topK, *topP, *repPenalty)
+		log.Printf("Sampling Config: Temp=%.2f TopK=%d TopP=%.2f Penalty=%.2f (DebugActivations=%v)", 
+			*temperature, *topK, *topP, *repPenalty, *debugActivations)
 			
 		result, err := e.Infer(inputTokens, *numTokens, samplerConfig)
 		if err != nil {
