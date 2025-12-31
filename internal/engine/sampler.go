@@ -13,6 +13,7 @@ type SamplerConfig struct {
 	TopP        float64
 	RepPenalty  float64 // 1.0 = no penalty, > 1.0 = penalty
 	Seed        int64
+	DebugActivations bool
 }
 
 type Sampler struct {

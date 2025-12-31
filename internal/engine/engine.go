@@ -254,7 +254,7 @@ func (e *Engine) loadModel(path string) error {
 			} else if t.Type == gguf.GGMLTypeQ4_K {
 				// Type 12 (Q4_K). 
 				
-				if e.Config.Dim < 1024 || strings.Contains(t.Name, "token_embd.weight") {
+				if e.Config.Dim < 1024 {
 					f32Data := gguf.DequantizeQ4K(t.Data, numElements)
 					mt = e.Ctx.NewTensor(rows, cols)
 					mt.LoadFrom(f32Data)
@@ -266,6 +266,7 @@ func (e *Engine) loadModel(path string) error {
 					if uint64(len(t.Data)) < uint64(dataBytes) {
 						return fmt.Errorf("tensor %s data truncated (Need %d, Has %d)", t.Name, dataBytes, len(t.Data))
 					}
+					
 					mt.LoadFromRaw(t.Data[:dataBytes])
 					
 				}
@@ -273,9 +274,6 @@ func (e *Engine) loadModel(path string) error {
 			} else if t.Type == gguf.GGMLTypeQ6_K {
 				// Type 14 (Q6_K).
 				f32Data := gguf.DequantizeQ6K(t.Data, numElements)
-				if t.Name == "output.weight" {
-					fmt.Printf("DEBUG: output.weight probe [0:10]: %v\n", f32Data[:10])
-				}
 				mt = e.Ctx.NewTensor(rows, cols)
 				mt.LoadFrom(f32Data)
 
@@ -488,7 +486,7 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 
 			currentF32.Layer(l, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, kCache, vCache,
 				scratch, // Pass scratch
-				e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen, e.Config.WindowSize, e.GlobalScale)
+				e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen, e.Config.WindowSize, e.GlobalScale, samplerConfig.DebugActivations)
 			
 			// Log layer output if enabled and first token
 			if i == 0 {
@@ -587,7 +585,7 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 			// Layer now handles F32 currentF32, using mixed precision
 			currentF32.Layer(l, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, kCache, vCache,
 				scratch, // Pass scratch
-				e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen, e.Config.WindowSize, e.GlobalScale) // Corrected variable names
+				e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen, e.Config.WindowSize, e.GlobalScale, samplerConfig.DebugActivations)
 		}
 		
 		// Final Norm (F32 -> F16)
@@ -598,9 +596,10 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 		
 		// Output Head (F16 -> F32 Logits)
 		// Reuse pre-allocated logits buffer
-		// scratch.Normed contains result. Use it.
 		// Output into scratch.Logits (which is 'logits')
-		scratch.Normed.LinearToFP32_Into(e.Weights.Output, logits)
+		normedF32 := scratch.Normed.ToF32()
+		normedF32.LinearF32_Into(e.Weights.Output, logits, e.GlobalScale)
+		normedF32.ReturnToPool()
 		// logits.ScanMax("DEBUG_FINAL: Logits")
 		
 		// Logic update: RMSNormFP32_ToF16_Into does NOT allocate.

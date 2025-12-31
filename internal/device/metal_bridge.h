@@ -153,6 +153,25 @@ void Metal_MatMul_Q4K_F32(MetalContextRef ctx, MetalBufferRef a, int offA,
                           MetalBufferRef c, int offC, int M, int N, int K,
                           float scale);
 
+void Metal_MatMul_Q6K_F32(MetalContextRef ctx, MetalBufferRef a, int offA,
+                          int transA, MetalBufferRef b, int offB, int transB,
+                          MetalBufferRef c, int offC, int M, int N, int K,
+                          float scale);
+
+void Metal_MatMul_Q4K_F32_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
+                              MetalBufferRef b, int offB, MetalBufferRef c,
+                              int offC, int M, int N, int K, float scale);
+
+void Metal_MatMul_Q6K_F32_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
+                              MetalBufferRef b, int offB, MetalBufferRef c,
+                              int offC, int M, int N, int K, float scale);
+
+void Metal_DebugRoPEFreq(MetalContextRef ctx, MetalBufferRef output,
+                         int headDim, float theta, int pos);
+
+void Metal_DebugDot(MetalContextRef ctx, MetalBufferRef a, MetalBufferRef b,
+                    MetalBufferRef output, int dim);
+
 void Metal_Add_F32(MetalContextRef ctx, MetalBufferRef a, int offA,
                    MetalBufferRef b, int offB, MetalBufferRef c, int offC,
                    int count);
