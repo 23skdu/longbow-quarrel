@@ -1,3 +1,5 @@
+//go:build darwin && metal
+
 package engine
 
 import (
@@ -18,29 +20,29 @@ type LlamaConfig struct {
 	Eps        float32
 	RopeTheta  float32
 	WindowSize int // Sliding window size for attention (4096 for Mistral)
-	
+
 	// Debug Flags
 	DebugDequant bool
 }
 
 type LlamaWeights struct {
-	TokenEmb   *device.Tensor // vocab x dim
-	
+	TokenEmb *device.Tensor // vocab x dim
+
 	// Layers
-	AttnQ      []*device.Tensor
-	AttnK      []*device.Tensor
-	AttnV      []*device.Tensor
-	AttnO      []*device.Tensor
-	
+	AttnQ []*device.Tensor
+	AttnK []*device.Tensor
+	AttnV []*device.Tensor
+	AttnO []*device.Tensor
+
 	// AttnNorm   []*device.Tensor
-	AttnNorm   []*device.Tensor // Re-added just in case
-	
-	FfnGate    []*device.Tensor
-	FfnDown    []*device.Tensor
-	FfnUp      []*device.Tensor
-	
-	FfnNorm    []*device.Tensor
-	
+	AttnNorm []*device.Tensor // Re-added just in case
+
+	FfnGate []*device.Tensor
+	FfnDown []*device.Tensor
+	FfnUp   []*device.Tensor
+
+	FfnNorm []*device.Tensor
+
 	// Final
 	OutputNorm *device.Tensor
 	Output     *device.Tensor // vocab x dim (often shared with TokenEmb?)
@@ -51,22 +53,23 @@ type Engine struct {
 	Model   *gguf.GGUFFile
 	Config  LlamaConfig
 	Weights *LlamaWeights
-	
+
 	// KV Cache
 	KVCacheK []*device.Tensor // layers x (seq_len x dim) ? No, pre-allocated buffer
 	KVCacheV []*device.Tensor
-	
+
 	// Cache State
 	CachePos int
-	
+
 	// Tokenizer
 	Tokenizer interface{} // Will be *tokenizer.Tokenizer
-	
+
+	// Debug
+	LastLogits []float32
+
 	// Activation Logger
 	ActLogger *ActivationLogger
 
 	// Heuristic Global Scale (1.0 default, 100.0 if detected underscaling)
 	GlobalScale float32
 }
-
-

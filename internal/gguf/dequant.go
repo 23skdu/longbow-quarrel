@@ -266,6 +266,15 @@ func DequantizeQ6K(data []byte, numElements int) []float32 {
 	return out
 }
 
+func DequantizeF16(data []byte, numElements int) []float32 {
+	out := make([]float32, numElements)
+	for i := 0; i < numElements; i++ {
+		bits := binary.LittleEndian.Uint16(data[i*2 : (i+1)*2])
+		out[i] = Float16ToFloat32(bits)
+	}
+	return out
+}
+
 func Float16ToFloat32(b uint16) float32 {
 	sign := uint32(b & 0x8000) << 16
 	exp := uint32(b & 0x7C00) >> 10

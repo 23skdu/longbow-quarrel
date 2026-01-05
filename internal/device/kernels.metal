@@ -69,7 +69,7 @@ kernel void swiglu_f16(device const half *gate [[ buffer(0) ]],
 
 kernel void rmsnorm_f16(device const half *x [[ buffer(0) ]],
                       device half *out [[ buffer(1) ]],
-                      device const half *w [[ buffer(2) ]],
+                      device const float *w [[ buffer(2) ]], // Changed to float
                       constant float &eps [[ buffer(3) ]],
                       constant int &cols [[ buffer(4) ]],
                       uint tid [[ thread_index_in_threadgroup ]],
@@ -562,9 +562,9 @@ kernel void rope_f16(device half *x [[ buffer(0) ]],
     device half *token_ptr = x + gid.y * numHeads * headDim;
     device half *q_ptr = token_ptr + h * headDim;
     
-    // Standard Llama/Mistral uses Half-Half rotation (0 with 64, 1 with 65...)
-    int idx0 = i;
-    int idx1 = i + headDim/2;
+    // Interleaved rotation (standard for Mistral/Llama GGUF)
+    int idx0 = 2 * i;
+    int idx1 = 2 * i + 1;
     
     float x0 = (float)q_ptr[idx0];
     float x1 = (float)q_ptr[idx1];

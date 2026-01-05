@@ -1,3 +1,5 @@
+//go:build darwin && metal
+
 package main
 
 import (
@@ -65,7 +67,7 @@ func testScale(ctx *device.Context) {
 	tA := ctx.NewTensor(rows, cols)
 	tA.LoadFrom(aData)
 	
-	tC := tA.Scale(scale)
+	tC := tA.ScaleBy(scale)
 	result := tC.ToHost()
 	
 	if !almostEqual(result, expected) {

@@ -293,12 +293,12 @@ func (t *Tensor) LoadFrom(data []float32) {
 	
 	if t.dataType == DataTypeF32 {
 		// Copy directly as F32
-		C.Metal_CopyToDevice(t.buf, 0, unsafe.Pointer(&data[0]), C.int(len(data)*4))
+		C.Metal_CopyToDevice(t.buf, C.int(t.Offset), unsafe.Pointer(&data[0]), C.int(len(data)*4))
 		return
 	}
 
 	if t.dataType == DataTypeF32 {
-		C.Metal_CopyToDevice(t.buf, 0, unsafe.Pointer(&data[0]), C.int(t.sizeBytes))
+		C.Metal_CopyToDevice(t.buf, C.int(t.Offset), unsafe.Pointer(&data[0]), C.int(t.sizeBytes))
 		return
 	}
 	
@@ -308,19 +308,19 @@ func (t *Tensor) LoadFrom(data []float32) {
 		f16[i] = Float32ToFloat16(v)
 	}
 	
-	C.Metal_CopyToDevice(t.buf, 0, unsafe.Pointer(&f16[0]), C.int(t.sizeBytes))
+	C.Metal_CopyToDevice(t.buf, C.int(t.Offset), unsafe.Pointer(&f16[0]), C.int(t.sizeBytes))
 }
 
 func (t *Tensor) LoadRaw(data []byte) {
 	if len(data) > t.sizeBytes {
 		panic("Raw data size exceeds tensor buffer")
 	}
-	C.Metal_CopyToDevice(t.buf, 0, unsafe.Pointer(&data[0]), C.int(len(data)))
+	C.Metal_CopyToDevice(t.buf, C.int(t.Offset), unsafe.Pointer(&data[0]), C.int(len(data)))
 }
 
 // LoadFromBytes copies raw bytes to the buffer (for Q4K data, etc.)
 func (t *Tensor) LoadFromBytes(data []byte) {
-	C.Metal_CopyToDevice(t.buf, 0, unsafe.Pointer(&data[0]), C.int(len(data)))
+	C.Metal_CopyToDevice(t.buf, C.int(t.Offset), unsafe.Pointer(&data[0]), C.int(len(data)))
 }
 
 func (t *Tensor) Probe(name string, n int) {
@@ -389,6 +389,7 @@ func (t *Tensor) ScanMax(name string) float32 {
 	var maxVal float32 = 0.0
 	var minVal float32 = 0.0
 	var sum float32 = 0.0
+	var sumSq float64 = 0.0
 	var zeros int = 0
 	var nans int = 0
 	
@@ -406,11 +407,13 @@ func (t *Tensor) ScanMax(name string) float32 {
 		if v > maxVal { maxVal = v }
 		if v < minVal { minVal = v }
 		sum += v
+		sumSq += float64(v) * float64(v)
 	}
 	
 	mean := sum / float32(len(data))
-	// Print removed
-	fmt.Printf("[%s] Min: %.4f Max: %.4f Mean: %.4f Zeros: %d/%d NaNs: %d\n", name, minVal, maxVal, mean, zeros, len(data), nans)
+	rms := float32(math.Sqrt(sumSq / float64(len(data))))
+	
+	fmt.Printf("[%s] Min: %.4f Max: %.4f Mean: %.4f RMS: %.4f Zeros: %d/%d NaNs: %d\n", name, minVal, maxVal, mean, rms, zeros, len(data), nans)
 	if len(data) >= 32 {
 		fmt.Printf("[%s] Sample: %.4f\n", name, data[:32])
 	}
@@ -436,7 +439,7 @@ func (t *Tensor) LoadFromRaw(data []byte) {
 	if len(data) == 0 {
 		return
 	}
-	C.Metal_CopyToDevice(t.buf, 0, unsafe.Pointer(&data[0]), C.int(len(data)))
+	C.Metal_CopyToDevice(t.buf, C.int(t.Offset), unsafe.Pointer(&data[0]), C.int(len(data)))
 }
 
 func (t *Tensor) BufRef() unsafe.Pointer {
@@ -450,12 +453,12 @@ func (t *Tensor) ToHost() []float32 {
 	
 	if t.dataType == DataTypeF32 {
 		f32 := make([]float32, t.rows*t.cols)
-		C.Metal_CopyToHost(t.buf, 0, unsafe.Pointer(&f32[0]), C.int(t.sizeBytes))
+		C.Metal_CopyToHost(t.buf, C.int(t.Offset), unsafe.Pointer(&f32[0]), C.int(t.sizeBytes))
 		return f32
 	}
 
 	f16 := make([]uint16, t.rows*t.cols)
-	C.Metal_CopyToHost(t.buf, 0, unsafe.Pointer(&f16[0]), C.int(t.sizeBytes))
+	C.Metal_CopyToHost(t.buf, C.int(t.Offset), unsafe.Pointer(&f16[0]), C.int(t.sizeBytes))
 	
 	f32 := make([]float32, len(f16))
 	for i, v := range f16 {
@@ -470,13 +473,13 @@ func (t *Tensor) ToHostBytes() []byte {
 	}
 	// Copy raw bytes
 	out := make([]byte, t.sizeBytes)
-	C.Metal_CopyToHost(t.buf, 0, unsafe.Pointer(&out[0]), C.int(t.sizeBytes))
+	C.Metal_CopyToHost(t.buf, C.int(t.Offset), unsafe.Pointer(&out[0]), C.int(t.sizeBytes))
 	return out
 }
 
 // ZeroInit initializes tensor buffer with zeros
 func (t *Tensor) ZeroInit() {
-	C.Metal_ZeroBuffer(t.buf, 0, C.int(t.sizeBytes))
+	C.Metal_ZeroBuffer(t.buf, C.int(t.Offset), C.int(t.sizeBytes))
 }
 
 func (c *Context) Synchronize() {
@@ -498,9 +501,9 @@ func (c *Context) WaitWithTimeout(timeout time.Duration) error {
 	}
 }
 
-func (t *Tensor) Scale(val float32) *Tensor {
+func (t *Tensor) ScaleBy(val float32) *Tensor {
 	res := t.ctx.NewTensorPooled(t.rows, t.cols)
-	C.Metal_Scale_F16(t.ctx.ref, t.buf, 0, C.float(val), res.buf, 0, C.int(t.rows*t.cols))
+	C.Metal_Scale_F16(t.ctx.ref, t.buf, C.int(t.Offset), C.float(val), res.buf, C.int(res.Offset), C.int(t.rows*t.cols))
 	return res
 }
 
@@ -520,9 +523,9 @@ func (t *Tensor) MatMul(b *Tensor) *Tensor {
 		c := t.ctx.NewTensor(N, M)
 		c.ZeroInit()
 		C.Metal_MatMul_Q4K_F16(t.ctx.ref,
-			t.buf, 0, C.bool(false),
-			b.buf, 0, C.bool(false),
-			c.buf, 0,
+			t.buf, C.int(t.Offset), C.bool(false),
+			b.buf, C.int(b.Offset), C.bool(false),
+			c.buf, C.int(c.Offset),
 			C.int(M), C.int(N), C.int(K), C.float(1.0));
 		
 		metrics.RecordKernelDuration("MatMul", time.Since(t0))
@@ -531,9 +534,9 @@ func (t *Tensor) MatMul(b *Tensor) *Tensor {
 		c := t.ctx.NewTensor(N, M)
 		c.ZeroInit()
 		C.Metal_MatMul_Q3K_F16(t.ctx.ref,
-			t.buf, 0, C.bool(false),
-			b.buf, 0, C.bool(false),
-			c.buf, 0,
+			t.buf, C.int(t.Offset), C.bool(false),
+			b.buf, C.int(b.Offset), C.bool(false),
+			c.buf, C.int(c.Offset),
 			C.int(M), C.int(N), C.int(K));
 		
 		metrics.RecordKernelDuration("MatMul", time.Since(t0))
@@ -542,9 +545,9 @@ func (t *Tensor) MatMul(b *Tensor) *Tensor {
 		c := t.ctx.NewTensor(N, M)
 		c.ZeroInit()
 		C.Metal_MatMul_Q6K_F16(t.ctx.ref,
-			t.buf, 0, C.bool(false),
-			b.buf, 0, C.bool(false),
-			c.buf, 0,
+			t.buf, C.int(t.Offset), C.bool(false),
+			b.buf, C.int(b.Offset), C.bool(false),
+			c.buf, C.int(c.Offset),
 			C.int(M), C.int(N), C.int(K), C.float(1.0));
 		
 		metrics.RecordKernelDuration("MatMul", time.Since(t0))
@@ -553,9 +556,9 @@ func (t *Tensor) MatMul(b *Tensor) *Tensor {
 
 	c := t.ctx.NewTensor(N, M) 
 	C.Metal_MatMul_F16(t.ctx.ref,
-		t.buf, 0, C.bool(false),
-		b.buf, 0, C.bool(false),
-		c.buf, 0,
+		t.buf, C.int(t.Offset), C.bool(false),
+		b.buf, C.int(b.Offset), C.bool(false),
+		c.buf, C.int(c.Offset),
 		C.int(M), C.int(N), C.int(K))
 	metrics.RecordKernelDuration("MatMul", time.Since(t0))
 	return c
@@ -577,7 +580,7 @@ func (t *Tensor) Linear(weight *Tensor) *Tensor {
 	// and Input (Vector) as buffer 1 (broadcast source).
 	
 	if weight.dataType == DataTypeQ4K {
-		C.Metal_MatMul_Q4K_F16(t.ctx.ref, weight.buf, 0, false, t.buf, 0, false, res.buf, 0,
+		C.Metal_MatMul_Q4K_F16(t.ctx.ref, weight.buf, C.int(weight.Offset), false, t.buf, C.int(t.Offset), false, res.buf, C.int(res.Offset),
 			C.int(t.rows), C.int(weight.rows), C.int(weight.cols), C.float(1.0))
 	} else {
 		// BatchedMatMul_F16 using MPS
@@ -589,9 +592,9 @@ func (t *Tensor) Linear(weight *Tensor) *Tensor {
 		sC := N * 2
 		
 		C.Metal_BatchedMatMul_F16(t.ctx.ref, 
-			t.buf, 0, C.int(sA), false,
-			weight.buf, 0, C.int(sB), true,
-			res.buf, 0, C.int(sC),
+			t.buf, C.int(t.Offset), C.int(sA), false,
+			weight.buf, C.int(weight.Offset), C.int(sB), true,
+			res.buf, C.int(res.Offset), C.int(sC),
 			C.int(M), C.int(N), C.int(K), 1)
 	}
 	metrics.RecordKernelDuration("Linear", time.Since(t0))
@@ -628,15 +631,15 @@ func (t *Tensor) LinearInto(weight *Tensor, out *Tensor, scale float32) {
 // RunQ3K_Explicit for testing only
 func (c *Context) RunQ3K_Explicit(w, in, out *Tensor) {
 	C.Metal_MatMul_Q3K_F16(c.ref,
-		w.buf, 0, C.bool(false),
-		in.buf, 0, C.bool(false),
-		out.buf, 0,
+		w.buf, C.int(w.Offset), C.bool(false),
+		in.buf, C.int(in.Offset), C.bool(false),
+		out.buf, C.int(out.Offset),
 		C.int(1), C.int(w.rows), C.int(w.cols))
 }
 
 func (t *Tensor) RMSNorm(weight *Tensor, eps float32) *Tensor {
 	res := t.ctx.NewTensorPooled(t.rows, t.cols)
-	C.Metal_RMSNorm_F16(t.ctx.ref, t.buf, 0, weight.buf, 0, res.buf, 0, 
+	C.Metal_RMSNorm_F16(t.ctx.ref, t.buf, C.int(t.Offset), weight.buf, C.int(weight.Offset), res.buf, C.int(res.Offset), 
 		C.int(t.rows), C.int(t.cols), C.float(eps))
 	return res
 }
@@ -645,9 +648,10 @@ func (t *Tensor) RMSNorm(weight *Tensor, eps float32) *Tensor {
 // Eliminates intermediate buffer allocation
 func (t *Tensor) RMSNormLinear(normWeight, weight *Tensor, eps float32) *Tensor {
 	res := t.ctx.NewTensorPooled(t.rows, weight.rows)
-	C.Metal_RMSNormLinear_F16(t.ctx.ref, t.buf, 0, 
-		normWeight.buf, 0, weight.buf, 0, res.buf, 0,
-		C.int(t.rows), C.int(weight.rows), C.float(eps))
+	C.Metal_RMSNormLinear_F16(t.ctx.ref, t.buf, C.int(t.Offset), 
+		normWeight.buf, C.int(normWeight.Offset),
+		weight.buf, C.int(weight.Offset), res.buf, C.int(res.Offset),
+		C.int(t.cols), C.int(weight.rows), C.float(eps))
 	return res
 }
 
@@ -698,9 +702,9 @@ func (t *Tensor) RMSNormQKV(normWeight, wQ, wK, wV *Tensor, eps float32) (*Tenso
 	q := t.ctx.NewTensorPooled(t.rows, wQ.rows)
 	k := t.ctx.NewTensorPooled(t.rows, wK.rows)
 	v := t.ctx.NewTensorPooled(t.rows, wV.rows)
-	C.Metal_RMSNormQKV_F16(t.ctx.ref, t.buf, 0, normWeight.buf, 0,
-		wQ.buf, 0, wK.buf, 0, wV.buf, 0,
-		q.buf, 0, k.buf, 0, v.buf, 0,
+	C.Metal_RMSNormQKV_F16(t.ctx.ref, t.buf, C.int(t.Offset), normWeight.buf, C.int(normWeight.Offset),
+		wQ.buf, C.int(wQ.Offset), wK.buf, C.int(wK.Offset), wV.buf, C.int(wV.Offset),
+		q.buf, C.int(q.Offset), k.buf, C.int(k.Offset), v.buf, C.int(v.Offset),
 		C.int(t.cols), C.int(wQ.rows), C.int(wK.rows), C.float(eps))
 	return q, k, v
 }
@@ -708,8 +712,8 @@ func (t *Tensor) RMSNormQKV(normWeight, wQ, wK, wV *Tensor, eps float32) (*Tenso
 // FusedFFN performs one entire FFN block: RMSNorm + Gate/Up Linear + SwiGLU + Down Linear
 func (t *Tensor) FusedFFN(normWeight, wGate, wUp, wDown *Tensor, eps float32) *Tensor {
 	res := t.ctx.NewTensorPooled(t.rows, t.cols)
-	C.Metal_FusedFFN_F16(t.ctx.ref, t.buf, 0, normWeight.buf, 0,
-		wGate.buf, 0, wUp.buf, 0, wDown.buf, 0, res.buf, 0,
+	C.Metal_FusedFFN_F16(t.ctx.ref, t.buf, C.int(t.Offset), normWeight.buf, C.int(normWeight.Offset),
+		wGate.buf, C.int(wGate.Offset), wUp.buf, C.int(wUp.Offset), wDown.buf, C.int(wDown.Offset), res.buf, C.int(res.Offset),
 		C.int(t.cols), C.int(wGate.rows), C.float(eps))
 	return res
 }
@@ -1061,7 +1065,7 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		t.AddMixedInPlace(resAtt)
 	} else {
 		t1 := t.Add(resAtt)
-		C.Metal_Copy_F16(t.ctx.ref, t1.buf, 0, t.buf, 0, C.int(t.rows*t.cols))
+		C.Metal_Copy_F16(t.ctx.ref, t1.buf, C.int(t1.Offset), t.buf, C.int(t.Offset), C.int(t.rows*t.cols))
 		t1.ReturnToPool()
 	}
 	
@@ -1106,7 +1110,7 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		} else {
 			// Fallback (Should not happen in useF32FFN path)
 			t2 := t.Add(resFFN) // Mixed
-			C.Metal_Copy_F16(t.ctx.ref, t2.buf, 0, t.buf, 0, C.int(t.rows*t.cols))
+			C.Metal_Copy_F16(t.ctx.ref, t2.buf, C.int(t2.Offset), t.buf, C.int(t.Offset), C.int(t.rows*t.cols))
 			t2.ReturnToPool()
 		}
 
@@ -1169,7 +1173,7 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 			t.AddMixedInPlace(resFFN)
 		} else {
 			t2 := t.Add(resFFN)
-			C.Metal_Copy_F16(t.ctx.ref, t2.buf, 0, t.buf, 0, C.int(t.rows*t.cols))
+			C.Metal_Copy_F16(t.ctx.ref, t2.buf, C.int(t2.Offset), t.buf, C.int(t.Offset), C.int(t.rows*t.cols))
 			t2.ReturnToPool()
 		}
 		
@@ -1189,7 +1193,7 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 
 // Correct RoPE implementation using arguments expected by Kernel
 func (t *Tensor) RoPE(posOffset, headDim, numHeads, seqLen int, ropeTheta float32) {
-	C.Metal_RoPE_F16(t.ctx.ref, t.buf, 0, 1, C.int(seqLen), C.int(numHeads), C.int(headDim), C.int(posOffset), C.float(ropeTheta))
+	C.Metal_RoPE_F16(t.ctx.ref, t.buf, C.int(t.Offset), 1, C.int(seqLen), C.int(numHeads), C.int(headDim), C.int(posOffset), C.float(ropeTheta))
 }
 
 func (t *Tensor) SwiGLU(gate *Tensor) *Tensor {
@@ -1201,12 +1205,12 @@ func (t *Tensor) SwiGLU(gate *Tensor) *Tensor {
 	interSize := t.cols
 	res := t.ctx.NewTensorPooled(t.rows, interSize)
 	
-	C.Metal_SwiGLU_F16(t.ctx.ref, t.buf, 0, gate.buf, 0, res.buf, 0, C.int(t.rows), C.int(interSize))
+	C.Metal_SwiGLU_F16(t.ctx.ref, t.buf, C.int(t.Offset), gate.buf, C.int(gate.Offset), res.buf, C.int(res.Offset), C.int(t.rows), C.int(interSize))
 	return res
 }
 
 func (t *Tensor) Softmax() {
-	C.Metal_Softmax_F16(t.ctx.ref, t.buf, 0, t.buf, 0, C.int(t.rows), C.int(t.cols))
+	C.Metal_Softmax_F16(t.ctx.ref, t.buf, C.int(t.Offset), t.buf, C.int(t.Offset), C.int(t.rows), C.int(t.cols))
 }
 
 // FP32 FFN Methods for Small Models (SmolLM2, TinyLlama)
@@ -1216,7 +1220,7 @@ func (t *Tensor) Softmax() {
 func (t *Tensor) LinearToFP32_Into(weight *Tensor, out *Tensor) {
 	// t (F16) * w (F16) -> out (FP32)
 	// We use Metal_LinearF16ToF32 kernel wrapper
-	C.Metal_LinearF16ToF32(t.ctx.ref, weight.buf, 0, t.buf, C.int(t.Offset), out.buf, C.int(out.Offset),
+	C.Metal_LinearF16ToF32(t.ctx.ref, weight.buf, C.int(weight.Offset), t.buf, C.int(t.Offset), out.buf, C.int(out.Offset),
 		C.int(t.rows), C.int(t.cols), C.int(weight.rows))
 }
 
@@ -1224,14 +1228,14 @@ func (t *Tensor) LinearToFP32_Into(weight *Tensor, out *Tensor) {
 // Used for Gate/Up projections in FP32 FFN path
 func (t *Tensor) LinearToFP32(weight *Tensor) *Tensor {
 	out := t.ctx.NewTensorFP32Pooled(t.rows, weight.rows)
-	C.Metal_LinearF16ToF32(t.ctx.ref, weight.buf, 0, t.buf, C.int(t.Offset), out.buf, C.int(out.Offset),
+	C.Metal_LinearF16ToF32(t.ctx.ref, weight.buf, C.int(weight.Offset), t.buf, C.int(t.Offset), out.buf, C.int(out.Offset),
 		C.int(t.rows), C.int(t.cols), C.int(weight.rows))
 	return out
 }
 
 // RMSNorm_F32_Into performs RMSNorm (FP32 -> FP32)
 func (t *Tensor) RMSNorm_F32_Into(weight *Tensor, eps float32, out *Tensor) {
-	C.Metal_RMSNorm_F32(t.ctx.ref, t.buf, C.int(t.Offset), weight.buf, 0, out.buf, C.int(out.Offset),
+	C.Metal_RMSNorm_F32(t.ctx.ref, t.buf, C.int(t.Offset), weight.buf, C.int(weight.Offset), out.buf, C.int(out.Offset),
 		C.int(t.rows), C.int(t.cols), C.float(eps))
 }
 
@@ -1280,7 +1284,7 @@ func (gate *Tensor) SwiGLU_FP32(up *Tensor) *Tensor {
 	res := gate.ctx.NewTensorFP32Pooled(gate.rows, gate.cols)
 	
 	// Use existing swiglu_f32 kernel
-	C.Metal_SwiGLU_F32(gate.ctx.ref, gate.buf, 0, up.buf, 0, res.buf, 0,
+	C.Metal_SwiGLU_F32(gate.ctx.ref, gate.buf, C.int(gate.Offset), up.buf, C.int(up.Offset), res.buf, C.int(res.Offset),
 		C.int(gate.rows), C.int(gate.cols))
 	return res
 }
@@ -1292,7 +1296,7 @@ func (t *Tensor) LinearFromFP32(weight *Tensor) *Tensor {
 		panic("LinearFromFP32 requires FP32 input")
 	}
 	out := t.ctx.NewTensorPooled(t.rows, weight.rows)
-	C.Metal_LinearF32ToF16(t.ctx.ref, weight.buf, 0, t.buf, 0, out.buf, 0,
+	C.Metal_LinearF32ToF16(t.ctx.ref, weight.buf, C.int(weight.Offset), t.buf, C.int(t.Offset), out.buf, C.int(out.Offset),
 		C.int(t.rows), C.int(t.cols), C.int(weight.rows))
 	return out
 }
@@ -1301,7 +1305,7 @@ func (t *Tensor) LinearFromFP32_Into(weight *Tensor, out *Tensor) {
 	if t.dataType != DataTypeF32 {
 		panic("LinearFromFP32 requires FP32 input")
 	}
-	C.Metal_LinearF32ToF16(t.ctx.ref, weight.buf, 0, t.buf, C.int(t.Offset), out.buf, C.int(out.Offset),
+	C.Metal_LinearF32ToF16(t.ctx.ref, weight.buf, C.int(weight.Offset), t.buf, C.int(t.Offset), out.buf, C.int(out.Offset),
 		C.int(t.rows), C.int(t.cols), C.int(weight.rows))
 }
 
@@ -1310,7 +1314,7 @@ func (t *Tensor) Add(other *Tensor) *Tensor {
 		panic("Add dim mismatch")
 	}
 	res := t.ctx.NewTensorPooled(t.rows, t.cols)
-	C.Metal_Add_F16(t.ctx.ref, t.buf, 0, other.buf, 0, res.buf, 0, C.int(t.rows*t.cols))
+	C.Metal_Add_F16(t.ctx.ref, t.buf, C.int(t.Offset), other.buf, C.int(other.Offset), res.buf, C.int(res.Offset), C.int(t.rows*t.cols))
 	return res
 }
 
@@ -1332,15 +1336,15 @@ func (t *Tensor) EmbeddingLookup(row int, scale float32) *Tensor {
 	res := t.ctx.NewTensorPooled(1, t.cols)
 	if t.dataType == DataTypeQ4K {
 		// fmt.Printf("DEBUG: Using Q4K Embedding Kernel for row %d\n", row)
-		C.Metal_Embedding_Q4K(t.ctx.ref, t.buf, C.int(t.Offset), res.buf, 0, C.int(row), C.int(t.cols), C.float(scale))
+		C.Metal_Embedding_Q4K(t.ctx.ref, t.buf, C.int(t.Offset), res.buf, C.int(res.Offset), C.int(row), C.int(t.cols), C.float(scale))
 	} else {
-		C.Metal_Embedding_F16(t.ctx.ref, t.buf, C.int(t.Offset), res.buf, 0, C.int(row), C.int(t.cols))
+		C.Metal_Embedding_F16(t.ctx.ref, t.buf, C.int(t.Offset), res.buf, C.int(res.Offset), C.int(row), C.int(t.cols))
 	}
 	return res
 }
 
 func (t *Tensor) StoreKV(v *Tensor, kCache, vCache *Tensor, pos, heads, headDim, windowSize int) {
-	C.Metal_StoreKV_F16(t.ctx.ref, t.buf, 0, v.buf, 0, kCache.buf, C.int(kCache.Offset), vCache.buf, C.int(vCache.Offset), C.int(pos), C.int(heads), C.int(headDim), C.int(windowSize))
+	C.Metal_StoreKV_F16(t.ctx.ref, t.buf, C.int(t.Offset), v.buf, C.int(v.Offset), kCache.buf, C.int(kCache.Offset), vCache.buf, C.int(vCache.Offset), C.int(pos), C.int(heads), C.int(headDim), C.int(windowSize))
 }
 
 func (t *Tensor) Attention(kCache, vCache *Tensor, pos, numHeads, kvHeads, headDim, ctxLen, windowSize int) *Tensor {
@@ -1349,9 +1353,9 @@ func (t *Tensor) Attention(kCache, vCache *Tensor, pos, numHeads, kvHeads, headD
 	if scoresDim < 32768 { scoresDim = 32768 }
 	scores := t.ctx.NewTensorFP32Pooled(1, scoresDim)
 	
-	C.Metal_Attention_F16(t.ctx.ref, t.buf, 0, kCache.buf, C.int(kCache.Offset), 
-		vCache.buf, C.int(vCache.Offset), res.buf, 0,
-		scores.buf, 0,
+	C.Metal_Attention_F16(t.ctx.ref, t.buf, C.int(t.Offset), kCache.buf, C.int(kCache.Offset), 
+		vCache.buf, C.int(vCache.Offset), res.buf, C.int(res.Offset),
+		scores.buf, C.int(scores.Offset),
 		C.int(pos), C.int(numHeads), C.int(kvHeads), C.int(headDim), C.int(ctxLen), C.int(windowSize))
 	return res
 }
@@ -1369,7 +1373,7 @@ func (t *Tensor) AttFused(kCache, vCache *Tensor, out *Tensor, pos, numHeads, kv
 
 func (t *Tensor) RMSNormFP32_ToF16(weight *Tensor, eps float32) *Tensor {
 	res := t.ctx.NewTensorPooled(t.rows, t.cols) // Result is F16
-	C.Metal_RMSNorm_F32_F16(t.ctx.ref, t.buf, 0, weight.buf, 0, res.buf, 0, 
+	C.Metal_RMSNorm_F32_F16(t.ctx.ref, t.buf, C.int(t.Offset), weight.buf, C.int(weight.Offset), res.buf, C.int(res.Offset), 
 		C.int(t.rows), C.int(t.cols), C.float(eps))
 	// DEBUG
 
@@ -1385,7 +1389,7 @@ func (t *Tensor) RMSNormFP32_ToF16_Into(weight *Tensor, eps float32, out *Tensor
 func (t *Tensor) RMSNormFP32(weight *Tensor, eps float32) *Tensor {
 	res := t.ctx.NewTensorFP32(t.rows, t.cols)
 	// Input t is F32, Weight is F16
-	C.Metal_RMSNorm_F32(t.ctx.ref, t.buf, C.int(t.Offset), weight.buf, C.int(weight.Offset), res.buf, 0, 
+	C.Metal_RMSNorm_F32(t.ctx.ref, t.buf, C.int(t.Offset), weight.buf, C.int(weight.Offset), res.buf, C.int(res.Offset),
 		C.int(t.rows), C.int(t.cols), C.float(eps))
 	return res
 }
@@ -1404,42 +1408,50 @@ func (t *Tensor) AddMixedInPlace(other *Tensor) {
 
 func (t *Tensor) ToF32() *Tensor {
     res := t.ctx.NewTensorFP32Pooled(t.rows, t.cols)
-    C.Metal_Copy_F16_F32(t.ctx.ref, t.buf, 0, res.buf, 0, C.int(t.rows*t.cols))
+    C.Metal_Copy_F16_F32(t.ctx.ref, t.buf, C.int(t.Offset), res.buf, C.int(res.Offset), C.int(t.rows*t.cols))
     return res
 }
 
 func (t *Tensor) AddFP32(other *Tensor) *Tensor {
 	res := t.ctx.NewTensorFP32(t.rows, t.cols)
-	C.Metal_Add_F32(t.ctx.ref, t.buf, 0, other.buf, 0, res.buf, 0, C.int(t.rows*t.cols))
+	C.Metal_Add_F32(t.ctx.ref, t.buf, C.int(t.Offset), other.buf, C.int(other.Offset), res.buf, C.int(res.Offset), C.int(t.rows*t.cols))
 	return res
 }
 
 func (t *Tensor) SwiGLUFP32(gate *Tensor) *Tensor {
 	// t is up (F32), gate is gate (F32)
 	res := t.ctx.NewTensorFP32(t.rows, t.cols)
-	C.Metal_SwiGLU_F32(t.ctx.ref, t.buf, 0, gate.buf, 0, res.buf, 0, C.int(t.rows), C.int(t.cols))
+	C.Metal_SwiGLU_F32(t.ctx.ref, t.buf, C.int(t.Offset), gate.buf, C.int(gate.Offset), res.buf, C.int(res.Offset), C.int(t.rows), C.int(t.cols))
 	return res
+}
+
+func (t *Tensor) SwiGLU_F32_InPlace(gate *Tensor) {
+	C.Metal_SwiGLU_F32(t.ctx.ref, t.buf, C.int(t.Offset), gate.buf, C.int(gate.Offset), t.buf, C.int(t.Offset), C.int(t.rows), C.int(t.cols))
 }
 
 func (t *Tensor) CopyToF32() *Tensor {
 	res := t.ctx.NewTensorFP32(t.rows, t.cols)
-	C.Metal_Copy_F16_F32(t.ctx.ref, t.buf, 0, res.buf, 0, C.int(t.rows*t.cols))
+	C.Metal_Copy_F16_F32(t.ctx.ref, t.buf, C.int(t.Offset), res.buf, C.int(res.Offset), C.int(t.rows*t.cols))
 	return res
 }
 
 func (t *Tensor) ScaleInPlace(val float32) {
-	C.Metal_Scale_F16(t.ctx.ref, t.buf, 0, C.float(val), t.buf, 0, C.int(t.rows*t.cols))
+	C.Metal_Scale_F16(t.ctx.ref, t.buf, C.int(t.Offset), C.float(val), t.buf, C.int(t.Offset), C.int(t.rows*t.cols))
 }
 
 
 func (t *Tensor) CopyToF16() *Tensor {
 	res := t.ctx.NewTensor(t.rows, t.cols)
-	C.Metal_Copy_F32_F16(t.ctx.ref, t.buf, 0, res.buf, 0, C.int(t.rows*t.cols))
+	C.Metal_Copy_F32_F16(t.ctx.ref, t.buf, C.int(t.Offset), res.buf, C.int(res.Offset), C.int(t.rows*t.cols))
 	return res
 }
 
 func (t *Tensor) CopyToF16_Into(dest *Tensor) {
-	C.Metal_Copy_F32_F16(t.ctx.ref, t.buf, 0, dest.buf, 0, C.int(t.rows*t.cols))
+	C.Metal_Copy_F32_F16(t.ctx.ref, t.buf, C.int(t.Offset), dest.buf, C.int(dest.Offset), C.int(t.rows*t.cols))
+}
+
+func (t *Tensor) ToF32InPlace(res *Tensor) {
+    C.Metal_Copy_F16_F32(t.ctx.ref, t.buf, C.int(t.Offset), res.buf, C.int(res.Offset), C.int(t.rows*t.cols))
 }
 
 
@@ -1508,3 +1520,12 @@ func (t *Tensor) DebugDot(b *Tensor, output *Tensor, dim int) {
 func (t *Tensor) AttSoftmax(pos, heads, stride int) {
 	C.Metal_AttSoftmax_F16(t.ctx.ref, t.buf, C.int(t.Offset), C.int(pos), C.int(heads), C.int(stride))
 }
+
+// AttValues performs attention value aggregation
+func (t *Tensor) AttValues(vCache *Tensor, out *Tensor, pos, numHeads, kvHeads, headDim, stride, windowSize int) {
+	C.Metal_AttValues_F16(t.ctx.ref, t.buf, C.int(t.Offset),
+		vCache.buf, C.int(vCache.Offset),
+		out.buf, C.int(out.Offset),
+		C.int(pos), C.int(numHeads), C.int(kvHeads), C.int(headDim), C.int(stride), C.int(windowSize))
+}
+

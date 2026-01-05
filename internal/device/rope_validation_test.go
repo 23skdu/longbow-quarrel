@@ -1,3 +1,5 @@
+//go:build darwin && metal
+
 package device
 
 import (
@@ -16,8 +18,8 @@ func ropeCPU(input []float32, headDim, pos int, theta float64) []float32 {
 
 	for i := 0; i < len(input); i += headDim {
 		for j := 0; j < headDim/2; j++ {
-			idx0 := i + j
-			idx1 := i + j + headDim/2
+			idx0 := i + 2*j
+			idx1 := i + 2*j + 1
 			
 			// theta_i = theta ^ (-2i / d)
 			expVar := -2.0 * float32(j) / float32(headDim)
