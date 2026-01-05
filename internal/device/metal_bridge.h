@@ -12,6 +12,24 @@ extern "C" {
 typedef void *MetalContextRef;
 typedef void *MetalBufferRef;
 
+void Metal_LinearQ6K_F16_F32(MetalContextRef ctx, MetalBufferRef weight,
+                             int offWeight, MetalBufferRef input, int offInput,
+                             MetalBufferRef output, int offOutput, int rows,
+                             int dimIn, int dimOut, float scale);
+
+void Metal_LinearQ4_0_F16(MetalContextRef ctx, MetalBufferRef weight,
+                          int offWeight, MetalBufferRef input, int offInput,
+                          MetalBufferRef output, int offOutput, int rows,
+                          int dimIn, int dimOut, float scale);
+
+void Metal_LinearQ4_0_F32(MetalContextRef ctx, MetalBufferRef weight,
+                          int offWeight, MetalBufferRef input, int offInput,
+                          MetalBufferRef output, int offOutput, int rows,
+                          int dimIn, int dimOut, float scale);
+
+void Metal_EmbeddingQ4_0_F16(MetalContextRef ctx, MetalBufferRef weights,
+                             int offW, MetalBufferRef result, int offRes,
+                             int rowIdx, int cols);
 // Device management
 MetalContextRef Metal_Init(const char *libSource);
 void Metal_Free(MetalContextRef ctx);
@@ -25,6 +43,8 @@ void Metal_CopyToDevice(MetalBufferRef buf, int offset, const void *data,
 void Metal_CopyToHost(MetalBufferRef buf, int offset, void *data, int size);
 void *Metal_GetBufferContents(MetalBufferRef buf);
 void Metal_ZeroBuffer(MetalBufferRef buf, int offset, int size);
+void Metal_ZeroBufferGPU(MetalContextRef ctx, MetalBufferRef buf, int offset,
+                         int size);
 
 // Basic Ops
 void Metal_Add_F16(MetalContextRef ctx, MetalBufferRef a, int offA,

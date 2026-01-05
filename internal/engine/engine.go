@@ -9,6 +9,7 @@ import (
 	"log"
 	"math"
 	"runtime"
+	"sort"
 
 	"time"
 
@@ -88,8 +89,8 @@ func (e *Engine) loadModel(path string) error {
 	e.Config.HeadDim = e.Config.Dim / e.Config.Heads
 
 	log.Printf("GGUF Metadata Keys:")
-	for k := range f.KV {
-		log.Printf("  %s", k)
+	for k, v := range f.KV {
+		log.Printf("  %s: %v", k, v)
 	}
 
 	// Seq Len (Context)
@@ -109,12 +110,18 @@ func (e *Engine) loadModel(path string) error {
 		e.Config.RopeTheta = 10000.0
 	}
 
+	// Global Scale
+	e.GlobalScale = 1.0
+
 	// RMS Norm Eps
+	var eps float32
 	if val, ok := f.KV["llama.attention.layer_norm_rms_epsilon"]; ok {
-		e.Config.Eps = float32(toFloat64(val))
+		eps = float32(toFloat64(val))
 	} else {
-		e.Config.Eps = 1e-5
+		eps = 1e-5 // default
 	}
+	e.Config.Eps = eps
+	fmt.Printf("[DEBUG] NormEps: %e\n", eps)
 
 	// Sliding Window Size (for Mistral)
 	// Mistral uses 4096-token sliding window attention
@@ -242,7 +249,7 @@ func (e *Engine) loadModel(path string) error {
 					}
 					mean := float32(sum / float64(numElements))
 					rms := float32(math.Sqrt(sumSq / float64(numElements)))
-					fmt.Printf("WEIGHT DEBUG: %s Mean=%e RMS=%e First4=%v\n", t.Name, mean, rms, f32Data[:4])
+					fmt.Printf("WEIGHT DEBUG: %s Mean=%e RMS=%e First4=%v HEX=%x\n", t.Name, mean, rms, f32Data[:4], rawBytes[:16])
 				}
 			} else if t.Type == gguf.GGMLTypeF16 {
 				if isNormWeight(t.Name) {
@@ -252,7 +259,7 @@ func (e *Engine) loadModel(path string) error {
 					mt.LoadFrom(f32Data)
 					fmt.Printf("[PROMOTED] %s to FP32\n", t.Name)
 				} else {
-					mt = e.Ctx.NewTensor(rows, cols)
+					mt = e.Ctx.NewTensorWithType(rows, cols, device.DataTypeF16)
 					// ... F16 load ...
 					dataBytes := numElements * 2
 					if uint64(len(t.Data)) < uint64(dataBytes) {
@@ -265,7 +272,7 @@ func (e *Engine) loadModel(path string) error {
 
 				if e.Config.Dim < 1024 {
 					f32Data := gguf.DequantizeQ4K(t.Data, numElements)
-					mt = e.Ctx.NewTensor(rows, cols)
+					mt = e.Ctx.NewTensorWithType(rows, cols, device.DataTypeF16)
 					mt.LoadFrom(f32Data)
 				} else {
 					// Large Models: Use Q4K Tensor and Kernels
@@ -279,12 +286,37 @@ func (e *Engine) loadModel(path string) error {
 					mt.LoadFromRaw(t.Data[:dataBytes])
 
 				}
+			} else if t.Type == gguf.GGMLTypeQ4_0 {
+				// Type 2 (Q4_0).
+				// Always use native Q4_0 kernel
+				// rows * cols elements.
+				// Block size 32. 18 bytes per block.
+				// Check alignment
+				if numElements%32 != 0 {
+					return fmt.Errorf("Q4_0 tensor %s size %d not divisible by 32", t.Name, numElements)
+				}
+				mt = e.Ctx.NewTensorWithType(rows, cols, device.DataTypeQ4_0)
+				dataBytes := (numElements / 32) * 18
+				if uint64(len(t.Data)) < uint64(dataBytes) {
+					return fmt.Errorf("tensor %s data truncated (Need %d, Has %d)", t.Name, dataBytes, len(t.Data))
+				}
+				mt.LoadFromRaw(t.Data[:dataBytes])
 
 			} else if t.Type == gguf.GGMLTypeQ6_K {
 				// Type 14 (Q6_K).
-				f32Data := gguf.DequantizeQ6K(t.Data, numElements)
-				mt = e.Ctx.NewTensor(rows, cols)
-				mt.LoadFrom(f32Data)
+				if t.Name == "output.weight" || e.Config.Dim >= 1024 {
+					// Use Native Q6K
+					mt = e.Ctx.NewTensorWithType(rows, cols, device.DataTypeQ6K)
+					dataBytes := (numElements / 256) * 210
+					if uint64(len(t.Data)) < uint64(dataBytes) {
+						return fmt.Errorf("tensor %s data truncated", t.Name)
+					}
+					mt.LoadFromRaw(t.Data[:dataBytes])
+				} else {
+					f32Data := gguf.DequantizeQ6K(t.Data, numElements)
+					mt = e.Ctx.NewTensorWithType(rows, cols, device.DataTypeF16)
+					mt.LoadFrom(f32Data)
+				}
 
 			} else if t.Type == gguf.GGMLTypeQ4_K_S { // 99 Unused
 				mt = e.Ctx.NewTensor(rows, cols) // fallback
@@ -468,8 +500,8 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 		lastToken := inputTokens[i]
 
 		current := e.Weights.TokenEmb.EmbeddingLookup(lastToken, e.GlobalScale)
-		if samplerConfig.DebugActivations || (i == 0) {
-			current.ScanMax(fmt.Sprintf("[Pos %d] Embedding Out", e.CachePos))
+		if samplerConfig.DebugActivations || (i < 10) {
+			current.ScanMax(fmt.Sprintf("[Pos %d] Token %d Embedding", e.CachePos, lastToken))
 		}
 
 		// DEBUG: Print first 4 elements of embedding
@@ -528,26 +560,25 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 			// Output Head (F16 -> F32 Logits)
 			// scratch.Normed contains result. Use it.
 			scratch.Normed.LinearToFP32_Into(e.Weights.Output, logits)
+			e.Ctx.Synchronize()
 			logitsData := logits.ToHost()
 
-			// Use Sampler
-			// DEBUG: Print top 3 manually
-			var m1, m2, m3 float32 = -1e9, -1e9, -1e9
-			var i1, i2, i3 int = -1, -1, -1
+			params := make([]struct {
+				idx int
+				v   float32
+			}, len(logitsData))
 			for idx, v := range logitsData {
-				if v > m1 {
-					m3, i3 = m2, i2
-					m2, i2 = m1, i1
-					m1, i1 = v, idx
-				} else if v > m2 {
-					m3, i3 = m2, i2
-					m2, i2 = v, idx
-				} else if v > m3 {
-					m3, i3 = v, idx
-				}
+				params[idx].idx = idx
+				params[idx].v = v
 			}
-			fmt.Printf("Top 3: [%d:%.2f] [%d:%.2f] [%d:%.2f]\n", i1, m1, i2, m2, i3, m3)
-			nextObj := sampler.Sample(logitsData, inputTokens, e.Config.VocabSize)
+			sort.Slice(params, func(i, j int) bool { return params[i].v > params[j].v })
+			fmt.Printf("Top 10 Logits: ")
+			for i := 0; i < 10 && i < len(params); i++ {
+				fmt.Printf("[%d:%.2f] ", params[i].idx, params[i].v)
+			}
+			fmt.Printf("\n")
+			nextToken := sampler.Sample(logitsData, inputTokens, e.Config.VocabSize)
+			fmt.Printf("Sampler Picked: %d\n", nextToken)
 
 			// Log logits if enabled
 			if e.ActLogger.IsEnabled() {
@@ -555,7 +586,7 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 				e.ActLogger.LogLogits(logitsData, nil)
 			}
 
-			result = append(result, nextObj)
+			result = append(result, nextToken)
 		}
 
 		currentF32.ReturnToPool()
@@ -636,6 +667,7 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 		// It writes to scratch.Normed.
 		// No need to ReturnToPool for scratch.Normed (it's persistent scratch).
 
+		e.Ctx.Synchronize()
 		logitsData := logits.ToHost()
 
 		// Save logits for debugging
