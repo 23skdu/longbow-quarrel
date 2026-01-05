@@ -69,7 +69,7 @@ kernel void swiglu_f16(device const half *gate [[ buffer(0) ]],
 
 kernel void rmsnorm_f16(device const half *x [[ buffer(0) ]],
                       device half *out [[ buffer(1) ]],
-                      device const float *w [[ buffer(2) ]], // Changed to float
+                      device const float *w [[ buffer(2) ]],
                       constant float &eps [[ buffer(3) ]],
                       constant int &cols [[ buffer(4) ]],
                       uint tid [[ thread_index_in_threadgroup ]],
@@ -134,11 +134,9 @@ kernel void linear_q4k_f16(device const uchar *weight [[ buffer(0) ]],
     for (int i = (int)lane_id; i < num_blocks; i += 32) {
         device const uchar *block = row_ptr + i * 144;
         
-        // Direct Half Cast
-        float d = (float)*(device const half*)(block);
-        
-        // Direct Half Cast for dmin
-        float dmin = (float)*(device const half*)(block + 2);
+        // Use robust dequantization for subnormal scales
+        float d = fp16_to_fp32(*(device const ushort*)(block));
+        float dmin = fp16_to_fp32(*(device const ushort*)(block + 2));
         
         device const uchar *scales = block + 4;
         device const uchar *qs = block + 16;
@@ -210,8 +208,8 @@ kernel void rmsnorm_linear_q4k_f16(device const float *input [[ buffer(0) ]],
     
     for (int i = (int)tid.x; i < num_blocks; i += 1024) {
         device const uchar *block = row_ptr + i * 144;
-        float d = (float)*(device const half*)(block);
-        float dmin = (float)*(device const half*)(block + 2);
+        float d = fp16_to_fp32(*(device const ushort*)(block));
+        float dmin = fp16_to_fp32(*(device const ushort*)(block + 2));
         
         device const uchar *scales = block + 4;
         device const uchar *qs = block + 16;
@@ -277,8 +275,8 @@ kernel void swiglu_linear_q4k_f16(device const half *gate_input [[ buffer(0) ]],
     
     for (int i = (int)lane_id; i < num_blocks; i += 32) {
         device const uchar *block = row_ptr + i * 144;
-        float d = (float)*(device const half*)(block);
-        float dmin = (float)*(device const half*)(block + 2);
+        float d = fp16_to_fp32(*(device const ushort*)(block));
+        float dmin = fp16_to_fp32(*(device const ushort*)(block + 2));
         
         device const uchar *scales = block + 4;
         device const uchar *qs = block + 16;
@@ -381,40 +379,20 @@ kernel void linear_q6k_f16(device const uchar *weight [[ buffer(0) ]],
         device const uchar *ql = block;
         device const uchar *qh = block + 128;
         device const char  *sc = (device const char *)(block + 192);
-        ushort d_bits = *(device const ushort*)(block + 208);
-        
-        // Manual FP16->FP32 conversion with subnormal handling
-        uint d_sign = (d_bits & 0x8000u) << 16;
-        uint d_exp_raw = (d_bits & 0x7C00u) >> 10;
-        uint d_mant = d_bits & 0x03FFu;
-        float d;
-        if (d_exp_raw == 0) {
-            if (d_mant == 0) { d = 0.0f; }
-            else {
-                uint shift = 0; uint test_mant = d_mant;
-                while ((test_mant & 0x0400) == 0) { test_mant <<= 1; shift++; }
-                uint normalized_mant = (test_mant & 0x03FF) << 13;
-                uint d_exp = (113 - shift) << 23;
-                d = as_type<float>(d_sign | d_exp | normalized_mant);
-            }
-        } else {
-            uint d_exp = (d_exp_raw + (127 - 15)) << 23;
-            d = as_type<float>(d_sign | d_exp | (d_mant << 13));
-        }
+        // Simple cast - let Hardware handle F16
+        half d = *(device const half*)(block + 208);
         
         for (int l = 0; l < 16; l++) {
             float s = d * scale * (float)sc[l];
-            int sub_off = l * 16;
+            int group_off = l * 16;
             for (int k = 0; k < 16; k += 2) {
-                int idx = sub_off + k;
+                int idx = group_off + k;
                 uchar b = ql[idx / 2];
                 uchar h0 = (qh[idx / 4] >> ((idx % 4) * 2)) & 3;
                 uchar h1 = (qh[(idx+1) / 4] >> (((idx+1) % 4) * 2)) & 3;
                 
-                float w0 = s * ((float)((int8_t)((h0 << 4) | (b & 0xF))) - 32.0f);
-                float w1 = s * ((float)((int8_t)((h1 << 4) | (b >> 4))) - 32.0f);
-                
-                sum += w0 * (float)in_ptr[i * 256 + idx] + w1 * (float)in_ptr[i * 256 + idx + 1];
+                sum += (half)s * (half)((int8_t)((h0 << 4) | (b & 0xF)) - 32) * input[batch * dim_in + i * 256 + idx];
+                sum += (half)s * (half)((int8_t)((h1 << 4) | (b >> 4)) - 32) * input[batch * dim_in + i * 256 + idx + 1];
             }
         }
     }
@@ -444,39 +422,23 @@ kernel void linear_q6k_f32(device const uchar *weight [[ buffer(0) ]],
         device const char  *sc = (device const char *)(block + 192);
         ushort d_bits = *(device const ushort*)(block + 208);
         
-        uint d_sign = (d_bits & 0x8000u) << 16;
-        uint d_exp_raw = (d_bits & 0x7C00u) >> 10;
-        uint d_mant = d_bits & 0x03FFu;
-        float d;
-        if (d_exp_raw == 0) {
-            if (d_mant == 0) { d = 0.0f; }
-            else {
-                uint shift = 0; uint test_mant = d_mant;
-                while ((test_mant & 0x0400) == 0) { test_mant <<= 1; shift++; }
-                uint normalized_mant = (test_mant & 0x03FF) << 13;
-                uint d_exp = (113 - shift) << 23;
-                d = as_type<float>(d_sign | d_exp | normalized_mant);
-            }
-        } else {
-            uint d_exp = (d_exp_raw + (127 - 15)) << 23;
-            d = as_type<float>(d_sign | d_exp | (d_mant << 13));
-        }
+        // Simple cast
+        float d = (float)(*(device const half*)(block + 208));
+        if (isinf(d) || isnan(d)) d = 0.0f;
         
         for (int l = 0; l < 16; l++) {
             float s = d * scale * (float)sc[l];
-            int sub_off = l * 16;
+            int group_off = l * 16;
             for (int k = 0; k < 16; k += 2) {
-                int idx = sub_off + k;
+                int idx = group_off + k;
                 uchar b = ql[idx / 2];
                 uchar h0 = (qh[idx / 4] >> ((idx % 4) * 2)) & 3;
                 uchar h1 = (qh[(idx+1) / 4] >> (((idx+1) % 4) * 2)) & 3;
                 
-                float w0 = s * ((float)((int8_t)((h0 << 4) | (b & 0xF))) - 32.0f);
-                float w1 = s * ((float)((int8_t)((h1 << 4) | (b >> 4))) - 32.0f);
-                
-                sum += w0 * in_ptr[i * 256 + idx] + w1 * in_ptr[i * 256 + idx + 1];
-            }
+                sum += s * (float)((int8_t)((h0 << 4) | (b & 0xF)) - 32) * input[batch * dim_in + i * 256 + idx];
+                sum += s * (float)((int8_t)((h1 << 4) | (b >> 4)) - 32) * input[batch * dim_in + i * 256 + idx + 1];
         }
+    }
     }
     sum = simd_sum(sum);
     if (lane_id == 0) output[batch * dim_out + row] = sum;
@@ -504,24 +466,8 @@ kernel void linear_q6k_f32_f16(device const uchar *weight [[ buffer(0) ]],
         device const char  *sc = (device const char *)(block + 192);
         ushort d_bits = *(device const ushort*)(block + 208);
         
-        uint d_sign = (d_bits & 0x8000u) << 16;
-        uint d_exp_raw = (d_bits & 0x7C00u) >> 10;
-        uint d_mant = d_bits & 0x03FFu;
-        float d;
-        if (d_exp_raw == 0) {
-            if (d_mant == 0) { d = 0.0f; }
-            else {
-                uint shift = 0; uint test_mant = d_mant;
-                while ((test_mant & 0x0400) == 0) { test_mant <<= 1; shift++; }
-                uint normalized_mant = (test_mant & 0x03FF) << 13;
-                uint d_exp = (113 - shift) << 23;
-                d = as_type<float>(d_sign | d_exp | normalized_mant);
-            }
-        } else {
-            uint d_exp = (d_exp_raw + (127 - 15)) << 23;
-            d = as_type<float>(d_sign | d_exp | (d_mant << 13));
-        }
-        
+        float d = (float)(*(device const half*)(block + 208));
+        if (isinf(d) || isnan(d)) d = 0.0f;
         for (int l = 0; l < 16; l++) {
             float s = d * scale * (float)sc[l];
             int sub_off = l * 16;
@@ -536,8 +482,104 @@ kernel void linear_q6k_f32_f16(device const uchar *weight [[ buffer(0) ]],
             }
         }
     }
-    sum = simd_sum(sum);
     if (lane_id == 0) output[batch * dim_out + row] = safe_half(sum);
+}
+
+
+// Q4_0: Block size 32. 18 bytes.
+// Structure: half d; uchar qs[16];
+kernel void linear_q4_0_f16(device const uchar *weight [[ buffer(0) ]],
+                           device const half *input [[ buffer(1) ]],
+                           device half *output [[ buffer(2) ]],
+                           constant int &dim_in [[ buffer(3) ]],
+                           constant int &dim_out [[ buffer(4) ]],
+                           constant float &scale [[ buffer(5) ]],
+                           uint3 tid [[ thread_position_in_threadgroup ]],
+                           uint3 qid [[ thread_position_in_grid ]]) {
+    uint row = qid.y; uint batch = qid.z;
+    if (row >= (uint)dim_out) return; uint lane_id = tid.x;
+    int num_blocks = dim_in / 32;
+    device const uchar *row_ptr = weight + row * num_blocks * 18;
+    device const half *in_ptr = input + batch * dim_in;
+    float sum = 0;
+    
+    for (int i = (int)lane_id; i < num_blocks; i += 32) {
+        device const uchar *block = row_ptr + i * 18;
+        half d = *(device const half*)block;
+        device const uchar *qs = block + 2;
+        
+        for (int j = 0; j < 16; j++) {
+            uchar b = qs[j];
+            float v0 = ((float)(b & 0xF) - 8.0f);
+            float v1 = ((float)(b >> 4) - 8.0f);
+            sum += (float)d * v0 * (float)in_ptr[i * 32 + j * 2];
+            sum += (float)d * v1 * (float)in_ptr[i * 32 + j * 2 + 1];
+        }
+    }
+    sum = simd_sum(sum);
+    if (lane_id == 0) output[batch * dim_out + row] = (half)(sum * scale);
+}
+
+kernel void linear_q4_0_f32(device const uchar *weight [[ buffer(0) ]],
+                           device const half *input [[ buffer(1) ]],
+                           device float *output [[ buffer(2) ]],
+                           constant int &dim_in [[ buffer(3) ]],
+                           constant int &dim_out [[ buffer(4) ]],
+                           constant float &scale [[ buffer(5) ]],
+                           uint3 tid [[ thread_position_in_threadgroup ]],
+                           uint3 qid [[ thread_position_in_grid ]]) {
+    uint row = qid.y; uint batch = qid.z;
+    if (row >= (uint)dim_out) return; uint lane_id = tid.x;
+    int num_blocks = dim_in / 32;
+    device const uchar *row_ptr = weight + row * num_blocks * 18;
+    device const half *in_ptr = input + batch * dim_in;
+    float sum = 0;
+    
+    for (int i = (int)lane_id; i < num_blocks; i += 32) {
+        device const uchar *block = row_ptr + i * 18;
+        half d = *(device const half*)block;
+        device const uchar *qs = block + 2;
+        
+        for (int j = 0; j < 16; j++) {
+            uchar b = qs[j];
+            float v0 = ((float)(b & 0xF) - 8.0f);
+            float v1 = ((float)(b >> 4) - 8.0f);
+            sum += (float)d * v0 * (float)in_ptr[i * 32 + j * 2];
+            sum += (float)d * v1 * (float)in_ptr[i * 32 + j * 2 + 1];
+        }
+    }
+    sum = simd_sum(sum);
+    if (lane_id == 0) output[batch * dim_out + row] = sum * scale;
+}
+
+kernel void embedding_q4_0_f16(device const uchar *weight [[ buffer(0) ]],
+                              device half *output [[ buffer(1) ]],
+                              constant int &idx [[ buffer(2) ]],
+                              constant int &dim [[ buffer(3) ]],
+                              uint qid [[ thread_position_in_grid ]]) {
+    if (qid >= (uint)dim) return;
+    int num_blocks = dim / 32;
+    // Row offset
+    device const uchar *row_ptr = weight + idx * num_blocks * 18;
+    
+    int i = qid / 32; // block index
+    int lane = qid % 32; // element in block
+    
+    device const uchar *block = row_ptr + i * 18;
+    half d = *(device const half*)block;
+    device const uchar *qs = block + 2;
+    
+    // qs stores 32 elements. 2 per byte.
+    // lane 0 -> byte 0 low. lane 1 -> byte 0 high.
+    int byte_idx = lane / 2;
+    uchar b = qs[byte_idx];
+    float v;
+    if ((lane % 2) == 0) {
+        v = ((float)(b & 0xF) - 8.0f);
+    } else {
+        v = ((float)(b >> 4) - 8.0f);
+    }
+    output[qid] = (half)(v * (float)d);
 }
 
 
@@ -551,26 +593,29 @@ kernel void rope_f16(device half *x [[ buffer(0) ]],
     // gid.y = token index (0 .. batch_size-1)
     
     int h = gid.x / (headDim / 2);
-    int i = gid.x % (headDim / 2);
-    int p = pos + gid.y; // Absolute position in sequence
+    int lane = gid.x % (headDim / 2);
     
-    float freq = (float)p * pow(ropeTheta, -2.0f * (float)i / (float)headDim);
-    float ct = cos(freq);
-    float st = sin(freq);
-    
-    // Layout: [Tokens, Heads, HeadDim]
-    device half *token_ptr = x + gid.y * numHeads * headDim;
-    device half *q_ptr = token_ptr + h * headDim;
-    
-    // Interleaved rotation (standard for Mistral/Llama GGUF)
-    int idx0 = 2 * i;
-    int idx1 = 2 * i + 1;
-    
-    float x0 = (float)q_ptr[idx0];
-    float x1 = (float)q_ptr[idx1];
-    
-    q_ptr[idx0] = (half)(x0 * ct - x1 * st);
-    q_ptr[idx1] = (half)(x0 * st + x1 * ct);
+    if (lane < headDim/2) {
+        // Neox Rotation (Half)
+        int half_dim = headDim / 2;
+        
+        int idx0 = lane;
+        int idx1 = lane + half_dim;
+        
+        // Calculate theta
+        // theta = pos * base^(-2*i/d)
+        // i = idx0
+        float theta_i = (float)pos * pow(ropeTheta, -2.0f * (float)idx0 / (float)headDim);
+        float sin_theta = sin(theta_i);
+        float cos_theta = cos(theta_i);
+
+        device half *dx = x + gid.y * numHeads * headDim + h * headDim;
+        float x0 = (float)dx[idx0];
+        float x1 = (float)dx[idx1];
+
+        dx[idx0] = (half)(x0 * cos_theta - x1 * sin_theta);
+        dx[idx1] = (half)(x0 * sin_theta + x1 * cos_theta);
+    }
 }
 
 kernel void embedding_f16(device const half *weight [[ buffer(0) ]], device half *output [[ buffer(1) ]], constant int &idx [[ buffer(2) ]], constant int &cols [[ buffer(3) ]], uint qid [[ thread_position_in_grid ]]) {
@@ -625,58 +670,8 @@ kernel void embedding_q4k_f16(device const uchar *weight [[ buffer(0) ]],
     
     for (int i = tid; i < num_blocks; i += 1024) {
         device const uchar *block = row_ptr + i * 144;
-        ushort d_bits = *(device const ushort*)(block);
-        ushort dmin_bits = *(device const ushort*)(block + 2);
-        
-        // Manual FP16->FP32 conversion with subnormal handling
-        uint d_sign = (d_bits & 0x8000u) << 16;
-        uint d_exp_raw = (d_bits & 0x7C00u) >> 10;
-        uint d_mant = d_bits & 0x03FFu;
-        
-        float d;
-        if (d_exp_raw == 0) {
-            if (d_mant == 0) {
-                d = 0.0f;
-            } else {
-                uint shift = 0;
-                uint test_mant = d_mant;
-                while ((test_mant & 0x0400) == 0) {
-                    test_mant <<= 1;
-                    shift++;
-                }
-                uint normalized_mant = (test_mant & 0x03FF) << 13;
-                uint d_exp = (113 - shift) << 23;
-                d = as_type<float>(d_sign | d_exp | normalized_mant);
-            }
-        } else {
-            uint d_exp = (d_exp_raw + (127 - 15)) << 23;
-            d = as_type<float>(d_sign | d_exp | (d_mant << 13));
-        }
-        
-        // Same for dmin
-        uint dmin_sign = (dmin_bits & 0x8000u) << 16;
-        uint dmin_exp_raw = (dmin_bits & 0x7C00u) >> 10;
-        uint dmin_mant = dmin_bits & 0x03FFu;
-        
-        float dmin;
-        if (dmin_exp_raw == 0) {
-            if (dmin_mant == 0) {
-                dmin = 0.0f;
-            } else {
-                uint shift = 0;
-                uint test_mant = dmin_mant;
-                while ((test_mant & 0x0400) == 0) {
-                    test_mant <<= 1;
-                    shift++;
-                }
-                uint normalized_mant = (test_mant & 0x03FF) << 13;
-                uint dmin_exp = (113 - shift) << 23;
-                dmin = as_type<float>(dmin_sign | dmin_exp | normalized_mant);
-            }
-        } else {
-            uint dmin_exp = (dmin_exp_raw + (127 - 15)) << 23;
-            dmin = as_type<float>(dmin_sign | dmin_exp | (dmin_mant << 13));
-        }
+        float d = fp16_to_fp32(*(device const ushort*)(block));
+        float dmin = fp16_to_fp32(*(device const ushort*)(block + 2));
         
         device const uchar *scales = block + 4;
         device const uchar *qs = block + 16;
@@ -743,6 +738,9 @@ kernel void att_scores_f16_v2(device const half *q [[ buffer(0) ]],
     // Initialize all scores to -inf (or masked value) before the window
     if (lane == 0) {
         for (int t = 0; t < start; t++) {
+            scores[h * stride + t] = -10000.0f;
+        }
+        for (int t = pos + 1; t < stride; t++) {
             scores[h * stride + t] = -10000.0f;
         }
     }
@@ -897,6 +895,17 @@ kernel void copy_f32_to_f16(device const float *src [[ buffer(0) ]], device half
 }
 
 // ==========================================
+// Utility Kernels
+// ==========================================
+kernel void fill_zero(device uchar *data [[ buffer(0) ]],
+                      constant int &size [[ buffer(1) ]],
+                      uint tid [[ thread_position_in_grid ]]) {
+    if (tid < (uint)size) {
+        data[tid] = 0;
+    }
+}
+
+// ==========================================
 // FP32 Kernels for Higher Precision
 // ==========================================
 
@@ -993,60 +1002,8 @@ kernel void linear_q4k_f32(device const uchar *weight [[ buffer(0) ]],
     float sum = 0;
     for (int i = (int)lane_id; i < num_blocks; i += 32) {
         device const uchar *block = row_ptr + i * 144;
-        ushort d_bits = *(device const ushort*)(block);
-        ushort dmin_bits = *(device const ushort*)(block + 2);
-        
-        // Manual FP16->FP32 conversion with subnormal handling (same as F16 kernel)
-        uint d_sign = (d_bits & 0x8000u) << 16;
-        uint d_exp_raw = (d_bits & 0x7C00u) >> 10;
-        uint d_mant = d_bits & 0x03FFu;
-        
-        float d;
-        if (d_exp_raw == 0) {
-            if (d_mant == 0) {
-                d = 0.0f;
-            } else {
-                uint shift = 0;
-                uint test_mant = d_mant;
-                while ((test_mant & 0x0400) == 0) {
-                    test_mant <<= 1;
-                    shift++;
-                }
-                // After normalization, bit 10 is set (the implicit leading 1)
-                // For FP32, we need to remove this bit and place remaining 10 bits in upper mantissa
-                uint normalized_mant = (test_mant & 0x03FF) << 13;  // Bits 0-9 -> bits 13-22
-                uint d_exp = (113 - shift) << 23;
-                d = as_type<float>(d_sign | d_exp | normalized_mant);
-            }
-        } else {
-            uint d_exp = (d_exp_raw + (127 - 15)) << 23;
-            d = as_type<float>(d_sign | d_exp | (d_mant << 13));
-        }
-        
-        // Same for dmin
-        uint dmin_sign = (dmin_bits & 0x8000u) << 16;
-        uint dmin_exp_raw = (dmin_bits & 0x7C00u) >> 10;
-        uint dmin_mant = dmin_bits & 0x03FFu;
-        
-        float dmin;
-        if (dmin_exp_raw == 0) {
-            if (dmin_mant == 0) {
-                dmin = 0.0f;
-            } else {
-                uint shift = 0;
-                uint test_mant = dmin_mant;
-                while ((test_mant & 0x0400) == 0) {
-                    test_mant <<= 1;
-                    shift++;
-                }
-                uint normalized_mant = (test_mant & 0x03FF) << 13;
-                uint dmin_exp = (113 - shift) << 23;
-                dmin = as_type<float>(dmin_sign | dmin_exp | normalized_mant);
-            }
-        } else {
-            uint dmin_exp = (dmin_exp_raw + (127 - 15)) << 23;
-            dmin = as_type<float>(dmin_sign | dmin_exp | (dmin_mant << 13));
-        }
+        float d = fp16_to_fp32(*(device const ushort*)(block));
+        float dmin = fp16_to_fp32(*(device const ushort*)(block + 2));
 
 
         device const uchar *scales = block + 4;
@@ -1094,44 +1051,8 @@ kernel void linear_q4k_f32_f16(device const uchar *weight [[ buffer(0) ]],
     float sum = 0;
     for (int i = (int)lane_id; i < num_blocks; i += 32) {
         device const uchar *block = row_ptr + i * 144;
-        ushort d_bits = *(device const ushort*)(block);
-        ushort dmin_bits = *(device const ushort*)(block + 2);
-        
-        uint d_sign = (d_bits & 0x8000u) << 16;
-        uint d_exp_raw = (d_bits & 0x7C00u) >> 10;
-        uint d_mant = d_bits & 0x03FFu;
-        float d;
-        if (d_exp_raw == 0) {
-            if (d_mant == 0) { d = 0.0f; }
-            else {
-                uint shift = 0; uint test_mant = d_mant;
-                while ((test_mant & 0x0400) == 0) { test_mant <<= 1; shift++; }
-                uint normalized_mant = (test_mant & 0x03FF) << 13;
-                uint d_exp = (113 - shift) << 23;
-                d = as_type<float>(d_sign | d_exp | normalized_mant);
-            }
-        } else {
-            uint d_exp = (d_exp_raw + (127 - 15)) << 23;
-            d = as_type<float>(d_sign | d_exp | (d_mant << 13));
-        }
-        
-        uint dm_sign = (dmin_bits & 0x8000u) << 16;
-        uint dm_exp_raw = (dmin_bits & 0x7C00u) >> 10;
-        uint dm_mant = dmin_bits & 0x03FFu;
-        float dmin;
-        if (dm_exp_raw == 0) {
-            if (dm_mant == 0) { dmin = 0.0f; }
-            else {
-                uint shift = 0; uint test_mant = dm_mant;
-                while ((test_mant & 0x0400) == 0) { test_mant <<= 1; shift++; }
-                uint normalized_mant = (test_mant & 0x03FF) << 13;
-                uint dm_exp = (113 - shift) << 23;
-                dmin = as_type<float>(dm_sign | dm_exp | normalized_mant);
-            }
-        } else {
-            uint dm_exp = (dm_exp_raw + (127 - 15)) << 23;
-            dmin = as_type<float>(dm_sign | dm_exp | (dm_mant << 13));
-        }
+        float d = fp16_to_fp32(*(device const ushort*)(block));
+        float dmin = fp16_to_fp32(*(device const ushort*)(block + 2));
 
         float scale_val = d * scale;
         float min_val = dmin * scale;
@@ -1218,6 +1139,64 @@ kernel void linear_f16_f32(device const half *weight [[ buffer(0) ]],
 // FP32 FFN Kernels for Small Models (SmolLM2, TinyLlama)
 // These kernels maintain FP32 precision through FFN to prevent activation explosion
 // ============================================================================
+
+kernel void linear_q6k_f16_f32(device const uchar *weight [[ buffer(0) ]],
+                          device const half *input [[ buffer(1) ]],
+                          device float *output [[ buffer(2) ]],
+                          constant int &dim_in [[ buffer(3) ]],
+                          constant int &dim_out [[ buffer(4) ]],
+                          constant float &scale [[ buffer(5) ]],
+                          uint3 tid [[ thread_position_in_threadgroup ]],
+                          uint3 qid [[ thread_position_in_grid ]]) {
+    uint row = qid.y; uint batch = qid.z;
+    if (row >= (uint)dim_out) return; uint lane_id = tid.x;
+    int num_blocks = dim_in / 256;
+    device const uchar *row_ptr = weight + row * num_blocks * 210;
+    device const half *in_ptr = input + batch * dim_in;
+    float sum = 0;
+    
+    for (int i = (int)lane_id; i < num_blocks; i += 32) {
+        device const uchar *block = row_ptr + i * 210;
+        device const uchar *ql = block;
+        device const uchar *qh = block + 128;
+        device const char  *sc = (device const char *)(block + 192);
+        ushort d_bits = *(device const ushort*)(block + 208);
+        
+        float d;
+        uint d_sign = (d_bits & 0x8000u) << 16;
+        uint d_exp_raw = (d_bits & 0x7C00u) >> 10;
+        uint d_mant = d_bits & 0x03FFu;
+        if (d_exp_raw == 0) {
+            if (d_mant == 0) d = 0.0f;
+            else {
+                uint shift = 0; uint test_mant = d_mant;
+                while ((test_mant & 0x0400) == 0) { test_mant <<= 1; shift++; }
+                d = as_type<float>(d_sign | ((113 - shift) << 23) | ((test_mant & 0x03FF) << 13));
+            }
+        } else {
+            d = as_type<float>(d_sign | ((d_exp_raw + 112) << 23) | (d_mant << 13));
+        }
+
+        device const half *in_ptr_block = input + batch * dim_in + i * 256;
+        
+        for (int l = 0; l < 16; l++) {
+            float s = d * scale * (float)sc[l];
+            int group_off = l * 16;
+            for (int k = 0; k < 16; k += 2) {
+                int idx = group_off + k;
+                uchar b = ql[idx / 2];
+                uchar h0 = (qh[idx / 4] >> ((idx % 4) * 2)) & 3;
+                uchar h1 = (qh[(idx+1) / 4] >> (((idx+1) % 4) * 2)) & 3;
+                
+                sum += s * (float)((int8_t)((h0 << 4) | (b & 0xF)) - 32) * input[batch * dim_in + i * 256 + idx];
+                sum += s * (float)((int8_t)((h1 << 4) | (b >> 4)) - 32) * input[batch * dim_in + i * 256 + idx + 1];
+            }
+        }
+    }
+    
+    sum = simd_sum(sum);
+    if (lane_id == 0) output[batch * dim_out + row] = sum;
+}
 
 // Linear: FP16 weights, FP16 input → FP32 output (for Gate/Up projections)
 kernel void linear_f16_to_f32(device const half *weight [[ buffer(0) ]],

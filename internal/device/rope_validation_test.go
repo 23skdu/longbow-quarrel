@@ -18,19 +18,19 @@ func ropeCPU(input []float32, headDim, pos int, theta float64) []float32 {
 
 	for i := 0; i < len(input); i += headDim {
 		for j := 0; j < headDim/2; j++ {
-			idx0 := i + 2*j
-			idx1 := i + 2*j + 1
-			
+			idx0 := i + j
+			idx1 := i + j + headDim/2
+
 			// theta_i = theta ^ (-2i / d)
 			expVar := -2.0 * float32(j) / float32(headDim)
 			freq := float32(pos) * float32(math.Pow(theta, float64(expVar)))
-			
+
 			cos := float32(math.Cos(float64(freq)))
 			sin := float32(math.Sin(float64(freq)))
-			
+
 			x0 := input[idx0]
 			x1 := input[idx1]
-			
+
 			output[idx0] = x0*cos - x1*sin
 			output[idx1] = x0*sin + x1*cos
 		}
@@ -59,10 +59,10 @@ func TestRoPE_Precision_HighTheta(t *testing.T) {
 	// 2. Run GPU Kernel
 	tIn := ctx.NewTensor(1, headDim)
 	tIn.LoadFrom(inputData)
-	
+
 	// RoPE(posOffset, headDim, numHeads, seqLen int, ropeTheta float32)
 	tIn.RoPE(pos, headDim, 1, 1, float32(theta))
-	
+
 	gpuRes := tIn.ToHost()
 
 	// 3. Compare with strict tolerance
@@ -77,7 +77,7 @@ func TestRoPE_Precision_HighTheta(t *testing.T) {
 			t.Errorf("Mismatch at index %d: Got %f, Want %f (Diff: %f)", i, gpuRes[i], expected[i], diff)
 		}
 	}
-	
+
 	t.Logf("Max Error with Theta=1e6: %e", maxErr)
 	t.Logf("Sample GPU[0:4]: %v", gpuRes[:4])
 	t.Logf("Sample CPU[0:4]: %v", expected[:4])

@@ -1,4 +1,4 @@
-//go:build darwin && metal
+// go:build darwin && metal
 
 #import "metal_bridge.h"
 #import <Metal/Metal.h>
@@ -29,10 +29,14 @@
 @property(strong) id<MTLComputePipelineState> pipelineRMSNorm_F32;
 @property(strong) id<MTLComputePipelineState> pipelineMatMul_Q4K_F32;
 @property(strong) id<MTLComputePipelineState> pipelineMatMul_Q6K_F32;
+@property(strong) id<MTLComputePipelineState> pipelineLinearQ6K_F16_F32;
 @property(strong) id<MTLComputePipelineState> pipelineMatMul_Q4K_F32_F16;
 @property(strong) id<MTLComputePipelineState> pipelineMatMul_Q6K_F32_F16;
 @property(strong) id<MTLComputePipelineState> pipelineAdd_F32;
 @property(strong) id<MTLComputePipelineState> pipelineSwiGLU_F32;
+// @property(strong) id<MTLComputePipelineState> pipelineSwiGLULinear_Q4K_F16;
+// // Already declared
+@property(strong) id<MTLComputePipelineState> pipelineFillZero;
 @property(strong) id<MTLComputePipelineState> pipelineMatMul_F16_F32;
 @property(strong) id<MTLComputePipelineState> pipelineCopy_F16_F32;
 // FP32 FFN Pipelines for Small Models
@@ -48,6 +52,10 @@
 @property(strong) id<MTLComputePipelineState> pipelineDebugRoPEFreq;
 @property(strong) id<MTLComputePipelineState> pipelineDebugDot;
 @property(strong) id<MTLComputePipelineState> pipelineSwiGLULinear_Q4K_F16;
+// Q4_0
+@property(strong) id<MTLComputePipelineState> pipelineLinearQ4_0_F16;
+@property(strong) id<MTLComputePipelineState> pipelineLinearQ4_0_F32;
+@property(strong) id<MTLComputePipelineState> pipelineEmbeddingQ4_0_F16;
 @property(strong) id<MTLCommandBuffer> currentCommandBuffer;
 @property(strong) id<MTLComputeCommandEncoder> currentEncoder;
 @property(strong) id<MTLCommandBuffer> lastCommandBuffer;
@@ -179,10 +187,17 @@ MetalContextRef Metal_Init(const char *libSource) {
   ctx.pipelineRMSNorm_F32 = loadPipeline(ctx, @"rmsnorm_f32");
   ctx.pipelineMatMul_Q4K_F32 = loadPipeline(ctx, @"linear_q4k_f32");
   ctx.pipelineMatMul_Q6K_F32 = loadPipeline(ctx, @"linear_q6k_f32");
+  ctx.pipelineLinearQ6K_F16_F32 = loadPipeline(ctx, @"linear_q6k_f16_f32");
   ctx.pipelineMatMul_Q4K_F32_F16 = loadPipeline(ctx, @"linear_q4k_f32_f16");
   ctx.pipelineMatMul_Q6K_F32_F16 = loadPipeline(ctx, @"linear_q6k_f32_f16");
   ctx.pipelineAdd_F32 = loadPipeline(ctx, @"add_f32");
   ctx.pipelineSwiGLU_F32 = loadPipeline(ctx, @"swiglu_f32");
+  ctx.pipelineSwiGLULinear_Q4K_F16 =
+      loadPipeline(ctx, @"swiglu_linear_q4k_f16");
+  // Q4_0
+  ctx.pipelineLinearQ4_0_F16 = loadPipeline(ctx, @"linear_q4_0_f16");
+  ctx.pipelineLinearQ4_0_F32 = loadPipeline(ctx, @"linear_q4_0_f32");
+  ctx.pipelineEmbeddingQ4_0_F16 = loadPipeline(ctx, @"embedding_q4_0_f16");
   ctx.pipelineMatMul_F16_F32 = loadPipeline(ctx, @"linear_f16_f32");
   ctx.pipelineCopy_F16_F32 = loadPipeline(ctx, @"copy_f16_to_f32");
   ctx.pipelineCopy_F32_F16 = loadPipeline(ctx, @"copy_f32_to_f16");
@@ -194,6 +209,8 @@ MetalContextRef Metal_Init(const char *libSource) {
   ctx.pipelineLinearF32ToF16 = loadPipeline(ctx, @"linear_f32_to_f16");
   ctx.pipelineRMSNorm_F32_F16 = loadPipeline(ctx, @"rmsnorm_f32_to_f16_v4");
   ctx.pipelineAdd_F32_F16 = loadPipeline(ctx, @"add_f32_f16");
+
+  ctx.pipelineFillZero = loadPipeline(ctx, @"fill_zero"); // New Kernel
   ctx.pipelineRMSNormLinear_Q4K_F16 =
       loadPipeline(ctx, @"rmsnorm_linear_q4k_f16");
   ctx.pipelineDebugRoPEFreq = loadPipeline(ctx, @"debug_rope_freq");
@@ -349,6 +366,22 @@ void Metal_ZeroBuffer(MetalBufferRef buf, int o, int s) {
   id<MTLBuffer> b = (__bridge id<MTLBuffer>)buf;
   memset([b contents] + o, 0, s);
   [b didModifyRange:NSMakeRange(o, s)];
+}
+
+void Metal_ZeroBufferGPU(MetalContextRef ctx, MetalBufferRef buf, int o,
+                         int s) {
+  MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
+  id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
+  [enc setComputePipelineState:mc.pipelineFillZero];
+  [enc setBuffer:(__bridge id<MTLBuffer>)buf offset:o atIndex:0];
+  [enc setBytes:&s length:4 atIndex:1];
+
+  MTLSize gridSize = MTLSizeMake(s, 1, 1);
+  MTLSize groupSize = MTLSizeMake(1024, 1, 1);
+  if (gridSize.width < 1024)
+    groupSize.width = gridSize.width;
+
+  [enc dispatchThreads:gridSize threadsPerThreadgroup:groupSize];
 }
 
 void Metal_Embedding_F16(MetalContextRef ctx, MetalBufferRef weights, int offW,
@@ -1175,5 +1208,75 @@ void Metal_Add_F32_F16(MetalContextRef ctx, MetalBufferRef a, int oA,
   [enc setBuffer:(__bridge id<MTLBuffer>)r offset:oR atIndex:2]; // FP32 result
   [enc dispatchThreads:MTLSizeMake(count, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(MIN(count, 256), 1, 1)];
+  [mc barrier];
+}
+
+void Metal_LinearQ6K_F16_F32(MetalContextRef ctx, MetalBufferRef weight,
+                             int offWeight, MetalBufferRef input, int offInput,
+                             MetalBufferRef output, int offOutput, int rows,
+                             int dimIn, int dimOut, float scale) {
+  MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
+  id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
+  [enc setComputePipelineState:mc.pipelineLinearQ6K_F16_F32];
+  [enc setBuffer:(__bridge id<MTLBuffer>)weight offset:offWeight atIndex:0];
+  [enc setBuffer:(__bridge id<MTLBuffer>)input offset:offInput atIndex:1];
+  [enc setBuffer:(__bridge id<MTLBuffer>)output offset:offOutput atIndex:2];
+  [enc setBytes:&dimIn length:4 atIndex:3];
+  [enc setBytes:&dimOut length:4 atIndex:4];
+  [enc setBytes:&scale length:4 atIndex:5];
+  [enc dispatchThreadgroups:MTLSizeMake(1, dimOut, rows)
+      threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+  [mc barrier];
+}
+
+void Metal_LinearQ4_0_F16(MetalContextRef ctx, MetalBufferRef weight,
+                          int offWeight, MetalBufferRef input, int offInput,
+                          MetalBufferRef output, int offOutput, int rows,
+                          int dimIn, int dimOut, float scale) {
+  MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
+  id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
+  [enc setComputePipelineState:mc.pipelineLinearQ4_0_F16];
+  [enc setBuffer:(__bridge id<MTLBuffer>)weight offset:offWeight atIndex:0];
+  [enc setBuffer:(__bridge id<MTLBuffer>)input offset:offInput atIndex:1];
+  [enc setBuffer:(__bridge id<MTLBuffer>)output offset:offOutput atIndex:2];
+  [enc setBytes:&dimIn length:4 atIndex:3];
+  [enc setBytes:&dimOut length:4 atIndex:4];
+  [enc setBytes:&scale length:4 atIndex:5];
+  [enc dispatchThreadgroups:MTLSizeMake(1, dimOut, rows)
+      threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+  [mc barrier];
+}
+
+void Metal_LinearQ4_0_F32(MetalContextRef ctx, MetalBufferRef weight,
+                          int offWeight, MetalBufferRef input, int offInput,
+                          MetalBufferRef output, int offOutput, int rows,
+                          int dimIn, int dimOut, float scale) {
+  MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
+  id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
+  [enc setComputePipelineState:mc.pipelineLinearQ4_0_F32];
+  [enc setBuffer:(__bridge id<MTLBuffer>)weight offset:offWeight atIndex:0];
+  [enc setBuffer:(__bridge id<MTLBuffer>)input offset:offInput atIndex:1];
+  [enc setBuffer:(__bridge id<MTLBuffer>)output offset:offOutput atIndex:2];
+  [enc setBytes:&dimIn length:4 atIndex:3];
+  [enc setBytes:&dimOut length:4 atIndex:4];
+  [enc setBytes:&scale length:4 atIndex:5];
+  [enc dispatchThreadgroups:MTLSizeMake(1, dimOut, rows)
+      threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+  [mc barrier];
+}
+
+void Metal_EmbeddingQ4_0_F16(MetalContextRef ctx, MetalBufferRef weights,
+                             int offW, MetalBufferRef result, int offRes,
+                             int rowIdx, int cols) {
+  MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
+  id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
+  [enc setComputePipelineState:mc.pipelineEmbeddingQ4_0_F16];
+  [enc setBuffer:(__bridge id<MTLBuffer>)weights offset:offW atIndex:0];
+  [enc setBuffer:(__bridge id<MTLBuffer>)result offset:offRes atIndex:1];
+  [enc setBytes:&rowIdx length:4 atIndex:2];
+  [enc setBytes:&cols length:4 atIndex:3];
+  int threads = (cols < 1024) ? cols : 1024;
+  [enc dispatchThreads:MTLSizeMake(cols, 1, 1)
+      threadsPerThreadgroup:MTLSizeMake(threads, 1, 1)];
   [mc barrier];
 }
