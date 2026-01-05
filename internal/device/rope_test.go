@@ -1,87 +1,64 @@
+//go:build darwin && metal
+
+
 package device
 
 import (
 	"math"
-	"math/rand"
 	"testing"
-	"time"
 )
 
-// CPU reference for RoPE
-func cpuRoPE(data []float32, rows, headDim, heads int, pos int, theta float32) []float32 {
-	out := make([]float32, len(data))
-	copy(out, data)
-
-	// data is [rows, heads * headDim]
-	// but tensor is flat.
-	// We only verify single row for now as per kernel limitation
-	r := 0
-	rowOff := r * (heads * headDim)
-	p := pos + r 
-
-	for h := 0; h < heads; h++ {
-		headOff := rowOff + h*headDim
-
-		for i := 0; i < headDim/2; i++ {
-			// theta^(-2i/dim)
-			freq := float32(float64(p) * math.Pow(float64(theta), -2.0*float64(i)/float64(headDim)))
-			cos := float32(math.Cos(float64(freq)))
-			sin := float32(math.Sin(float64(freq)))
-
-			idx1 := headOff + i
-			idx2 := headOff + i + (headDim / 2)
-
-			x1 := data[idx1]
-			x2 := data[idx2]
-
-			// Rotation: [x1*c - x2*s, x1*s + x2*c]
-			out[idx1] = x1*cos - x2*sin
-			out[idx2] = x1*sin + x2*cos
-		}
-	}
-	return out
-}
-
-func TestRoPEKernel(t *testing.T) {
+func TestRoPE_Precision(t *testing.T) {
 	ctx := NewContext()
 	defer ctx.Free()
 
-	rows := 1 // Test single row
-	heads := 2
-	headDim := 64
-	cols := heads * headDim
-	pos := 10
-	theta := float32(1000000.0)
+	headDim := 128
+	numHeads := 32
+	pos := 5
+	ropeTheta := float32(10000.0)
 
-	// Create random input
-	inputData := make([]float32, rows*cols)
+	// 1. Prepare Input Data
+	inputData := make([]float32, numHeads*headDim)
 	for i := range inputData {
-		inputData[i] = rand.Float32()
-	}
-
-	// CPU Result
-	cpuOut := cpuRoPE(inputData, rows, headDim, heads, pos, theta)
-
-	// Metal Result
-	tRow := ctx.NewTensor(rows, cols)
-	tRow.LoadFrom(inputData)
-	
-	// Pass 1 as batch/seqLen
-	tRow.RoPE(pos, headDim, heads, 1, theta) 
-	
-	if err := ctx.WaitWithTimeout(2 * time.Second); err != nil {
-		t.Fatal(err)
+		inputData[i] = float32(i) / 100.0
 	}
 	
-	metalOut := tRow.ToHost()
-	tRow.Free()
+	ten := ctx.NewTensor(1, numHeads*headDim)
+	ten.LoadFrom(inputData)
+
+	// 2. CPU Reference
+	expected := make([]float32, numHeads*headDim)
+	copy(expected, inputData)
 	
-	// Compare
-	for i, v := range metalOut {
-		// FP16 precision tolerance
-		if math.Abs(float64(v - cpuOut[i])) > 1e-2 {
-			t.Errorf("Mismatch at %d: CPU %f, Metal %f (Diff: %f)", i, cpuOut[i], v, v-cpuOut[i])
-			return 
+	for h := 0; h < numHeads; h++ {
+		for i := 0; i < headDim/2; i++ {
+			theta := float64(pos) * math.Pow(float64(ropeTheta), -2.0*float64(i)/float64(headDim))
+			ct := math.Cos(theta)
+			st := math.Sin(theta)
+			
+			off := h * headDim
+			idx0 := off + 2*i
+			idx1 := off + 2*i + 1
+			
+			v0 := float64(expected[idx0])
+			v1 := float64(expected[idx1])
+			
+			expected[idx0] = float32(v0*ct - v1*st)
+			expected[idx1] = float32(v0*st + v1*ct)
+		}
+	}
+
+	// 3. Run Kernel
+	ten.RoPE(pos, headDim, numHeads, 1, ropeTheta)
+	ctx.Synchronize()
+	
+	// 4. Verify
+	got := ten.ToHost()
+	
+	for i := 0; i < len(got); i++ {
+		if math.Abs(float64(got[i]-expected[i])) > 1e-3 {
+			t.Errorf("Mismatch at index %d: got %f, want %f", i, got[i], expected[i])
+			if i > 10 { break } // Don't spam
 		}
 	}
 }

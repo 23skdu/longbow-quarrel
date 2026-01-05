@@ -7,8 +7,8 @@ import (
 	"testing"
 )
 
-func BenchmarkMetalMatMul_128(b *testing.B) { benchmarkMatMul(b, 128, 128, 128) }
-func BenchmarkMetalMatMul_512(b *testing.B) { benchmarkMatMul(b, 512, 512, 512) }
+func BenchmarkMetalMatMul_128(b *testing.B)  { benchmarkMatMul(b, 128, 128, 128) }
+func BenchmarkMetalMatMul_512(b *testing.B)  { benchmarkMatMul(b, 512, 512, 512) }
 func BenchmarkMetalMatMul_1024(b *testing.B) { benchmarkMatMul(b, 1024, 1024, 1024) }
 func BenchmarkMetalMatMul_2048(b *testing.B) { benchmarkMatMul(b, 2048, 2048, 2048) }
 
@@ -30,19 +30,19 @@ func benchmarkMatMul(b *testing.B, M, K, N int) {
 	   tA.LoadFrom(aData)
 	   tB := ctx.NewTensor(K, N)
 	   tB.LoadFrom(bData)
-	   
+
 	   tA_ := tA
 	*/
-	
+
 	tA := ctx.NewTensor(M, K)
 	tA.LoadFrom(aData)
 	tB := ctx.NewTensor(K, N)
 	tB.LoadFrom(bData)
-	
+
 	// Warmup
 	_ = tA.MatMul(tB)
 	ctx.Synchronize()
-	
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		tC := tA.MatMul(tB)
@@ -56,8 +56,8 @@ func benchmarkMatMul(b *testing.B, M, K, N int) {
 		// The current API allocates new result every time.
 		// This benchmark measures Allocation + Dispatch.
 		// It represents current unoptimized state.
-		
-		_ = tC 
+
+		_ = tC
 		// Forcing sync every N steps might be good, but here we just loop.
 	}
 	ctx.Synchronize()

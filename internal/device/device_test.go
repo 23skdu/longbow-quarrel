@@ -1,5 +1,6 @@
 //go:build darwin && metal
 
+
 package device
 
 import (
@@ -59,7 +60,7 @@ func TestMetalScale(t *testing.T) {
 	tA := ctx.NewTensor(count, 1)
 	tA.LoadFrom(a)
 
-	tC := tA.Scale(scale)
+	tC := tA.ScaleBy(scale)
 	result := tC.ToHost()
 
 	for i := 0; i < count; i++ {

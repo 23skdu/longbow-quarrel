@@ -1,7 +1,10 @@
+//go:build darwin && metal
+
 package main
 
 import (
 	"fmt"
+
 	"github.com/23skdu/longbow-quarrel/internal/engine"
 )
 
@@ -12,7 +15,7 @@ func main() {
 		fmt.Printf("Error: %v\n", err)
 		return
 	}
-	
+
 	words := []string{"The", "Paris"}
 	for _, w := range words {
 		tokens := e.Model.KV["tokenizer.ggml.tokens"].([]interface{})
@@ -24,8 +27,16 @@ func main() {
 			}
 		}
 		if id != -1 {
-			emb := e.Weights.TokenEmb.EmbeddingLookup(id)
-			max := emb.ScanMax(fmt.Sprintf("Emb(%s)", w))
+			data := e.Weights.TokenEmb.EmbeddingLookup(id, 1.0).ToHost()
+			max := float32(0.0)
+			for _, v := range data {
+				if v > max {
+					max = v
+				}
+				if -v > max {
+					max = -v
+				}
+			}
 			fmt.Printf("Token %q (ID %d) Max Emb: %f\n", w, id, max)
 		}
 	}
