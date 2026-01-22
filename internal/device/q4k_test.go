@@ -1,6 +1,5 @@
 //go:build darwin && metal
 
-
 package device
 
 import (
@@ -28,7 +27,7 @@ func TestQ4K_Correctness(t *testing.T) {
 	q4kData := make([]byte, dataSize)
 	rand.Seed(time.Now().UnixNano())
 	rand.Read(q4kData) // Randomize scales, mins, quants
-	
+
 	// FIX: Ensure d (bytes 0-1) and dmin (bytes 2-3) are valid Float16s
 	// Random bytes can form NaNs (exponent=31, mantissa!=0) or Infs.
 	for i := 0; i < numBlocks; i++ {
@@ -37,7 +36,7 @@ func TestQ4K_Correctness(t *testing.T) {
 		// Small positive numbers to prevent explosion
 		d := Float32ToFloat16(rand.Float32() * 0.1)
 		dmin := Float32ToFloat16(rand.Float32() * 0.1)
-		
+
 		// Write back
 		binary.LittleEndian.PutUint16(q4kData[offset:], d)
 		binary.LittleEndian.PutUint16(q4kData[offset+2:], dmin)
@@ -60,8 +59,13 @@ func TestQ4K_Correctness(t *testing.T) {
 
 	// 3. GPU Execution
 	// Create Q4K Weight Tensor
-	wTen := ctx.NewQ4KTensor(rows, cols)
-	wTen.LoadFromRaw(q4kData)
+	wTen, err := ctx.NewQ4KTensor(rows, cols)
+	if err != nil {
+		t.Fatalf("Failed to create Q4K tensor: %v", err)
+	}
+	if err := wTen.LoadFromRaw(q4kData); err != nil {
+		t.Fatalf("Failed to load Q4K data: %v", err)
+	}
 
 	// Create Input Vector (F16)
 	// MatMul expects B as [M x K] where M is batch dims.
@@ -71,13 +75,13 @@ func TestQ4K_Correctness(t *testing.T) {
 
 	// Run MatMul: C = A(1x256) * B(256x1) = 1x1
 	outTen := wTen.MatMul(inTen)
-	
+
 	if err := ctx.WaitWithTimeout(2 * time.Second); err != nil {
 		t.Fatal(err)
 	}
-	
+
 	res := outTen.ToHost()
-	
+
 	wTen.Free()
 	inTen.Free()
 	outTen.Free()
@@ -87,7 +91,7 @@ func TestQ4K_Correctness(t *testing.T) {
 	}
 
 	got := res[0]
-	
+
 	t.Logf("CPU Reference: %f", expected)
 	t.Logf("GPU Result:    %f", got)
 
@@ -99,15 +103,15 @@ func TestQ4K_Correctness(t *testing.T) {
 	// Metal `kernel` likely promotes to float for mul then accum?
 	// linear_q4k_f16 uses `float sum` accumulator. And `float` intermediate for dequant.
 	// So precision should be decent.
-	
+
 	diff := float32(math.Abs(float64(got - expected)))
 	// Relative error might be better if value is large.
 	// But `expected` could be near 0.
-	
+
 	// With 256 elements, errors can accumulate.
 	// Tolerance 1.0? or 1%?
 	// Let's check magnitude.
-	
+
 	if diff > 1.0 && diff > float32(math.Abs(float64(expected)))*0.05 {
 		t.Errorf("Mismatch. Expected %f, Got %f, Diff %f", expected, got, diff)
 	}
@@ -148,8 +152,13 @@ func TestQ3K_Correctness(t *testing.T) {
 	}
 
 	// GPU Execution
-	wTen := ctx.NewQ3KTensor(rows, cols)
-	wTen.LoadFromRaw(q3kData)
+	wTen, err := ctx.NewQ3KTensor(rows, cols)
+	if err != nil {
+		t.Fatalf("Failed to create Q3K tensor: %v", err)
+	}
+	if err := wTen.LoadFromRaw(q3kData); err != nil {
+		t.Fatalf("Failed to load Q3K data: %v", err)
+	}
 
 	inTen := ctx.NewTensor(cols, 1)
 	inTen.LoadFrom(inputF32)
@@ -157,15 +166,15 @@ func TestQ3K_Correctness(t *testing.T) {
 	// Explicit Dispatch to allow ZeroInit
 	c := ctx.NewTensor(rows, 1)
 	c.ZeroInit() // Start with 0.0
-	
+
 	ctx.RunQ3K_Explicit(wTen, inTen, c)
-		
+
 	if err := ctx.WaitWithTimeout(2 * time.Second); err != nil {
 		t.Fatal(err)
 	}
-	
+
 	res := c.ToHost()
-	
+
 	wTen.Free()
 	inTen.Free()
 	c.Free()
@@ -175,17 +184,17 @@ func TestQ3K_Correctness(t *testing.T) {
 	}
 
 	got := res[0]
-	
+
 	t.Logf("Q3K CPU Ref: %f", expected)
 	t.Logf("Q3K GPU Res: %f", got)
 
 	diff := float32(math.Abs(float64(got - expected)))
-	
-	// Q3 is lower precision, heavier quantization. 
+
+	// Q3 is lower precision, heavier quantization.
 	// Error tolerance might need to be slightly higher?
 	// But dequantization itself is exact logic on bits.
 	// Only float adds are inexact.
-	
+
 	if diff > 1.0 && diff > float32(math.Abs(float64(expected)))*0.05 {
 		t.Errorf("Mismatch. Expected %f, Got %f, Diff %f", expected, got, diff)
 	}
@@ -229,8 +238,13 @@ func TestQ6K_Correctness(t *testing.T) {
 	}
 
 	// GPU Result
-	wTen := ctx.NewQ6KTensor(rows, cols)
-	wTen.LoadFromRaw(q6kData)
+	wTen, err := ctx.NewQ6KTensor(rows, cols)
+	if err != nil {
+		t.Fatalf("Failed to create Q6K tensor: %v", err)
+	}
+	if err := wTen.LoadFromRaw(q6kData); err != nil {
+		t.Fatalf("Failed to load Q6K data: %v", err)
+	}
 	inTen := ctx.NewTensor(1, cols)
 	inTen.LoadFrom(inputF32)
 

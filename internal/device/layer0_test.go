@@ -27,14 +27,14 @@ func TestLayer0_RMSNorm(t *testing.T) {
 	ctx := NewContext()
 	defer ctx.Free()
 
-	rows := 1 // Batch = 1
+	rows := 1   // Batch = 1
 	dim := 4096 // Mistral Dim
 	eps := float32(1e-5)
 
 	// 1. Generate Input and Weight
 	input := make([]float32, rows*dim)
 	weight := make([]float32, dim)
-	
+
 	for i := range input {
 		input[i] = rand.Float32() // 0-1
 	}
@@ -48,15 +48,15 @@ func TestLayer0_RMSNorm(t *testing.T) {
 	// 3. Run GPU Implementation
 	tInput := ctx.NewTensor(rows, dim)
 	tInput.LoadFrom(input) // F16
-	
+
 	tWeight := ctx.NewTensor(1, dim) // 1D weight [1, Dim] or [Dim]? RMSNorm expects [Dim] usually
 	tWeight.LoadFrom(weight)
-	
+
 	tOut := tInput.RMSNorm(tWeight, eps)
-	
+
 	tOut.ctx.Synchronize()
 	gpuOut := tOut.ToHost()
-	
+
 	tInput.Free()
 	tWeight.Free()
 	tOut.Free()
@@ -70,14 +70,14 @@ func TestLayer0_LinearF16(t *testing.T) {
 	defer ctx.Free()
 
 	// Dimensions for Mistral Q/K/V projection
-	M := 1 // Batch
+	M := 1    // Batch
 	K := 4096 // In features (Dim)
 	N := 4096 // Out features (Dim) - Simplified, usually 4096 for Q, 1024 for K/V etc.
-	
+
 	// 1. Generate Input and Weight
 	input := make([]float32, M*K)
 	weight := make([]float32, N*K) // [Out, In]
-	
+
 	for i := range input {
 		input[i] = (rand.Float32() - 0.5) * 0.1
 	}
@@ -92,22 +92,22 @@ func TestLayer0_LinearF16(t *testing.T) {
 	// Linear expects weight tensor [N, K]
 	// Input tensor [M, K]
 	// Output [M, N]
-	
+
 	tInput := ctx.NewTensor(M, K)
 	tInput.LoadFrom(input)
-	
+
 	tWeight := ctx.NewTensor(N, K)
 	tWeight.LoadFrom(weight)
-	
+
 	// We use Linear, which returns new tensor
 	// Linear calls BatchedMatMul_F16 if weight is F16
-	tOut := tInput.Linear(tWeight)
-	
+	tOut, _ := tInput.Linear(tWeight)
+
 	if err := ctx.WaitWithTimeout(2 * time.Second); err != nil {
 		t.Fatal(err)
 	}
 	gpuOut := tOut.ToHost() // [M, N]
-	
+
 	tInput.Free()
 	tWeight.Free()
 	tOut.Free()
@@ -126,29 +126,29 @@ func TestLayer0_RoPE(t *testing.T) {
 	HeadDim := 128
 	Dim := Heads * HeadDim
 	Theta := float32(10000.0) // Mistral used 10000.0 (or 1M? standard is 10k usually)
-	
+
 	// 1. Input
 	input := make([]float32, Batch*Dim)
 	for i := range input {
 		input[i] = rand.Float32() * 0.1
 	}
-	
+
 	// 2. CPU
 	cpuOut := CPURoPE(input, 0, Heads, HeadDim, Theta)
-	
+
 	// 3. GPU
 	tInput := ctx.NewTensor(Batch, Dim)
 	tInput.LoadFrom(input)
-	
+
 	// Call RoPE (Method modifies in place)
 	// Arguments: pos, headDim, numHeads, seqLen, theta
 	tInput.RoPE(0, HeadDim, Heads, 1, Theta)
-	
+
 	if err := ctx.WaitWithTimeout(2 * time.Second); err != nil {
 		t.Fatal(err)
 	}
 	gpuOut := tInput.ToHost()
-	
+
 	tInput.Free()
 	// 4. Compare
 	assertClose(t, "RoPE", cpuOut, gpuOut, 1e-3)
@@ -162,48 +162,56 @@ func TestLayer0_Attention(t *testing.T) {
 	Heads := 4
 	KVHeads := 1 // GQA
 	HeadDim := 32
-	Pos := 5 // 5th token
+	Pos := 5     // 5th token
 	CtxLen := 10 // Padded context
 	Scale := float32(1.0 / math.Sqrt(float64(HeadDim)))
-	
+
 	// 1. Inputs
 	// Q: [Heads * HeadDim] (Current token)
 	qData := make([]float32, Heads*HeadDim)
-	for i := range qData { qData[i] = rand.Float32() * 0.5 }
-	
+	for i := range qData {
+		qData[i] = rand.Float32() * 0.5
+	}
+
 	// K Cache: [CtxLen, KVHeads*HeadDim] (Rows are tokens)
 	kData := make([]float32, CtxLen*KVHeads*HeadDim)
-	for i := range kData { kData[i] = rand.Float32() * 0.5 }
-	
+	for i := range kData {
+		kData[i] = rand.Float32() * 0.5
+	}
+
 	// V Cache: Same as K
 	vData := make([]float32, CtxLen*KVHeads*HeadDim)
-	for i := range vData { vData[i] = rand.Float32() * 0.5 }
-	
+	for i := range vData {
+		vData[i] = rand.Float32() * 0.5
+	}
+
 	// 2. CPU Reference
 	// Loop over heads
 	cpuOut := make([]float32, Heads*HeadDim)
-	
+
 	for h := 0; h < Heads; h++ {
 		kvH := h / (Heads / KVHeads)
 		// For each previous token t <= Pos
 		scores := make([]float32, Pos+1)
-		
+
 		// 2a. Score = Q . K * Scale
 		for t := 0; t <= Pos; t++ {
 			var dot float32 = 0
 			for d := 0; d < HeadDim; d++ {
 				qVal := qData[h*HeadDim+d]
-				kVal := kData[t*(KVHeads*HeadDim) + kvH*HeadDim + d]
+				kVal := kData[t*(KVHeads*HeadDim)+kvH*HeadDim+d]
 				dot += qVal * kVal
 			}
 			scores[t] = dot * Scale
 		}
-		
+
 		// 2b. Softmax
 		// Find max
 		maxVal := float32(-math.MaxFloat32)
 		for t := 0; t <= Pos; t++ {
-			if scores[t] > maxVal { maxVal = scores[t] }
+			if scores[t] > maxVal {
+				maxVal = scores[t]
+			}
 		}
 		var sumExp float32 = 0
 		for t := 0; t <= Pos; t++ {
@@ -213,36 +221,36 @@ func TestLayer0_Attention(t *testing.T) {
 		for t := 0; t <= Pos; t++ {
 			scores[t] /= sumExp
 		}
-		
+
 		// 2c. Output = Score . V
 		for d := 0; d < HeadDim; d++ {
 			var val float32 = 0
 			for t := 0; t <= Pos; t++ {
-				vVal := vData[t*(KVHeads*HeadDim) + kvH*HeadDim + d]
+				vVal := vData[t*(KVHeads*HeadDim)+kvH*HeadDim+d]
 				val += scores[t] * vVal
 			}
 			cpuOut[h*HeadDim+d] = val
 		}
 	}
-	
+
 	// 3. GPU
 	tQ := ctx.NewTensor(1, Heads*HeadDim)
 	tQ.LoadFrom(qData)
-	
+
 	tKCache := ctx.NewTensor(CtxLen, KVHeads*HeadDim) // Rows=CtxLen, Cols=Dim
 	tKCache.LoadFrom(kData)
-	
+
 	tVCache := ctx.NewTensor(CtxLen, KVHeads*HeadDim)
 	tVCache.LoadFrom(vData)
-	
+
 	// Attention(k, v, pos, numHeads, kvHeads, headDim, ctxLen, windowSize)
 	tOut := tQ.Attention(tKCache, tVCache, Pos, Heads, KVHeads, HeadDim, CtxLen, 0)
-	
+
 	if err := ctx.WaitWithTimeout(2 * time.Second); err != nil {
 		t.Fatal(err)
 	}
 	gpuOut := tOut.ToHost()
-	
+
 	tQ.Free()
 	tKCache.Free()
 	tVCache.Free()
@@ -260,36 +268,36 @@ func TestLayer0_SwiGLU(t *testing.T) {
 	// Dimensions
 	M := 1
 	Dim := 128
-	
+
 	// 1. Input
 	// SwiGLU takes two inputs: Gate and Up (Val)
 	gate := make([]float32, M*Dim)
 	up := make([]float32, M*Dim)
-	
+
 	for i := range gate {
 		gate[i] = (rand.Float32() - 0.5) * 2.0 // Range -1 to 1 for Silu check
 		up[i] = (rand.Float32() - 0.5)
 	}
-	
+
 	// 2. CPU
 	cpuOut := CPUSwiGLU(gate, up)
-	
+
 	// 3. GPU
 	tUp := ctx.NewTensor(M, Dim)
 	tUp.LoadFrom(up)
-	
+
 	tGate := ctx.NewTensor(M, Dim)
 	tGate.LoadFrom(gate)
-	
+
 	// SwiGLU(gate) -> returns new tensor with result
 	// The receiver (t) is 'up', arg is 'gate'
-	tOut := tUp.SwiGLU(tGate)
-	
+	tOut, _ := tUp.SwiGLU(tGate)
+
 	if err := ctx.WaitWithTimeout(2 * time.Second); err != nil {
 		t.Fatal(err)
 	}
 	gpuOut := tOut.ToHost()
-	
+
 	tUp.Free()
 	tGate.Free()
 	tOut.Free()

@@ -1,6 +1,5 @@
 //go:build darwin && metal
 
-
 package device
 
 import (
@@ -29,7 +28,7 @@ func TestMetalAdd(t *testing.T) {
 	tB := ctx.NewTensor(rows, cols)
 	tB.LoadFrom(b)
 
-	tC := tA.Add(tB)
+	tC, _ := tA.Add(tB)
 	result := tC.ToHost()
 
 	for i := 0; i < count; i++ {
@@ -37,7 +36,7 @@ func TestMetalAdd(t *testing.T) {
 			t.Fatalf("Add mismatch at %d: got %f, want %f", i, result[i], expected[i])
 		}
 	}
-	
+
 	tA.Free()
 	tB.Free()
 	tC.Free()
@@ -80,8 +79,6 @@ func TestMetalMatMul(t *testing.T) {
 	// ... (Existing F16 test)
 }
 
-
-
 func TestMetalRMSNorm(t *testing.T) {
 	ctx := NewContext()
 	defer ctx.Free()
@@ -117,30 +114,30 @@ func TestMetalRoPE(t *testing.T) {
 	// Theta = 1 * 10000^(-0) = 1.
 	// Cos(1) = 0.5403, Sin(1) = 0.8415
 	// [1, 0] -> [1*cos - 0*sin, 1*sin + 0*cos] = [0.5403, 0.8415]
-	
+
 	headDim := 2
 	rows := 1
 	input := []float32{1.0, 0.0}
-	
+
 	tIn := ctx.NewTensor(rows, headDim)
 	tIn.LoadFrom(input)
-	
+
 	// Test Pos 0
 	tIn.RoPE(0, headDim, 1, 1, 10000.0)
 	out := tIn.ToHost()
 	if math.Abs(float64(out[0]-1.0)) > 1e-3 || math.Abs(float64(out[1]-0.0)) > 1e-3 {
 		t.Errorf("RoPE pos 0 mismatch: %v", out)
 	}
-	
+
 	// Reset
 	tIn.LoadFrom(input)
 	// Test Pos 1
 	tIn.RoPE(1, headDim, 1, 1, 10000.0) // Offset=1
 	out = tIn.ToHost()
-	
+
 	expected0 := float32(math.Cos(1.0))
 	expected1 := float32(math.Sin(1.0))
-	
+
 	if math.Abs(float64(out[0]-expected0)) > 1e-3 {
 		t.Errorf("RoPE pos 1 mismatch [0]: got %f, want %f", out[0], expected0)
 	}
@@ -152,27 +149,27 @@ func TestMetalRoPE(t *testing.T) {
 func TestMetalSwiGLU(t *testing.T) {
 	ctx := NewContext()
 	defer ctx.Free()
-	
+
 	// Val = [2.0], Gate = [0.0]
 	// Silu(0.0) = 0.0 / (1 + exp(0)) = 0.0 / 2 = 0.0
 	// Out = 2.0 * 0.0 = 0.0
-	
+
 	// Val = [2.0], Gate = [10.0] (Sigmoid(10) ~ 1.0) -> Silu(10) ~ 10.0
 	// Out = 2.0 * 10.0 = 20.0
-	
+
 	rows := 2
 	interSize := 1
 	valData := []float32{2.0, 2.0}
 	gateData := []float32{0.0, 10.0}
-	
+
 	tVal := ctx.NewTensor(rows, interSize) // [2, 1]
 	tVal.LoadFrom(valData)
 	tGate := ctx.NewTensor(rows, interSize) // [2, 1]
 	tGate.LoadFrom(gateData)
-	
-	res := tVal.SwiGLU(tGate)
+
+	res, _ := tVal.SwiGLU(tGate)
 	out := res.ToHost()
-	
+
 	// Check 0
 	if math.Abs(float64(out[0]-0.0)) > 1e-3 {
 		t.Errorf("SwiGLU [0] mismatch: got %f, want 0.0", out[0])

@@ -8,18 +8,28 @@ import (
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
 )
 
+type PrecisionMode int
+
+const (
+	PrecisionAuto   PrecisionMode = iota // Heuristic based on Dim
+	PrecisionFP16                        // Full FP16
+	PrecisionF32FFN                      // FP32 FFN for small models
+	PrecisionMixed                       // Mixed precision for large models
+)
+
 type LlamaConfig struct {
-	Dim        int
-	HiddenDim  int
-	Layers     int
-	Heads      int
-	KVHeads    int
-	HeadDim    int // Dim / Heads usually
-	VocabSize  int
-	SeqLen     int
-	Eps        float32
-	RopeTheta  float32
-	WindowSize int // Sliding window size for attention (4096 for Mistral)
+	Dim           int
+	HiddenDim     int
+	Layers        int
+	Heads         int
+	KVHeads       int
+	HeadDim       int // Dim / Heads usually
+	VocabSize     int
+	SeqLen        int
+	Eps           float32
+	RopeTheta     float32
+	WindowSize    int // Sliding window size for attention (4096 for Mistral)
+	PrecisionMode PrecisionMode
 
 	// Debug Flags
 	DebugDequant bool

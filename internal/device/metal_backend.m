@@ -1123,7 +1123,7 @@ void Metal_MatMul_F16_F32_F32(MetalContextRef ctx, MetalBufferRef a, int offA,
 void Metal_AttFused_F16(MetalContextRef ctx, MetalBufferRef q, int oQ,
                         MetalBufferRef kC, int oK, MetalBufferRef vC, int oV,
                         MetalBufferRef r, int oR, int p, int nh, int kh, int hd,
-                        int windowSize) {
+                        int windowSize, int maxCtxLen) {
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
   id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
   [enc setComputePipelineState:mc.pipelineAttFused_F16];
@@ -1136,6 +1136,7 @@ void Metal_AttFused_F16(MetalContextRef ctx, MetalBufferRef q, int oQ,
   [enc setBytes:&kh length:4 atIndex:6];
   [enc setBytes:&hd length:4 atIndex:7];
   [enc setBytes:&windowSize length:4 atIndex:8];
+  [enc setBytes:&maxCtxLen length:4 atIndex:9];
   [enc dispatchThreadgroups:MTLSizeMake(nh, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(1024, 1, 1)];
   [mc barrier];

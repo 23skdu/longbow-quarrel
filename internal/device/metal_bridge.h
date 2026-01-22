@@ -224,8 +224,8 @@ void Metal_MatMul_F16_F32_F32(MetalContextRef ctx, MetalBufferRef weight,
 
 void Metal_AttFused_F16(MetalContextRef ctx, MetalBufferRef q, int offQ,
                         MetalBufferRef kC, int offK, MetalBufferRef vC,
-                        int offV, MetalBufferRef r, int oR, int p, int nh,
-                        int kh, int hd, int windowSize);
+                        int offV, MetalBufferRef r, int offR, int p, int nh,
+                        int kh, int hd, int windowSize, int maxCtxLen);
 
 // FP32 FFN Kernels for Small Models
 void Metal_LinearF16ToF32(MetalContextRef ctx, MetalBufferRef weight,
