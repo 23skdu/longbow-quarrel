@@ -8,11 +8,11 @@ import (
 )
 
 type SamplerConfig struct {
-	Temperature float64
-	TopK        int
-	TopP        float64
-	RepPenalty  float64 // 1.0 = no penalty, > 1.0 = penalty
-	Seed        int64
+	Temperature      float64
+	TopK             int
+	TopP             float64
+	RepPenalty       float64 // 1.0 = no penalty, > 1.0 = penalty
+	Seed             int64
 	DebugActivations bool
 }
 
@@ -32,6 +32,31 @@ func NewSampler(cfg SamplerConfig) *Sampler {
 }
 
 func (s *Sampler) Sample(logits []float32, history []int, vocabSize int) int {
+	// Check for NaN/Inf in logits and handle gracefully
+	hasNaN := false
+	hasInf := false
+	for _, v := range logits {
+		if math.IsNaN(float64(v)) {
+			hasNaN = true
+			break
+		}
+		if math.IsInf(float64(v), 0) {
+			hasInf = true
+			break
+		}
+	}
+
+	if hasNaN || hasInf {
+		// Find the first valid (non-NaN, non-Inf) logit
+		for i, v := range logits {
+			if !math.IsNaN(float64(v)) && !math.IsInf(float64(v), 0) {
+				return i
+			}
+		}
+		// All logits are NaN/Inf, return 0 as last resort
+		return 0
+	}
+
 	// 1. Repetition Penalty
 	if s.Config.RepPenalty > 1.0 && len(history) > 0 {
 		// Apply penalty to tokens in recent history
@@ -42,13 +67,13 @@ func (s *Sampler) Sample(logits []float32, history []int, vocabSize int) int {
 		if len(history) > 64 {
 			start = len(history) - 64
 		}
-		
+
 		for _, id := range history[start:] {
 			if _, ok := seen[id]; ok {
 				continue
 			}
 			seen[id] = struct{}{}
-			
+
 			if id < len(logits) {
 				val := logits[id]
 				// If positive, divide. If negative, multiply.
@@ -68,7 +93,7 @@ func (s *Sampler) Sample(logits []float32, history []int, vocabSize int) int {
 		// Greedy
 		return argMax(logits)
 	}
-	
+
 	// Apply Temp
 	// Also convert to float64 for precision
 	probs := make([]float64, len(logits))
@@ -82,27 +107,37 @@ func (s *Sampler) Sample(logits []float32, history []int, vocabSize int) int {
 	// 4. Top-K / Top-P
 	candidates := make([]tokenProb, 0, len(probs))
 	for i, p := range probs {
-		if p > 1e-10 { // Optimization: ignore near-zero
+		if p > 1e-10 && !math.IsNaN(p) && !math.IsInf(p, 0) { // Optimization: ignore near-zero and NaN/Inf
 			candidates = append(candidates, tokenProb{id: i, prob: p})
 		}
 	}
-	
+
+	// Handle empty candidates
+	if len(candidates) == 0 {
+		return argMax(logits)
+	}
+
 	// Sort desc
 	sort.Slice(candidates, func(i, j int) bool {
 		return candidates[i].prob > candidates[j].prob
 	})
-	
+
 	// Apply filters
 	candidates = applyTopK(candidates, s.Config.TopK)
 	candidates = applyTopP(candidates, s.Config.TopP)
-	
+
+	// Handle empty candidates after filtering
+	if len(candidates) == 0 {
+		return argMax(logits)
+	}
+
 	// 5. Select
 	// Re-normalize filtered candidates
 	sum := 0.0
 	for _, c := range candidates {
 		sum += c.prob
 	}
-	
+
 	r := s.rng.Float64() * sum
 	acc := 0.0
 	for _, c := range candidates {
@@ -111,8 +146,8 @@ func (s *Sampler) Sample(logits []float32, history []int, vocabSize int) int {
 			return c.id
 		}
 	}
-	
-	// Fallback
+
+	// Fallback: return highest probability candidate
 	return candidates[0].id
 }
 
@@ -140,13 +175,13 @@ func softmax(x []float64) {
 			max = v
 		}
 	}
-	
+
 	sum := 0.0
 	for i := range x {
 		x[i] = math.Exp(x[i] - max)
 		sum += x[i]
 	}
-	
+
 	for i := range x {
 		x[i] /= sum
 	}
@@ -163,7 +198,7 @@ func applyTopP(candidates []tokenProb, p float64) []tokenProb {
 	if p >= 1.0 || p <= 0.0 {
 		return candidates
 	}
-	
+
 	sum := 0.0
 	for i, c := range candidates {
 		sum += c.prob

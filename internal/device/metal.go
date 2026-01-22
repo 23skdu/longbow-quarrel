@@ -16,6 +16,7 @@ import "C"
 import (
 	_ "embed"
 	"fmt"
+	"log"
 	"math"
 	"runtime"
 	"sync"
@@ -23,6 +24,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/23skdu/longbow-quarrel/internal/gguf"
 	"github.com/23skdu/longbow-quarrel/internal/metrics"
 )
 
@@ -85,8 +87,8 @@ type DataType int
 const (
 	DataTypeF16  DataType = 0
 	DataTypeQ4K  DataType = 1
-	DataTypeQ4_0 DataType = 2 // Q4_0 is 2
-	DataTypeQ3K  DataType = 2 // Conflict? No, Q3K was placeholder?
+	DataTypeQ4_0 DataType = 2
+	DataTypeQ3K  DataType = 5
 	DataTypeF32  DataType = 3
 	DataTypeQ6K  DataType = 4
 )
@@ -106,10 +108,13 @@ func (t *Tensor) Rows() int { return t.rows }
 func (t *Tensor) Cols() int { return t.cols }
 
 // NewQ3KTensor creates a tensor with Q3_K quantization layout (110 bytes per 256 weights)
-func (c *Context) NewQ3KTensor(rows, cols int) *Tensor {
+// Returns error if dimensions are invalid
+func (c *Context) NewQ3KTensor(rows, cols int) (*Tensor, error) {
 	numElements := rows * cols
 	if numElements%256 != 0 {
-		panic("Q3_K tensor size must be divisible by 256")
+		return nil, NewValidationError("NewQ3KTensor",
+			fmt.Sprintf("Q3_K tensor size must be divisible by 256, got %d", numElements),
+			"tensor_dims")
 	}
 	numBlocks := numElements / 256
 	sizeBytes := numBlocks * 110
@@ -122,14 +127,17 @@ func (c *Context) NewQ3KTensor(rows, cols int) *Tensor {
 		sizeBytes: int(sizeBytes),
 		buf:       buf,
 		dataType:  DataTypeQ3K,
-	}
+	}, nil
 }
 
 // NewQ4KTensor creates a tensor with Q4_K quantization layout (144 bytes per 256 weights)
-func (c *Context) NewQ4KTensor(rows, cols int) *Tensor {
+// Returns error if dimensions are invalid
+func (c *Context) NewQ4KTensor(rows, cols int) (*Tensor, error) {
 	numElements := rows * cols
 	if numElements%256 != 0 {
-		panic("Q4_K tensor size must be divisible by 256")
+		return nil, NewValidationError("NewQ4KTensor",
+			fmt.Sprintf("Q4_K tensor size must be divisible by 256, got %d", numElements),
+			"tensor_dims")
 	}
 	numBlocks := numElements / 256
 	sizeBytes := numBlocks * 144
@@ -142,14 +150,17 @@ func (c *Context) NewQ4KTensor(rows, cols int) *Tensor {
 		sizeBytes: int(sizeBytes),
 		buf:       buf,
 		dataType:  DataTypeQ4K,
-	}
+	}, nil
 }
 
 // NewQ6KTensor creates a tensor with Q6_K quantization layout (210 bytes per 256 weights)
-func (c *Context) NewQ6KTensor(rows, cols int) *Tensor {
+// Returns error if dimensions are invalid
+func (c *Context) NewQ6KTensor(rows, cols int) (*Tensor, error) {
 	numElements := rows * cols
 	if numElements%256 != 0 {
-		panic("Q6_K tensor size must be divisible by 256")
+		return nil, NewValidationError("NewQ6KTensor",
+			fmt.Sprintf("Q6_K tensor size must be divisible by 256, got %d", numElements),
+			"tensor_dims")
 	}
 	numBlocks := numElements / 256
 	sizeBytes := numBlocks * 210
@@ -161,7 +172,7 @@ func (c *Context) NewQ6KTensor(rows, cols int) *Tensor {
 		sizeBytes: sizeBytes,
 		buf:       buf,
 		dataType:  DataTypeQ6K,
-	}
+	}, nil
 }
 
 // NewTensor creates a standard F16 tensor
@@ -317,20 +328,23 @@ func (t *Tensor) ReturnToPool() {
 	t.ctx.mu.Unlock()
 }
 
-func (t *Tensor) LoadFrom(data []float32) {
+func (t *Tensor) LoadFrom(data []float32) error {
 	if len(data) != t.rows*t.cols {
-		panic("Data size mismatch")
+		return NewValidationError("LoadFrom",
+			fmt.Sprintf("data size %d does not match tensor size %d",
+				len(data), t.rows*t.cols),
+			"tensor_data")
 	}
 
 	if t.dataType == DataTypeF32 {
 		// Copy directly as F32
 		C.Metal_CopyToDevice(t.buf, C.int(t.Offset), unsafe.Pointer(&data[0]), C.int(len(data)*4))
-		return
+		return nil
 	}
 
 	if t.dataType == DataTypeF32 {
 		C.Metal_CopyToDevice(t.buf, C.int(t.Offset), unsafe.Pointer(&data[0]), C.int(t.sizeBytes))
-		return
+		return nil
 	}
 
 	// Convert to FP16
@@ -340,13 +354,17 @@ func (t *Tensor) LoadFrom(data []float32) {
 	}
 
 	C.Metal_CopyToDevice(t.buf, C.int(t.Offset), unsafe.Pointer(&f16[0]), C.int(t.sizeBytes))
+	return nil
 }
 
-func (t *Tensor) LoadRaw(data []byte) {
+func (t *Tensor) LoadRaw(data []byte) error {
 	if len(data) > t.sizeBytes {
-		panic("Raw data size exceeds tensor buffer")
+		return NewValidationError("LoadRaw",
+			fmt.Sprintf("raw data size %d exceeds tensor buffer size %d", len(data), t.sizeBytes),
+			"tensor_data")
 	}
 	C.Metal_CopyToDevice(t.buf, C.int(t.Offset), unsafe.Pointer(&data[0]), C.int(len(data)))
+	return nil
 }
 
 // LoadFromBytes copies raw bytes to the buffer (for Q4K data, etc.)
@@ -413,7 +431,7 @@ func (t *Tensor) ScanNaNs(name string) int {
 		}
 	}
 	if nanCount > 0 || infCount > 0 {
-
+		metrics.RecordNumericalInstability(name, nanCount, infCount)
 	}
 	return nanCount + infCount
 }
@@ -472,14 +490,17 @@ func (t *Tensor) LoadQ4KFrom(raw []byte) {
 
 // LoadFromRaw copies raw bytes directly to the GPU buffer.
 // The caller must ensure the data is in the correct format (FP16 usually) and size.
-func (t *Tensor) LoadFromRaw(data []byte) {
+func (t *Tensor) LoadFromRaw(data []byte) error {
 	if len(data) != t.sizeBytes {
-		panic("Raw data size mismatch")
+		return NewValidationError("LoadFromRaw",
+			fmt.Sprintf("raw data size %d does not match tensor size %d", len(data), t.sizeBytes),
+			"tensor_data")
 	}
 	if len(data) == 0 {
-		return
+		return nil
 	}
 	C.Metal_CopyToDevice(t.buf, C.int(t.Offset), unsafe.Pointer(&data[0]), C.int(len(data)))
+	return nil
 }
 
 func (t *Tensor) BufRef() unsafe.Pointer {
@@ -495,6 +516,12 @@ func (t *Tensor) ToHost() []float32 {
 		f32 := make([]float32, t.rows*t.cols)
 		C.Metal_CopyToHost(t.buf, C.int(t.Offset), unsafe.Pointer(&f32[0]), C.int(t.sizeBytes))
 		return f32
+	}
+
+	if t.dataType == DataTypeQ6K {
+		rawBytes := make([]byte, t.sizeBytes)
+		C.Metal_CopyToHost(t.buf, C.int(t.Offset), unsafe.Pointer(&rawBytes[0]), C.int(t.sizeBytes))
+		return gguf.DequantizeQ6K(rawBytes, t.rows*t.cols)
 	}
 
 	f16 := make([]uint16, t.rows*t.cols)
@@ -606,10 +633,10 @@ func (t *Tensor) MatMul(b *Tensor) *Tensor {
 
 // Linear performs t * weight^T
 // t: [M, K], weight: [N, K] -> result: [M, N]
-func (t *Tensor) Linear(weight *Tensor) *Tensor {
-	// t.cols (K) must match weight.cols (K)
-	if t.cols != weight.cols {
-		panic(fmt.Sprintf("Linear dim mismatch: input cols %d != weight cols %d", t.cols, weight.cols))
+// Returns error if dimensions are incompatible
+func (t *Tensor) Linear(weight *Tensor) (*Tensor, error) {
+	if err := ValidateLinearDimensions(t.cols, weight.cols); err != nil {
+		return nil, err
 	}
 	t0 := time.Now()
 	res := t.ctx.NewTensorPooled(t.rows, weight.rows) // [M, N]
@@ -638,13 +665,17 @@ func (t *Tensor) Linear(weight *Tensor) *Tensor {
 			C.int(M), C.int(N), C.int(K), 1)
 	}
 	metrics.RecordKernelDuration("Linear", time.Since(t0))
-	return res
+	return res, nil
 }
 
 // LinearInto performs Linear using existing output tensor (scratch buffer)
-func (t *Tensor) LinearInto(weight *Tensor, out *Tensor, scale float32) {
+// Returns error if dimensions are incompatible
+func (t *Tensor) LinearInto(weight *Tensor, out *Tensor, scale float32) error {
 	if t.rows != out.rows || weight.rows != out.cols {
-		panic(fmt.Sprintf("LinearInto dim mismatch: [%d,%d] * [%d,%d] -> [%d,%d]", t.rows, t.cols, weight.rows, weight.cols, out.rows, out.cols))
+		return NewValidationError("LinearInto",
+			fmt.Sprintf("dimension mismatch: [%d,%d] * [%d,%d] -> [%d,%d]",
+				t.rows, t.cols, weight.rows, weight.cols, out.rows, out.cols),
+			"linear_dims")
 	}
 
 	// DEBUG: Output Layer Check
@@ -654,7 +685,7 @@ func (t *Tensor) LinearInto(weight *Tensor, out *Tensor, scale float32) {
 
 	if t.dataType == DataTypeF32 {
 		t.LinearF32_Into(weight, out, scale)
-		return
+		return nil
 	}
 
 	// Use MatMul Kernel
@@ -679,6 +710,7 @@ func (t *Tensor) LinearInto(weight *Tensor, out *Tensor, scale float32) {
 		C.Metal_MatMul_F16(t.ctx.ref, weight.buf, C.int(weight.Offset), C.bool(false), t.buf, C.int(t.Offset), C.bool(false), out.buf, C.int(out.Offset),
 			C.int(t.rows), C.int(weight.rows), C.int(weight.cols))
 	}
+	return nil
 }
 
 // RunQ3K_Explicit for testing only
@@ -994,7 +1026,7 @@ func (s *LayerScratch) Free() {
 
 func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, kCache, vCache *Tensor,
 	scratch *LayerScratch,
-	pos, heads, kvHeads, headDim int, ropeTheta, eps float32, hiddenDim, ctxLen, windowSize int, globalScale float32, debug bool) {
+	pos, heads, kvHeads, headDim int, ropeTheta, eps float32, hiddenDim, ctxLen, windowSize int, globalScale float32, debug bool, precisionMode int) {
 
 	// Probes for debugging activations
 	probe := func(tag string, t *Tensor) {
@@ -1098,11 +1130,15 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		// Force Split Path for Debug
 		if false {
 			// Fused Path (Current)
+			maxCtxLen := kCache.Cols()
+			if maxCtxLen == 0 {
+				maxCtxLen = p + 1
+			}
 			C.Metal_AttFused_F16(t.ctx.ref, qPart.buf, C.int(qPart.Offset+offQ),
 				kCache.buf, C.int(kCache.Offset),
 				vCache.buf, C.int(vCache.Offset),
 				attOut.buf, C.int(attOut.Offset+offAtt),
-				C.int(p), C.int(heads), C.int(kvHeads), C.int(headDim), C.int(windowSize))
+				C.int(p), C.int(heads), C.int(kvHeads), C.int(headDim), C.int(windowSize), C.int(maxCtxLen))
 		} else {
 			// Split Path
 			scores := scratch.Scores
@@ -1147,7 +1183,7 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 	if t.dataType == DataTypeF32 {
 		t.AddMixedInPlace(resAtt)
 	} else {
-		t1 := t.Add(resAtt)
+		t1, _ := t.Add(resAtt)
 		C.Metal_Copy_F16(t.ctx.ref, t1.buf, C.int(t1.Offset), t.buf, C.int(t.Offset), C.int(t.rows*t.cols))
 		t1.ReturnToPool()
 	}
@@ -1156,17 +1192,25 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 
 	// --- FFN Block ---
 
-	// Use FP32 FFN for small models (dim < 1024) to prevent activation explosion
-	useF32FFN := t.cols < 1024
+	// Precision mode: 0=Auto, 1=FP16, 2=F32FFN (small models), 3=Mixed (large models)
+	useF32FFN := precisionMode == 2
+	useMixedPrecisionFFN := precisionMode == 3
 
 	// 8. FFN Block
 
-	if useF32FFN {
-		// FP32 FFN Path for Small Models (SmolLM2)
+	if useF32FFN || useMixedPrecisionFFN {
+		// FP32 or Mixed Precision FFN Path
 		// 8. FFN Norm (F32 -> F32)
 		normedFFN := scratch.NormedFFN_F32
 		if t.dataType == DataTypeF32 {
 			t.RMSNorm_F32_Into(ffnNorm, eps, normedFFN)
+		} else if useMixedPrecisionFFN {
+			// For mixed precision, convert to F32 for FFN computations
+			tCopy := t.ToF32()
+			tCopy.RMSNorm_F32_Into(ffnNorm, eps, normedFFN)
+			tCopy.ReturnToPool()
+		} else {
+			t.RMSNormFP32_ToF16_Into(ffnNorm, eps, normedFFN)
 		}
 
 		// 9. Gate/Up Projections -> FP32
@@ -1187,9 +1231,17 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		// 12. Residual Add 2
 		if t.dataType == DataTypeF32 {
 			t.AddInPlace(resFFN)
+		} else if useMixedPrecisionFFN {
+			// Convert back to F16 for residual add
+			resFFNF16 := t.ctx.NewTensorPooled(t.rows, t.cols)
+			resFFN.CopyToF16_Into(resFFNF16)
+			t1, _ := t.Add(resFFNF16)
+			C.Metal_Copy_F16(t.ctx.ref, t1.buf, C.int(t1.Offset), t.buf, C.int(t.Offset), C.int(t.rows*t.cols))
+			t1.ReturnToPool()
+			resFFNF16.ReturnToPool()
 		} else {
 			// Fallback (Should not happen in useF32FFN path)
-			t2 := t.Add(resFFN) // Mixed
+			t2, _ := t.Add(resFFN) // Mixed
 			C.Metal_Copy_F16(t.ctx.ref, t2.buf, C.int(t2.Offset), t.buf, C.int(t.Offset), C.int(t.rows*t.cols))
 			t2.ReturnToPool()
 		}
@@ -1198,10 +1250,6 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		probe("FFN-Final", resFFN)
 		probe("Gate", gatePart)
 		probe("Up", upPart)
-
-		// normedFFN.ReturnToPool() // Now a scratch buffer
-		// resFFN.ReturnToPool() // Now a scratch buffer
-		// t2 returned inside else block
 	} else {
 		// FP16 FFN Path (Original)
 		normedFFN := scratch.NormedFFN
@@ -1235,7 +1283,7 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		if false && ffnDown.dataType == DataTypeQ4K {
 			gatePartF16_P.SwiGLULinearIntoQ4K(upPartF16_P, ffnDown, resFFN, globalScale)
 		} else {
-			swiOut := upPartF16_P.SwiGLU(gatePartF16_P)
+			swiOut, _ := upPartF16_P.SwiGLU(gatePartF16_P)
 			swiOut.LinearInto(ffnDown, resFFN, globalScale)
 			swiOut.ReturnToPool()
 		}
@@ -1247,9 +1295,18 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		if t.dataType == DataTypeF32 {
 			t.AddMixedInPlace(resFFN)
 		} else {
-			t2 := t.Add(resFFN)
+			t2, _ := t.Add(resFFN)
 			C.Metal_Copy_F16(t.ctx.ref, t2.buf, C.int(t2.Offset), t.buf, C.int(t.Offset), C.int(t.rows*t.cols))
 			t2.ReturnToPool()
+		}
+
+		// NaN Detection at layer output
+		t.ctx.Synchronize()
+		data := t.ToHost()
+		nanInfo := DetectNaN(data, 10)
+		if nanInfo.HasNaN() {
+			log.Printf("[LAYER_DEBUG] NaN detected at layer output layerIdx=%d: count=%d, positions=%v",
+				layerIdx, nanInfo.Count, nanInfo.Positions)
 		}
 
 		// Debug FFN Output (Correct Location)
@@ -1270,17 +1327,18 @@ func (t *Tensor) RoPE(posOffset, headDim, numHeads, seqLen int, ropeTheta float3
 	C.Metal_RoPE_F16(t.ctx.ref, t.buf, C.int(t.Offset), 1, C.int(seqLen), C.int(numHeads), C.int(headDim), C.int(posOffset), C.float(ropeTheta))
 }
 
-func (t *Tensor) SwiGLU(gate *Tensor) *Tensor {
-	// Input t is 'val' (up projection). 'gate' is gate projection.
-	// Both must be same size [Rows, InterSize].
+func (t *Tensor) SwiGLU(gate *Tensor) (*Tensor, error) {
 	if t.rows != gate.rows || t.cols != gate.cols {
-		panic("SwiGLU dim mismatch")
+		return nil, NewValidationError("SwiGLU",
+			fmt.Sprintf("dimension mismatch: t[%d,%d] != gate[%d,%d]",
+				t.rows, t.cols, gate.rows, gate.cols),
+			"swiglu_dims")
 	}
 	interSize := t.cols
 	res := t.ctx.NewTensorPooled(t.rows, interSize)
 
 	C.Metal_SwiGLU_F16(t.ctx.ref, t.buf, C.int(t.Offset), gate.buf, C.int(gate.Offset), res.buf, C.int(res.Offset), C.int(t.rows), C.int(interSize))
-	return res
+	return res, nil
 }
 
 func (t *Tensor) Softmax() {
@@ -1294,14 +1352,18 @@ func (t *Tensor) Softmax() {
 func (t *Tensor) LinearToFP32_Into(weight *Tensor, out *Tensor) {
 	if weight.dataType == DataTypeQ6K {
 		// Output head logic: F16 input * Q6K weight -> F32 output
+		// weight shape: [vocabSize, dim], input shape: [batch, dim], output shape: [batch, vocabSize]
+		// dimIn = weight.cols (input dimension), dimOut = weight.rows (vocab size)
 		C.Metal_LinearQ6K_F16_F32(t.ctx.ref, weight.buf, C.int(weight.Offset),
 			t.buf, C.int(t.Offset), out.buf, C.int(out.Offset),
-			C.int(t.rows), C.int(weight.rows), C.int(weight.cols), 1.0)
+			C.int(t.rows), C.int(weight.cols), C.int(weight.rows), 1.0)
 	} else if weight.dataType == DataTypeQ4_0 {
 		// Q4_0 -> F32 (Output Head)
+		// weight shape: [vocabSize, dim], input shape: [batch, dim], output shape: [batch, vocabSize]
+		// dimIn = weight.cols (input dimension), dimOut = weight.rows (vocab size)
 		C.Metal_LinearQ4_0_F32(t.ctx.ref, weight.buf, C.int(weight.Offset),
 			t.buf, C.int(t.Offset), out.buf, C.int(out.Offset),
-			C.int(t.rows), C.int(weight.rows), C.int(weight.cols), 1.0)
+			C.int(t.rows), C.int(weight.cols), C.int(weight.rows), 1.0)
 	} else {
 		// Default: F16 weight * F16 input -> F32 output
 		C.Metal_LinearF16ToF32(t.ctx.ref, weight.buf, C.int(weight.Offset), t.buf, C.int(t.Offset), out.buf, C.int(out.Offset),
@@ -1379,12 +1441,17 @@ func (gate *Tensor) SwiGLU_FP32_Into(up *Tensor, out *Tensor) {
 
 // SwiGLU_FP32 performs SwiGLU with FP32 inputs and outputs
 // gate and up must both be FP32 tensors
-func (gate *Tensor) SwiGLU_FP32(up *Tensor) *Tensor {
+func (gate *Tensor) SwiGLU_FP32(up *Tensor) (*Tensor, error) {
 	if gate.rows != up.rows || gate.cols != up.cols {
-		panic("SwiGLU_FP32 dim mismatch")
+		return nil, NewValidationError("SwiGLU_FP32",
+			fmt.Sprintf("dimension mismatch: gate[%d,%d] != up[%d,%d]",
+				gate.rows, gate.cols, up.rows, up.cols),
+			"swiglu_dims")
 	}
 	if gate.dataType != DataTypeF32 || up.dataType != DataTypeF32 {
-		panic("SwiGLU_FP32 requires FP32 inputs")
+		return nil, NewValidationError("SwiGLU_FP32",
+			fmt.Sprintf("requires FP32 inputs, got gate=%v, up=%v", gate.dataType, up.dataType),
+			"datatype")
 	}
 
 	res := gate.ctx.NewTensorFP32Pooled(gate.rows, gate.cols)
@@ -1392,49 +1459,44 @@ func (gate *Tensor) SwiGLU_FP32(up *Tensor) *Tensor {
 	// Use existing swiglu_f32 kernel
 	C.Metal_SwiGLU_F32(gate.ctx.ref, gate.buf, C.int(gate.Offset), up.buf, C.int(up.Offset), res.buf, C.int(res.Offset),
 		C.int(gate.rows), C.int(gate.cols))
-	return res
+	return res, nil
 }
 
 // LinearFromFP32 performs FP16 weight × FP32 input → FP16 output
 // Used for Down projection in FP32 FFN path
-func (t *Tensor) LinearFromFP32(weight *Tensor) *Tensor {
+func (t *Tensor) LinearFromFP32(weight *Tensor) (*Tensor, error) {
 	if t.dataType != DataTypeF32 {
-		panic("LinearFromFP32 requires FP32 input")
+		return nil, NewValidationError("LinearFromFP32",
+			fmt.Sprintf("requires FP32 input, got %v", t.dataType),
+			"datatype")
 	}
 	out := t.ctx.NewTensorPooled(t.rows, weight.rows)
 	C.Metal_LinearF32ToF16(t.ctx.ref, weight.buf, C.int(weight.Offset), t.buf, C.int(t.Offset), out.buf, C.int(out.Offset),
 		C.int(t.rows), C.int(t.cols), C.int(weight.rows))
-	return out
+	return out, nil
 }
 
-func (t *Tensor) LinearFromFP32_Into(weight *Tensor, out *Tensor) {
-	if t.dataType != DataTypeF32 {
-		panic("LinearFromFP32 requires FP32 input")
-	}
-	C.Metal_LinearF32ToF16(t.ctx.ref, weight.buf, C.int(weight.Offset), t.buf, C.int(t.Offset), out.buf, C.int(out.Offset),
-		C.int(t.rows), C.int(t.cols), C.int(weight.rows))
-}
-
-func (t *Tensor) Add(other *Tensor) *Tensor {
-	if t.rows != other.rows || t.cols != other.cols {
-		panic("Add dim mismatch")
+func (t *Tensor) Add(other *Tensor) (*Tensor, error) {
+	if err := ValidateAddDimensions(t.rows, t.cols, other.rows, other.cols); err != nil {
+		return nil, err
 	}
 	res := t.ctx.NewTensorPooled(t.rows, t.cols)
 	C.Metal_Add_F16(t.ctx.ref, t.buf, C.int(t.Offset), other.buf, C.int(other.Offset), res.buf, C.int(res.Offset), C.int(t.rows*t.cols))
-	return res
+	return res, nil
 }
 
 // AddInPlace performs t += other (FP32)
-func (t *Tensor) AddInPlace(other *Tensor) {
-	if t.rows != other.rows || t.cols != other.cols {
-		panic("AddInPlace dim mismatch")
+func (t *Tensor) AddInPlace(other *Tensor) error {
+	if err := ValidateAddDimensions(t.rows, t.cols, other.rows, other.cols); err != nil {
+		return err
 	}
 	if t.dataType != DataTypeF32 || other.dataType != DataTypeF32 {
-		panic("AddInPlace requires FP32 inputs")
+		return NewValidationError("AddInPlace", "requires FP32 inputs", "datatype")
 	}
 	// a = a + b
 	// Metal_Add_F32(a, offA, b, offB, res, offRes, count)
 	C.Metal_Add_F32(t.ctx.ref, t.buf, C.int(t.Offset), other.buf, C.int(other.Offset), t.buf, C.int(t.Offset), C.int(t.rows*t.cols))
+	return nil
 }
 
 func (t *Tensor) EmbeddingLookup(row int, scale float32) *Tensor {
@@ -1470,12 +1532,41 @@ func (t *Tensor) Attention(kCache, vCache *Tensor, pos, numHeads, kvHeads, headD
 }
 
 // AttFused performs fused attention (Score + Softmax + Value Aggregation)
-func (t *Tensor) AttFused(kCache, vCache *Tensor, out *Tensor, pos, numHeads, kvHeads, headDim, windowSize int) {
+// Returns error if output tensor dimensions are invalid for the attention computation
+func (t *Tensor) AttFused(kCache, vCache *Tensor, out *Tensor, pos, numHeads, kvHeads, headDim, windowSize int) error {
+	expectedOutRows := 1
+	expectedOutCols := numHeads * headDim
+
+	if out.Rows() != expectedOutRows || out.Cols() != expectedOutCols {
+		return NewValidationError("AttFused",
+			fmt.Sprintf("output tensor dimensions [%d,%d] do not match expected [%d,%d]",
+				out.Rows(), out.Cols(), expectedOutRows, expectedOutCols),
+			"attention_output")
+	}
+
+	if numHeads%kvHeads != 0 {
+		return NewValidationError("AttFused",
+			fmt.Sprintf("numHeads (%d) must be divisible by kvHeads (%d)", numHeads, kvHeads),
+			"gqa_config")
+	}
+
+	if pos < 0 {
+		return NewValidationError("AttFused",
+			fmt.Sprintf("invalid position: %d (must be non-negative)", pos),
+			"position")
+	}
+
+	maxCtxLen := kCache.Cols()
+	if maxCtxLen == 0 {
+		maxCtxLen = pos + 1
+	}
+
 	C.Metal_AttFused_F16(t.ctx.ref, t.buf, C.int(t.Offset),
 		kCache.buf, C.int(kCache.Offset),
 		vCache.buf, C.int(vCache.Offset),
 		out.buf, C.int(out.Offset),
-		C.int(pos), C.int(numHeads), C.int(kvHeads), C.int(headDim), C.int(windowSize))
+		C.int(pos), C.int(numHeads), C.int(kvHeads), C.int(headDim), C.int(windowSize), C.int(maxCtxLen))
+	return nil
 }
 
 // FP32 Operations
@@ -1507,12 +1598,13 @@ func (t *Tensor) LinearIntoFP32(weight *Tensor, out *Tensor, scale float32) {
 	t.LinearF32_Into(weight, out, scale)
 }
 
-func (t *Tensor) AddMixedInPlace(other *Tensor) {
-	if t.rows != other.rows || t.cols != other.cols {
-		panic("AddMixed dim mismatch")
+func (t *Tensor) AddMixedInPlace(other *Tensor) error {
+	if err := ValidateAddDimensions(t.rows, t.cols, other.rows, other.cols); err != nil {
+		return err
 	}
 	// t (F32) += other (F16)
 	C.Metal_Add_F32_F16(t.ctx.ref, t.buf, C.int(t.Offset), other.buf, C.int(other.Offset), t.buf, C.int(t.Offset), C.int(t.rows*t.cols))
+	return nil
 }
 
 func (t *Tensor) ToF32() *Tensor {
@@ -1554,8 +1646,15 @@ func (t *Tensor) CopyToF16() *Tensor {
 	return res
 }
 
-func (t *Tensor) CopyToF16_Into(dest *Tensor) {
+func (t *Tensor) CopyToF16_Into(dest *Tensor) error {
+	if t.rows != dest.rows || t.cols != dest.cols {
+		return NewValidationError("CopyToF16_Into",
+			fmt.Sprintf("dimension mismatch: src[%d,%d] != dest[%d,%d]",
+				t.rows, t.cols, dest.rows, dest.cols),
+			"copy_dims")
+	}
 	C.Metal_Copy_F32_F16(t.ctx.ref, t.buf, C.int(t.Offset), dest.buf, C.int(dest.Offset), C.int(t.rows*t.cols))
+	return nil
 }
 
 func (t *Tensor) ToF32InPlace(res *Tensor) {

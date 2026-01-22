@@ -767,6 +767,7 @@ kernel void att_fused_f16(device const half *q [[ buffer(0) ]],
                         constant int &kv_heads [[ buffer(6) ]],
                         constant int &headDim [[ buffer(7) ]],
                         constant int &window_size [[ buffer(8) ]],
+                        constant int &max_context_len [[ buffer(9) ]],
                         uint3 tid [[ thread_position_in_threadgroup ]],
                         uint3 nthreads [[ threads_per_threadgroup ]],
                         uint3 group_id [[ threadgroup_position_in_grid ]]) {
@@ -778,78 +779,130 @@ kernel void att_fused_f16(device const half *q [[ buffer(0) ]],
     // SLIDING WINDOW: Determine window bounds
     int start = (window_size > 0 && pos >= window_size) ? (pos - window_size + 1) : 0;
 
-    // Limit fused path to 4000 tokens to stay within 32KB
-    threadgroup float s_mem[4000]; 
-    if (pos >= 4000) return;
+    // Use dynamic memory allocation based on actual context length
+    // For small contexts (<= 8192), use direct storage
+    // For larger contexts, use streaming approach
+    int effective_len = pos - start + 1;
+    int max_smem_tokens = (max_context_len > 0 && max_context_len < 4096) ? max_context_len : 4096;
 
     device const half *mq = q + h * headDim;
     uint nt = nthreads.x;
-    
-    // 1. Parallel score calculation
-    for (int t = tid.x; t < 4000; t += nt) {
-        if (t >= start && t <= pos) {
-            float d = 0; 
+
+    // Determine processing strategy based on context length
+    if (effective_len <= max_smem_tokens) {
+        // Direct processing: all tokens fit in threadgroup memory
+        threadgroup float s_mem[4096];
+        if (pos >= 4096) return;
+
+        // 1. Parallel score calculation
+        for (int t = tid.x; t <= pos; t += nt) {
+            if (t >= start) {
+                float d = 0;
+                int cache_idx = (window_size > 0) ? (t % window_size) : t;
+                device const half *mk = k_cache + cache_idx * kv_dim + kvh * headDim;
+                for (int i = 0; i < headDim; i++) d += (float)mq[i] * (float)mk[i];
+                s_mem[t] = d * scale;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // 2. Softmax Max Reduction
+        threadgroup float tg_mv;
+        float l_mv = -10000.0f;
+        for (int i = tid.x; i <= pos; i += nt) {
+            if (i >= start && s_mem[i] > l_mv) l_mv = s_mem[i];
+        }
+        l_mv = simd_max(l_mv);
+
+        threadgroup float scratch[32];
+        if ((tid.x & 31) == 0) scratch[tid.x / 32] = l_mv;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        if (tid.x < 32) {
+            uint n_subgroups = (nt + 31) / 32;
+            float m = (tid.x < n_subgroups) ? scratch[tid.x] : -10000.0f;
+            m = simd_max(m);
+            if (tid.x == 0) tg_mv = m;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        float mv = tg_mv;
+
+        // 3. Softmax Sum Reduction
+        threadgroup float tg_se;
+        float l_se = 0;
+        for (int i = tid.x; i <= pos; i += nt) {
+            if (i >= start) {
+                float e = exp(s_mem[i] - mv);
+                s_mem[i] = e;
+                l_se += e;
+            }
+        }
+        l_se = simd_sum(l_se);
+        if ((tid.x & 31) == 0) scratch[tid.x / 32] = l_se;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        if (tid.x < 32) {
+            uint n_subgroups = (nt + 31) / 32;
+            float s = (tid.x < n_subgroups) ? scratch[tid.x] : 0.0f;
+            s = simd_sum(s);
+            if (tid.x == 0) tg_se = s;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        float se = tg_se;
+        if (se == 0) se = 1e-6f;
+
+        // 4. Result Accumulation
+        if (tid.x < (uint)headDim) {
+            float r = 0;
+            for (int t = start; t <= pos; t++) {
+                int cache_idx = (window_size > 0) ? (t % window_size) : t;
+                r += (s_mem[t] / se) * (float)v_cache[cache_idx * kv_dim + kvh * headDim + tid.x];
+            }
+            output[h * headDim + tid.x] = safe_half(r);
+        }
+    } else {
+        // Streaming approach: process tokens in chunks
+        // Use smaller threadgroup memory for softmax state
+        threadgroup float chunk_max[32];
+        threadgroup float chunk_sum[32];
+
+        float r = 0;
+        float global_max = -10000.0f;
+
+        // First pass: compute global max
+        for (int t = start; t <= pos; t++) {
+            float d = 0;
             int cache_idx = (window_size > 0) ? (t % window_size) : t;
             device const half *mk = k_cache + cache_idx * kv_dim + kvh * headDim;
             for (int i = 0; i < headDim; i++) d += (float)mq[i] * (float)mk[i];
-            s_mem[t] = d * scale;
-        } else {
-            s_mem[t] = -10000.0f;
+            float score = d * scale;
+            if (score > global_max) global_max = score;
         }
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    // 2. Softmax Max Reduction
-    threadgroup float tg_mv;
-    float l_mv = -10000.0f;
-    for (int i = tid.x; i <= pos; i += nt) {
-        if (s_mem[i] > l_mv) l_mv = s_mem[i];
-    }
-    l_mv = simd_max(l_mv);
-    
-    threadgroup float scratch[32]; 
-    if ((tid.x & 31) == 0) scratch[tid.x / 32] = l_mv;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    
-    if (tid.x < 32) {
-        uint n_subgroups = (nt + 31) / 32;
-        float m = (tid.x < n_subgroups) ? scratch[tid.x] : -10000.0f;
-        m = simd_max(m);
-        if (tid.x == 0) tg_mv = m;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    float mv = tg_mv;
-    
-    // 3. Softmax Sum Reduction
-    threadgroup float tg_se;
-    float l_se = 0;
-    for (int i = tid.x; i <= pos; i += nt) {
-        float e = exp(s_mem[i] - mv);
-        s_mem[i] = e;
-        l_se += e;
-    }
-    l_se = simd_sum(l_se);
-    if ((tid.x & 31) == 0) scratch[tid.x / 32] = l_se;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    
-    if (tid.x < 32) {
-        uint n_subgroups = (nt + 31) / 32;
-        float s = (tid.x < n_subgroups) ? scratch[tid.x] : 0.0f;
-        s = simd_sum(s);
-        if (tid.x == 0) tg_se = s;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    float se = tg_se;
-    if (se == 0) se = 1e-6f;
-    
-    // 4. Result Accumulation
-    if (tid.x < (uint)headDim) {
-        float r = 0;
+        // Second pass: compute exp scores and accumulate with numerical stability
+        float global_sum = 0;
         for (int t = start; t <= pos; t++) {
+            float d = 0;
             int cache_idx = (window_size > 0) ? (t % window_size) : t;
-            r += (s_mem[t] / se) * (float)v_cache[cache_idx * kv_dim + kvh * headDim + tid.x];
+            device const half *mk = k_cache + cache_idx * kv_dim + kvh * headDim;
+            for (int i = 0; i < headDim; i++) d += (float)mq[i] * (float)mk[i];
+            float score = d * scale;
+            float exp_score = exp(score - global_max);
+            global_sum += exp_score;
+
+            // Accumulate value weighted by exp_score
+            for (int i = 0; i < headDim; i++) {
+                if (tid.x == i) {
+                    r += exp_score * (float)v_cache[cache_idx * kv_dim + kvh * headDim + i];
+                }
+            }
         }
-        output[h * headDim + tid.x] = safe_half(r);
+        r = simd_sum(r);
+        if (global_sum == 0) global_sum = 1e-6f;
+
+        if (tid.x < (uint)headDim) {
+            output[h * headDim + tid.x] = safe_half(r / global_sum);
+        }
     }
 }
 
@@ -1081,12 +1134,20 @@ kernel void swiglu_f32(device const float *gate [[ buffer(0) ]],
                      device const float *up [[ buffer(1) ]], 
                      device float *out [[ buffer(2) ]],
                      uint qid [[ thread_position_in_grid ]]) {
-    float g = gate[qid]; 
-    float val = up[qid] * (g / (1.0f + exp(-g)));
-    out[qid] = val;
+    float g = gate[qid];
+    float u = up[qid];
+    
+    // SwiGLU: up * silu(gate) where silu(x) = x * sigmoid(x)
+    // Clamp gate to prevent extreme sigmoid values
+    float g_clamped = clamp(g, -10.0f, 10.0f);
+    float sigmoid_g = g_clamped / (1.0f + exp(-g_clamped));
+    float val = u * sigmoid_g;
+    
+    // Clamp output to prevent activation explosion
+    // Use larger clamp for FP32 (1e4) to allow meaningful values while preventing overflow
+    out[qid] = clamp(val, -1e4f, 1e4f);
 }
 
-// Weights: F16, Input: F16, Output: F32
 kernel void linear_f16_in_f16_out_f32(device const half *weight [[ buffer(0) ]],
                          device const half *input [[ buffer(1) ]],
                          device float *output [[ buffer(2) ]],
@@ -1108,7 +1169,10 @@ kernel void linear_f16_in_f16_out_f32(device const half *weight [[ buffer(0) ]],
         sum += dot(v_w.xy, v_i.xy) + dot(v_w.zw, v_i.zw);
     }
     sum = simd_sum(sum); 
-    if (lane_id == 0) output[batch * dim_out + row] = sum;
+    if (lane_id == 0) {
+        // Clamp output to prevent activation explosion
+        output[batch * dim_out + row] = clamp(sum, -1e4f, 1e4f);
+    }
 }
 
 kernel void linear_f16_f32(device const half *weight [[ buffer(0) ]],

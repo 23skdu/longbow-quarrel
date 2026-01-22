@@ -1,6 +1,5 @@
 //go:build darwin && metal
 
-
 package device
 
 import (
@@ -47,17 +46,17 @@ func TestRMSNormLinearQ4K(t *testing.T) {
 	q4kBlock[1] = byte(d_f16 >> 8)
 	q4kBlock[2] = byte(dmin_f16 & 0xFF)
 	q4kBlock[3] = byte(dmin_f16 >> 8)
-	
+
 	// scales (12 bytes)
 	// sc[j] = scales[j] & 63. set to 1.
 	for i := 4; i < 8; i++ {
-		q4kBlock[i] = 1 
+		q4kBlock[i] = 1
 	}
 	// m[j] = scales[j+4] & 63. set to 0.
 	for i := 8; i < 12; i++ {
 		q4kBlock[i] = 0
 	}
-	// bits for sc[4..7] and m[4..7] also in 12-15? 
+	// bits for sc[4..7] and m[4..7] also in 12-15?
 	// For simplicity, let's just use first 4 sub-blocks or ensure sc[j]=1 m[j]=0 for all.
 	// Actually let's just set all to 1 (sc=1, m=1) for simplicity if easier.
 	for i := 4; i < 16; i++ {
@@ -69,8 +68,13 @@ func TestRMSNormLinearQ4K(t *testing.T) {
 		q4kBlock[i] = 0x11
 	}
 
-	tWeight := ctx.NewQ4KTensor(N, K)
-	tWeight.LoadFromRaw(q4kBlock)
+	tWeight, err := ctx.NewQ4KTensor(N, K)
+	if err != nil {
+		t.Fatalf("Failed to create Q4K tensor: %v", err)
+	}
+	if err := tWeight.LoadFromRaw(q4kBlock); err != nil {
+		t.Fatalf("Failed to load Q4K data: %v", err)
+	}
 
 	// 4. Run Fused
 	tFused := tIn.RMSNormLinearQ4K(tNormW, tWeight, eps, scale)
@@ -79,14 +83,14 @@ func TestRMSNormLinearQ4K(t *testing.T) {
 	// 5. Run Sequential for Reference
 	tNormed := ctx.NewTensorPooled(M, K)
 	tIn.RMSNormFP32_ToF16_Into(tNormW, eps, tNormed)
-	tSeq := tNormed.Linear(tWeight)
+	tSeq, _ := tNormed.Linear(tWeight)
 	seqRes := tSeq.ToHost()
 
 	// Expected calculation:
 	// RMS = sqrt(mean(input^2) + eps) = sqrt(4 + 1e-5) ~ 2.0000025
 	// NormVal = (2.0 / 2.0000025) * 0.5 ~ 0.499999
 	// Sum(NormVal * weight) = 256 * 0.499999 * 1.0 ~ 127.999
-	
+
 	t.Logf("Fused results: %v", fusedRes)
 	t.Logf("Sequential results: %v", seqRes)
 
@@ -124,19 +128,28 @@ func TestSwiGLULinearQ4K(t *testing.T) {
 	q4kBlock[1] = byte(d_f16 >> 8)
 	q4kBlock[2] = byte(dmin_f16 & 0xFF)
 	q4kBlock[3] = byte(dmin_f16 >> 8)
-	for i := 4; i < 16; i++ { q4kBlock[i] = 1 } // sc=1, m=1
-	for i := 16; i < 144; i++ { q4kBlock[i] = 0x11 } // v=1
+	for i := 4; i < 16; i++ {
+		q4kBlock[i] = 1
+	} // sc=1, m=1
+	for i := 16; i < 144; i++ {
+		q4kBlock[i] = 0x11
+	} // v=1
 
-	tWeight := ctx.NewQ4KTensor(N, K)
-	tWeight.LoadFromRaw(q4kBlock)
+	tWeight, err := ctx.NewQ4KTensor(N, K)
+	if err != nil {
+		t.Fatalf("Failed to create Q4K tensor: %v", err)
+	}
+	if err := tWeight.LoadFromRaw(q4kBlock); err != nil {
+		t.Fatalf("Failed to load Q4K data: %v", err)
+	}
 
 	// 3. Run Fused
 	tFused := tGate.SwiGLULinearQ4K(tUp, tWeight, scale)
 	fusedRes := tFused.ToHost()
 
 	// 4. Run Sequential
-	tSwi := tGate.SwiGLU(tUp)
-	tSeq := tSwi.Linear(tWeight)
+	tSwi, _ := tGate.SwiGLU(tUp)
+	tSeq, _ := tSwi.Linear(tWeight)
 	seqRes := tSeq.ToHost()
 
 	t.Logf("Fused results: %v", fusedRes)
