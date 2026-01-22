@@ -792,7 +792,9 @@ kernel void att_fused_f16(device const half *q [[ buffer(0) ]],
     if (effective_len <= max_smem_tokens) {
         // Direct processing: all tokens fit in threadgroup memory
         threadgroup float s_mem[4096];
-        if (pos >= 4096) return;
+        // Note: s_mem is indexed by relative position (t - start), not absolute t
+        // This is because KV cache uses rolling buffer indexing (t % window_size)
+        // but s_mem needs contiguous storage for the softmax computation
 
         // 1. Parallel score calculation
         for (int t = tid.x; t <= pos; t += nt) {
@@ -801,7 +803,7 @@ kernel void att_fused_f16(device const half *q [[ buffer(0) ]],
                 int cache_idx = (window_size > 0) ? (t % window_size) : t;
                 device const half *mk = k_cache + cache_idx * kv_dim + kvh * headDim;
                 for (int i = 0; i < headDim; i++) d += (float)mq[i] * (float)mk[i];
-                s_mem[t] = d * scale;
+                s_mem[t - start] = d * scale;  // Use relative indexing
             }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -809,8 +811,9 @@ kernel void att_fused_f16(device const half *q [[ buffer(0) ]],
         // 2. Softmax Max Reduction
         threadgroup float tg_mv;
         float l_mv = -10000.0f;
-        for (int i = tid.x; i <= pos; i += nt) {
-            if (i >= start && s_mem[i] > l_mv) l_mv = s_mem[i];
+        for (int i = tid.x; i < effective_len; i += nt) {
+            float val = s_mem[i];
+            if (val > l_mv) l_mv = val;
         }
         l_mv = simd_max(l_mv);
 
@@ -830,12 +833,10 @@ kernel void att_fused_f16(device const half *q [[ buffer(0) ]],
         // 3. Softmax Sum Reduction
         threadgroup float tg_se;
         float l_se = 0;
-        for (int i = tid.x; i <= pos; i += nt) {
-            if (i >= start) {
-                float e = exp(s_mem[i] - mv);
-                s_mem[i] = e;
-                l_se += e;
-            }
+        for (int i = tid.x; i < effective_len; i += nt) {
+            float e = exp(s_mem[i] - mv);
+            s_mem[i] = e;
+            l_se += e;
         }
         l_se = simd_sum(l_se);
         if ((tid.x & 31) == 0) scratch[tid.x / 32] = l_se;
@@ -856,7 +857,7 @@ kernel void att_fused_f16(device const half *q [[ buffer(0) ]],
             float r = 0;
             for (int t = start; t <= pos; t++) {
                 int cache_idx = (window_size > 0) ? (t % window_size) : t;
-                r += (s_mem[t] / se) * (float)v_cache[cache_idx * kv_dim + kvh * headDim + tid.x];
+                r += (s_mem[t - start] / se) * (float)v_cache[cache_idx * kv_dim + kvh * headDim + tid.x];
             }
             output[h * headDim + tid.x] = safe_half(r);
         }
