@@ -2,7 +2,8 @@
 
 ## Debugging Strategy (10-Point Plan)
 
-1. [ ] **RoPE Logic Re-Verification**: Confirm calling `rope_f16` twice (for Q and K) with same `pos` is correct for Mistral.
+1. [x] **RoPE Logic Re-Verification**: Confirm calling `rope_f16` twice (for Q and K) with same `pos` is correct for Mistral.
+
 2. [ ] **GQA Ratio Handling**: Verify `att_scores_f16` and `att_values_f16` correctly utilize the `heads / kv_heads` ratio.
 3. [x] **Activation Trace Analysis**: Run `ScanMax` tracking across all 32 layers for the first token to identify collapse/saturation.
 4. [ ] **Logit Range Audit**: Inspect raw logit distribution; check for flatness or extreme values.
@@ -18,6 +19,8 @@
 - [ ] Revert experimental RoPE kernel changes (Step 790 regression).
 - [x] Implement enhanced `ScanMax` tracking in `engine.go`.
 - [ ] Analyze Layer 0 -> Layer 31 activation flow.
+- [ ] **[NEW] RoPE precision issue**: Tests reveal 0.045 deviation for Mistral 1M theta (1000000.0)
+
 
 ## Verification
 
