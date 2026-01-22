@@ -36,7 +36,6 @@ func getKV(f *gguf.GGUFFile, llamaKey, qwenKey string) (interface{}, bool) {
 }
 
 func NewEngine(modelPath string, debugDequant bool) (*Engine, error) {
-	// Initialize Metal Context
 	ctx := device.NewContext()
 
 	e := &Engine{
@@ -47,11 +46,12 @@ func NewEngine(modelPath string, debugDequant bool) (*Engine, error) {
 	}
 	e.Config.DebugDequant = debugDequant
 
-	// Load Model
 	if err := e.loadModel(modelPath); err != nil {
 		ctx.Free()
 		return nil, err
 	}
+
+	e.TraceTracker = NewActivationTraceTracker(e.Config.Layers)
 
 	return e, nil
 }
@@ -581,6 +581,12 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 			fmt.Printf("DEBUG: Token %d Embedding (First 10): %v\n", lastToken, embData[:10])
 		}
 
+		// Track embedding stats for first token
+		if i == 0 {
+			stats := currentF32.GetStats(16)
+			e.TraceTracker.RecordLayer("embedding", -1, stats)
+		}
+
 		// Layers (Attention + FFN)
 		for l := 0; l < e.Config.Layers; l++ {
 			attnNorm := e.Weights.AttnNorm[l]
@@ -602,6 +608,12 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 			// Log layer output if enabled OR if first token (for recovery analysis)
 			if samplerConfig.DebugActivations || (i == 0) {
 				currentF32.ScanMax(fmt.Sprintf("[Pos %d] Layer %d Output", e.CachePos, l))
+
+				// Track layer stats for first token
+				if i == 0 {
+					stats := currentF32.GetStats(16)
+					e.TraceTracker.RecordLayer(fmt.Sprintf("layer_%d", l), l, stats)
+				}
 			}
 		}
 
