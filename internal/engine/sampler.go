@@ -15,6 +15,7 @@ type SamplerConfig struct {
 	RepPenalty       float64 // 1.0 = no penalty, > 1.0 = penalty
 	Seed             int64
 	DebugActivations bool
+	QualityMode      bool // Enable advanced sampling with nucleus sampling and adaptive temperature
 }
 
 type Sampler struct {
@@ -29,6 +30,184 @@ func NewSampler(cfg SamplerConfig) *Sampler {
 	return &Sampler{
 		Config: cfg,
 		rng:    rand.New(rand.NewSource(cfg.Seed)),
+	}
+}
+
+// SampleAdvanced provides enhanced sampling with nucleus sampling and dynamic temperature
+func (s *Sampler) SampleAdvanced(logits []float32, history []int, vocabSize int, qualityMode bool) int {
+	if qualityMode {
+		return s.sampleWithQualityControl(logits, history, vocabSize)
+	}
+	return s.Sample(logits, history, vocabSize)
+}
+
+// sampleWithQualityControl implements advanced sampling with nucleus sampling and quality controls
+func (s *Sampler) sampleWithQualityControl(logits []float32, history []int, vocabSize int) int {
+	// Check for NaN/Inf in logits and handle gracefully
+	hasNaN := false
+	hasInf := false
+	for _, v := range logits {
+		if math.IsNaN(float64(v)) {
+			hasNaN = true
+			break
+		}
+		if math.IsInf(float64(v), 0) {
+			hasInf = true
+			break
+		}
+	}
+
+	if hasNaN || hasInf {
+		// Find the first valid (non-NaN, non-Inf) logit
+		for i, v := range logits {
+			if !math.IsNaN(float64(v)) && !math.IsInf(float64(v), 0) {
+				return i
+			}
+		}
+		return 0
+	}
+
+	// 1. Repetition Penalty (enhanced)
+	if s.Config.RepPenalty > 1.0 && len(history) > 0 {
+		s.applySmartRepetitionPenalty(logits, history)
+	}
+
+	// 2. Dynamic Temperature based on confidence
+	temp := s.calculateAdaptiveTemperature(logits)
+	if temp == 0 {
+		// Greedy sampling for high confidence
+		return argMax(logits)
+	}
+
+	// 3. Apply temperature
+	probs := make([]float64, len(logits))
+	maxLogit := float64(logits[0])
+	for _, v := range logits {
+		if float64(v) > maxLogit {
+			maxLogit = float64(v)
+		}
+	}
+
+	for i, v := range logits {
+		probs[i] = float64(v) / temp
+	}
+
+	// 4. Softmax
+	softmax(probs)
+
+	// 5. Quality-guided filtering: nucleus sampling with top-p
+	candidates := make([]tokenProb, 0, len(probs))
+	for i, p := range probs {
+		if p > 1e-10 && !math.IsNaN(p) && !math.IsInf(p, 0) {
+			candidates = append(candidates, tokenProb{id: i, prob: p})
+		}
+	}
+
+	if len(candidates) == 0 {
+		return argMax(logits)
+	}
+
+	// Sort by probability (descending)
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].prob > candidates[j].prob
+	})
+
+	// Apply nucleus sampling (top-p)
+	candidates = applyTopP(candidates, s.Config.TopP)
+
+	// Apply top-k if specified
+	if s.Config.TopK > 0 {
+		candidates = applyTopK(candidates, s.Config.TopK)
+	}
+
+	if len(candidates) == 0 {
+		return argMax(logits)
+	}
+
+	// Sample from remaining candidates
+	r := s.rng.Float64()
+	acc := 0.0
+	for _, c := range candidates {
+		acc += c.prob
+		if r < acc {
+			return c.id
+		}
+	}
+
+	// Fallback
+	return candidates[0].id
+}
+
+// calculateAdaptiveTemperature adjusts temperature based on logit distribution confidence
+func (s *Sampler) calculateAdaptiveTemperature(logits []float32) float64 {
+	if len(logits) == 0 {
+		return s.Config.Temperature
+	}
+
+	// Calculate entropy as a measure of confidence
+	maxLogit := logits[0]
+	sum := float64(0)
+	for _, v := range logits {
+		if v > maxLogit {
+			maxLogit = v
+		}
+		sum += math.Exp(float64(v - maxLogit))
+	}
+
+	// Normalize to get probabilities
+	entropy := float64(0)
+	for _, v := range logits {
+		prob := math.Exp(float64(v-maxLogit)) / sum
+		if prob > 0 {
+			entropy -= prob * math.Log(prob)
+		}
+	}
+
+	// High entropy (uncertain) = higher temperature
+	// Low entropy (confident) = lower temperature
+	baseTemp := s.Config.Temperature
+	if entropy > 2.0 {
+		// High uncertainty - increase temperature for diversity
+		return baseTemp * 1.5
+	} else if entropy < 0.5 {
+		// High confidence - decrease temperature for consistency
+		return math.Max(baseTemp*0.5, 0.1)
+	}
+
+	return baseTemp
+}
+
+// applySmartRepetitionPenalty applies context-aware repetition penalties
+func (s *Sampler) applySmartRepetitionPenalty(logits []float32, history []int) {
+	if len(history) == 0 {
+		return
+	}
+
+	// Create frequency map for recent tokens
+	freqMap := make(map[int]int)
+	windowSize := 32 // Look at last 32 tokens
+	start := len(history) - windowSize
+	if start < 0 {
+		start = 0
+	}
+
+	for i := start; i < len(history); i++ {
+		if history[i] < len(logits) {
+			freqMap[history[i]]++
+		}
+	}
+
+	// Apply frequency-based penalty
+	for tokenID, freq := range freqMap {
+		if tokenID < len(logits) {
+			penalty := math.Pow(s.Config.RepPenalty, float64(freq))
+			val := logits[tokenID]
+			if val > 0 {
+				logits[tokenID] /= float32(penalty)
+			} else {
+				logits[tokenID] *= float32(penalty)
+			}
+		}
 	}
 }
 
@@ -217,12 +396,24 @@ func applyTopP(candidates []tokenProb, p float64) []tokenProb {
 		return candidates
 	}
 
+	// Calculate cumulative probabilities to find cutoff point
 	sum := 0.0
 	for i, c := range candidates {
 		sum += c.prob
 		if sum >= p {
-			// Include this token and stop
-			return candidates[:i+1]
+			// Include tokens up to this point
+			selected := candidates[:i+1]
+
+			// Renormalize probabilities to sum to 1.0
+			totalProb := 0.0
+			for _, c := range selected {
+				totalProb += c.prob
+			}
+			for i := range selected {
+				selected[i].prob /= totalProb
+			}
+
+			return selected
 		}
 	}
 	return candidates
