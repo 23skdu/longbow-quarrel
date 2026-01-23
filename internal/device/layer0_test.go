@@ -305,3 +305,139 @@ func TestLayer0_SwiGLU(t *testing.T) {
 	// 4. Compare
 	assertClose(t, "SwiGLU", cpuOut, gpuOut, 1e-3)
 }
+
+// TestSwiGLU_ExtremeValues tests SwiGLU with extreme input values that could cause NaN
+// This verifies the fix for NaN propagation starting at Layer 23
+func TestSwiGLU_ExtremeValues(t *testing.T) {
+	ctx := NewContext()
+	defer ctx.Free()
+
+	// Dimensions
+	M := 1
+	Dim := 128
+
+	testCases := []struct {
+		name       string
+		gateValues []float32
+		upValues   []float32
+		expectNaN  bool
+	}{
+		{
+			name:       "Large positive gate",
+			gateValues: repeatFloat32(100.0, M*Dim),
+			upValues:   repeatFloat32(1.0, M*Dim),
+			expectNaN:  false,
+		},
+		{
+			name:       "Large negative gate (could cause NaN without fix)",
+			gateValues: repeatFloat32(-100.0, M*Dim),
+			upValues:   repeatFloat32(1.0, M*Dim),
+			expectNaN:  false,
+		},
+		{
+			name:       "Mixed extreme values",
+			gateValues: mixExtremeValues(M * Dim),
+			upValues:   mixExtremeValues(M * Dim),
+			expectNaN:  false,
+		},
+		{
+			name:       "Very large positive (overflow test)",
+			gateValues: repeatFloat32(1000.0, M*Dim),
+			upValues:   repeatFloat32(1000.0, M*Dim),
+			expectNaN:  false,
+		},
+		{
+			name:       "Very large negative (overflow test)",
+			gateValues: repeatFloat32(-1000.0, M*Dim),
+			upValues:   repeatFloat32(1000.0, M*Dim),
+			expectNaN:  false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// CPU
+			cpuOut := CPUSwiGLU(tc.gateValues, tc.upValues)
+
+			// GPU
+			tUp := ctx.NewTensor(M, Dim)
+			tUp.LoadFrom(tc.upValues)
+
+			tGate := ctx.NewTensor(M, Dim)
+			tGate.LoadFrom(tc.gateValues)
+
+			tOut, _ := tUp.SwiGLU(tGate)
+
+			ctx.Synchronize()
+			gpuOut := tOut.ToHost()
+
+			tUp.Free()
+			tGate.Free()
+			tOut.Free()
+
+			// Check for NaN
+			cpuHasNaN := false
+			gpuHasNaN := false
+			for _, v := range cpuOut {
+				if math.IsNaN(float64(v)) {
+					cpuHasNaN = true
+					break
+				}
+			}
+			for _, v := range gpuOut {
+				if math.IsNaN(float64(v)) {
+					gpuHasNaN = true
+					break
+				}
+			}
+
+			if tc.expectNaN {
+				// If we expect NaN, at least one should have it
+				if !cpuHasNaN && !gpuHasNaN {
+					t.Logf("Expected NaN but none found (clamping may have prevented it)")
+				}
+			} else {
+				// If we don't expect NaN, neither should have it
+				if cpuHasNaN {
+					t.Errorf("CPU output contains NaN")
+				}
+				if gpuHasNaN {
+					t.Errorf("GPU output contains NaN")
+				}
+				if !cpuHasNaN && !gpuHasNaN {
+					t.Logf("✓ No NaN detected (clamping working correctly)")
+				}
+			}
+
+			// For extreme values, just verify no NaN (precision differences expected with F16)
+			// Value comparison skipped due to F16 precision vs F32 differences
+		})
+	}
+}
+
+func repeatFloat32(val float32, n int) []float32 {
+	result := make([]float32, n)
+	for i := range result {
+		result[i] = val
+	}
+	return result
+}
+
+func mixExtremeValues(n int) []float32 {
+	result := make([]float32, n)
+	for i := range result {
+		switch i % 5 {
+		case 0:
+			result[i] = 100.0
+		case 1:
+			result[i] = -100.0
+		case 2:
+			result[i] = 1000.0
+		case 3:
+			result[i] = -1000.0
+		case 4:
+			result[i] = (float32(rand.Intn(20000)) - 10000.0) / 10.0
+		}
+	}
+	return result
+}

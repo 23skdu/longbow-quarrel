@@ -4,9 +4,9 @@ package main
 
 import (
 	"fmt"
+	"github.com/23skdu/longbow-quarrel/internal/tokenizer"
 	"os"
 	"strconv"
-	"github.com/23skdu/longbow-quarrel/internal/tokenizer"
 )
 
 func main() {
@@ -16,7 +16,7 @@ func main() {
 		fmt.Printf("Error: %v\n", err)
 		return
 	}
-	
+
 	if len(os.Args) > 1 {
 		fmt.Printf("Decoding IDs from arguments:\n")
 		for _, arg := range os.Args[1:] {

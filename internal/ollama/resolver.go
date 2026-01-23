@@ -10,12 +10,12 @@ import (
 )
 
 const (
-	DefaultTag = "latest"
+	DefaultTag     = "latest"
 	MediaTypeModel = "application/vnd.ollama.image.model"
 )
 
 type Manifest struct {
-	SchemaVersion int `json:"schemaVersion"`
+	SchemaVersion int     `json:"schemaVersion"`
 	Layers        []Layer `json:"layers"`
 }
 
@@ -30,12 +30,12 @@ func GetOllamaDir() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	
+
 	// Check for OLLAMA_MODELS env var
 	if env := os.Getenv("OLLAMA_MODELS"); env != "" {
 		return env, nil
 	}
-	
+
 	// Default: ~/.ollama/models
 	if runtime.GOOS == "windows" {
 		// Not supporting windows specific logic detailed check right now
@@ -51,7 +51,7 @@ func ResolveModelPath(modelName string) (string, error) {
 	// Parse model name
 	// Short name: llama3 -> registry.ollama.ai/library/llama3/latest
 	// Tagged: llama3:instruct -> registry.ollama.ai/library/llama3/instruct
-	
+
 	parts := strings.Split(modelName, ":")
 	var name, tag string
 	if len(parts) == 1 {
@@ -61,33 +61,33 @@ func ResolveModelPath(modelName string) (string, error) {
 		name = parts[0]
 		tag = parts[1]
 	}
-	
+
 	baseDir, err := GetOllamaDir()
 	if err != nil {
 		return "", err
 	}
-	
+
 	// Construct manifest path
 	// Standard install: ~/.ollama/models/manifests/registry.ollama.ai/library/<name>/<tag>
 	// Note: User might use custom registry, but we assume default for short names
 	manifestPath := filepath.Join(baseDir, "manifests", "registry.ollama.ai", "library", name, tag)
-	
+
 	if _, err := os.Stat(manifestPath); os.IsNotExist(err) {
 		// Try without library? No, ollama structure usually includes it for official models
 		return "", fmt.Errorf("model manifest not found at %s", manifestPath)
 	}
-	
+
 	// Read Manifest
 	data, err := os.ReadFile(manifestPath)
 	if err != nil {
 		return "", err
 	}
-	
+
 	var m Manifest
 	if err := json.Unmarshal(data, &m); err != nil {
 		return "", err
 	}
-	
+
 	// Find the model layer
 	var blobDigest string
 	for _, l := range m.Layers {
@@ -96,19 +96,19 @@ func ResolveModelPath(modelName string) (string, error) {
 			break
 		}
 	}
-	
+
 	if blobDigest == "" {
 		return "", fmt.Errorf("no model layer found in manifest")
 	}
-	
+
 	// Blob path: blobs/sha256-<hash>
 	// Digest is "sha256:hash" -> replace ':' with '-'
 	blobName := strings.Replace(blobDigest, ":", "-", 1)
 	blobPath := filepath.Join(baseDir, "blobs", blobName)
-	
+
 	if _, err := os.Stat(blobPath); os.IsNotExist(err) {
 		return "", fmt.Errorf("model blob not found at %s", blobPath)
 	}
-	
+
 	return blobPath, nil
 }

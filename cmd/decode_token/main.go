@@ -5,7 +5,7 @@ package main
 import (
 	"fmt"
 	"log"
-	
+
 	"github.com/23skdu/longbow-quarrel/internal/tokenizer"
 )
 
@@ -15,7 +15,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to load tokenizer: %v", err)
 	}
-	
+
 	id := 31980
 	text := tok.Decode([]int{id})
 	fmt.Printf("Token %d: %q\n", id, text)

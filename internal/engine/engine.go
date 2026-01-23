@@ -462,8 +462,10 @@ func (e *Engine) loadModel(path string) error {
 	}
 
 	// Fallback: many models share token_embd.weight with output.weight
-	if e.Weights.Output == nil && e.Weights.TokenEmb != nil {
+	// For Llama/Mistral architectures, always tie output to token_embd for correctness
+	if e.Weights.TokenEmb != nil {
 		e.Weights.Output = e.Weights.TokenEmb
+		log.Printf("[MODEL] Tied output.weight to token_embd.weight for Llama architecture")
 	}
 
 	return nil
@@ -497,6 +499,12 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 		return nil, errors.New("empty input tokens")
 	}
 	fmt.Printf("DEBUG: Input Tokens: %v\n", inputTokens)
+
+	// Enable activation logging if requested
+	if samplerConfig.DebugActivations {
+		promptText := fmt.Sprintf("tokens:%v", inputTokens) // Simple representation for now
+		e.ActLogger.Enable(promptText, inputTokens)
+	}
 
 	fmt.Printf("DEBUG CONFIG: RopeTheta=%.2f HeadDim=%d Heads=%d KVHeads=%d Eps=%.6f\n",
 		e.Config.RopeTheta, e.Config.HeadDim, e.Config.Heads, e.Config.KVHeads, e.Config.Eps)
@@ -589,6 +597,7 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 
 		// Layers (Attention + FFN)
 		for l := 0; l < e.Config.Layers; l++ {
+			log.Printf("DEBUG_PRECISION: Layer %d, Dim=%d, PrecisionMode=%d (0=Auto, 1=FP16, 2=F32FFN, 3=Mixed)", l, e.Config.Dim, e.Config.PrecisionMode)
 			attnNorm := e.Weights.AttnNorm[l]
 			q := e.Weights.AttnQ[l]
 			k := e.Weights.AttnK[l]
@@ -603,7 +612,27 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 
 			currentF32.Layer(l, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, kCache, vCache,
 				scratch, // Pass scratch
+				e.TraceTracker,
 				e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen, e.Config.WindowSize, e.GlobalScale, samplerConfig.DebugActivations, int(e.Config.PrecisionMode))
+
+			// Log layer activation details if enabled
+			if e.ActLogger.IsEnabled() {
+				// Get samples and max values for logging
+				qSample := GetSampleFromTensor(scratch.QPart.ToHost(), 10)
+				kSample := GetSampleFromTensor(scratch.KPart.ToHost(), 10)
+				vSample := GetSampleFromTensor(scratch.VPart.ToHost(), 10)
+
+				qMax := GetMaxFromTensor(scratch.QPart.ToHost())
+				kMax := GetMaxFromTensor(scratch.KPart.ToHost())
+				vMax := GetMaxFromTensor(scratch.VPart.ToHost())
+				attnMax := GetMaxFromTensor(scratch.AttOut.ToHost())
+				ffnMax := GetMaxFromTensor(currentF32.ToHost())
+
+				e.ActLogger.LogLayer(l, qMax, kMax, vMax, attnMax, ffnMax,
+					qSample, kSample, vSample,
+					scratch.QPart.ToHost(), scratch.KPart.ToHost(), scratch.VPart.ToHost(),
+					scratch.AttOut.ToHost(), currentF32.ToHost())
+			}
 
 			// Log layer output if enabled OR if first token (for recovery analysis)
 			if samplerConfig.DebugActivations || (i == 0) {
@@ -725,6 +754,7 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 
 		// Layers (Attention + FFN)
 		for l := 0; l < e.Config.Layers; l++ {
+			log.Printf("DEBUG_PRECISION: Layer %d, Dim=%d, PrecisionMode=%d (0=Auto, 1=FP16, 2=F32FFN, 3=Mixed)", l, e.Config.Dim, e.Config.PrecisionMode)
 			// e.updateCurrentLayer(l) // This function call is not defined in the provided context. Removed.
 			attnNorm := e.Weights.AttnNorm[l]
 			q := e.Weights.AttnQ[l]
@@ -747,7 +777,26 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 			// Layer now handles F32 currentF32, using mixed precision
 			currentF32.Layer(l, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, kCache, vCache,
 				scratch, // Pass scratch
+				e.TraceTracker,
 				e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen, e.Config.WindowSize, e.GlobalScale, samplerConfig.DebugActivations, int(e.Config.PrecisionMode))
+
+			// Log layer activation details if enabled (generation phase)
+			if e.ActLogger.IsEnabled() && i >= len(inputTokens)-1 {
+				qSample := GetSampleFromTensor(scratch.QPart.ToHost(), 10)
+				kSample := GetSampleFromTensor(scratch.KPart.ToHost(), 10)
+				vSample := GetSampleFromTensor(scratch.VPart.ToHost(), 10)
+
+				qMax := GetMaxFromTensor(scratch.QPart.ToHost())
+				kMax := GetMaxFromTensor(scratch.KPart.ToHost())
+				vMax := GetMaxFromTensor(scratch.VPart.ToHost())
+				attnMax := GetMaxFromTensor(scratch.AttOut.ToHost())
+				ffnMax := GetMaxFromTensor(currentF32.ToHost())
+
+				e.ActLogger.LogLayer(l, qMax, kMax, vMax, attnMax, ffnMax,
+					qSample, kSample, vSample,
+					scratch.QPart.ToHost(), scratch.KPart.ToHost(), scratch.VPart.ToHost(),
+					scratch.AttOut.ToHost(), currentF32.ToHost())
+			}
 
 			if samplerConfig.DebugActivations {
 				currentF32.ScanMax(fmt.Sprintf("[Pos %d] Layer %d Output", e.CachePos, l))
@@ -819,6 +868,14 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 		e.CachePos++
 		metrics.RecordInference(1, time.Since(tToken))
 		e.Ctx.AutoreleasePoolPop(pool)
+	}
+
+	// Save activation log if enabled
+	if e.ActLogger.IsEnabled() {
+		err := e.ActLogger.SaveToFile("activation_debug.json")
+		if err != nil {
+			log.Printf("Warning: Failed to save activation log: %v", err)
+		}
 	}
 
 	return result, nil

@@ -13,13 +13,13 @@ func main() {
 		fmt.Printf("Error: %v\n", err)
 		return
 	}
-	
+
 	tokens, ok := f.KV["tokenizer.ggml.tokens"].([]interface{})
 	if !ok {
 		fmt.Println("No tokens found")
 		return
 	}
-	
+
 	s := tokens[13290].(string)
 	fmt.Printf("Token 13290: %q\n", s)
 	for _, r := range s {

@@ -46,13 +46,13 @@ func TestTokenizer_Mistral_SpecialTokens(t *testing.T) {
 	// 1 = BOS
 	// 2 = EOS
 	// ? = UNK (Often 0 or none)
-	
+
 	bos := tok.Decode([]int{1})
 	eos := tok.Decode([]int{2})
-	
+
 	t.Logf("BOS (1): %q", bos)
 	t.Logf("EOS (2): %q", eos)
-	
+
 	// Check if ID 1 maps to a known BOS string in vocab if possible, or just empty string if special control token?
 	// Mistral usually treats 1 as <s> and 2 as </s> but they might not decode to visible text depending on logic.
 }
@@ -87,16 +87,16 @@ func TestTokenizer_Mistral_PromptFormat(t *testing.T) {
 
 	prompt := "[INST] What is the capital of France? [/INST]"
 	ids := tok.Encode(prompt)
-	
+
 	t.Logf("Prompt: %q", prompt)
 	t.Logf("IDs: %v", ids)
-	
+
 	// Verify that [INST] is not split into [ I N S T ]
 	// [INST] should be a single token or specific sequence.
 	// For Mistral, [INST] is not a single special token in the vocab usually, it's text.
 	// Wait, actually strict Mistral instruction format uses control tokens OR text.
 	// Let's see what it produces.
-	
+
 	decoded := tok.Decode(ids)
 	t.Logf("Decoded: %q", decoded)
 }

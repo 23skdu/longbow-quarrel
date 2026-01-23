@@ -14,7 +14,7 @@ func main() {
 		fmt.Printf("Error: %v\n", err)
 		return
 	}
-	
+
 	prompt := "Hello"
 	tokens := tok.Encode(prompt)
 	fmt.Printf("Prompt: %q\n", prompt)

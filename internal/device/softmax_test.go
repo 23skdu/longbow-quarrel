@@ -1,6 +1,5 @@
 //go:build darwin && metal
 
-
 package device
 
 import (
@@ -33,7 +32,7 @@ func TestSoftmax_Precision(t *testing.T) {
 				// Mix of large and small values
 				inputData[i] = (rand.Float32() - 0.5) * tc.maxRange
 			}
-			// Mask values beyond pos with large negative if needed, 
+			// Mask values beyond pos with large negative if needed,
 			// though the kernel should respect 'pos'.
 
 			// 2. CPU Reference (FP64 for maximum precision)

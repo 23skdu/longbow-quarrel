@@ -15,28 +15,28 @@ func TestInferOutputType(t *testing.T) {
 
 // TestDecodeOutputType validates that decoded output is a valid string
 func TestDecodeOutputType(t *testing.T) {
-	tests := []struct{
-		name string
-		tokens []int
-		wantType string
+	tests := []struct {
+		name         string
+		tokens       []int
+		wantType     string
 		wantNotEmpty bool
 	}{
 		{
-			name: "empty tokens",
-			tokens: []int{},
-			wantType: "string",
+			name:         "empty tokens",
+			tokens:       []int{},
+			wantType:     "string",
 			wantNotEmpty: false,
 		},
 		{
-			name: "single token",
-			tokens: []int{0},
-			wantType: "string",
+			name:         "single token",
+			tokens:       []int{0},
+			wantType:     "string",
 			wantNotEmpty: true,
 		},
 		{
-			name:  "multiple tokens",
-			tokens: []int{100, 200, 300},
-			wantType: "string",
+			name:         "multiple tokens",
+			tokens:       []int{100, 200, 300},
+			wantType:     "string",
 			wantNotEmpty: true,
 		},
 	}
@@ -46,7 +46,7 @@ func TestDecodeOutputType(t *testing.T) {
 			// Test that decoder returns string type
 			// Note: Actual decoding requires tokenizer with valid vocab
 			var output interface{}
-			
+
 			// Mock decode - in real implementation this would call tokenizer.Decode
 			if len(tt.tokens) == 0 {
 				output = ""
@@ -87,7 +87,7 @@ func TestDecodeOutputType(t *testing.T) {
 func TestGenerateIntegration(t *testing.T) {
 	// Skip in unit tests - requires full model
 	t.Skip("Integration test - requires valid GGUF model")
-	
+
 	// Integration test structure:
 	// 1. Load small test model
 	// 2. Generate N tokens
@@ -114,7 +114,7 @@ func TestOutputValidation(t *testing.T) {
 		{
 			name:     "empty string",
 			output:   "",
-			wantPass: false,  // Empty output is invalid
+			wantPass: false, // Empty output is invalid
 		},
 		{
 			name:     "integer type (wrong)",
@@ -137,7 +137,7 @@ func TestOutputValidation(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// Type assertion with strict checking
 			str, ok := tc.output.(string)
-			
+
 			if !ok {
 				if tc.wantPass {
 					t.Errorf("Expected string type, got %T", tc.output)
