@@ -28,7 +28,7 @@ func New(path string) (*Tokenizer, error) {
 
 	tokens := make([]string, len(arr))
 	vocab := make(map[string]int, len(arr))
-	
+
 	for i, v := range arr {
 		s, ok := v.(string)
 		if !ok {
@@ -72,7 +72,7 @@ type Tokenizer struct {
 	Vocab  map[string]int
 	Merges []string
 	Ranks  map[string]int // Pair "a b" -> Rank (Index)
-	Scores []float32 // optional
+	Scores []float32      // optional
 }
 
 func (t *Tokenizer) Encode(text string) []int {
@@ -82,17 +82,17 @@ func (t *Tokenizer) Encode(text string) []int {
 
 	// 1. Basic pre-tokenization
 	words := splitWords(text)
-	
+
 	var allIDs []int
-	
+
 	// Fallback to Greedy Max Match if no merges available (e.g. Unigram)
 	useMaxMatch := len(t.Ranks) == 0
-	
+
 	for _, w := range words {
 		// Convert to BPE-clean format (replace space with U+2581 for Llama/Mistral)
 		// Note: GPT-2 uses Ġ, Llama uses  (U+2581)
 		cleanW := strings.ReplaceAll(w, " ", "\u2581")
-		
+
 		if useMaxMatch {
 			// Greedy Max Match
 			remaining := cleanW
@@ -100,11 +100,11 @@ func (t *Tokenizer) Encode(text string) []int {
 				bestMatch := ""
 				bestLen := 0
 				found := false
-				
+
 				// Try to find longest prefix that exists in vocab
 				// Optimization: Search from full length down
-				// Or simple loop? 
-				// Max token length? 
+				// Or simple loop?
+				// Max token length?
 				// Limit search window? No, naive is fine for now.
 				for l := len(remaining); l > 0; l-- {
 					sub := remaining[:l]
@@ -115,7 +115,7 @@ func (t *Tokenizer) Encode(text string) []int {
 						break
 					}
 				}
-				
+
 				if found {
 					allIDs = append(allIDs, t.Vocab[bestMatch])
 					remaining = remaining[bestLen:]
@@ -128,23 +128,23 @@ func (t *Tokenizer) Encode(text string) []int {
 			}
 			continue
 		}
-		
+
 		// Normal BPE (Merges)
 		subwords := make([]string, 0, len(cleanW))
 		for _, r := range cleanW {
 			subwords = append(subwords, string(r))
 		}
-		
+
 		// Iteratively merge
 		for {
 			if len(subwords) < 2 {
 				break
 			}
-			
+
 			// Find best pair
 			bestPairIdx := -1
 			bestRank := -1 // Lower is better
-			
+
 			for i := 0; i < len(subwords)-1; i++ {
 				pair := subwords[i] + " " + subwords[i+1]
 				// Check rank
@@ -155,14 +155,14 @@ func (t *Tokenizer) Encode(text string) []int {
 					}
 				}
 			}
-			
+
 			if bestPairIdx == -1 {
 				break // No more merges
 			}
-			
+
 			// Merge best pair
 			merged := subwords[bestPairIdx] + subwords[bestPairIdx+1]
-			
+
 			// Rebuild slice (inefficient but safe)
 			newSub := make([]string, 0, len(subwords)-1)
 			newSub = append(newSub, subwords[:bestPairIdx]...)
@@ -170,7 +170,7 @@ func (t *Tokenizer) Encode(text string) []int {
 			newSub = append(newSub, subwords[bestPairIdx+2:]...)
 			subwords = newSub
 		}
-		
+
 		// Map final subwords to IDs
 		for _, s := range subwords {
 			if id, ok := t.Vocab[s]; ok {
@@ -178,7 +178,7 @@ func (t *Tokenizer) Encode(text string) []int {
 			}
 		}
 	}
-	
+
 	return allIDs
 }
 
@@ -195,7 +195,7 @@ func splitWords(text string) []string {
 		if text[i] == ' ' && text[i-1] != ' ' {
 			res = append(res, text[start:i])
 			start = i
-		} 
+		}
 	}
 	res = append(res, text[start:])
 	return res
@@ -207,14 +207,14 @@ func (t *Tokenizer) Decode(ids []int) string {
 		if id < 0 || id >= len(t.Tokens) {
 			continue // Skip invalid token IDs
 		}
-		
+
 		token := t.Tokens[id]
-		
+
 		// Skip special tokens
 		if strings.HasPrefix(token, "<|") && strings.HasSuffix(token, "|>") {
 			continue
 		}
-		
+
 		// Replace BPE special characters with actual characters
 		// Ġ (U+0120) is used for space in BPE (GPT-2/RoBERTa)
 		// Ċ (U+010A) is used for newline in BPE
@@ -222,10 +222,10 @@ func (t *Tokenizer) Decode(ids []int) string {
 		token = strings.ReplaceAll(token, "Ġ", " ")
 		token = strings.ReplaceAll(token, "Ċ", "\n")
 		token = strings.ReplaceAll(token, "\u2581", " ")
-		
+
 		// Handle other common BPE markers
 		token = strings.ReplaceAll(token, "ĉ", "\t")
-		
+
 		sb.WriteString(token)
 	}
 	return sb.String()

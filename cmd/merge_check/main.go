@@ -13,13 +13,13 @@ func main() {
 		fmt.Printf("Error: %v\n", err)
 		return
 	}
-	
+
 	merges, ok := f.KV["tokenizer.ggml.merges"].([]interface{})
 	if !ok {
 		fmt.Println("No merges found")
 		return
 	}
-	
+
 	for i := 0; i < 10; i++ {
 		fmt.Printf("Merge %d: %q\n", i, merges[i])
 	}

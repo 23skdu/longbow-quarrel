@@ -51,20 +51,22 @@ kernel void scale_f16(device const half *x [[ buffer(0) ]], device half *out [[ 
 }
 
 kernel void swiglu_f16(device const half *gate [[ buffer(0) ]], 
-                     device const half *up [[ buffer(1) ]], 
+                     device const half *up [[ buffer(1)]], 
                      device half *out [[ buffer(2) ]],
                      uint qid [[ thread_position_in_grid ]]) {
     float g = (float)gate[qid]; 
     float u = (float)up[qid];
     
     // SwiGLU: up * silu(gate) where silu(x) = x * sigmoid(x)
-    float silu_g = g / (1.0f + exp(-g));
-    float val = u * silu_g;
+    // Clamp gate to prevent extreme sigmoid values that cause NaN
+    // This matches the F32 SwiGLU kernel behavior
+    float g_clamped = clamp(g, -10.0f, 10.0f);
+    float sigmoid_g = g_clamped / (1.0f + exp(-g_clamped));
+    float val = u * sigmoid_g;
     
-    // Note: SmolLM2 produces large intermediate values (50-60 range) which
-    // causes activation explosion. Proper fix requires FP32 accumulation.
-    // For now, allow values up to FP16 safe range.
-    out[qid] = safe_half(val);
+    // Clamp output to prevent activation explosion
+    // Use FP16 clamp range (65504) to stay within safe bounds
+    out[qid] = clamp(val, -65504.0f, 65504.0f);
 }
 
 kernel void rmsnorm_f16(device const half *x [[ buffer(0) ]],
@@ -104,231 +106,10 @@ kernel void linear_f16(device const half *weight [[ buffer(0) ]],
                      constant int &dim_out [[ buffer(4) ]],
                      uint3 tid [[ thread_position_in_threadgroup ]],
                      uint3 qid [[ thread_position_in_grid ]]) {
-    uint row = qid.y; uint batch = qid.z;
-    if (row >= (uint)dim_out) return; uint lane_id = tid.x;
-    device const half4 *w4 = (device const half4 *)(weight + row * dim_in);
-    device const half4 *i4 = (device const half4 *)(input + batch * dim_in);
-    int n4 = dim_in / 4;
-    float sum = 0; for (int i = (int)lane_id; i < n4; i += 32) {
-        float4 v_w = float4(w4[i]); float4 v_i = float4(i4[i]);
-        sum += dot(v_w.xy, v_i.xy) + dot(v_w.zw, v_i.zw);
-    }
-    sum = simd_sum(sum); 
-    if (lane_id == 0) output[batch * dim_out + row] = safe_half(sum);
-}
-
-kernel void linear_q4k_f16(device const uchar *weight [[ buffer(0) ]],
-                         device const half *input [[ buffer(1) ]],
-                         device half *output [[ buffer(2) ]],
-                         constant int &dim_in [[ buffer(3) ]],
-                         constant int &dim_out [[ buffer(4) ]],
-                         constant float &scale [[ buffer(5) ]],
-                         uint3 tid [[ thread_position_in_threadgroup ]],
-                         uint3 qid [[ thread_position_in_grid ]]) {
-    uint row = qid.y; uint batch = qid.z;
+uint row = qid.y; uint batch = qid.z;
     if (row >= (uint)dim_out) return; uint lane_id = tid.x;
     int num_blocks = (dim_in + 255) / 256;
-    device const uchar *row_ptr = weight + row * num_blocks * 144;
-    device const half *in_ptr = input + batch * dim_in;
-    float sum = 0;
-    for (int i = (int)lane_id; i < num_blocks; i += 32) {
-        device const uchar *block = row_ptr + i * 144;
-        
-        // Use robust dequantization for subnormal scales
-        float d = fp16_to_fp32(*(device const ushort*)(block));
-        float dmin = fp16_to_fp32(*(device const ushort*)(block + 2));
-        
-        device const uchar *scales = block + 4;
-        device const uchar *qs = block + 16;
-        uchar sc[8], m[8];
-        for (int j = 0; j < 8; j++) {
-            if (j < 4) {
-                sc[j] = scales[j] & 63;
-                m[j] = scales[j + 4] & 63;
-            } else {
-                sc[j] = (scales[j+4] & 0xF) | ((scales[j-4] >> 6) << 4);
-                m[j] = (scales[j+4] >> 4) | ((scales[j] >> 6) << 4);
-            }
-        }
-        for (int j = 0; j < 8; j++) {
-            float d_val = d * scale * (float)sc[j], m_val = dmin * scale * (float)m[j];
-            int sub_offset = j * 32, qs_offset = j * 16;
-            for (int k = 0; k < 16; k++) {
-				uchar b = qs[qs_offset + k];
-                float w0 = d_val * (float)(b & 0xF) - m_val;
-                float w1 = d_val * (float)(b >> 4) - m_val;
-                int idx0 = i * 256 + sub_offset + k;
-                int idx1 = idx0 + 16;
-                sum += w0 * (float)in_ptr[idx0] + w1 * (float)in_ptr[idx1];
-            }
-        }
-    }
-    sum = simd_sum(sum); 
-    if (lane_id == 0) output[batch * dim_out + row] = safe_half(sum);
-}
-
-kernel void rmsnorm_linear_q4k_f16(device const float *input [[ buffer(0) ]],
-                                 device const float *norm_weight [[ buffer(1) ]],
-                                 device const uchar *weight [[ buffer(2) ]],
-                                 device half *output [[ buffer(3) ]],
-                                 constant int &offRes [[ buffer(4) ]],
-                                 constant float &eps [[ buffer(5) ]],
-                                 constant int &dim_in [[ buffer(6) ]],
-                                 constant int &dim_out [[ buffer(7) ]],
-                                 constant float &scale [[ buffer(8) ]],
-                                 uint3 tid [[ thread_position_in_threadgroup ]],
-                                 uint3 qid [[ thread_position_in_grid ]]) {
-    uint row = qid.y; uint batch = qid.z;
-    if (row >= (uint)dim_out) return; uint lane_id = tid.x;
-
-    // 1. Shared memory for RMSNorm scale
-    threadgroup float s_rms[1024];
-    float sum_sq = 0.0f;
-    device const float *in_ptr = input + batch * dim_in;
-    for (int i = tid.x; i < dim_in; i += 1024) {
-        float val = (float)in_ptr[i];
-        sum_sq += val * val;
-    }
-    s_rms[tid.x] = sum_sq;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    
-    if (tid.x == 0) {
-        float t = 0;
-        int active_threads = (dim_in < 1024) ? dim_in : 1024;
-        for (int i = 0; i < active_threads; i++) t += s_rms[i];
-        s_rms[0] = 1.0f / sqrt(t / (float)dim_in + eps);
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    float rms_scale = s_rms[0];
-
-    // 2. Perform Linear Q4K with on-the-fly normalized input
-    int num_blocks = (dim_in + 255) / 256;
-    device const uchar *row_ptr = weight + row * num_blocks * 144;
-    float sum = 0;
-    
-    for (int i = (int)tid.x; i < num_blocks; i += 1024) {
-        device const uchar *block = row_ptr + i * 144;
-        float d = fp16_to_fp32(*(device const ushort*)(block));
-        float dmin = fp16_to_fp32(*(device const ushort*)(block + 2));
-        
-        device const uchar *scales = block + 4;
-        device const uchar *qs = block + 16;
-        uchar sc[8], m[8];
-        for (int j = 0; j < 8; j++) {
-            if (j < 4) {
-                sc[j] = scales[j] & 63;
-                m[j] = scales[j + 4] & 63;
-            } else {
-                sc[j] = (scales[j+4] & 0xF) | ((scales[j-4] >> 6) << 4);
-                m[j] = (scales[j+4] >> 4) | ((scales[j] >> 6) << 4);
-            }
-        }
-        for (int j = 0; j < 8; j++) {
-            float d_val = d * scale * (float)sc[j], m_val = dmin * scale * (float)m[j];
-            int sub_offset = j * 32, qs_offset = j * 16;
-            for (int k = 0; k < 16; k++) {
-                uchar b = qs[qs_offset + k];
-                float w0 = d_val * (float)(b & 0xF) - m_val;
-                float w1 = d_val * (float)(b >> 4) - m_val;
-                int idx0 = i * 256 + sub_offset + k;
-                int idx1 = idx0 + 16;
-                
-                // Normalized input (now reading float weight)
-                float in0 = (float)in_ptr[idx0] * rms_scale * norm_weight[idx0];
-                float in1 = (float)in_ptr[idx1] * rms_scale * norm_weight[idx1];
-                
-                sum += w0 * in0 + w1 * in1;
-            }
-        }
-    }
-    sum = simd_sum(sum);
-    if ((tid.x % 32) == 0) {
-        s_rms[tid.x / 32] = sum;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    
-    if (tid.x == 0) {
-        float final_sum = 0;
-        for (int i = 0; i < 32; i++) final_sum += s_rms[i];
-        output[batch * dim_out + row + offRes/2] = safe_half(final_sum);
-    }
-}
-
-kernel void swiglu_linear_q4k_f16(device const half *gate_input [[ buffer(0) ]],
-                                device const half *up_input [[ buffer(1) ]],
-                                device const uchar *weight [[ buffer(2) ]],
-                                device half *output [[ buffer(3) ]],
-                                constant int &offRes [[ buffer(4) ]],
-                                constant int &dim_in [[ buffer(5) ]],
-                                constant int &dim_out [[ buffer(6) ]],
-                                constant float &scale [[ buffer(7) ]],
-                                uint3 tid [[ thread_position_in_threadgroup ]],
-                                uint3 qid [[ thread_position_in_grid ]]) {
-    uint row = qid.y; uint batch = qid.z;
-    if (row >= (uint)dim_out) return; uint lane_id = tid.x;
-
-    int num_blocks = (dim_in + 255) / 256;
-    device const uchar *row_ptr = weight + row * num_blocks * 144;
-    device const half *gate_ptr = gate_input + batch * dim_in;
-    device const half *up_ptr = up_input + batch * dim_in;
-    float sum = 0;
-    
-    for (int i = (int)lane_id; i < num_blocks; i += 32) {
-        device const uchar *block = row_ptr + i * 144;
-        float d = fp16_to_fp32(*(device const ushort*)(block));
-        float dmin = fp16_to_fp32(*(device const ushort*)(block + 2));
-        
-        device const uchar *scales = block + 4;
-        device const uchar *qs = block + 16;
-        uchar sc[8], m[8];
-        for (int j = 0; j < 8; j++) {
-            if (j < 4) {
-                sc[j] = scales[j] & 63;
-                m[j] = scales[j + 4] & 63;
-            } else {
-                sc[j] = (scales[j+4] & 0xF) | ((scales[j-4] >> 6) << 4);
-                m[j] = (scales[j+4] >> 4) | ((scales[j] >> 6) << 4);
-            }
-        }
-        for (int j = 0; j < 8; j++) {
-            float d_val = d * scale * (float)sc[j], m_val = dmin * scale * (float)m[j];
-            int sub_offset = j * 32, qs_offset = j * 16;
-            for (int k = 0; k < 16; k++) {
-                uchar b = qs[qs_offset + k];
-                float w0 = d_val * (float)(b & 0xF) - m_val;
-                float w1 = d_val * (float)(b >> 4) - m_val;
-                int idx0 = i * 256 + sub_offset + k;
-                int idx1 = idx0 + 16;
-                
-                // On-the-fly SwiGLU for idx0
-                float g0 = (float)gate_ptr[idx0];
-                float u0 = (float)up_ptr[idx0];
-                float in0 = u0 * (g0 / (1.0f + exp(-g0)));
-                
-                // On-the-fly SwiGLU for idx1
-                float g1 = (float)gate_ptr[idx1];
-                float u1 = (float)up_ptr[idx1];
-                float in1 = u1 * (g1 / (1.0f + exp(-g1)));
-                
-                sum += w0 * in0 + w1 * in1;
-            }
-        }
-    }
-    sum = simd_sum(sum); 
-    if (lane_id == 0) output[batch * dim_out + row] = safe_half(sum);
-}
-
-kernel void linear_q3k_f16(device const uchar *weight [[ buffer(0) ]],
-                         device const half *input [[ buffer(1) ]],
-                         device half *output [[ buffer(2) ]],
-                         constant int &dim_in [[ buffer(3) ]],
-                         constant int &dim_out [[ buffer(4) ]],
-                         uint3 tid [[ thread_position_in_threadgroup ]],
-                         uint3 qid [[ thread_position_in_grid ]]) {
-    uint row = qid.y; uint batch = qid.z;
-    if (row >= (uint)dim_out) return; uint lane_id = tid.x;
-    int num_blocks = dim_in / 256;
-    device const uchar *row_ptr = weight + row * num_blocks * 110;
+    device const uchar *row_ptr = (device const uchar *)weight + row * num_blocks * 110;
     device const half *in_ptr = input + batch * dim_in;
     float sum = 0;
     for (int i = (int)lane_id; i < num_blocks; i += 32) {
@@ -379,8 +160,8 @@ kernel void linear_q6k_f16(device const uchar *weight [[ buffer(0) ]],
         device const uchar *ql = block;
         device const uchar *qh = block + 128;
         device const char  *sc = (device const char *)(block + 192);
-        // Simple cast - let Hardware handle F16
-        half d = *(device const half*)(block + 208);
+        // Convert F16 to F32 for proper calculation
+        float d = (float)*(device const half*)(block + 208);
         
         for (int l = 0; l < 16; l++) {
             float s = d * scale * (float)sc[l];
@@ -391,8 +172,8 @@ kernel void linear_q6k_f16(device const uchar *weight [[ buffer(0) ]],
                 uchar h0 = (qh[idx / 4] >> ((idx % 4) * 2)) & 3;
                 uchar h1 = (qh[(idx+1) / 4] >> (((idx+1) % 4) * 2)) & 3;
                 
-                sum += (half)s * (half)((int8_t)((h0 << 4) | (b & 0xF)) - 32) * input[batch * dim_in + i * 256 + idx];
-                sum += (half)s * (half)((int8_t)((h1 << 4) | (b >> 4)) - 32) * input[batch * dim_in + i * 256 + idx + 1];
+                sum += s * (float)((int8_t)((h0 << 4) | (b & 0xF)) - 32) * (float)in_ptr[i * 256 + idx];
+                sum += s * (float)((int8_t)((h1 << 4) | (b >> 4)) - 32) * (float)in_ptr[i * 256 + idx + 1];
             }
         }
     }
@@ -753,7 +534,10 @@ kernel void att_scores_f16_v2(device const half *q [[ buffer(0) ]],
         for (int i = (int)lane; i < headDim; i += 32) d += (float)mq[i] * (float)mk[i];
         d = simd_sum(d);
         if (lane == 0) {
-            scores[h * stride + t] = d * scale;
+            // Clamp score to prevent softmax overflow
+            // Typical attention scores are in range [-50, 50] for headDim=128
+            float score = d * scale;
+            scores[h * stride + t] = clamp(score, -100.0f, 100.0f);
         }
     }
 }
@@ -888,6 +672,8 @@ kernel void att_fused_f16(device const half *q [[ buffer(0) ]],
             device const half *mk = k_cache + cache_idx * kv_dim + kvh * headDim;
             for (int i = 0; i < headDim; i++) d += (float)mq[i] * (float)mk[i];
             float score = d * scale;
+            // Clamp score to prevent exp overflow
+            score = clamp(score, -100.0f, 100.0f);
             float exp_score = exp(score - global_max);
             global_sum += exp_score;
 

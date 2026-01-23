@@ -12,7 +12,11 @@ func TestDequantToken1(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	defer func() {
+		if err := f.Close(); err != nil {
+			t.Errorf("failed to close file: %v", err)
+		}
+	}()
 
 	// Token 1 at 760000
 	data := make([]byte, 144)
@@ -22,15 +26,17 @@ func TestDequantToken1(t *testing.T) {
 	}
 
 	fmt.Printf("Token 1 Raw: %x\n", data[:16])
-	
+
 	// Dequantize one block (256 weights)
 	weights := DequantizeQ4K(data, 256)
-	
+
 	fmt.Printf("Token 1 First 10 floats: %v\n", weights[:10])
-	
+
 	var max float32
 	for _, v := range weights {
-		if v*v > max*max { max = v }
+		if v*v > max*max {
+			max = v
+		}
 	}
 	fmt.Printf("Token 1 Max Abs: %f\n", max)
 }

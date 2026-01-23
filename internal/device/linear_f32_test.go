@@ -25,11 +25,15 @@ func TestLinearF16_F32_Kernel(t *testing.T) {
 	// Data
 	weightsF32 := make([]float32, N*K) // Transposed? [N, K] in Go wrapper
 	inputF32 := make([]float32, M*K)
-	
+
 	// Init with determinism
 	rnd := rand.New(rand.NewSource(42))
-	for i := range weightsF32 { weightsF32[i] = (rnd.Float32() - 0.5) * 0.1 }
-	for i := range inputF32 { inputF32[i] = (rnd.Float32() - 0.5) * 2.0 }
+	for i := range weightsF32 {
+		weightsF32[i] = (rnd.Float32() - 0.5) * 0.1
+	}
+	for i := range inputF32 {
+		inputF32[i] = (rnd.Float32() - 0.5) * 2.0
+	}
 
 	// CPU Reference
 	refOut := make([]float32, M*N)
@@ -41,11 +45,11 @@ func TestLinearF16_F32_Kernel(t *testing.T) {
 				// Wait. Weight shape in metal.go is [Rows, Cols].
 				// Rows = OutputDim (N). Cols = InputDim (K).
 				// So Weight[c, k].
-				w := weightsF32[c*K + k]
-				in := inputF32[r*K + k]
+				w := weightsF32[c*K+k]
+				in := inputF32[r*K+k]
 				sum += w * in
 			}
-			refOut[r*N + c] = sum
+			refOut[r*N+c] = sum
 		}
 	}
 
@@ -62,23 +66,23 @@ func TestLinearF16_F32_Kernel(t *testing.T) {
 	// But `Tensor` struct has `datatype`.
 	// We can manually create one? Or use `NewTensorFP32Pooled`?
 	// `NewTensorFP32Pooled` is available on `Context`.
-	
+
 	inT := ctx.NewTensorFP32Pooled(M, K)
 	inT.LoadFrom(inputF32) // LoadF32 to F32 keeps F32?
 	// Use LoadFromRaw for exact load to F32 buffer?
 	// LoadFrom checks DataType.
-	
+
 	// Create Output F32
 	outT := ctx.NewTensorFP32Pooled(M, N)
-	
+
 	// Run LinearF32_Into (which calls Metal_MatMul_F16_F32)
 	// func (t *Tensor) LinearF32_Into(weight *Tensor, out *Tensor)
 	// t is Input.
 	inT.LinearF32_Into(wT, outT, 1.0)
 	ctx.Synchronize()
-	
+
 	gpuOut := outT.ToHost()
-	
+
 	// Verify
 	errs := 0
 	for i := 0; i < len(refOut); i++ {
@@ -90,7 +94,7 @@ func TestLinearF16_F32_Kernel(t *testing.T) {
 			errs++
 		}
 	}
-	
+
 	if errs > 0 {
 		t.Fatalf("Failed with %d mismatches", errs)
 	}

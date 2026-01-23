@@ -13,18 +13,18 @@ func main() {
 		fmt.Printf("Error: %v\n", err)
 		return
 	}
-	
+
 	fmt.Printf("General Name: %v\n", f.KV["general.name"])
 	fmt.Printf("Context Length: %v\n", f.KV["llama.context_length"])
 	fmt.Printf("Rope Theta: %v\n", f.KV["llama.rope.freq_base"])
 	fmt.Printf("Rope Scaling: %v\n", f.KV["llama.rope.scaling.type"])
-	
+
 	tokens, ok := f.KV["tokenizer.ggml.tokens"].([]interface{})
 	if !ok {
 		fmt.Println("No tokens found")
 		return
 	}
-	
+
 	ids := []int{1, 2, 3, 4}
 	for _, id := range ids {
 		if id < len(tokens) {

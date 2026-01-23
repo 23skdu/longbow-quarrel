@@ -65,27 +65,27 @@ func TestLinearF16(t *testing.T) {
 	// But LinearInto expects weights.dataType. NewTensor defaults to F16.
 	// So tensorB.dataType == DataTypeF16.
 	// tensorA.LinearInto(tensorB, tensorOut)
-	
+
 	// We need to implement LinearInto call or call it.
 	// Since we are in `device` package, we can access Tensor methods.
 	tensorA.LinearInto(tensorB, tensorOut, 1.0)
-	
+
 	if err := ctx.WaitWithTimeout(2 * time.Second); err != nil {
 		t.Fatal(err)
 	}
-	
+
 	metalOut := tensorOut.ToHost()
-	
+
 	tensorA.Free()
 	tensorB.Free()
 	tensorOut.Free()
-	
+
 	// Compare
 	for i, v := range metalOut {
 		// FP16 precision tolerance
-		if math.Abs(float64(v - cpuOut[i])) > 1e-2 {
+		if math.Abs(float64(v-cpuOut[i])) > 1e-2 {
 			t.Errorf("Mismatch at %d: CPU %f, Metal %f (Diff: %f)", i, cpuOut[i], v, v-cpuOut[i])
-			return 
+			return
 		}
 	}
 }

@@ -1,6 +1,5 @@
 //go:build darwin && metal
 
-
 package device
 
 import (
@@ -39,7 +38,7 @@ func TestGQA_RatioHandling(t *testing.T) {
 		for kvh := 0; kvh < kvHeads; kvh++ {
 			for i := 0; i < headDim; i++ {
 				// Make each KV head and position distinct
-				kCacheData[p*kvHeads*headDim + kvh*headDim + i] = float32((p+1) * (kvh+1))
+				kCacheData[p*kvHeads*headDim+kvh*headDim+i] = float32((p + 1) * (kvh + 1))
 			}
 		}
 	}
@@ -57,7 +56,7 @@ func TestGQA_RatioHandling(t *testing.T) {
 	// 5. Verify Scores
 	scores := tScores.ToHostF32()
 	scale := 1.0 / math.Sqrt(float64(headDim))
-	
+
 	for h := 0; h < numHeads; h++ {
 		kvh := h / (numHeads / kvHeads)
 		for p := 0; p <= pos; p++ {
@@ -67,9 +66,9 @@ func TestGQA_RatioHandling(t *testing.T) {
 				expectedDot += float64(h+1) * float64((p+1)*(kvh+1))
 			}
 			expectedScore := float32(expectedDot * scale)
-			
-			got := scores[h*stride + p]
-			if math.Abs(float64(got - expectedScore)) > 1e-4 {
+
+			got := scores[h*stride+p]
+			if math.Abs(float64(got-expectedScore)) > 1e-4 {
 				t.Errorf("Score mismatch at head %d, pos %d: got %f, want %f (kvh=%d)", h, p, got, expectedScore, kvh)
 			}
 		}
@@ -81,7 +80,7 @@ func TestGQA_RatioHandling(t *testing.T) {
 	for p := 0; p <= pos; p++ {
 		for kvh := 0; kvh < kvHeads; kvh++ {
 			for i := 0; i < headDim; i++ {
-				vCacheData[p*kvHeads*headDim + kvh*headDim + i] = float32((p+1) + (kvh+1) + i)
+				vCacheData[p*kvHeads*headDim+kvh*headDim+i] = float32((p + 1) + (kvh + 1) + i)
 			}
 		}
 	}
@@ -103,7 +102,7 @@ func TestGQA_RatioHandling(t *testing.T) {
 	gotValues := tOut.ToHost()
 	for h := 0; h < numHeads; h++ {
 		kvh := h / (numHeads / kvHeads)
-		
+
 		// Expected value: Sum_p (Softmax_hp * V_p_kvh)
 		// Softmax values for head h:
 		headScores := make([]float64, pos+1)
@@ -124,11 +123,13 @@ func TestGQA_RatioHandling(t *testing.T) {
 				v_val := float64((p + 1) + (kvh + 1) + i)
 				expectedVal += headScores[p] * v_val
 			}
-			
+
 			got := float64(gotValues[h*headDim+i])
-			if math.Abs(got - expectedVal) > 1e-2 { // FP16 precision
+			if math.Abs(got-expectedVal) > 1e-2 { // FP16 precision
 				t.Errorf("Value mismatch at head %d, dim %d: got %f, want %f", h, i, got, expectedVal)
-				if i > 5 { break }
+				if i > 5 {
+					break
+				}
 			}
 		}
 	}

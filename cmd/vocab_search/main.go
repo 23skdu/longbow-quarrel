@@ -14,13 +14,13 @@ func main() {
 		fmt.Printf("Error: %v\n", err)
 		return
 	}
-	
+
 	tokens, ok := f.KV["tokenizer.ggml.tokens"].([]interface{})
 	if !ok {
 		fmt.Println("No tokens found")
 		return
 	}
-	
+
 	for i, v := range tokens {
 		s := v.(string)
 		if strings.Contains(s, "Paris") {

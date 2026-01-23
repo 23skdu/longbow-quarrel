@@ -17,7 +17,9 @@ func LoadFile(path string) (*GGUFFile, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() {
+		_ = f.Close() // Ignore close error in reader function
+	}()
 
 	info, err := f.Stat()
 	if err != nil {

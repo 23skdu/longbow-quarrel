@@ -10,16 +10,17 @@ const (
 type GGMLType uint32
 
 const (
-	GGMLTypeF32  GGMLType = 0
-	GGMLTypeF16  GGMLType = 1
-	GGMLTypeQ4_0 GGMLType = 2
-	GGMLTypeQ4_1 GGMLType = 3
-	GGMLTypeQ2_K GGMLType = 10
-	GGMLTypeQ3_K GGMLType = 11
-	GGMLTypeQ4_K GGMLType = 12
-	GGMLTypeQ5_K GGMLType = 13
-	GGMLTypeQ6_K GGMLType = 14
-	GGMLTypeQ8_K GGMLType = 15
+	GGMLTypeF32    GGMLType = 0
+	GGMLTypeF16    GGMLType = 1
+	GGMLTypeQ4_0   GGMLType = 2
+	GGMLTypeQ4_1   GGMLType = 3
+	GGMLTypeQ5_0   GGMLType = 4
+	GGMLTypeQ2_K   GGMLType = 10
+	GGMLTypeQ3_K   GGMLType = 11
+	GGMLTypeQ4_K   GGMLType = 12
+	GGMLTypeQ5_K   GGMLType = 13
+	GGMLTypeQ6_K   GGMLType = 14
+	GGMLTypeQ8_K   GGMLType = 15
 	GGMLTypeQ4_K_S GGMLType = 99 // Deprecated/Unused
 )
 
@@ -57,8 +58,8 @@ type GGUFFile struct {
 }
 
 type GGUFHeader struct {
-	Magic   uint32
-	Version uint32
+	Magic       uint32
+	Version     uint32
 	TensorCount uint64
 	KVCount     uint64
 }
@@ -71,6 +72,7 @@ func (e ErrInvalidMagic) Error() string {
 }
 
 type ErrUnsupportedVersion struct{ Version uint32 }
+
 func (e ErrUnsupportedVersion) Error() string {
 	return fmt.Sprintf("unsupported GGUF version: %d", e.Version)
 }

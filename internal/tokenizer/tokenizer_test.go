@@ -32,7 +32,7 @@ func generateVocabGGUF(path string, vocab []string) error {
 	binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeString))
 	// Array Len
 	binary.Write(f, binary.LittleEndian, uint64(len(vocab)))
-	
+
 	// Array Elements
 	for _, v := range vocab {
 		writeString(f, v)
@@ -64,7 +64,7 @@ func TestTokenizerDecode(t *testing.T) {
 	ids := []int{1, 2, 3, 4}
 	text := tk.Decode(ids)
 	expected := "Hello World!"
-	
+
 	if text != expected {
 		t.Errorf("Expected '%s', got '%s'", expected, text)
 	}

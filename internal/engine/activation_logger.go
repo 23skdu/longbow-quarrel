@@ -3,16 +3,17 @@ package engine
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 )
 
 // ActivationLog stores layer-by-layer activations for debugging
 type ActivationLog struct {
-	Prompt      string              `json:"prompt"`
-	Tokens      []int               `json:"tokens"`
-	Embedding   []float32           `json:"embedding"`     // First 100 values
-	Layers      []LayerLog          `json:"layers"`
-	FinalLogits map[string]float32  `json:"final_logits"`  // String keys for JSON
+	Prompt      string             `json:"prompt"`
+	Tokens      []int              `json:"tokens"`
+	Embedding   []float32          `json:"embedding"` // First 100 values
+	Layers      []LayerLog         `json:"layers"`
+	FinalLogits map[string]float32 `json:"final_logits"` // String keys for JSON
 }
 
 // LayerLog captures activations for a single transformer layer
@@ -23,9 +24,21 @@ type LayerLog struct {
 	VMax       float32   `json:"v_max"`
 	AttnOutMax float32   `json:"attn_out_max"`
 	FFNOutMax  float32   `json:"ffn_out_max"`
-	QSample    []float32 `json:"q_sample"`    // First 10 values
+	QSample    []float32 `json:"q_sample"` // First 10 values
 	KSample    []float32 `json:"k_sample"`
 	VSample    []float32 `json:"v_sample"`
+
+	// NaN/Inf detection
+	QNaNCount    int `json:"q_nan_count"`
+	QInfCount    int `json:"q_inf_count"`
+	KNaNCount    int `json:"k_nan_count"`
+	KInfCount    int `json:"k_inf_count"`
+	VNaNCount    int `json:"v_nan_count"`
+	VInfCount    int `json:"v_inf_count"`
+	AttnNaNCount int `json:"attn_nan_count"`
+	AttnInfCount int `json:"attn_inf_count"`
+	FFNNaNCount  int `json:"ffn_nan_count"`
+	FFNInfCount  int `json:"ffn_inf_count"`
 }
 
 // ActivationLogger manages activation logging during inference
@@ -74,12 +87,12 @@ func (al *ActivationLogger) LogEmbedding(data []float32) {
 }
 
 // LogLayer captures layer activations
-func (al *ActivationLogger) LogLayer(layerIdx int, qMax, kMax, vMax, attnMax, ffnMax float32, 
-	qSample, kSample, vSample []float32) {
+func (al *ActivationLogger) LogLayer(layerIdx int, qMax, kMax, vMax, attnMax, ffnMax float32,
+	qSample, kSample, vSample, qData, kData, vData, attnData, ffnData []float32) {
 	if !al.enabled {
 		return
 	}
-	
+
 	layer := LayerLog{
 		Idx:        layerIdx,
 		QMax:       qMax,
@@ -91,11 +104,28 @@ func (al *ActivationLogger) LogLayer(layerIdx int, qMax, kMax, vMax, attnMax, ff
 		KSample:    make([]float32, len(kSample)),
 		VSample:    make([]float32, len(vSample)),
 	}
-	
+
 	copy(layer.QSample, qSample)
 	copy(layer.KSample, kSample)
 	copy(layer.VSample, vSample)
-	
+
+	// NaN/Inf detection
+	if qData != nil {
+		layer.QNaNCount, layer.QInfCount = countNaNInf(qData)
+	}
+	if kData != nil {
+		layer.KNaNCount, layer.KInfCount = countNaNInf(kData)
+	}
+	if vData != nil {
+		layer.VNaNCount, layer.VInfCount = countNaNInf(vData)
+	}
+	if attnData != nil {
+		layer.AttnNaNCount, layer.AttnInfCount = countNaNInf(attnData)
+	}
+	if ffnData != nil {
+		layer.FFNNaNCount, layer.FFNInfCount = countNaNInf(ffnData)
+	}
+
 	al.log.Layers = append(al.log.Layers, layer)
 }
 
@@ -104,7 +134,7 @@ func (al *ActivationLogger) LogLogits(logits []float32, tokenIDs []int) {
 	if !al.enabled {
 		return
 	}
-	
+
 	for _, tid := range tokenIDs {
 		if tid < len(logits) {
 			al.log.FinalLogits[fmt.Sprintf("%d", tid)] = logits[tid]
@@ -117,17 +147,17 @@ func (al *ActivationLogger) SaveToFile(filename string) error {
 	if !al.enabled || al.log == nil {
 		return fmt.Errorf("no activation log to save")
 	}
-	
+
 	data, err := json.MarshalIndent(al.log, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal JSON: %w", err)
 	}
-	
+
 	err = os.WriteFile(filename, data, 0644)
 	if err != nil {
 		return fmt.Errorf("failed to write file: %w", err)
 	}
-	
+
 	fmt.Printf("Activation log saved to: %s\n", filename)
 	return nil
 }
@@ -155,4 +185,16 @@ func GetMaxFromTensor(data []float32) float32 {
 		}
 	}
 	return maxVal
+}
+
+// countNaNInf counts NaN and Inf values in a float32 slice
+func countNaNInf(data []float32) (nanCount, infCount int) {
+	for _, v := range data {
+		if math.IsNaN(float64(v)) {
+			nanCount++
+		} else if math.IsInf(float64(v), 0) {
+			infCount++
+		}
+	}
+	return nanCount, infCount
 }

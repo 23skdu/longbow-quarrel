@@ -436,7 +436,7 @@ func (t *Tensor) ScanNaNs(name string) int {
 	return nanCount + infCount
 }
 
-func (t *Tensor) ScanMax(name string) float32 {
+func (t *Tensor) ScanMax(name string) (float32, ActivationStats) {
 	data := t.ToHostF32()
 	var maxVal float32 = 0.0
 	var minVal float32 = 0.0
@@ -444,6 +444,7 @@ func (t *Tensor) ScanMax(name string) float32 {
 	var sumSq float64 = 0.0
 	var zeros int = 0
 	var nans int = 0
+	var infs int = 0
 
 	if len(data) > 0 {
 		minVal = data[0]
@@ -453,6 +454,10 @@ func (t *Tensor) ScanMax(name string) float32 {
 	for _, v := range data {
 		if math.IsNaN(float64(v)) {
 			nans++
+			continue
+		}
+		if math.IsInf(float64(v), 0) {
+			infs++
 			continue
 		}
 		if v == 0 {
@@ -471,11 +476,28 @@ func (t *Tensor) ScanMax(name string) float32 {
 	mean := sum / float32(len(data))
 	rms := float32(math.Sqrt(sumSq / float64(len(data))))
 
-	fmt.Printf("[%s] Min: %.4f Max: %.4f Mean: %.4f RMS: %.4f Zeros: %d/%d NaNs: %d\n", name, minVal, maxVal, mean, rms, zeros, len(data), nans)
-	if len(data) >= 32 {
-		fmt.Printf("[%s] Sample: %.4f\n", name, data[:32])
+	stats := ActivationStats{
+		Max:   maxVal,
+		Min:   minVal,
+		Mean:  mean,
+		RMS:   rms,
+		Zeros: zeros,
+		NaNs:  nans,
+		Infs:  infs,
 	}
-	return maxVal
+
+	sampleSize := 16
+	if len(data) < sampleSize {
+		sampleSize = len(data)
+	}
+	stats.Sample = make([]float32, sampleSize)
+	copy(stats.Sample, data[:sampleSize])
+
+	fmt.Printf("[%s] Min: %.4f Max: %.4f Mean: %.4f RMS: %.4f Zeros: %d/%d NaNs: %d Infs: %d\n", name, minVal, maxVal, mean, rms, zeros, len(data), nans, infs)
+	if len(data) >= 32 {
+		fmt.Printf("[%s] Sample: %v\n", name, data[:32])
+	}
+	return maxVal, stats
 }
 
 func (t *Tensor) ScanQ4KScales(name string) float32 {
@@ -1026,12 +1048,17 @@ func (s *LayerScratch) Free() {
 
 func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, kCache, vCache *Tensor,
 	scratch *LayerScratch,
+	traceTracker interface {
+		RecordLayer(layerName string, layerIdx int, stats ActivationStats)
+		IsEnabled() bool
+	},
 	pos, heads, kvHeads, headDim int, ropeTheta, eps float32, hiddenDim, ctxLen, windowSize int, globalScale float32, debug bool, precisionMode int) {
 
 	// Probes for debugging activations
 	probe := func(tag string, t *Tensor) {
-		if debug {
-			t.ScanMax(fmt.Sprintf("[Layer %d %s]", layerIdx, tag))
+		if debug && traceTracker.IsEnabled() {
+			_, stats := t.ScanMax(fmt.Sprintf("[Layer %d %s]", layerIdx, tag))
+			traceTracker.RecordLayer(tag, layerIdx, stats)
 		}
 	}
 
@@ -1187,6 +1214,7 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		C.Metal_Copy_F16(t.ctx.ref, t1.buf, C.int(t1.Offset), t.buf, C.int(t.Offset), C.int(t.rows*t.cols))
 		t1.ReturnToPool()
 	}
+	probe("Residual-1-Add", t)
 
 	// --- No Cleanup needed for Scratch ---
 
@@ -1212,6 +1240,7 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		} else {
 			t.RMSNormFP32_ToF16_Into(ffnNorm, eps, normedFFN)
 		}
+		probe("FFN-Norm", normedFFN)
 
 		// 9. Gate/Up Projections -> FP32
 		gatePart := scratch.GatePart
@@ -1219,14 +1248,18 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 
 		normedFFN.LinearF32_Into(ffnGate, gatePart, globalScale)
 		normedFFN.LinearF32_Into(ffnUp, upPart, globalScale)
+		probe("FFN-Gate-Proj", gatePart)
+		probe("FFN-Up-Proj", upPart)
 
 		// 10. SwiGLU F32
 		swiOut := scratch.SwiOut
 		gatePart.SwiGLU_FP32_Into(upPart, swiOut)
+		probe("FFN-SwiGLU", swiOut)
 
 		// 11. Down Projection (FP32 -> FP32)
 		resFFN := scratch.ResFFN_F32
 		swiOut.LinearF32_Into(ffnDown, resFFN, globalScale) // Handles Q4K
+		probe("FFN-Down-Proj", resFFN)
 
 		// 12. Residual Add 2
 		if t.dataType == DataTypeF32 {
@@ -1245,6 +1278,7 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 			C.Metal_Copy_F16(t.ctx.ref, t2.buf, C.int(t2.Offset), t.buf, C.int(t.Offset), C.int(t.rows*t.cols))
 			t2.ReturnToPool()
 		}
+		probe("Residual-2-Add", t)
 
 		// Debug FFN Output
 		probe("FFN-Final", resFFN)
@@ -1254,6 +1288,7 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		// FP16 FFN Path (Original)
 		normedFFN := scratch.NormedFFN
 		t.RMSNormFP32_ToF16_Into(ffnNorm, eps, normedFFN)
+		probe("FFN-Norm-FP16", normedFFN)
 
 		// 9. FFN Gate/Up
 		// For FP16 path, we need new F16 tensors for gate/up parts.
@@ -1271,6 +1306,8 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 			normedFFN.LinearInto(ffnGate, gatePartF16_P, globalScale)
 			normedFFN.LinearInto(ffnUp, upPartF16_P, globalScale)
 		}
+		probe("FFN-Gate-Proj-FP16", gatePartF16_P)
+		probe("FFN-Up-Proj-FP16", upPartF16_P)
 
 		if layerIdx == 0 {
 			normedFFN.ScanMax("Layer 0 FFN-Input (Normed)")
@@ -1287,6 +1324,7 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 			swiOut.LinearInto(ffnDown, resFFN, globalScale)
 			swiOut.ReturnToPool()
 		}
+		probe("FFN-Down-Proj-FP16", resFFN)
 
 		gatePartF16_P.ReturnToPool()
 		upPartF16_P.ReturnToPool()
@@ -1299,6 +1337,7 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 			C.Metal_Copy_F16(t.ctx.ref, t2.buf, C.int(t2.Offset), t.buf, C.int(t.Offset), C.int(t.rows*t.cols))
 			t2.ReturnToPool()
 		}
+		probe("Residual-2-Add-FP16", t)
 
 		// NaN Detection at layer output
 		t.ctx.Synchronize()

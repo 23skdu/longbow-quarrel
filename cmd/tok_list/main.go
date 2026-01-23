@@ -13,7 +13,7 @@ func main() {
 		fmt.Printf("Error: %v\n", err)
 		return
 	}
-	
+
 	tokens, _ := f.KV["tokenizer.ggml.tokens"].([]interface{})
 	for i := 1170; i < 1200; i++ {
 		fmt.Printf("Token %d: %q\n", i, tokens[i])

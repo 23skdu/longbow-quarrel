@@ -242,7 +242,7 @@ func TestTensor_Overflow_Detection(t *testing.T) {
 		tensor := ctx.NewTensor(16, 16)
 		tensor.LoadFrom(data)
 
-		maxVal := tensor.ScanMax("large_values")
+		maxVal, _ := tensor.ScanMax("large_values")
 
 		if maxVal < 10000.0 {
 			t.Errorf("Expected large max value, got %f", maxVal)
@@ -262,7 +262,7 @@ func TestTensor_Overflow_Detection(t *testing.T) {
 		tensor := ctx.NewTensor(16, 16)
 		tensor.LoadFrom(data)
 
-		maxVal := tensor.ScanMax("with_nan")
+		maxVal, _ := tensor.ScanMax("with_nan")
 
 		t.Logf("Max with NaN: %f", maxVal)
 	})
