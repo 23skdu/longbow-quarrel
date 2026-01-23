@@ -798,7 +798,14 @@ func toFloat64(v interface{}) float64 {
 	}
 }
 
+// Infer generates tokens and returns them all at once
 func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig SamplerConfig) ([]int, error) {
+	return e.InferWithCallback(inputTokens, tokensToGenerate, samplerConfig, nil)
+}
+
+// InferWithCallback generates tokens with optional streaming callback
+// If callback is provided, it's called for each generated token
+func (e *Engine) InferWithCallback(inputTokens []int, tokensToGenerate int, samplerConfig SamplerConfig, callback func(token int)) ([]int, error) {
 	// Validation
 	if len(inputTokens) == 0 {
 		return nil, errors.New("empty input tokens")
@@ -1073,6 +1080,11 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 			}
 
 			result = append(result, nextToken)
+
+			// Call streaming callback if provided
+			if callback != nil {
+				callback(nextToken)
+			}
 		}
 
 		currentF32.ReturnToPool()
@@ -1213,6 +1225,11 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 		}
 
 		result = append(result, maxIdx)
+
+		// Call streaming callback if provided
+		if callback != nil {
+			callback(maxIdx)
+		}
 		e.CachePos++
 		metrics.RecordInference(1, time.Since(tToken))
 		e.Ctx.AutoreleasePoolPop(pool)
