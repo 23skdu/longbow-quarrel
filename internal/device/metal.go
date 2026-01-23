@@ -1296,6 +1296,39 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		// Actually scratch has GatePart and UpPart but they are FP32.
 		// Let's just use NewTensorPooled for safety and ReturnToPool.
 
+		// Debug: check for nil pointers and invalid dimensions
+		if t == nil {
+			fmt.Printf("DEBUG: t is nil\n")
+			return
+		} else if t.ctx == nil {
+			fmt.Printf("DEBUG: t.ctx is nil\n")
+			return
+		} else if ffnGate == nil {
+			fmt.Printf("DEBUG: ffnGate is nil\n")
+			return
+		} else if ffnUp == nil {
+			fmt.Printf("DEBUG: ffnUp is nil\n")
+			return
+		} else if t.rows <= 0 || ffnGate.rows <= 0 || ffnUp.rows <= 0 {
+			fmt.Printf("DEBUG: Invalid tensor dimensions - t.rows=%d, ffnGate.rows=%d, ffnUp.rows=%d\n",
+				t.rows, ffnGate.rows, ffnUp.rows)
+			return
+		}
+
+		// Additional debug: check Metal context validity
+		if t.ctx.ref == nil {
+			fmt.Printf("DEBUG: t.ctx.ref is nil - Metal context not initialized properly\n")
+			return
+		}
+
+		// Debug allocation sizes
+		gateSize := t.rows * ffnGate.rows * 2 // FP16 = 2 bytes
+		upSize := t.rows * ffnUp.rows * 2
+		fmt.Printf("DEBUG: Attempting FFN tensor allocation - Gate: %dx%d (%d bytes), Up: %dx%d (%d bytes)\n",
+			t.rows, ffnGate.rows, gateSize, t.rows, ffnUp.rows, upSize)
+		fmt.Printf("DEBUG: Current allocated bytes: %d, Max GPU memory: %d\n",
+			atomic.LoadInt64(&allocatedBytes), MaxGPUMemory)
+
 		gatePartF16_P := t.ctx.NewTensorPooled(t.rows, ffnGate.rows)
 		upPartF16_P := t.ctx.NewTensorPooled(t.rows, ffnUp.rows)
 

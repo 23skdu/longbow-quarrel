@@ -1108,12 +1108,259 @@ kernel void store_kv_f16(device const half *k [[ buffer(0) ]],
                         constant int &window_size [[ buffer(6) ]],
                         uint tid [[ thread_position_in_grid ]]) {
     if (tid >= (uint)kv_dim) return;
-    
-    // SLIDING WINDOW: Use rolling buffer indexing
-    // If window_size == 0, use full sequence (backward compat)
-    int cache_pos = (window_size > 0) ? (pos % window_size) : pos;
-    int offset = cache_pos * kv_dim + tid;
-    
-    k_cache[offset] = k[tid];
-    v_cache[offset] = v[tid];
+    int cache_pos = pos % window_size;
+    k_cache[cache_pos * kv_dim + tid] = k[tid];
+    v_cache[cache_pos * kv_dim + tid] = v[tid];
+}
+
+kernel void rmsnorm_linear_q4k_f16(device const half *input [[ buffer(0) ]],
+                                   device const float *norm_weight [[ buffer(1) ]],
+                                   device const uchar *weight [[ buffer(2) ]],
+                                   device half *output [[ buffer(3) ]],
+                                   constant int &off_out [[ buffer(4) ]],
+                                   constant float &eps [[ buffer(5) ]],
+                                   constant int &dim_in [[ buffer(6) ]],
+                                   constant int &dim_out [[ buffer(7) ]],
+                                   constant float &scale [[ buffer(8) ]],
+                                   uint3 tid [[ thread_position_in_threadgroup ]],
+                                   uint3 qid [[ thread_position_in_grid ]]) {
+    uint row = qid.y; uint batch = qid.z;
+    if (row >= (uint)dim_out) return; uint lane_id = tid.x;
+
+    // First, compute RMS norm of the input
+    threadgroup float s[1024];
+    float sum_sq = 0.0f;
+    for (int i = lane_id; i < dim_in; i += 32) {
+        float val = (float)input[batch * dim_in + i];
+        sum_sq += val * val;
+    }
+    s[lane_id] = sum_sq;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (lane_id == 0) {
+        float t = 0;
+        for (int i = 0; i < 32; i++) t += s[i];
+        s[0] = 1.0f / sqrt(t / (float)dim_in + eps);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float rms_scale = s[0];
+
+    // Apply RMS norm and store normalized values
+    threadgroup half normalized[4096]; // Assuming max dim_in <= 4096
+    for (int i = lane_id; i < dim_in; i += 32) {
+        int idx = batch * dim_in + i;
+        normalized[i] = safe_half((float)input[idx] * rms_scale * norm_weight[i]);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Now perform Q4K linear transformation
+    int num_blocks = (dim_in + 255) / 256;
+    device const uchar *row_ptr = weight + row * num_blocks * 144;
+    float sum = 0;
+
+    for (int i = (int)lane_id; i < num_blocks; i += 32) {
+        device const uchar *block = row_ptr + i * 144;
+        float d = fp16_to_fp32(*(device const ushort*)(block));
+        float dmin = fp16_to_fp32(*(device const ushort*)(block + 2));
+
+        device const uchar *scales = block + 4;
+        device const uchar *qs = block + 16;
+        uchar sc[8], m[8];
+        for (int j = 0; j < 8; j++) {
+            if (j < 4) {
+                sc[j] = scales[j] & 63;
+                m[j] = scales[j + 4] & 63;
+            } else {
+                sc[j] = (scales[j+4] & 0xF) | ((scales[j-4] >> 6) << 4);
+                m[j] = (scales[j+4] >> 4) | ((scales[j] >> 6) << 4);
+            }
+        }
+        for (int j = 0; j < 8; j++) {
+            float d_val = d * scale * (float)sc[j], m_val = dmin * scale * (float)m[j];
+            int sub_offset = j * 32, qs_offset = j * 16;
+            for (int k = 0; k < 16; k++) {
+                uchar b = qs[qs_offset + k];
+                float w0 = d_val * (float)(b & 0xF) - m_val;
+                float w1 = d_val * (float)(b >> 4) - m_val;
+                int idx0 = i * 256 + sub_offset + k;
+                int idx1 = idx0 + 16;
+                if (idx0 < dim_in) sum += w0 * (float)normalized[idx0];
+                if (idx1 < dim_in) sum += w1 * (float)normalized[idx1];
+            }
+        }
+    }
+
+    sum = simd_sum(sum);
+    if (lane_id == 0) {
+        output[off_out + batch * dim_out + row] = safe_half(sum);
+    }
+}
+
+kernel void linear_q4k_f16(device const uchar *weight [[ buffer(0) ]],
+                          device const half *input [[ buffer(1) ]],
+                          device half *output [[ buffer(2) ]],
+                          constant int &dim_in [[ buffer(3) ]],
+                          constant int &dim_out [[ buffer(4) ]],
+                          constant float &scale [[ buffer(5) ]],
+                          uint3 tid [[ thread_position_in_threadgroup ]],
+                          uint3 qid [[ thread_position_in_grid ]]) {
+    uint row = qid.y; uint batch = qid.z;
+    if (row >= (uint)dim_out) return; uint lane_id = tid.x;
+    int num_blocks = (dim_in + 255) / 256;
+    device const uchar *row_ptr = weight + row * num_blocks * 144;
+    float sum = 0;
+
+    for (int i = (int)lane_id; i < num_blocks; i += 32) {
+        device const uchar *block = row_ptr + i * 144;
+        float d = fp16_to_fp32(*(device const ushort*)(block));
+        float dmin = fp16_to_fp32(*(device const ushort*)(block + 2));
+
+        device const uchar *scales = block + 4;
+        device const uchar *qs = block + 16;
+        uchar sc[8], m[8];
+        for (int j = 0; j < 8; j++) {
+            if (j < 4) {
+                sc[j] = scales[j] & 63;
+                m[j] = scales[j + 4] & 63;
+            } else {
+                sc[j] = (scales[j+4] & 0xF) | ((scales[j-4] >> 6) << 4);
+                m[j] = (scales[j+4] >> 4) | ((scales[j] >> 6) << 4);
+            }
+        }
+        for (int j = 0; j < 8; j++) {
+            float d_val = d * scale * (float)sc[j], m_val = dmin * scale * (float)m[j];
+            int sub_offset = j * 32, qs_offset = j * 16;
+            for (int k = 0; k < 16; k++) {
+                uchar b = qs[qs_offset + k];
+                float w0 = d_val * (float)(b & 0xF) - m_val;
+                float w1 = d_val * (float)(b >> 4) - m_val;
+                int idx0 = i * 256 + sub_offset + k;
+                int idx1 = idx0 + 16;
+                if (idx0 < dim_in) sum += w0 * (float)input[batch * dim_in + idx0];
+                if (idx1 < dim_in) sum += w1 * (float)input[batch * dim_in + idx1];
+            }
+        }
+    }
+    sum = simd_sum(sum);
+    if (lane_id == 0) output[batch * dim_out + row] = safe_half(sum);
+}
+
+kernel void linear_q3k_f16(device const uchar *weight [[ buffer(0) ]],
+                          device const half *input [[ buffer(1) ]],
+                          device half *output [[ buffer(2) ]],
+                          constant int &dim_in [[ buffer(3) ]],
+                          constant int &dim_out [[ buffer(4) ]],
+                          constant float &scale [[ buffer(5) ]],
+                          uint3 tid [[ thread_position_in_threadgroup ]],
+                          uint3 qid [[ thread_position_in_grid ]]) {
+    uint row = qid.y; uint batch = qid.z;
+    if (row >= (uint)dim_out) return; uint lane_id = tid.x;
+    int num_blocks = (dim_in + 255) / 256;
+    device const uchar *row_ptr = weight + row * num_blocks * 110;
+    float sum = 0;
+
+    for (int i = (int)lane_id; i < num_blocks; i += 32) {
+        device const uchar *block = row_ptr + i * 110;
+        float d = fp16_to_fp32(*(device const ushort*)(block + 108));
+        device const uchar *hmask = block;
+        device const uchar *qs = block + 32;
+        device const uchar *scales = block + 96;
+
+        for (int j = 0; j < 8; j++) {
+            float s = d * scale * (float)(scales[j] & 63);
+            int sub_offset = j * 32;
+            for (int k = 0; k < 16; k++) {
+                int idx = i * 256 + sub_offset + k;
+                if (idx >= dim_in) continue;
+
+                int qs_idx = (j * 32 + k) / 4;
+                int qs_shift = ((j * 32 + k) % 4) * 2;
+                int q = (qs[qs_idx] >> qs_shift) & 3;
+
+                int hmask_idx = (j * 32 + k) / 8;
+                int hmask_shift = (j * 32 + k) % 8;
+                int hbit = (hmask[hmask_idx] >> hmask_shift) & 1;
+
+                int val = (hbit << 2) | q;
+                float w = s * (float)val - s * 4.0f; // Center around 0
+                sum += w * (float)input[batch * dim_in + idx];
+            }
+        }
+    }
+
+    sum = simd_sum(sum);
+    if (lane_id == 0) output[batch * dim_out + row] = safe_half(sum);
+}
+
+kernel void swiglu_linear_q4k_f16(device const half *gate [[ buffer(0) ]],
+                                  device const half *up [[ buffer(1) ]],
+                                  device const uchar *weight [[ buffer(2) ]],
+                                  device half *output [[ buffer(3) ]],
+                                  constant int &off_out [[ buffer(4) ]],
+                                  constant int &dim_in [[ buffer(5) ]],
+                                  constant int &dim_out [[ buffer(6) ]],
+                                  constant float &scale [[ buffer(7) ]],
+                                  uint3 tid [[ thread_position_in_threadgroup ]],
+                                  uint3 qid [[ thread_position_in_grid ]]) {
+    uint row = qid.y; uint batch = qid.z;
+    if (row >= (uint)dim_out) return; uint lane_id = tid.x;
+
+    // Perform Q4K linear transformation on SwiGLU inputs
+    int num_blocks = (dim_in + 255) / 256;
+    device const uchar *row_ptr = weight + row * num_blocks * 144;
+    float sum = 0;
+
+    for (int i = (int)lane_id; i < num_blocks; i += 32) {
+        device const uchar *block = row_ptr + i * 144;
+        float d = fp16_to_fp32(*(device const ushort*)(block));
+        float dmin = fp16_to_fp32(*(device const ushort*)(block + 2));
+
+        device const uchar *scales = block + 4;
+        device const uchar *qs = block + 16;
+        uchar sc[8], m[8];
+        for (int j = 0; j < 8; j++) {
+            if (j < 4) {
+                sc[j] = scales[j] & 63;
+                m[j] = scales[j + 4] & 63;
+            } else {
+                sc[j] = (scales[j+4] & 0xF) | ((scales[j-4] >> 6) << 4);
+                m[j] = (scales[j+4] >> 4) | ((scales[j] >> 6) << 4);
+            }
+        }
+        for (int j = 0; j < 8; j++) {
+            float d_val = d * scale * (float)sc[j], m_val = dmin * scale * (float)m[j];
+            int sub_offset = j * 32, qs_offset = j * 16;
+            for (int k = 0; k < 16; k++) {
+                uchar b = qs[qs_offset + k];
+                float w0 = d_val * (float)(b & 0xF) - m_val;
+                float w1 = d_val * (float)(b >> 4) - m_val;
+                int idx0 = i * 256 + sub_offset + k;
+                int idx1 = idx0 + 16;
+
+                // Compute SwiGLU for each input element
+                if (idx0 < dim_in) {
+                    float g0 = (float)gate[batch * dim_in + idx0];
+                    float u0 = (float)up[batch * dim_in + idx0];
+                    float g0_clamped = clamp(g0, -10.0f, 10.0f);
+                    float sigmoid_g0 = g0_clamped / (1.0f + exp(-g0_clamped));
+                    float swiglu0 = u0 * sigmoid_g0;
+                    sum += w0 * swiglu0;
+                }
+
+                if (idx1 < dim_in) {
+                    float g1 = (float)gate[batch * dim_in + idx1];
+                    float u1 = (float)up[batch * dim_in + idx1];
+                    float g1_clamped = clamp(g1, -10.0f, 10.0f);
+                    float sigmoid_g1 = g1_clamped / (1.0f + exp(-g1_clamped));
+                    float swiglu1 = u1 * sigmoid_g1;
+                    sum += w1 * swiglu1;
+                }
+            }
+        }
+    }
+
+    sum = simd_sum(sum);
+    if (lane_id == 0) {
+        output[off_out + batch * dim_out + row] = safe_half(sum);
+    }
 }
