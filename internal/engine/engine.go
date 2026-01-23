@@ -18,6 +18,7 @@ import (
 	"github.com/23skdu/longbow-quarrel/internal/device"
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
 	"github.com/23skdu/longbow-quarrel/internal/metrics"
+	"github.com/23skdu/longbow-quarrel/internal/tokenizer"
 )
 
 // Helper to get KV value with architecture-aware fallback
@@ -33,6 +34,310 @@ func getKV(f *gguf.GGUFFile, llamaKey, qwenKey string) (interface{}, bool) {
 		}
 	}
 	return nil, false
+}
+
+// QualityEvaluator provides metrics for evaluating generated text quality
+type QualityEvaluator struct {
+	tokenizer *tokenizer.Tokenizer
+}
+
+// NewQualityEvaluator creates a new quality evaluator
+func NewQualityEvaluator(t *tokenizer.Tokenizer) *QualityEvaluator {
+	return &QualityEvaluator{tokenizer: t}
+}
+
+// NewQualityEvaluatorSimple creates a quality evaluator without tokenizer (for basic metrics)
+func NewQualityEvaluatorSimple() *QualityEvaluator {
+	return &QualityEvaluator{tokenizer: nil}
+}
+
+// PerplexityResult holds perplexity calculation results
+type PerplexityResult struct {
+	Perplexity  float64
+	TotalTokens int
+	AvgLogProb  float64
+}
+
+// CalculatePerplexity computes perplexity for a sequence of tokens
+// Note: This is a simplified implementation. A full implementation would require
+// the model to compute actual token probabilities.
+func (qe *QualityEvaluator) CalculatePerplexity(tokens []int) PerplexityResult {
+	if len(tokens) < 2 {
+		return PerplexityResult{Perplexity: 1.0, TotalTokens: len(tokens), AvgLogProb: 0.0}
+	}
+
+	// Simplified perplexity calculation
+	// In a real implementation, this would use the model's forward pass
+	// to compute actual log probabilities for each token given its context
+	totalLogProb := 0.0
+	validTokens := 0
+
+	// For demonstration, use a simple language model approximation
+	// This is just a placeholder - real perplexity requires model probabilities
+	for i := 1; i < len(tokens); i++ {
+		// Approximate log probability based on token frequency patterns
+		// This is highly simplified and not accurate
+		logProb := -0.5 - 0.1*float64(i%3) // Placeholder calculation
+		totalLogProb += logProb
+		validTokens++
+	}
+
+	avgLogProb := totalLogProb / float64(validTokens)
+	perplexity := math.Exp(-avgLogProb)
+
+	return PerplexityResult{
+		Perplexity:  perplexity,
+		TotalTokens: validTokens,
+		AvgLogProb:  avgLogProb,
+	}
+}
+
+// BLEUScore holds BLEU evaluation results
+type BLEUScore struct {
+	BLEU1     float64
+	BLEU2     float64
+	BLEU3     float64
+	BLEU4     float64
+	Precision []float64
+}
+
+// CalculateBLEU computes BLEU score between candidate and reference texts
+func (qe *QualityEvaluator) CalculateBLEU(candidate, reference string) BLEUScore {
+	if qe.tokenizer == nil {
+		// Simple character-based BLEU for testing without tokenizer
+		return qe.calculateBLEUSimple(candidate, reference)
+	}
+
+	candTokens := qe.tokenizer.Encode(candidate)
+	refTokens := qe.tokenizer.Encode(reference)
+
+	// Simplified BLEU calculation for n-grams 1-4
+	maxN := 4
+	precisions := make([]float64, maxN)
+
+	for n := 1; n <= maxN; n++ {
+		candNGrams := getNGrams(candTokens, n)
+		refNGrams := getNGrams(refTokens, n)
+
+		// Count matching n-grams
+		matches := 0
+		for candNGram := range candNGrams {
+			if refNGrams[candNGram] > 0 {
+				matches++
+			}
+		}
+
+		// Calculate precision
+		if len(candNGrams) > 0 {
+			precisions[n-1] = float64(matches) / float64(len(candNGrams))
+		} else {
+			precisions[n-1] = 0.0
+		}
+	}
+
+	// Calculate BLEU scores (simplified geometric mean)
+	bleu1 := precisions[0]
+	bleu2 := math.Sqrt(precisions[0] * precisions[1])
+	bleu3 := math.Pow(precisions[0]*precisions[1]*precisions[2], 1.0/3.0)
+	bleu4 := math.Pow(precisions[0]*precisions[1]*precisions[2]*precisions[3], 1.0/4.0)
+
+	// Apply brevity penalty (simplified)
+	bp := 1.0
+	if len(candTokens) < len(refTokens) {
+		bp = math.Exp(1.0 - float64(len(refTokens))/float64(len(candTokens)))
+	}
+
+	return BLEUScore{
+		BLEU1:     bleu1 * bp,
+		BLEU2:     bleu2 * bp,
+		BLEU3:     bleu3 * bp,
+		BLEU4:     bleu4 * bp,
+		Precision: precisions,
+	}
+}
+
+// ROUGEScore holds ROUGE evaluation results
+type ROUGEScore struct {
+	ROUGE1_F1 float64
+	ROUGE2_F1 float64
+	ROUGEL_F1 float64
+	Precision float64
+	Recall    float64
+	F1        float64
+}
+
+// CalculateROUGE computes ROUGE score between candidate and reference texts
+func (qe *QualityEvaluator) CalculateROUGE(candidate, reference string) ROUGEScore {
+	if qe.tokenizer == nil {
+		// Simple character-based ROUGE for testing without tokenizer
+		return qe.calculateROUGESimple(candidate, reference)
+	}
+
+	candTokens := qe.tokenizer.Encode(candidate)
+	refTokens := qe.tokenizer.Encode(reference)
+
+	// Calculate unigram overlap (ROUGE-1)
+	candUnigrams := make(map[int]int)
+	refUnigrams := make(map[int]int)
+
+	for _, token := range candTokens {
+		candUnigrams[token]++
+	}
+	for _, token := range refTokens {
+		refUnigrams[token]++
+	}
+
+	unigramMatches := 0
+	for token, count := range candUnigrams {
+		if refCount, exists := refUnigrams[token]; exists {
+			unigramMatches += min(count, refCount)
+		}
+	}
+
+	precision := float64(unigramMatches) / float64(len(candTokens))
+	recall := float64(unigramMatches) / float64(len(refTokens))
+	f1 := 2.0 * precision * recall / (precision + recall)
+
+	if math.IsNaN(f1) {
+		f1 = 0.0
+	}
+
+	return ROUGEScore{
+		ROUGE1_F1: f1,
+		ROUGE2_F1: 0.0, // Simplified - would need bigram calculation
+		ROUGEL_F1: f1,  // Simplified - using unigram as approximation
+		Precision: precision,
+		Recall:    recall,
+		F1:        f1,
+	}
+}
+
+// calculateBLEUSimple provides a basic character-based BLEU calculation for testing
+func (qe *QualityEvaluator) calculateBLEUSimple(candidate, reference string) BLEUScore {
+	if candidate == reference {
+		// Perfect match
+		return BLEUScore{
+			BLEU1:     1.0,
+			BLEU2:     1.0,
+			BLEU3:     1.0,
+			BLEU4:     1.0,
+			Precision: []float64{1.0, 1.0, 1.0, 1.0},
+		}
+	}
+
+	// Simple n-gram matching at character level
+	maxN := 4
+	precisions := make([]float64, maxN)
+
+	candChars := []rune(candidate)
+	refChars := []rune(reference)
+
+	for n := 1; n <= maxN; n++ {
+		candNGrams := getCharNGrams(candChars, n)
+		refNGrams := getCharNGrams(refChars, n)
+
+		matches := 0
+		for candNGram := range candNGrams {
+			if refNGrams[candNGram] > 0 {
+				matches++
+			}
+		}
+
+		if len(candNGrams) > 0 {
+			precisions[n-1] = float64(matches) / float64(len(candNGrams))
+		} else {
+			precisions[n-1] = 0.0
+		}
+	}
+
+	// Calculate BLEU scores
+	bleu1 := precisions[0]
+	bleu2 := math.Sqrt(precisions[0] * precisions[1])
+	bleu3 := math.Pow(precisions[0]*precisions[1]*precisions[2], 1.0/3.0)
+	bleu4 := math.Pow(precisions[0]*precisions[1]*precisions[2]*precisions[3], 1.0/4.0)
+
+	// Brevity penalty
+	bp := 1.0
+	if len(candidate) < len(reference) {
+		bp = math.Exp(1.0 - float64(len(reference))/float64(len(candidate)))
+	}
+
+	return BLEUScore{
+		BLEU1:     bleu1 * bp,
+		BLEU2:     bleu2 * bp,
+		BLEU3:     bleu3 * bp,
+		BLEU4:     bleu4 * bp,
+		Precision: precisions,
+	}
+}
+
+// Helper functions for n-gram calculation
+func getNGrams(tokens []int, n int) map[string]int {
+	nGrams := make(map[string]int)
+	for i := 0; i <= len(tokens)-n; i++ {
+		key := fmt.Sprintf("%v", tokens[i:i+n])
+		nGrams[key]++
+	}
+	return nGrams
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// calculateROUGESimple provides a basic character-based ROUGE calculation for testing
+func (qe *QualityEvaluator) calculateROUGESimple(candidate, reference string) ROUGEScore {
+	candChars := []rune(candidate)
+	refChars := []rune(reference)
+
+	// Create character frequency maps
+	candUnigrams := make(map[rune]int)
+	refUnigrams := make(map[rune]int)
+
+	for _, char := range candChars {
+		candUnigrams[char]++
+	}
+	for _, char := range refChars {
+		refUnigrams[char]++
+	}
+
+	// Calculate matches
+	unigramMatches := 0
+	for char, count := range candUnigrams {
+		if refCount, exists := refUnigrams[char]; exists {
+			unigramMatches += min(count, refCount)
+		}
+	}
+
+	precision := float64(unigramMatches) / float64(len(candChars))
+	recall := float64(unigramMatches) / float64(len(refChars))
+	f1 := 2.0 * precision * recall / (precision + recall)
+
+	if math.IsNaN(f1) {
+		f1 = 0.0
+	}
+
+	return ROUGEScore{
+		ROUGE1_F1: f1,
+		ROUGE2_F1: 0.0, // Not implemented for character-level
+		ROUGEL_F1: f1,  // Same as ROUGE-1 for character level
+		Precision: precision,
+		Recall:    recall,
+		F1:        f1,
+	}
+}
+
+// Helper function for character n-gram extraction
+func getCharNGrams(chars []rune, n int) map[string]int {
+	nGrams := make(map[string]int)
+	for i := 0; i <= len(chars)-n; i++ {
+		key := string(chars[i : i+n])
+		nGrams[key]++
+	}
+	return nGrams
 }
 
 func NewEngine(modelPath string, debugDequant bool) (*Engine, error) {

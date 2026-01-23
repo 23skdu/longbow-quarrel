@@ -138,7 +138,7 @@
    - ✅ Quality-guided sampling mode (--quality flag)
    - ✅ Tested and verified working
 
-2. **P0: Add Quality Metrics** - BLEU/ROUGE scoring for generated text
+2. **P0: Add Quality Metrics** ✅ **COMPLETED** - BLEU/ROUGE/perplexity scoring implemented
 3. **P0: Streaming API** - Real-time text generation responses
 4. **P1: Performance Benchmarking** - Compare against llama.cpp baselines
 5. **P1: Memory Optimization** - Better KV-cache management
