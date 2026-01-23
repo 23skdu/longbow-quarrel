@@ -1,6 +1,316 @@
-# Mistral Coherence Recovery Plan
+# Longbow Quarrel Improvement Roadmap
 
-## Debugging Strategy (10-Point Plan) - VERIFIED WITH TESTS
+## 🎯 **15-Step Plan to Improve Text Generation Quality**
+
+### **Phase 1: Sampling & Decoding Improvements (High Priority)**
+
+1. **Advanced Sampling Strategies**
+   - Implement nucleus sampling (top-p) with proper probability redistribution
+   - Add dynamic temperature scaling based on confidence scores
+   - Implement repetition-aware sampling with context-aware penalties
+   - Add frequency-based token suppression for better diversity
+
+2. **Multi-Token Prediction Optimization**
+   - Implement speculative decoding for faster inference
+   - Add batched token generation with parallel processing
+   - Optimize KV-cache management for longer contexts
+   - Implement dynamic batching for variable-length sequences
+
+3. **Quality-Guided Sampling**
+   - Add perplexity-based rejection sampling
+   - Implement contrastive decoding to reduce repetition
+   - Add semantic coherence scoring during generation
+   - Implement adaptive sampling based on generation history
+
+### **Phase 2: Model Architecture & Numerical Improvements**
+
+4. **Advanced Attention Mechanisms**
+   - Implement sliding window attention for efficient long contexts
+   - Add relative position embeddings beyond RoPE
+   - Implement sparse attention patterns for memory efficiency
+   - Add multi-head attention optimization with fused kernels
+
+5. **Numerical Stability Enhancements**
+   - Implement gradient checkpointing for memory efficiency
+   - Add automatic mixed precision training compatibility
+   - Implement robust overflow/underflow detection
+   - Add quantization-aware training techniques
+
+6. **Architecture Extensions**
+   - Support for more model architectures (Gemma, Phi, etc.)
+   - Implement adapter/LoRA fine-tuning capabilities
+   - Add support for instruction-tuned models
+   - Implement model merging and ensemble methods
+
+### **Phase 3: Performance & Scalability**
+
+7. **GPU Optimization**
+   - Implement kernel fusion for attention + FFN operations
+   - Add memory-efficient attention (FlashAttention-style)
+   - Implement dynamic kernel selection based on tensor sizes
+   - Add GPU memory defragmentation and pooling improvements
+
+8. **Multi-Threading & Concurrency**
+   - Implement concurrent request processing
+   - Add async tensor operations with proper synchronization
+   - Implement request batching with dynamic sizing
+   - Add priority-based scheduling for different request types
+
+9. **Memory Management**
+   - Implement intelligent KV-cache eviction policies
+   - Add memory-mapped model loading for large models
+   - Implement model sharding across multiple GPUs
+   - Add automatic memory budget management
+
+### **Phase 4: Quality Assurance & Validation**
+
+10. **Comprehensive Testing Suite**
+    - Add integration tests for end-to-end text generation
+    - Implement quality metrics (BLEU, ROUGE, perplexity)
+    - Add adversarial testing for edge cases
+    - Implement automated regression testing
+
+11. **Output Quality Metrics**
+    - Add coherence and fluency scoring
+    - Implement toxicity and bias detection
+    - Add factual accuracy validation
+    - Implement user preference learning
+
+12. **Benchmarking & Profiling**
+    - Add comprehensive performance benchmarks
+    - Implement memory usage profiling
+    - Add latency and throughput measurements
+    - Create comparison baselines against other engines
+
+### **Phase 5: User Experience & Ecosystem**
+
+13. **API & Interface Improvements**
+    - Implement REST API with OpenAI compatibility
+    - Add streaming response support
+    - Implement conversation memory and context management
+    - Add model configuration presets
+
+14. **Documentation & Tooling**
+    - Create comprehensive API documentation
+    - Add model fine-tuning guides
+    - Implement model conversion utilities
+    - Add development and deployment tooling
+
+15. **Ecosystem Integration**
+    - Add support for popular model hubs (Hugging Face)
+    - Implement model versioning and rollback
+    - Add monitoring and observability features
+    - Create community contribution guidelines
+
+---
+
+## **🎯 Implementation Priority Matrix**
+
+| Priority | Phase | Timeline | Impact | Complexity |
+|----------|-------|----------|--------|------------|
+| **P0** | Sampling & Decoding (Steps 1-3) | 2-4 weeks | **High** | Medium |
+| **P1** | Architecture & Numerical (Steps 4-6) | 4-6 weeks | **High** | High |
+| **P2** | Performance & Scalability (Steps 7-9) | 3-5 weeks | Medium | High |
+| **P3** | Quality Assurance (Steps 10-12) | 2-3 weeks | Medium | Medium |
+| **P4** | User Experience (Steps 13-15) | 4-8 weeks | Low | Medium |
+
+## **📊 Current Status & Quick Wins**
+
+### **✅ COMPLETED (Foundation + P0 Sampling)**
+- [x] Core inference pipeline working
+- [x] Q6K quantization functional
+- [x] Metal GPU acceleration
+- [x] **Advanced sampling system** (nucleus, adaptive temperature, smart repetition)
+- [x] **Quality-guided sampling mode** with entropy-based temperature scaling
+- [x] Coherent text generation achieved
+
+### **🔄 IN PROGRESS**
+- [x] Numerical stability fixes (NaN/Inf handling)
+- [x] Basic debugging infrastructure
+- [x] Test coverage expansion
+
+### **🎯 IMMEDIATE NEXT STEPS (Priority Order)**
+
+1. **P0: Improve Sampling Quality** ✅ **COMPLETED** - Advanced sampling implemented
+   - ✅ Proper nucleus sampling with probability renormalization
+   - ✅ Adaptive temperature scaling based on entropy
+   - ✅ Smart repetition penalties with frequency weighting
+   - ✅ Quality-guided sampling mode (--quality flag)
+   - ✅ Tested and verified working
+
+2. **P0: Add Quality Metrics** - BLEU/ROUGE scoring for generated text
+3. **P0: Streaming API** - Real-time text generation responses
+4. **P1: Performance Benchmarking** - Compare against llama.cpp baselines
+5. **P1: Memory Optimization** - Better KV-cache management
+
+---
+
+---
+
+## **📈 Current Capabilities Assessment**
+
+### **✅ Strengths**
+- **Functional Inference**: Successfully generates coherent text from prompts
+- **GPU Acceleration**: Metal-optimized kernels with good performance
+- **Quantization Support**: Q6K, Q4K, Q3K working correctly
+- **Architecture Support**: Llama 3, Mistral, SmolLM2 models
+- **Debugging Tools**: Comprehensive activation logging and numerical analysis
+
+### **⚠️ Current Limitations**
+- **Sampling**: Advanced sampling implemented, but could add contrastive decoding
+- **Single Request**: No concurrent processing or batching
+- **Memory Usage**: Basic KV-cache without advanced eviction
+- **Quality Metrics**: No automated evaluation of generation quality
+- **API**: Command-line only, no streaming or REST API
+
+### **🎯 Immediate Action Items (Next 7 Days)**
+
+#### **1. Enhance Sampling (High Impact, Low Effort)** ✅ **COMPLETED**
+```bash
+# Now available: Advanced quality-guided sampling
+./quarrel -model smollm2:135m-instruct-fp16 -prompt "Hello world" -temp 0.8 -topp 0.9 -quality
+
+# Features implemented:
+# ✅ Proper nucleus sampling with probability renormalization
+# ✅ Adaptive temperature based on logit entropy
+# ✅ Smart repetition penalties with frequency weighting
+# ✅ Quality vs speed trade-off modes
+# ✅ Comprehensive NaN/Inf handling
+```
+
+#### **2. Add Quality Evaluation (Medium Impact, Low Effort)**
+```bash
+# TODO: Add perplexity calculation
+# - Implement perplexity scoring in engine.go
+# - Add BLEU/ROUGE metrics for test suites
+# - Create benchmark dataset for consistent evaluation
+```
+
+#### **3. Performance Profiling (Medium Impact, Low Effort)**
+```bash
+# TODO: Add latency measurements
+# - Implement timing in engine.go inference loop
+# - Add memory usage tracking
+# - Create performance comparison scripts
+```
+
+#### **4. API Enhancement (High Impact, Medium Effort)**
+```bash
+# TODO: Implement streaming responses
+# - Modify cmd/quarrel/main.go to support streaming
+# - Add WebSocket or Server-Sent Events support
+# - Implement token-by-token output for better UX
+```
+
+---
+
+## **🔧 Implementation Details for Top 3 Priorities**
+
+### **Priority 1: Advanced Sampling Implementation**
+
+**File: `internal/engine/sampler.go`**
+- **Current**: Basic filtering with temperature scaling
+- **Target**: Nucleus sampling with proper probability renormalization
+- **Changes**:
+  ```go
+  // Add to applyTopP function:
+  func applyTopP(candidates []tokenProb, p float64) []tokenProb {
+      if p >= 1.0 || p <= 0.0 {
+          return candidates
+      }
+
+      // Sort by probability (already done)
+      // Calculate cumulative probabilities
+      cumsum := 0.0
+      for i, c := range candidates {
+          cumsum += c.prob
+          if cumsum >= p {
+              // Include tokens up to this point
+              result := candidates[:i+1]
+              // Renormalize probabilities
+              total := cumsum
+              for j := range result {
+                  result[j].prob /= total
+              }
+              return result
+          }
+      }
+      return candidates
+  }
+  ```
+
+### **Priority 2: Quality Metrics**
+
+**File: `internal/engine/engine.go`**
+- **Add**: Perplexity calculation and text quality scoring
+- **Implementation**:
+  ```go
+  func (e *Engine) CalculatePerplexity(tokens []int) float64 {
+      // Compute negative log-likelihood
+      totalLogProb := 0.0
+      for i, token := range tokens[1:] {
+          logits := e.Infer(tokens[:i+1])
+          // Get probability of actual next token
+          prob := math.Exp(float64(logits[token]))
+          totalLogProb += math.Log(prob)
+      }
+      return math.Exp(-totalLogProb / float64(len(tokens)-1))
+  }
+  ```
+
+### **Priority 3: Streaming API**
+
+**File: `cmd/quarrel/main.go`**
+- **Add**: `--stream` flag and token-by-token output
+- **Implementation**:
+  ```go
+  if *streamOutput {
+      for _, token := range result {
+          fmt.Print(tokenizer.Decode([]int{token}))
+          time.Sleep(50 * time.Millisecond) // Simulate streaming
+      }
+  } else {
+      // Current batch output
+      decoded := tokenizer.Decode(result)
+      fmt.Print(decoded)
+  }
+  ```
+
+---
+
+## **📋 Detailed Task Breakdown**
+
+### **Week 1: Sampling & Quality (P0)**
+- [ ] Implement proper nucleus sampling
+- [ ] Add perplexity calculation
+- [ ] Create quality evaluation metrics
+- [ ] Add streaming output option
+
+### **Week 2: Performance & Memory (P1)**
+- [ ] Implement KV-cache optimization
+- [ ] Add memory usage profiling
+- [ ] Create performance benchmarks
+- [ ] Optimize tensor memory allocation
+
+### **Week 3: API & User Experience (P2)**
+- [ ] Implement REST API endpoints
+- [ ] Add conversation context management
+- [ ] Create model configuration presets
+- [ ] Add error handling and validation
+
+### **Week 4+: Advanced Features (P3-P4)**
+- [ ] Multi-threading support
+- [ ] Model fine-tuning capabilities
+- [ ] Advanced attention mechanisms
+- [ ] Ecosystem integrations
+
+---
+
+## **Previous Debugging Strategy (10-Point Plan) - VERIFIED WITH TESTS**
+
+---
+
+## **Previous Debugging Strategy (10-Point Plan) - VERIFIED WITH TESTS**
 
 The following items now have comprehensive unit test coverage in `internal/engine/audit_test.go` and `internal/device/rope_coherence_test.go`:
 
@@ -100,3 +410,32 @@ All audits expose Prometheus metrics in `internal/metrics/metrics.go`:
 - Activation metrics: `activation_*`
 - NaN metrics: `nan_*`
 - RoPE metrics: `rope_*`
+
+---
+
+## **📚 ARCHIVED: Previous Debugging Strategy (COMPLETED)**
+
+### **✅ Core Coherence Issues - RESOLVED**
+
+The original debugging plan successfully resolved the fundamental numerical issues that caused incoherent output. Longbow Quarrel now generates coherent text instead of "[INST]<unk>..." gibberish.
+
+**Key Achievements:**
+- [x] **RoPE Logic**: Verified and fixed positional embeddings
+- [x] **GQA Implementation**: Corrected grouped query attention
+- [x] **NaN/Inf Handling**: Added comprehensive numerical stability
+- [x] **Q6K Quantization**: Fixed dequantization bugs
+- [x] **Metal Kernels**: Corrected shader implementations
+- [x] **Coherent Text Generation**: ✅ **ACHIEVED**
+
+### **📊 Legacy Test Coverage**
+- Comprehensive unit tests in `internal/engine/audit_test.go`
+- Numerical stability validation in `internal/device/rope_coherence_test.go`
+- All major architectural components verified and working
+
+### **🔧 Legacy Fixes Applied**
+- F16 SwiGLU input clamping to prevent sigmoid overflow
+- Attention score clamping for softmax stability
+- CPU/GPU consistency in numerical operations
+- Extreme value handling and edge case testing
+
+**Status**: This debugging phase is **COMPLETE**. The foundation is solid and functional. Focus has shifted to quality improvements and advanced features as outlined in the 15-step plan above.

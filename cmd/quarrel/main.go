@@ -29,6 +29,7 @@ var (
 	topK             = flag.Int("topk", 40, "Top-K sampling")
 	topP             = flag.Float64("topp", 0.95, "Top-P (Nucleus) sampling")
 	repPenalty       = flag.Float64("penalty", 1.1, "Repetition penalty")
+	qualityMode      = flag.Bool("quality", false, "Enable advanced quality-guided sampling")
 	chatML           = flag.Bool("chatml", false, "Wrap prompt in ChatML template")
 	debugDequant     = flag.Bool("debug-dequant", false, "Enable dequantization debug dump")
 	debugActivations = flag.Bool("debug-activations", false, "Enable layer-by-layer activation dumping")
@@ -147,10 +148,11 @@ func main() {
 			RepPenalty:       *repPenalty,
 			Seed:             time.Now().UnixNano(),
 			DebugActivations: *debugActivations,
+			QualityMode:      *qualityMode,
 		}
 
-		log.Printf("Sampling Config: Temp=%.2f TopK=%d TopP=%.2f Penalty=%.2f (DebugActivations=%v)",
-			*temperature, *topK, *topP, *repPenalty, *debugActivations)
+		log.Printf("Sampling Config: Temp=%.2f TopK=%d TopP=%.2f Penalty=%.2f QualityMode=%v (DebugActivations=%v)",
+			*temperature, *topK, *topP, *repPenalty, *qualityMode, *debugActivations)
 
 		result, err := e.Infer(inputTokens, *numTokens, samplerConfig)
 		if err != nil {
