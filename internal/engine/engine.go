@@ -651,10 +651,50 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 			// Final Norm (F32 -> F16)
 			// Debug Output Norm Weights
 			if i == 0 {
-				// e.Weights.OutputNorm.ScanMax("Output Norm Weights")
+				e.Weights.OutputNorm.ScanMax("Output Norm Weights")
+				e.Weights.Output.ScanMax("Output Weights")
 			}
-			currentF32.RMSNormFP32_ToF16_Into(e.Weights.OutputNorm, e.Config.Eps, scratch.Normed)
-			e.Ctx.Synchronize()
+
+			// Debug: check currentF32 before final norm
+			currentF32.ScanMax(fmt.Sprintf("Layer %d Final Input (before norm)", i))
+
+			// Check for and handle Inf/NaN values before final norm
+			if infInfo := currentF32.ScanForNaN(fmt.Sprintf("Layer %d Pre-Final Norm", i), 5); infInfo.HasInf || infInfo.HasNaN() {
+				log.Printf("[WARN] Found %d NaN and %d Inf values in pre-final norm, clamping extreme values", infInfo.Count, infInfo.InfCount)
+				// Clamp extreme values to prevent RMSNorm issues
+				hostData := currentF32.ToHost()
+				for j := range hostData {
+					if math.IsInf(float64(hostData[j]), 0) {
+						// Replace Inf with a large but finite value
+						if hostData[j] > 0 {
+							hostData[j] = 1e6
+						} else {
+							hostData[j] = -1e6
+						}
+					} else if math.IsNaN(float64(hostData[j])) {
+						hostData[j] = 0.0 // Replace NaN with zero
+					}
+					// Also clamp extremely large values
+					if hostData[j] > 1e6 {
+						hostData[j] = 1e6
+					} else if hostData[j] < -1e6 {
+						hostData[j] = -1e6
+					}
+				}
+				// Load cleaned data back
+				cleanTensor := e.Ctx.NewTensorFP32(currentF32.Rows(), currentF32.Cols())
+				cleanTensor.LoadFromF32(hostData)
+				// Use cleaned tensor for RMSNorm
+				cleanTensor.RMSNormFP32_ToF16_Into(e.Weights.OutputNorm, e.Config.Eps, scratch.Normed)
+				e.Ctx.Synchronize()
+				cleanTensor.ReturnToPool()
+			} else {
+				currentF32.RMSNormFP32_ToF16_Into(e.Weights.OutputNorm, e.Config.Eps, scratch.Normed)
+				e.Ctx.Synchronize()
+			}
+
+			// Debug: check normed output
+			scratch.Normed.ScanMax(fmt.Sprintf("Layer %d Final Norm Output", i))
 
 			// Check for NaN in normalized output
 			if nanInfo := scratch.Normed.ScanForNaN("Final Norm", 5); nanInfo.HasNaN() {
@@ -665,6 +705,9 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 			// scratch.Normed contains result. Use it.
 			scratch.Normed.LinearToFP32_Into(e.Weights.Output, logits)
 			e.Ctx.Synchronize()
+
+			// Debug: check final logits
+			logits.ScanMax(fmt.Sprintf("Layer %d Final Logits", i))
 
 			logitsData := logits.ToHost()
 

@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"log"
 	"math"
 	"math/rand"
 	"sort"
@@ -157,14 +158,31 @@ type tokenProb struct {
 }
 
 func argMax(logits []float32) int {
+	if len(logits) == 0 {
+		panic("argMax: empty logits slice")
+	}
+
 	maxIdx := 0
 	maxVal := logits[0]
+
+	// Handle all-NaN case
+	allNaN := true
 	for i, v := range logits {
-		if v > maxVal {
-			maxVal = v
-			maxIdx = i
+		if !math.IsNaN(float64(v)) {
+			allNaN = false
+			if v > maxVal || math.IsNaN(float64(maxVal)) {
+				maxVal = v
+				maxIdx = i
+			}
 		}
 	}
+
+	if allNaN {
+		// All values are NaN, return first index as fallback
+		log.Printf("[WARN] argMax: all logits are NaN, returning index 0")
+		return 0
+	}
+
 	return maxIdx
 }
 
