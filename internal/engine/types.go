@@ -91,6 +91,9 @@ type Engine struct {
 	Config  LlamaConfig
 	Weights *LlamaWeights
 
+	// Quality Evaluation
+	QualityEval *QualityEvaluator
+
 	// KV Cache
 	KVCacheK []*device.Tensor // layers x (seq_len x dim) ? No, pre-allocated buffer
 	KVCacheV []*device.Tensor
