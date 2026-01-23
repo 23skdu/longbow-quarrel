@@ -116,12 +116,14 @@
 
 ## **📊 Current Status & Quick Wins**
 
-### **✅ COMPLETED (Foundation + P0 Sampling)**
+### **✅ COMPLETED (Foundation + All P0 Features)**
 - [x] Core inference pipeline working
 - [x] Q6K quantization functional
 - [x] Metal GPU acceleration
 - [x] **Advanced sampling system** (nucleus, adaptive temperature, smart repetition)
 - [x] **Quality-guided sampling mode** with entropy-based temperature scaling
+- [x] **Comprehensive quality metrics** (BLEU/ROUGE/perplexity scoring)
+- [x] **Real-time streaming API** with token-by-token output
 - [x] Coherent text generation achieved
 
 ### **🔄 IN PROGRESS**
@@ -131,15 +133,9 @@
 
 ### **🎯 IMMEDIATE NEXT STEPS (Priority Order)**
 
-1. **P0: Improve Sampling Quality** ✅ **COMPLETED** - Advanced sampling implemented
-   - ✅ Proper nucleus sampling with probability renormalization
-   - ✅ Adaptive temperature scaling based on entropy
-   - ✅ Smart repetition penalties with frequency weighting
-   - ✅ Quality-guided sampling mode (--quality flag)
-   - ✅ Tested and verified working
-
+1. **P0: Improve Sampling Quality** ✅ **COMPLETED** - Advanced nucleus sampling with adaptive temperature
 2. **P0: Add Quality Metrics** ✅ **COMPLETED** - BLEU/ROUGE/perplexity scoring implemented
-3. **P0: Streaming API** - Real-time text generation responses
+3. **P0: Streaming API** ✅ **COMPLETED** - Real-time token streaming with callback API
 4. **P1: Performance Benchmarking** - Compare against llama.cpp baselines
 5. **P1: Memory Optimization** - Better KV-cache management
 

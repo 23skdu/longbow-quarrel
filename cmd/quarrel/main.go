@@ -30,6 +30,7 @@ var (
 	topP             = flag.Float64("topp", 0.95, "Top-P (Nucleus) sampling")
 	repPenalty       = flag.Float64("penalty", 1.1, "Repetition penalty")
 	qualityMode      = flag.Bool("quality", false, "Enable advanced quality-guided sampling")
+	streamOutput     = flag.Bool("stream", false, "Stream tokens as they are generated")
 	chatML           = flag.Bool("chatml", false, "Wrap prompt in ChatML template")
 	debugDequant     = flag.Bool("debug-dequant", false, "Enable dequantization debug dump")
 	debugActivations = flag.Bool("debug-activations", false, "Enable layer-by-layer activation dumping")
@@ -151,10 +152,26 @@ func main() {
 			QualityMode:      *qualityMode,
 		}
 
-		log.Printf("Sampling Config: Temp=%.2f TopK=%d TopP=%.2f Penalty=%.2f QualityMode=%v (DebugActivations=%v)",
-			*temperature, *topK, *topP, *repPenalty, *qualityMode, *debugActivations)
+		log.Printf("Sampling Config: Temp=%.2f TopK=%d TopP=%.2f Penalty=%.2f QualityMode=%v Stream=%v (DebugActivations=%v)",
+			*temperature, *topK, *topP, *repPenalty, *qualityMode, *streamOutput, *debugActivations)
 
-		result, err := e.Infer(inputTokens, *numTokens, samplerConfig)
+		var result []int
+		var err error
+
+		if *streamOutput {
+			// Streaming mode: output tokens as they are generated
+			fmt.Print("Streaming output: ")
+			result, err = e.InferWithCallback(inputTokens, *numTokens, samplerConfig, func(token int) {
+				decoded := tok.Decode([]int{token})
+				fmt.Print(decoded)
+				// Flush output immediately for streaming effect
+				// Note: In Go, stdout is line-buffered by default, but we want immediate output
+			})
+			fmt.Println(" [END]") // Mark end of streaming
+		} else {
+			// Batch mode: collect all tokens then output
+			result, err = e.Infer(inputTokens, *numTokens, samplerConfig)
+		}
 		if err != nil {
 			log.Printf("Inference error: %v", err)
 		} else {
