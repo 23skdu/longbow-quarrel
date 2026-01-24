@@ -1,0 +1,379 @@
+name: Longbow Quarrel CI Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    # Run full suite daily at 2 AM UTC
+    - cron: '0 2 * * *'
+
+env:
+  GO_VERSION: '1.25'
+  MODEL_PATH: '~/.ollama/models'
+
+jobs:
+  # ===== LINT AND CODE QUALITY =====
+  lint:
+    name: Code Quality
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+            
+      - name: Install dependencies
+        run: |
+          go mod download
+          go install golang.org/x/tools/cmd/goimports@latest
+          go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+          
+      - name: Run golangci-lint
+        run: |
+          golangci-lint run --timeout=10m --verbose
+          
+      - name: Check goimports
+        run: |
+          goimports -l . | tee /dev/stderr
+          
+      - name: Run go vet
+        run: |
+          go vet ./...
+
+  # ===== BUILD AND BASIC TESTS =====
+  build:
+    name: Build and Test
+    runs-on: macos-latest
+    needs: lint
+    strategy:
+      matrix:
+        go-version: ['1.24', '1.25', '1.26']
+        
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Go ${{ matrix.go-version }}
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+          
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
+          
+      - name: Build
+        run: |
+          go build -v ./cmd/quarrel
+          go build -v -tags "darwin,metal" ./cmd/quarrel
+          
+      - name: Basic unit tests
+        run: |
+          go test -v ./internal/tokenizer
+          go test -v ./internal/gguf
+          go test -v ./internal/metrics
+
+  # ===== METAL GPU TESTS =====
+  metal-tests:
+    name: Metal GPU Tests
+    runs-on: macos-latest
+    needs: build
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'run-metal-tests')
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          
+      - name: Install Ollama and test model
+        run: |
+          # Install Ollama
+          curl -fsSL https://ollama.com/install.sh | sh
+          
+          # Pull a small test model
+          ollama pull smollm2:135m
+          
+      - name: Run Metal device tests
+        run: |
+          go test -v -tags "darwin,metal" ./internal/device -timeout 30m
+          
+      - name: Run engine tests with Metal
+        run: |
+          go test -v -tags "darwin,metal" ./internal/engine -timeout 30m
+          
+      - name: Run integration tests
+        run: |
+          go test -v -tags "darwin,metal" ./test/integration -timeout 30m
+
+  # ===== FUZZ TESTING =====
+  fuzz-tests:
+    name: Fuzz Testing
+    runs-on: macos-latest
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    strategy:
+      matrix:
+        duration: [30s, 1m, 5m]
+        corpus: ['tokenizer', 'sampling', 'model_input']
+        
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          
+      - name: Install Ollama and test model
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          ollama pull smollm2:135m
+          
+      - name: Run fuzz tests
+        run: |
+          go test -fuzz=Fuzz${{ matrix.corpus }} -fuzztime=${{ matrix.duration }} -tags "darwin,metal" ./internal/engine
+          
+      - name: Upload fuzz corpus
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-corpus-${{ matrix.corpus }}-${{ matrix.duration }}
+          path:testdata/fuzz/
+
+  # ===== PERFORMANCE BENCHMARKS =====
+  benchmarks:
+    name: Performance Benchmarks
+    runs-on: macos-latest
+    needs: metal-tests
+    if: github.event_name == 'push' || github.event_name == 'schedule'
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          
+      - name: Install Ollama and test model
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          ollama pull smollm2:135m
+          
+      - name: Run benchmarks
+        run: |
+          go test -bench=. -benchmem -tags "darwin,metal" ./internal/device > bench_results.txt 2>&1
+          cat bench_results.txt
+          
+      - name: Benchmark vs llama.cpp
+        run: |
+          ./scripts/benchmark_compare.sh -m ~/.ollama/models -p "The capital of France is" -n 32 > benchmark_output.txt 2>&1
+          cat benchmark_output.txt
+          
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: |
+            bench_results.txt
+            benchmark_output.txt
+
+  # ===== COVERAGE AND QUALITY =====
+  coverage:
+    name: Test Coverage
+    runs-on: macos-latest
+    needs: build
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          
+      - name: Run tests with coverage
+        run: |
+          go test -v -coverprofile=coverage.out -covermode=atomic ./...
+          
+      - name: Install coverage tool
+        run: go install github.com/wadey/gocovmerge@latest
+          
+      - name: Process coverage
+        run: |
+          go tool cover -html=coverage.out -o coverage.html
+          
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          file: ./coverage.out
+          flags: unittests
+          name: codecov-umbrella
+          
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.html
+
+  # ===== SECURITY SCANNING =====
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: lint
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          
+      - name: Run Gosec Security Scanner
+        uses: securecodewarrior/github-action-gosec@master
+        with:
+          args: './...'
+          
+      - name: Run SAST scan
+        uses: github/super-linter@v4
+        env:
+          DEFAULT_BRANCH: main
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ===== BUILD ARTIFACTS =====
+  build-artifacts:
+    name: Build Artifacts
+    runs-on: macos-latest
+    needs: [lint, build, metal-tests]
+    if: github.event_name == 'push' || github.event_name == 'schedule'
+    
+    strategy:
+      matrix:
+        goos: [darwin]
+        goarch: [amd64, arm64]
+        
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 1
+        run: |
+          go build -v -tags "darwin,metal" -ldflags="-s -w" -o quarrel-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/quarrel
+          
+      - name: Create archive
+        run: |
+          tar -czf quarrel-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz quarrel-${{ matrix.goos }}-${{ matrix.goarch }}
+          
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: quarrel-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: quarrel-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz
+
+  # ===== RELEASE CANDIDATE =====
+  release-candidate:
+    name: Release Candidate
+    runs-on: macos-latest
+    needs: [coverage, benchmarks, security]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          
+      - name: Generate release notes
+        run: |
+          # Generate changelog from commits
+          echo "## Release Notes" > release_notes.md
+          echo "" >> release_notes.md
+          git log --oneline --since="1 week ago" >> release_notes.md
+          
+      - name: Create Draft Release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: v${{ github.run_number }}-rc
+          release_name: Release Candidate ${{ github.run_number }}
+          body_path: release_notes.md
+          draft: true
+          prerelease: true
+
+  # ===== NOTIFICATIONS =====
+  notify:
+    name: Notify Results
+    runs-on: ubuntu-latest
+    needs: [lint, build, metal-tests, coverage, benchmarks, security]
+    if: always()
+    
+    steps:
+      - name: Notify on success
+        if: needs.lint.result == 'success' && needs.build.result == 'success' && needs.metal-tests.result == 'success'
+        run: |
+          echo "✅ All CI checks passed successfully!"
+          
+      - name: Notify on failure
+        if: contains(needs.*.result, 'failure')
+        run: |
+          echo "❌ CI pipeline failed!"
+          exit 1
