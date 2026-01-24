@@ -59,6 +59,9 @@ void Metal_Embedding_F16(MetalContextRef ctx, MetalBufferRef weights, int offW,
 void Metal_Embedding_Q4K(MetalContextRef ctx, MetalBufferRef weights, int offW,
                          MetalBufferRef result, int offRes, int rowIdx,
                          int cols, float scale);
+void Metal_Embedding_Q4K_Optimized(MetalContextRef ctx, MetalBufferRef weights, int offW,
+                                  MetalBufferRef result, int offRes, int rowIdx,
+                                  int cols, float scale);
 
 // Llama Specific Kernels
 void Metal_RMSNorm_F16(MetalContextRef ctx, MetalBufferRef input, int offIn,

@@ -157,7 +157,11 @@ func TestLargeContext_8K_Integration(t *testing.T) {
 	}
 	defer os.Remove(modelPath)
 
-	engine, err := NewEngine(modelPath, false)
+	engineConfig := EngineConfig{
+		DebugDequant: false,
+		KVCacheSize:  22,
+	}
+	engine, err := NewEngine(modelPath, engineConfig)
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
@@ -188,7 +192,11 @@ func TestLargeContext_16K_Integration(t *testing.T) {
 	}
 	defer os.Remove(modelPath)
 
-	engine, err := NewEngine(modelPath, false)
+	engineConfig := EngineConfig{
+		DebugDequant: false,
+		KVCacheSize:  22,
+	}
+	engine, err := NewEngine(modelPath, engineConfig)
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
@@ -218,7 +226,11 @@ func TestLargeContext_32K_Integration(t *testing.T) {
 	}
 	defer os.Remove(modelPath)
 
-	engine, err := NewEngine(modelPath, false)
+	engineConfig := EngineConfig{
+		DebugDequant: false,
+		KVCacheSize:  22,
+	}
+	engine, err := NewEngine(modelPath, engineConfig)
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
@@ -263,7 +275,11 @@ func TestGQA_Configuration_Integration(t *testing.T) {
 			}
 			defer os.Remove(modelPath)
 
-			engine, err := NewEngine(modelPath, false)
+			engineConfig := EngineConfig{
+				DebugDequant: false,
+				KVCacheSize:  22,
+			}
+			engine, err := NewEngine(modelPath, engineConfig)
 			if err != nil {
 				t.Fatalf("Failed to create engine: %v", err)
 			}
@@ -316,7 +332,11 @@ func TestSliding_Window_Integration(t *testing.T) {
 			}
 			defer os.Remove(modelPath)
 
-			engine, err := NewEngine(modelPath, false)
+			engineConfig := EngineConfig{
+				DebugDequant: false,
+				KVCacheSize:  22,
+			}
+			engine, err := NewEngine(modelPath, engineConfig)
 			if err != nil {
 				if tc.validSW {
 					t.Errorf("Expected valid config, got error: %v", err)

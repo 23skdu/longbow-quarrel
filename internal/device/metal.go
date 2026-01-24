@@ -1069,12 +1069,14 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 	// Norm into scratch
 	// RMSNormFP32_ToF16 usually allocates.
 	// We need RMSNormFP32_ToF16_Into(dest).
+	t0_rmsnorm1 := time.Now()
 	if t.dataType == DataTypeF32 {
 		t.RMSNormFP32_ToF16_Into(attnNorm, eps, normed)
 	} else {
 		// t.RMSNorm(attnNorm, eps) // Allocates. Need Into.
 		// For now assume FP32 residual
 	}
+	metrics.RecordKernelDuration("Layer_RMSNorm1", time.Since(t0_rmsnorm1))
 	probe("Norm-1", normed)
 
 	// 2. QKV Projections (Using Scratch)
@@ -1083,11 +1085,13 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 	vPart := scratch.VPart
 
 	doLin := func(w, dst *Tensor, tag string) {
+		t0_lin := time.Now()
 		if w.dataType == DataTypeQ4K && t.dataType == DataTypeF32 {
 			t.RMSNormLinearIntoQ4K(attnNorm, w, dst, eps, globalScale)
 		} else {
 			normed.LinearInto(w, dst, globalScale)
 		}
+		metrics.RecordKernelDuration("Layer_Linear_"+tag, time.Since(t0_lin))
 		probe(tag, dst)
 	}
 
@@ -1121,14 +1125,20 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		// 3. RoPE (In-place on qPart/kPart row i)
 
 		// Process Q (Heads)
+		t0_rope_q := time.Now()
 		C.Metal_RoPE_F16(t.ctx.ref, qPart.buf, C.int(qPart.Offset+offQ), 1, 1, C.int(heads), C.int(headDim), C.int(p), C.float(ropeTheta))
+		metrics.RecordKernelDuration("Layer_RoPE_Q", time.Since(t0_rope_q))
 		// Process K (KVHeads)
+		t0_rope_k := time.Now()
 		C.Metal_RoPE_F16(t.ctx.ref, kPart.buf, C.int(kPart.Offset+offK), 1, 1, C.int(kvHeads), C.int(headDim), C.int(p), C.float(ropeTheta))
+		metrics.RecordKernelDuration("Layer_RoPE_K", time.Since(t0_rope_k))
 
 		// 4. Store K/V (Must append to KVCache at current pos)
+		t0_storekv := time.Now()
 		C.Metal_StoreKV_F16(t.ctx.ref, kPart.buf, C.int(kPart.Offset+offK), vPart.buf, C.int(vPart.Offset+offV),
 			kCache.buf, C.int(kCache.Offset), vCache.buf, C.int(vCache.Offset),
 			C.int(p), C.int(kvHeads), C.int(headDim), C.int(windowSize))
+		metrics.RecordKernelDuration("Layer_StoreKV", time.Since(t0_storekv))
 
 		if p < 2 {
 
@@ -1175,10 +1185,12 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 			// 	fmt.Printf("[Metal Layer] C.Metal_AttScores_F16 Call: p=%d heads=%d kvHeads=%d dim=%d stride=%d\n", p, heads, kvHeads, headDim, ctxLen)
 			// }
 
+			t0_scores := time.Now()
 			C.Metal_AttScores_F16(t.ctx.ref, qPart.buf, C.int(qPart.Offset+offQ),
 				kCache.buf, C.int(kCache.Offset),
 				scores.buf, C.int(scores.Offset), // Dst
 				C.int(p), C.int(heads), C.int(kvHeads), C.int(headDim), C.int(ctxLen), C.int(windowSize))
+			metrics.RecordKernelDuration("Layer_AttScores", time.Since(t0_scores))
 
 			// DEBUG: Dump Scores (Pre-Softmax)
 			if layerIdx == 0 && i == 0 && p < 5 {
@@ -1189,24 +1201,29 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 				fmt.Printf("DEBUG: Layer 0, Head 0, Pos %d Scores: %v\n", p, rawScores[:p+2])
 			}
 
+			t0_softmax := time.Now()
 			C.Metal_AttSoftmax_F16(t.ctx.ref, scores.buf, C.int(scores.Offset),
 				C.int(p), C.int(heads), C.int(ctxLen))
+			metrics.RecordKernelDuration("Layer_Softmax", time.Since(t0_softmax))
 
+			t0_attvalues := time.Now()
 			C.Metal_AttValues_F16(t.ctx.ref, scores.buf, C.int(scores.Offset),
 				vCache.buf, C.int(vCache.Offset),
 				attOut.buf, C.int(attOut.Offset+offAtt),
 				C.int(p), C.int(heads), C.int(kvHeads), C.int(headDim), C.int(ctxLen), C.int(windowSize))
+			metrics.RecordKernelDuration("Layer_AttValues", time.Since(t0_attvalues))
 		}
 	}
 
 	// 6. Attention Output Projection
-
-	// Output Projection
+	t0_attn_out := time.Now()
 	scratch.AttOut.LinearInto(o, resAtt, globalScale)
+	metrics.RecordKernelDuration("Layer_AttnOut", time.Since(t0_attn_out))
 	probe("Att-Final", resAtt)
 	probe("Att-Out", scratch.AttOut)
 
 	// 7. Residual Add 1
+	t0_add1 := time.Now()
 	if t.dataType == DataTypeF32 {
 		t.AddMixedInPlace(resAtt)
 	} else {
@@ -1214,6 +1231,7 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		C.Metal_Copy_F16(t.ctx.ref, t1.buf, C.int(t1.Offset), t.buf, C.int(t.Offset), C.int(t.rows*t.cols))
 		t1.ReturnToPool()
 	}
+	metrics.RecordKernelDuration("Layer_Add1", time.Since(t0_add1))
 	probe("Residual-1-Add", t)
 
 	// --- No Cleanup needed for Scratch ---
@@ -1230,6 +1248,7 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		// FP32 or Mixed Precision FFN Path
 		// 8. FFN Norm (F32 -> F32)
 		normedFFN := scratch.NormedFFN_F32
+		t0_rmsnorm2 := time.Now()
 		if t.dataType == DataTypeF32 {
 			t.RMSNorm_F32_Into(ffnNorm, eps, normedFFN)
 		} else if useMixedPrecisionFFN {
@@ -1240,28 +1259,38 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		} else {
 			t.RMSNormFP32_ToF16_Into(ffnNorm, eps, normedFFN)
 		}
+		metrics.RecordKernelDuration("Layer_RMSNorm2", time.Since(t0_rmsnorm2))
 		probe("FFN-Norm", normedFFN)
 
 		// 9. Gate/Up Projections -> FP32
 		gatePart := scratch.GatePart
 		upPart := scratch.UpPart
 
+		t0_ffn_gate := time.Now()
 		normedFFN.LinearF32_Into(ffnGate, gatePart, globalScale)
+		metrics.RecordKernelDuration("Layer_FFN_Gate", time.Since(t0_ffn_gate))
+		t0_ffn_up := time.Now()
 		normedFFN.LinearF32_Into(ffnUp, upPart, globalScale)
+		metrics.RecordKernelDuration("Layer_FFN_Up", time.Since(t0_ffn_up))
 		probe("FFN-Gate-Proj", gatePart)
 		probe("FFN-Up-Proj", upPart)
 
 		// 10. SwiGLU F32
 		swiOut := scratch.SwiOut
+		t0_swiglu := time.Now()
 		gatePart.SwiGLU_FP32_Into(upPart, swiOut)
+		metrics.RecordKernelDuration("Layer_SwiGLU", time.Since(t0_swiglu))
 		probe("FFN-SwiGLU", swiOut)
 
 		// 11. Down Projection (FP32 -> FP32)
 		resFFN := scratch.ResFFN_F32
+		t0_ffn_down := time.Now()
 		swiOut.LinearF32_Into(ffnDown, resFFN, globalScale) // Handles Q4K
+		metrics.RecordKernelDuration("Layer_FFN_Down", time.Since(t0_ffn_down))
 		probe("FFN-Down-Proj", resFFN)
 
 		// 12. Residual Add 2
+		t0_add2 := time.Now()
 		if t.dataType == DataTypeF32 {
 			t.AddInPlace(resFFN)
 		} else if useMixedPrecisionFFN {
@@ -1278,6 +1307,7 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 			C.Metal_Copy_F16(t.ctx.ref, t2.buf, C.int(t2.Offset), t.buf, C.int(t.Offset), C.int(t.rows*t.cols))
 			t2.ReturnToPool()
 		}
+		metrics.RecordKernelDuration("Layer_Add2", time.Since(t0_add2))
 		probe("Residual-2-Add", t)
 
 		// Debug FFN Output
@@ -1287,7 +1317,9 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 	} else {
 		// FP16 FFN Path (Original)
 		normedFFN := scratch.NormedFFN
+		t0_rmsnorm2 := time.Now()
 		t.RMSNormFP32_ToF16_Into(ffnNorm, eps, normedFFN)
+		metrics.RecordKernelDuration("Layer_RMSNorm2", time.Since(t0_rmsnorm2))
 		probe("FFN-Norm-FP16", normedFFN)
 
 		// 9. FFN Gate/Up
@@ -1332,6 +1364,7 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		gatePartF16_P := t.ctx.NewTensorPooled(t.rows, ffnGate.rows)
 		upPartF16_P := t.ctx.NewTensorPooled(t.rows, ffnUp.rows)
 
+		t0_ffn_gate := time.Now()
 		if false && ffnGate.dataType == DataTypeQ4K {
 			t.RMSNormLinearIntoQ4K(ffnNorm, ffnGate, gatePartF16_P, eps, globalScale)
 			t.RMSNormLinearIntoQ4K(ffnNorm, ffnUp, upPartF16_P, eps, globalScale)
@@ -1339,6 +1372,7 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 			normedFFN.LinearInto(ffnGate, gatePartF16_P, globalScale)
 			normedFFN.LinearInto(ffnUp, upPartF16_P, globalScale)
 		}
+		metrics.RecordKernelDuration("Layer_FFN_GateUp", time.Since(t0_ffn_gate))
 		probe("FFN-Gate-Proj-FP16", gatePartF16_P)
 		probe("FFN-Up-Proj-FP16", upPartF16_P)
 
@@ -1350,6 +1384,7 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 
 		// 10. SwiGLU + 11. Down Projection
 		resFFN := scratch.ResFFN // F16 scratch
+		t0_swiglu_down := time.Now()
 		if false && ffnDown.dataType == DataTypeQ4K {
 			gatePartF16_P.SwiGLULinearIntoQ4K(upPartF16_P, ffnDown, resFFN, globalScale)
 		} else {
@@ -1357,12 +1392,14 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 			swiOut.LinearInto(ffnDown, resFFN, globalScale)
 			swiOut.ReturnToPool()
 		}
+		metrics.RecordKernelDuration("Layer_SwiGLU_Down", time.Since(t0_swiglu_down))
 		probe("FFN-Down-Proj-FP16", resFFN)
 
 		gatePartF16_P.ReturnToPool()
 		upPartF16_P.ReturnToPool()
 
 		// 12. Residual Add 2
+		t0_add2 := time.Now()
 		if t.dataType == DataTypeF32 {
 			t.AddMixedInPlace(resFFN)
 		} else {
@@ -1370,6 +1407,7 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 			C.Metal_Copy_F16(t.ctx.ref, t2.buf, C.int(t2.Offset), t.buf, C.int(t.Offset), C.int(t.rows*t.cols))
 			t2.ReturnToPool()
 		}
+		metrics.RecordKernelDuration("Layer_Add2", time.Since(t0_add2))
 		probe("Residual-2-Add-FP16", t)
 
 		// NaN Detection at layer output
@@ -1574,8 +1612,8 @@ func (t *Tensor) AddInPlace(other *Tensor) error {
 func (t *Tensor) EmbeddingLookup(row int, scale float32) *Tensor {
 	res := t.ctx.NewTensorPooled(1, t.cols)
 	if t.dataType == DataTypeQ4K {
-		// fmt.Printf("DEBUG: Using Q4K Embedding Kernel for row %d\n", row)
-		C.Metal_Embedding_Q4K(t.ctx.ref, t.buf, C.int(t.Offset), res.buf, C.int(res.Offset), C.int(row), C.int(t.cols), C.float(scale))
+		// Use optimized Q4K embedding kernel for better performance
+		C.Metal_Embedding_Q4K_Optimized(t.ctx.ref, t.buf, C.int(t.Offset), res.buf, C.int(res.Offset), C.int(row), C.int(t.cols), C.float(scale))
 	} else if t.dataType == DataTypeQ4_0 {
 		C.Metal_EmbeddingQ4_0_F16(t.ctx.ref, t.buf, C.int(t.Offset), res.buf, C.int(res.Offset), C.int(row), C.int(t.cols))
 	} else {

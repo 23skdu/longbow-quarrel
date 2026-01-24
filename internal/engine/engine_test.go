@@ -173,7 +173,11 @@ func TestEngineLifecycle(t *testing.T) {
 	// NewEngine(path) -> (*Engine, error)
 	// e.Infer(prompt) -> tokens
 
-	engine, err := NewEngine(modelPath, false)
+	engineConfig := EngineConfig{
+		DebugDequant: false,
+		KVCacheSize:  22,
+	}
+	engine, err := NewEngine(modelPath, engineConfig)
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
@@ -350,7 +354,11 @@ func TestMistralMetadataSupport(t *testing.T) {
 	}
 	defer os.Remove(modelPath)
 
-	e, err := NewEngine(modelPath, false)
+	engineConfig := EngineConfig{
+		DebugDequant: false,
+		KVCacheSize:  22,
+	}
+	e, err := NewEngine(modelPath, engineConfig)
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
