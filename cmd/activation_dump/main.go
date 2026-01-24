@@ -48,7 +48,7 @@ func main() {
 
 	fmt.Printf("Loading model: %s\n", modelPath)
 	// e, err := engine.NewEngine(modelPath, false)
-	_, err := engine.NewEngine(modelPath, false)
+	_, err := engine.NewEngine(modelPath, engine.EngineConfig{DebugDequant: false})
 	if err != nil {
 		fmt.Printf("Error loading model: %v\n", err)
 		os.Exit(1)
