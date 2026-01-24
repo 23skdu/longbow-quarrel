@@ -60,6 +60,7 @@ type LlamaConfig struct {
 
 	// Debug Flags
 	DebugDequant bool
+	KVCacheSize  int // Overrides model's default if > 0
 }
 
 type LlamaWeights struct {

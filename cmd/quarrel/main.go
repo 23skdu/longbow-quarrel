@@ -33,6 +33,7 @@ var (
 	streamOutput     = flag.Bool("stream", false, "Stream tokens as they are generated")
 	chatML           = flag.Bool("chatml", false, "Wrap prompt in ChatML template")
 	debugDequant     = flag.Bool("debug-dequant", false, "Enable dequantization debug dump")
+	kvCacheSize      = flag.Int("kv-cache-size", 0, "Size of the KV cache in tokens (0 = from model)")
 	debugActivations = flag.Bool("debug-activations", false, "Enable layer-by-layer activation dumping")
 )
 
@@ -87,7 +88,11 @@ func main() {
 
 	// Initialize Engine
 	log.Printf("Loading model from %s...", *modelPath)
-	e, err := engine.NewEngine(*modelPath, *debugDequant)
+	engineConfig := engine.EngineConfig{
+		DebugDequant: *debugDequant,
+		KVCacheSize:  *kvCacheSize,
+	}
+	e, err := engine.NewEngine(*modelPath, engineConfig)
 	if err != nil {
 		log.Fatalf("Failed to initialize engine: %v", err)
 	}

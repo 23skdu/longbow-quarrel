@@ -340,7 +340,12 @@ func getCharNGrams(chars []rune, n int) map[string]int {
 	return nGrams
 }
 
-func NewEngine(modelPath string, debugDequant bool) (*Engine, error) {
+type EngineConfig struct {
+	DebugDequant bool
+	KVCacheSize  int
+}
+
+func NewEngine(modelPath string, config EngineConfig) (*Engine, error) {
 	ctx := device.NewContext()
 
 	e := &Engine{
@@ -349,7 +354,8 @@ func NewEngine(modelPath string, debugDequant bool) (*Engine, error) {
 		ActLogger:  NewActivationLogger(),
 		LastLogits: nil,
 	}
-	e.Config.DebugDequant = debugDequant
+	e.Config.DebugDequant = config.DebugDequant
+	e.Config.KVCacheSize = config.KVCacheSize
 
 	if err := e.loadModel(modelPath); err != nil {
 		ctx.Free()
@@ -1249,7 +1255,10 @@ func (e *Engine) InferWithCallback(inputTokens []int, tokensToGenerate int, samp
 func (e *Engine) initKVCache() error {
 	layers := e.Config.Layers
 	windowSize := e.Config.WindowSize
-	if windowSize == 0 {
+	if e.Config.KVCacheSize > 0 {
+		windowSize = e.Config.KVCacheSize
+		log.Printf("[MEMORY] Overriding KV Cache size to %d from command line", windowSize)
+	} else if windowSize == 0 {
 		// Default to full sequence length if not specified
 		windowSize = e.Config.SeqLen
 	}
@@ -1280,7 +1289,9 @@ func (e *Engine) initKVCache() error {
 	szPerTensor := align(rows * cols * 2) // F16
 	totalSz := layers * 2 * szPerTensor
 
-	fmt.Printf("Alloc KVCache Heap: %d bytes\n", totalSz)
+	log.Printf("[MEMORY] Allocating KV Cache: %d layers, %d window, %d heads, %d head_dim", layers, windowSize, kvHeads, headDim)
+	log.Printf("[MEMORY] Total KV Cache size: %.2f MiB", float64(totalSz)/1024/1024)
+
 	heap := e.Ctx.NewHeap(totalSz)
 	if heap == nil {
 		return errors.New("KVCache Heap alloc failed")
