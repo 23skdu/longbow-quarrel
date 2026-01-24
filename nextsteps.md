@@ -116,7 +116,7 @@
 
 ## **📊 Current Status & Quick Wins**
 
-### **✅ COMPLETED (Foundation + All P0 & P1 Benchmarking)**
+### **✅ COMPLETED (Foundation + All P0 & P1 Benchmarking/Memory)**
 - [x] Core inference pipeline working
 - [x] Q6K quantization functional
 - [x] Metal GPU acceleration
@@ -125,6 +125,7 @@
 - [x] **Comprehensive quality metrics** (BLEU/ROUGE/perplexity scoring)
 - [x] **Real-time streaming API** with token-by-token output
 - [x] **Performance Benchmarking** against llama.cpp (results in `BENCHMARKS.md`)
+- [x] **KV Cache Memory Optimization** with `-kv-cache-size` override
 - [x] Coherent text generation achieved
 
 ### **🔄 IN PROGRESS**
@@ -138,7 +139,7 @@
 2. **P0: Add Quality Metrics** ✅ **COMPLETED** - BLEU/ROUGE/perplexity scoring implemented
 3. **P0: Streaming API** ✅ **COMPLETED** - Real-time token streaming with callback API
 4. **P1: Performance Benchmarking** ✅ **COMPLETED** - Compared against llama.cpp baselines
-5. **P1: Memory Optimization** - Better KV-cache management
+5. **P1: Memory Optimization** ✅ **COMPLETED** - Better KV-cache management
 
 ---
 
