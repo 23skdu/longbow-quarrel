@@ -41,7 +41,11 @@ func TestRoPEFrequency_Mistral(t *testing.T) {
 	}
 
 	// Test that our config uses the correct value
-	engine, err := NewEngine(mistralPath, false)
+	engineConfig := EngineConfig{
+		DebugDequant: false,
+		KVCacheSize:  22,
+	}
+	engine, err := NewEngine(mistralPath, engineConfig)
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}

@@ -16,6 +16,7 @@
 @property(strong) id<MTLComputePipelineState> pipelineRoPE_F16;
 @property(strong) id<MTLComputePipelineState> pipelineEmbedding_F16;
 @property(strong) id<MTLComputePipelineState> pipelineEmbedding_Q4K;
+@property(strong) id<MTLComputePipelineState> pipelineEmbedding_Q4K_Optimized;
 @property(strong) id<MTLComputePipelineState> pipelineStoreKV_F16;
 @property(strong) id<MTLComputePipelineState> pipelineAdd_F16;
 @property(strong) id<MTLComputePipelineState> pipelineCopy_F16;
@@ -173,6 +174,7 @@ MetalContextRef Metal_Init(const char *libSource) {
   ctx.pipelineRoPE_F16 = loadPipeline(ctx, @"rope_f16");
   ctx.pipelineEmbedding_F16 = loadPipeline(ctx, @"embedding_f16");
   ctx.pipelineEmbedding_Q4K = loadPipeline(ctx, @"embedding_q4k_f16");
+  ctx.pipelineEmbedding_Q4K_Optimized = loadPipeline(ctx, @"embedding_q4k_f16_optimized");
   ctx.pipelineStoreKV_F16 = loadPipeline(ctx, @"store_kv_f16");
   ctx.pipelineAdd_F16 = loadPipeline(ctx, @"add_f16");
   ctx.pipelineCopy_F16 = loadPipeline(ctx, @"copy_f16");
@@ -447,6 +449,23 @@ void Metal_Embedding_Q4K(MetalContextRef ctx, MetalBufferRef weights, int offW,
   [enc setBytes:&scale length:4 atIndex:4];
   [enc dispatchThreads:MTLSizeMake(1024, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(1024, 1, 1)];
+  [mc barrier];
+}
+
+void Metal_Embedding_Q4K_Optimized(MetalContextRef ctx, MetalBufferRef weights, int offW,
+                                  MetalBufferRef result, int offRes, int rowIdx,
+                                  int cols, float scale) {
+  MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
+  id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
+  [enc setComputePipelineState:mc.pipelineEmbedding_Q4K_Optimized];
+  [enc setBuffer:(__bridge id<MTLBuffer>)weights offset:offW atIndex:0];
+  [enc setBuffer:(__bridge id<MTLBuffer>)result offset:offRes atIndex:1];
+  [enc setBytes:&rowIdx length:4 atIndex:2];
+  [enc setBytes:&cols length:4 atIndex:3];
+  [enc setBytes:&scale length:4 atIndex:4];
+  // Use 1 thread per output element for better parallelism
+  [enc dispatchThreads:MTLSizeMake(cols, 1, 1)
+      threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
   [mc barrier];
 }
 

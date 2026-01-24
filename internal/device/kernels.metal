@@ -433,7 +433,56 @@ kernel void debug_dot(device const half *a [[ buffer(0) ]],
     }
 }
 
-// Embedding Lookup: Q4_K weights → FP16 output
+// Optimized Embedding Lookup: Q4_K weights → FP16 output with vectorization
+kernel void embedding_q4k_f16_optimized(device const uchar *weight [[ buffer(0) ]],
+                                        device half *output [[ buffer(1) ]],
+                                        constant int &idx [[ buffer(2) ]],
+                                        constant int &cols [[ buffer(3) ]],
+                                        constant float &scale [[ buffer(4) ]],
+                                        uint tid [[ thread_position_in_grid ]]) {
+    if (tid >= (uint)cols) return;
+    
+    int num_blocks = (cols + 255) / 256;
+    int block_idx = tid / 256;
+    int lane_in_block = tid % 256;
+    
+    device const uchar *row_ptr = weight + (uint)idx * num_blocks * 144;
+    device const uchar *block = row_ptr + block_idx * 144;
+    
+    // Pre-compute scale factors once per block
+    float d = fp16_to_fp32(*(device const ushort*)(block));
+    float dmin = fp16_to_fp32(*(device const ushort*)(block + 2));
+    
+    device const uchar *scales = block + 4;
+    device const uchar *qs = block + 16;
+    
+    // Unpack scales for this lane
+    int group = lane_in_block / 32;
+    int sub_lane = lane_in_block % 32;
+    int qs_idx = sub_lane / 2;
+    
+    // Extract scales and mins for this group
+    uchar sc, m;
+    if (group < 4) {
+        sc = scales[group] & 63;
+        m = scales[group + 4] & 63;
+    } else {
+        sc = (scales[group+4] & 0xF) | ((scales[group-4] >> 6) << 4);
+        m = (scales[group+4] >> 4) | ((scales[group] >> 6) << 4);
+    }
+    
+    float d_val = d * scale * (float)sc;
+    float m_val = dmin * scale * (float)m;
+    
+    // Extract 4-bit quantized value
+    uchar b = qs[16 * group + qs_idx];
+    uchar q4 = (sub_lane % 2 == 0) ? (b & 0xF) : (b >> 4);
+    
+    // Final dequantization
+    output[tid] = (half)(d_val * (float)q4 - m_val);
+}
+
+// Legacy version kept for compatibility
 kernel void embedding_q4k_f16(device const uchar *weight [[ buffer(0) ]],
                              device half *output [[ buffer(1) ]],
                              constant int &idx [[ buffer(2) ]],
@@ -443,7 +492,7 @@ kernel void embedding_q4k_f16(device const uchar *weight [[ buffer(0) ]],
     int num_blocks = (cols + 255) / 256;
     device const uchar *row_ptr = weight + (uint)idx * num_blocks * 144;
     
-    // Each thread handles a portion of the 256-elements blocks
+    // Each thread handles a portion of 256-elements blocks
     // If we want high performance, we'd distribute blocks across threads.
     // For now, simpler: each thread handles one or more blocks if needed.
     // But cols is usually small-ish (4096).
@@ -464,7 +513,7 @@ kernel void embedding_q4k_f16(device const uchar *weight [[ buffer(0) ]],
             } else {
                 sc[j] = (scales[j+4] & 0xF) | ((scales[j-4] >> 6) << 4);
                 m[j] = (scales[j+4] >> 4) | ((scales[j] >> 6) << 4);
-            }
+}
         }
         for (int j = 0; j < 8; j++) {
             float d_val = d * scale * (float)sc[j], m_val = dmin * scale * (float)m[j];
