@@ -116,7 +116,7 @@
 
 ## **📊 Current Status & Quick Wins**
 
-### **✅ COMPLETED (Foundation + All P0 Features)**
+### **✅ COMPLETED (Foundation + All P0 & P1 Benchmarking)**
 - [x] Core inference pipeline working
 - [x] Q6K quantization functional
 - [x] Metal GPU acceleration
@@ -124,6 +124,7 @@
 - [x] **Quality-guided sampling mode** with entropy-based temperature scaling
 - [x] **Comprehensive quality metrics** (BLEU/ROUGE/perplexity scoring)
 - [x] **Real-time streaming API** with token-by-token output
+- [x] **Performance Benchmarking** against llama.cpp (results in `BENCHMARKS.md`)
 - [x] Coherent text generation achieved
 
 ### **🔄 IN PROGRESS**
@@ -136,7 +137,7 @@
 1. **P0: Improve Sampling Quality** ✅ **COMPLETED** - Advanced nucleus sampling with adaptive temperature
 2. **P0: Add Quality Metrics** ✅ **COMPLETED** - BLEU/ROUGE/perplexity scoring implemented
 3. **P0: Streaming API** ✅ **COMPLETED** - Real-time token streaming with callback API
-4. **P1: Performance Benchmarking** - Compare against llama.cpp baselines
+4. **P1: Performance Benchmarking** ✅ **COMPLETED** - Compared against llama.cpp baselines
 5. **P1: Memory Optimization** - Better KV-cache management
 
 ---
@@ -182,12 +183,13 @@
 # - Create benchmark dataset for consistent evaluation
 ```
 
-#### **3. Performance Profiling (Medium Impact, Low Effort)**
+#### **3. Performance Profiling (Medium Impact, Low Effort)** ✅ **COMPLETED**
 ```bash
-# TODO: Add latency measurements
-# - Implement timing in engine.go inference loop
-# - Add memory usage tracking
-# - Create performance comparison scripts
+# Now documented in BENCHMARKS.md
+# longbow-quarrel: ~63.5 t/s
+# llama.cpp: 225.29 t/s (token generation)
+#
+# Next steps focus on closing this 3.5x performance gap.
 ```
 
 #### **4. API Enhancement (High Impact, Medium Effort)**
