@@ -1,0 +1,45 @@
+package gguf
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"testing"
+	"time"
+)
+
+// FuzzGGUFReader tests GGUF file parsing with malformed data
+func FuzzGGUFReader(f *testing.F) {
+	f.Add([]byte("valid header"), []byte("GGUF magic v3 with reasonable sizes"))
+	f.Add([]byte("invalid magic"), []byte("INVALID\x00\x00\x00\x00"))
+	f.Add([]byte("corrupt header"), []byte("GGUF\x00\x00\x00corrupt"))
+	f.Add([]byte("huge tensor count"), []byte("GGUF"+make([]byte, 1000)+string([]byte{0xFF, 0xFF, 0xFF, 0xFF})+"1000"))
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		ctx := context.Background()
+		tempDir := t.TempDir()
+		defer os.RemoveAll(tempDir)
+
+		ggufPath := filepath.Join(tempDir, "test.gguf")
+		err := os.WriteFile(ggufPath, data, 0644)
+		if err != nil {
+			t.Fatalf("Failed to write GGUF data: %v", err)
+		}
+
+		// Test GGUF loading
+		ggufFile, err := gguf.LoadFile(ggufPath)
+		if err != nil {
+			t.Logf("GGUF loading failed (expected for malformed data): %v", err)
+			return
+		}
+		defer ggufFile.Close()
+
+		// Verify reasonable bounds
+		if len(ggufFile.Tensors) > 10000 {
+			t.Logf("Suspiciously large tensor count: %d", len(ggufFile.Tensors))
+		}
+	})
+}

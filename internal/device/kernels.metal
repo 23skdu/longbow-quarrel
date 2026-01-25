@@ -1413,3 +1413,262 @@ kernel void swiglu_linear_q4k_f16(device const half *gate [[ buffer(0) ]],
         output[off_out + batch * dim_out + row] = safe_half(sum);
     }
 }
+
+kernel void rmsnorm_linear_f16(device const half *input [[ buffer(0) ]],
+                              device const float *norm_weight [[ buffer(1) ]],
+                              device const half *weight [[ buffer(2) ]],
+                              device half *output [[ buffer(3) ]],
+                              constant int &dim_in [[ buffer(4) ]],
+                              constant int &dim_out [[ buffer(5) ]],
+                              constant float &eps [[ buffer(6) ]],
+                              uint3 tid [[ thread_position_in_threadgroup ]],
+                              uint3 qid [[ thread_position_in_grid ]]) {
+    uint row = qid.y; uint batch = qid.z;
+    if (row >= (uint)dim_out) return; uint lane_id = tid.x;
+
+    // 1. RMSNorm
+    threadgroup float s[1024];
+    float sum_sq = 0.0f;
+    for (int i = lane_id; i < dim_in; i += 32) {
+        float val = (float)input[batch * dim_in + i];
+        sum_sq += val * val;
+    }
+    s[lane_id] = sum_sq;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (lane_id == 0) {
+        float t = 0;
+        for (int i = 0; i < 32; i++) t += s[i];
+        s[0] = 1.0f / sqrt(t / (float)dim_in + eps);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float rms_scale = s[0];
+
+    // 2. Linear (A * B^T where A is weight [dim_out, dim_in], B is normalized input [1, dim_in])
+    // We can't easily store the whole normalized row in threadgroup if dim_in > 4096.
+    // So we'll compute it on the fly or in chunks.
+    
+    float sum = 0;
+    for (int i = lane_id; i < dim_in; i += 32) {
+        float val = (float)input[batch * dim_in + i] * rms_scale * norm_weight[i];
+        sum += val * (float)weight[row * dim_in + i];
+    }
+    sum = simd_sum(sum);
+    if (lane_id == 0) {
+        output[batch * dim_out + row] = (half)sum;
+    }
+}
+
+kernel void rmsnorm_qkv_f16(device const half *input [[ buffer(0) ]],
+                           device const float *norm_weight [[ buffer(1) ]],
+                           device const half *q_weight [[ buffer(2) ]],
+                           device const half *k_weight [[ buffer(3) ]],
+                           device const half *v_weight [[ buffer(4) ]],
+                           device half *q_out [[ buffer(5) ]],
+                           device half *k_out [[ buffer(6) ]],
+                           device half *v_out [[ buffer(7) ]],
+                           constant int &dim_in [[ buffer(8) ]],
+                           constant int &q_dim [[ buffer(9) ]],
+                           constant int &kv_dim [[ buffer(10) ]],
+                           constant float &eps [[ buffer(11) ]],
+                           uint3 tid [[ thread_position_in_threadgroup ]],
+                           uint3 qid [[ thread_position_in_grid ]]) {
+    uint row = qid.y; uint batch = qid.z;
+    uint lane_id = tid.x;
+
+    // 1. RMSNorm (shared across Q, K, V threads in the same batch)
+    // We'll use a simpler approach: each thread computes its own part of RMSNorm
+    // or we can use threadgroup memory if we coordinate.
+    // Since we want to fuse, let's assume qid.y handles different output rows.
+    // Q, K, V outputs have different row counts. This kernel might be tricky to balance.
+    
+    // Simpler approach for now: One kernel that just does the Norm once per batch and then the projections.
+    // But Metal dispatches are 3D. 
+    // Let's use qid.y for the MAX of (q_dim, kv_dim).
+    
+    threadgroup float rms_scale_tg;
+    if (lane_id == 0 && row == 0) {
+        float sum_sq = 0;
+        for (int i = 0; i < dim_in; i++) {
+            float val = (float)input[batch * dim_in + i];
+            sum_sq += val * val;
+        }
+        rms_scale_tg = 1.0f / sqrt(sum_sq / (float)dim_in + eps);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float rms_scale = rms_scale_tg;
+
+    // Q Proj
+    if (row < (uint)q_dim) {
+        float sum = 0;
+        for (int i = lane_id; i < dim_in; i += 32) {
+            float val = (float)input[batch * dim_in + i] * rms_scale * norm_weight[i];
+            sum += val * (float)q_weight[row * dim_in + i];
+        }
+        sum = simd_sum(sum);
+        if (lane_id == 0) q_out[batch * q_dim + row] = (half)sum;
+    }
+
+    // K Proj
+    if (row < (uint)kv_dim) {
+        float sum = 0;
+        for (int i = lane_id; i < dim_in; i += 32) {
+            float val = (float)input[batch * dim_in + i] * rms_scale * norm_weight[i];
+            sum += val * (float)k_weight[row * dim_in + i];
+        }
+        sum = simd_sum(sum);
+        if (lane_id == 0) k_out[batch * kv_dim + row] = (half)sum;
+    }
+
+    // V Proj
+    if (row < (uint)kv_dim) {
+        float sum = 0;
+        for (int i = lane_id; i < dim_in; i += 32) {
+            float val = (float)input[batch * dim_in + i] * rms_scale * norm_weight[i];
+            sum += val * (float)v_weight[row * dim_in + i];
+        }
+        sum = simd_sum(sum);
+        if (lane_id == 0) v_out[batch * kv_dim + row] = (half)sum;
+    }
+}
+
+kernel void store_kv_f16_batch(device const half *k [[ buffer(0) ]],
+                              device const half *v [[ buffer(1) ]],
+                              device half *k_cache [[ buffer(2) ]],
+                              device half *v_cache [[ buffer(3) ]],
+                              constant int &pos_offset [[ buffer(4) ]],
+                              constant int &kv_dim [[ buffer(5) ]],
+                              constant int &window_size [[ buffer(6) ]],
+                              uint2 gid [[ thread_position_in_grid ]]) {
+    if (gid.x >= (uint)kv_dim) return;
+    int p = pos_offset + gid.y;
+    int cache_pos = p % window_size;
+    k_cache[cache_pos * kv_dim + gid.x] = k[gid.y * kv_dim + gid.x];
+    v_cache[cache_pos * kv_dim + gid.x] = v[gid.y * kv_dim + gid.x];
+}
+
+kernel void rmsnorm_qkv_q4k_f16(device const half *input [[ buffer(0) ]],
+                               device const float *norm_weight [[ buffer(1) ]],
+                               device const uchar *q_weight [[ buffer(2) ]],
+                               device const uchar *k_weight [[ buffer(3) ]],
+                               device const uchar *v_weight [[ buffer(4) ]],
+                               device half *q_out [[ buffer(5) ]],
+                               device half *k_out [[ buffer(6) ]],
+                               device half *v_out [[ buffer(7) ]],
+                               constant int &dim_in [[ buffer(8) ]],
+                               constant int &q_dim [[ buffer(9) ]],
+                               constant int &kv_dim [[ buffer(10) ]],
+                               constant float &eps [[ buffer(11) ]],
+                               constant float &scale [[ buffer(12) ]],
+                               uint3 tid [[ thread_position_in_threadgroup ]],
+                               uint3 qid [[ thread_position_in_grid ]]) {
+    uint row = qid.y; uint batch = qid.z;
+    uint lane_id = tid.x;
+
+    // 1. RMSNorm (simplified per-thread or shared)
+    threadgroup float rms_scale_tg;
+    if (lane_id == 0 && row == 0) {
+        float sum_sq = 0;
+        for (int i = 0; i < dim_in; i++) {
+            float val = (float)input[batch * dim_in + i];
+            sum_sq += val * val;
+        }
+        rms_scale_tg = 1.0f / sqrt(sum_sq / (float)dim_in + eps);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float rms_scale = rms_scale_tg;
+
+    // We'll compute normalized input on the fly to save memory, 
+    // but for Q4K it's better to have it in threadgroup if possible.
+    // However, dim_in can be 4096. 4096 * 2 bytes = 8KB. 
+    // Threadgroup can handle it.
+    
+    threadgroup half normalized[4096];
+    if (row == 0) {
+        for (int i = lane_id; i < dim_in; i += 32) {
+            normalized[i] = safe_half((float)input[batch * dim_in + i] * rms_scale * norm_weight[i]);
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Q Proj
+    if (row < (uint)q_dim) {
+        int num_blocks = (dim_in + 255) / 256;
+        device const uchar *row_ptr = q_weight + row * num_blocks * 144;
+        float sum = 0;
+        for (int i = (int)lane_id; i < num_blocks; i += 32) {
+            device const uchar *block = row_ptr + i * 144;
+            float d = fp16_to_fp32(*(device const ushort*)(block));
+            float dmin = fp16_to_fp32(*(device const ushort*)(block + 2));
+            device const uchar *scales = block + 4;
+            device const uchar *qs = block + 16;
+            for (int j = 0; j < 8; j++) {
+                uchar sc, m;
+                if (j < 4) { sc = scales[j] & 63; m = scales[j + 4] & 63; }
+                else { sc = (scales[j+4] & 0xF) | ((scales[j-4] >> 6) << 4); m = (scales[j+4] >> 4) | ((scales[j] >> 6) << 4); }
+                float d_val = d * scale * (float)sc, m_val = dmin * scale * (float)m;
+                for (int k = 0; k < 16; k++) {
+                    uchar b = qs[j * 16 + k];
+                    sum += (float)normalized[i * 256 + j * 32 + k] * (d_val * (float)(b & 0xF) - m_val);
+                    sum += (float)normalized[i * 256 + j * 32 + k + 16] * (d_val * (float)(b >> 4) - m_val);
+                }
+            }
+        }
+        sum = simd_sum(sum);
+        if (lane_id == 0) q_out[batch * q_dim + row] = safe_half(sum);
+    }
+
+    // K Proj
+    if (row < (uint)kv_dim) {
+        int num_blocks = (dim_in + 255) / 256;
+        device const uchar *row_ptr = k_weight + row * num_blocks * 144;
+        float sum = 0;
+        for (int i = (int)lane_id; i < num_blocks; i += 32) {
+            device const uchar *block = row_ptr + i * 144;
+            float d = fp16_to_fp32(*(device const ushort*)(block));
+            float dmin = fp16_to_fp32(*(device const ushort*)(block + 2));
+            device const uchar *scales = block + 4;
+            device const uchar *qs = block + 16;
+            for (int j = 0; j < 8; j++) {
+                uchar sc, m;
+                if (j < 4) { sc = scales[j] & 63; m = scales[j + 4] & 63; }
+                else { sc = (scales[j+4] & 0xF) | ((scales[j-4] >> 6) << 4); m = (scales[j+4] >> 4) | ((scales[j] >> 6) << 4); }
+                float d_val = d * scale * (float)sc, m_val = dmin * scale * (float)m;
+                for (int k = 0; k < 16; k++) {
+                    uchar b = qs[j * 16 + k];
+                    sum += (float)normalized[i * 256 + j * 32 + k] * (d_val * (float)(b & 0xF) - m_val);
+                    sum += (float)normalized[i * 256 + j * 32 + k + 16] * (d_val * (float)(b >> 4) - m_val);
+                }
+            }
+        }
+        sum = simd_sum(sum);
+        if (lane_id == 0) k_out[batch * kv_dim + row] = safe_half(sum);
+    }
+
+    // V Proj
+    if (row < (uint)kv_dim) {
+        int num_blocks = (dim_in + 255) / 256;
+        device const uchar *row_ptr = v_weight + row * num_blocks * 144;
+        float sum = 0;
+        for (int i = (int)lane_id; i < num_blocks; i += 32) {
+            device const uchar *block = row_ptr + i * 144;
+            float d = fp16_to_fp32(*(device const ushort*)(block));
+            float dmin = fp16_to_fp32(*(device const ushort*)(block + 2));
+            device const uchar *scales = block + 4;
+            device const uchar *qs = block + 16;
+            for (int j = 0; j < 8; j++) {
+                uchar sc, m;
+                if (j < 4) { sc = scales[j] & 63; m = scales[j + 4] & 63; }
+                else { sc = (scales[j+4] & 0xF) | ((scales[j-4] >> 6) << 4); m = (scales[j+4] >> 4) | ((scales[j] >> 6) << 4); }
+                float d_val = d * scale * (float)sc, m_val = dmin * scale * (float)m;
+                for (int k = 0; k < 16; k++) {
+                    uchar b = qs[j * 16 + k];
+                    sum += (float)normalized[i * 256 + j * 32 + k] * (d_val * (float)(b & 0xF) - m_val);
+                    sum += (float)normalized[i * 256 + j * 32 + k + 16] * (d_val * (float)(b >> 4) - m_val);
+                }
+            }
+        }
+        sum = simd_sum(sum);
+        if (lane_id == 0) v_out[batch * kv_dim + row] = safe_half(sum);
+    }
+}

@@ -1,0 +1,173 @@
+package ollama
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// TestResolveModelPath validates model name resolution logic
+func TestResolveModelPath(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "ExactMatch",
+			input:    "llama3.2:latest",
+			expected: "manifests/registry.ollama.ai/library/llama3.2/latest",
+		},
+		{
+			name:     "WithTag",
+			input:    "llama3.2:instruct",
+			expected: "manifests/registry.ollama.ai/library/llama3.2/instruct",
+		},
+		{
+			name:     "PartialMatch",
+			input:    "llama3",
+			expected: "manifests/registry.ollama.ai/library/llama3.2/latest",
+		},
+		{
+			name:     "NoMatch",
+			input:    "gpt2",
+			expected: "manifests/registry.ollama.ai/library/gpt2/latest",
+		},
+		{
+			name:     "InvalidFormat",
+			input:    "",
+			expected: "", // Should return error for empty input
+		},
+		{
+			name:     "SpecialCharacters",
+			input:    "llama3.2@latest",
+			expected: "manifests/registry.ollama.ai/library/llama3.2/latest",
+		},
+		{
+			name:     "PathSeparator",
+			input:    "user/models/llama3.2",
+			expected: "user/models/llama3.2", // Should normalize path separators
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := ResolveModelPath(tt.input)
+
+			if tt.expected == "" {
+				// Expect error for invalid input
+				if err == nil {
+					t.Errorf("Expected error for empty input, got none")
+				}
+				return
+			}
+
+			if err != nil {
+				t.Errorf("ResolveModelPath(%s) failed: %v", tt.input, err)
+				return
+			}
+
+			// Normalize paths for comparison
+			normalizedResult := filepath.ToSlash(result)
+			normalizedExpected := filepath.ToSlash(tt.expected)
+
+			if normalizedResult != normalizedExpected {
+				t.Errorf("ResolveModelPath(%s) = %s, expected %s", tt.input, normalizedResult, normalizedExpected)
+			}
+
+			// Check if result points to a reasonable location
+			if !strings.Contains(result, "library") {
+				t.Errorf("ResolveModelPath(%s) does not point to library directory: %s", tt.input, result)
+			}
+		})
+}
+
+// TestGetOllamaDir validates Ollama directory detection
+func TestGetOllamaDir(t *testing.T) {
+	// Mock different home directories
+	originalHome := os.Getenv("HOME")
+	defer func() {
+		os.Setenv("HOME", originalHome)
+	}()
+
+	tests := []struct {
+		name     string
+		mockHome string
+		expectedOK bool
+	}{
+		{
+			name:     "StandardHome",
+			mockHome: "/Users/testuser",
+			expectedOK: true,
+		},
+		{
+			name:     "NoHome",
+			mockHome: "",
+			expectedOK: false,
+		},
+		{
+			name:     "HomeWithOLLAMA",
+			mockHome: "/Users/testuser/.ollama",
+			expectedOK: true,
+		},
+		{
+			name:     "CustomDataDir",
+			mockHome: "/custom/data/.ollama",
+			expectedOK: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			os.Setenv("HOME", tt.mockHome)
+			defer func() {
+				os.Setenv("HOME", originalHome)
+			}()
+
+			result, err := GetOllamaDir()
+
+			if tt.expectedOK {
+				if err != nil {
+					t.Errorf("GetOllamaDir(%s) failed: %v", tt.mockHome, err)
+					return
+				}
+				if result == "" {
+					t.Errorf("GetOllamaDir(%s) returned empty, expected directory", tt.mockHome)
+				}
+			} else {
+				if err == nil {
+					t.Errorf("GetOllamaDir(%s) should have failed, but got success", tt.mockHome)
+				}
+			}
+		})
+}
+
+// TestManifestParsing tests the GGUF manifest parsing functionality
+func TestManifestParsing(t *testing.T) {
+	// Create a temporary directory structure for testing
+	tempDir := t.TempDir()
+	defer os.RemoveAll(tempDir)
+
+	// Create mock manifest structure
+	manifestDir := filepath.Join(tempDir, "manifests", "registry.ollama.ai", "library", "llama3.2", "latest")
+	modelDir := filepath.Join(manifestDir, "model")
+
+	// Create mock model file
+	modelFile := filepath.Join(modelDir, "ggml-model-f16.gguf")
+	err := os.WriteFile(modelFile, "", 0644)
+	if err != nil {
+		t.Fatalf("Failed to create mock model file: %v", err)
+	}
+
+	// Test parsing the mock directory
+	resolved, err := ResolveModelPath("llama3.2")
+	if err != nil {
+		t.Fatalf("Failed to resolve mock model: %v", err)
+	}
+
+	// Should resolve to our mock model
+	if !strings.Contains(resolved, tempDir) {
+		t.Errorf("ResolveModelPath did not resolve to temp directory: got %s", resolved)
+	}
+}

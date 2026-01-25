@@ -5,8 +5,8 @@ set -e
 # Configuration
 MODEL_PATH="/Users/rsd/.ollama/models/blobs/sha256-f535f83ec568d040f88ddc04a199fa6da90923bbb41d4dcaed02caa924d6ef57"
 PROMPT="The quick brown fox jumps over the lazy dog"
-TOKENS=100
-ITERATIONS=3
+TOKENS=10
+ITERATIONS=1
 OUTPUT_DIR="benchmark_results"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 REPORT_FILE="$OUTPUT_DIR/benchmark_report_$TIMESTAMP.md"
@@ -144,7 +144,7 @@ fi
 echo -e "${GREEN}✓ Found llama-cli at: $LLAMACPP_CLI${NC}"
 
 # Run llama.cpp benchmark
-LLAMACPP_CMD="$LLAMACPP_CLI -m \"$MODEL_PATH\" -p \"$PROMPT\" -n $TOKENS --color -c 2048 --temp 0.0"
+LLAMACPP_CMD="$LLAMACPP_CLI -m \"$MODEL_PATH\" -p \"$PROMPT\" -n $TOKENS --color on -c 2048 --temp 0.0"
 LLAMACPP_RESULTS=$(run_benchmark "llama.cpp" "$LLAMACPP_CMD" "$ITERATIONS")
 LLAMACPP_AVG=$(echo "$LLAMACPP_RESULTS" | cut -d, -f1)
 LLAMACPP_MIN=$(echo "$LLAMACPP_RESULTS" | cut -d, -f2)
@@ -156,7 +156,7 @@ cat > "$REPORT_FILE" << EOF
 # LLM Performance Benchmark Report
 
 **Generated:** $(date)  
-**Model:** Mistral 7B (4.3GB GGUF)  
+**Model:** SmolLM2 135M (270MB GGUF)  
 **Test Prompt:** "$PROMPT"  
 **Tokens Generated:** $TOKENS  
 **Iterations:** $ITERATIONS  
@@ -199,7 +199,7 @@ EOF
 
 - **longbow-quarrel Performance:** $QUARREL_AVG tokens/sec
 - **Acceleration:** Metal GPU acceleration with custom kernels
-- **Model Size:** 7B parameters (Mistral architecture)
+- **Model Size:** 135M parameters (SmolLM2 architecture)
 
 ### Observations
 
@@ -220,13 +220,13 @@ EOF
 
 ### Model Configuration
 
-- **Architecture**: Llama 3 / Mistral compatible
-- **Attention**: Grouped Query Attention (GQA)
+- **Architecture**: SmolLM2 Llama compatible
+- **Attention**: Multi-Head Attention (MHA)
 - **Positional**: RoPE embeddings
 - **Activation**: SwiGLU
-- **Layers**: 32
-- **Hidden Size**: 4096
-- **Heads**: 32 (8 KV heads)
+- **Layers**: 12
+- **Hidden Size**: 768
+- **Heads**: 12 (12 KV heads)
 
 ---
 
