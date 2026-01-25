@@ -866,7 +866,7 @@ func (e *Engine) InferWithCallback(inputTokens []int, tokensToGenerate int, samp
 
 	// Create scratch buffers for the layer fusion
 	// New Scratch Buffer for Zero-Alloc	// Initialize scratch buffers (Heap backed, includes Logits)
-	scratch := e.Ctx.NewLayerScratch(1, e.Config.Dim, e.Config.HiddenDim,
+	scratch := e.Ctx.NewLayerScratch(len(inputTokens), e.Config.Dim, e.Config.HiddenDim,
 		e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.SeqLen, e.Config.VocabSize)
 	defer scratch.Free()
 

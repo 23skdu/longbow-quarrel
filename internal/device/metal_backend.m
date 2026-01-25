@@ -18,6 +18,7 @@
 @property(strong) id<MTLComputePipelineState> pipelineEmbedding_Q4K;
 @property(strong) id<MTLComputePipelineState> pipelineEmbedding_Q4K_Optimized;
 @property(strong) id<MTLComputePipelineState> pipelineStoreKV_F16;
+@property(strong) id<MTLComputePipelineState> pipelineStoreKV_F16_Batch;
 @property(strong) id<MTLComputePipelineState> pipelineAdd_F16;
 @property(strong) id<MTLComputePipelineState> pipelineCopy_F16;
 @property(strong) id<MTLComputePipelineState> pipelineSwiGLU_F16;
@@ -50,6 +51,9 @@
 @property(strong) id<MTLComputePipelineState> pipelineRMSNorm_F32_F16;
 @property(strong) id<MTLComputePipelineState> pipelineAdd_F32_F16;
 @property(strong) id<MTLComputePipelineState> pipelineRMSNormLinear_Q4K_F16;
+@property(strong) id<MTLComputePipelineState> pipelineRMSNormLinear_F16;
+@property(strong) id<MTLComputePipelineState> pipelineRMSNormQKV_F16;
+@property(strong) id<MTLComputePipelineState> pipelineRMSNormQKV_Q4K_F16;
 @property(strong) id<MTLComputePipelineState> pipelineDebugRoPEFreq;
 @property(strong) id<MTLComputePipelineState> pipelineDebugDot;
 @property(strong) id<MTLComputePipelineState> pipelineSwiGLULinear_Q4K_F16;
@@ -176,6 +180,7 @@ MetalContextRef Metal_Init(const char *libSource) {
   ctx.pipelineEmbedding_Q4K = loadPipeline(ctx, @"embedding_q4k_f16");
   ctx.pipelineEmbedding_Q4K_Optimized = loadPipeline(ctx, @"embedding_q4k_f16_optimized");
   ctx.pipelineStoreKV_F16 = loadPipeline(ctx, @"store_kv_f16");
+  ctx.pipelineStoreKV_F16_Batch = loadPipeline(ctx, @"store_kv_f16_batch");
   ctx.pipelineAdd_F16 = loadPipeline(ctx, @"add_f16");
   ctx.pipelineCopy_F16 = loadPipeline(ctx, @"copy_f16");
   ctx.pipelineSwiGLU_F16 = loadPipeline(ctx, @"swiglu_f16");
@@ -184,6 +189,9 @@ MetalContextRef Metal_Init(const char *libSource) {
   ctx.pipelineAttValues_F16 = loadPipeline(ctx, @"att_values_f16");
   ctx.pipelineAttFused_F16 = loadPipeline(ctx, @"att_fused_f16");
   ctx.pipelineScale_F16 = loadPipeline(ctx, @"scale_f16");
+  ctx.pipelineRMSNormLinear_F16 = loadPipeline(ctx, @"rmsnorm_linear_f16");
+  ctx.pipelineRMSNormQKV_F16 = loadPipeline(ctx, @"rmsnorm_qkv_f16");
+  ctx.pipelineRMSNormQKV_Q4K_F16 = loadPipeline(ctx, @"rmsnorm_qkv_q4k_f16");
 
   // FP32 Load
   ctx.pipelineRMSNorm_F32 = loadPipeline(ctx, @"rmsnorm_f32");
@@ -736,7 +744,21 @@ void Metal_CopyBufferToF32(MetalContextRef ctx, MetalBufferRef src, void *dst,
 void Metal_RMSNormLinear_F16(MetalContextRef ctx, MetalBufferRef i, int oI,
                              MetalBufferRef nW, int oNW, MetalBufferRef w,
                              int oW, MetalBufferRef r, int oR, int iD, int oD,
-                             float e) {}
+                             float e) {
+  MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
+  id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
+  [enc setComputePipelineState:mc.pipelineRMSNormLinear_F16];
+  [enc setBuffer:(__bridge id<MTLBuffer>)i offset:oI atIndex:0];
+  [enc setBuffer:(__bridge id<MTLBuffer>)nW offset:oNW atIndex:1];
+  [enc setBuffer:(__bridge id<MTLBuffer>)w offset:oW atIndex:2];
+  [enc setBuffer:(__bridge id<MTLBuffer>)r offset:oR atIndex:3];
+  [enc setBytes:&iD length:4 atIndex:4];
+  [enc setBytes:&oD length:4 atIndex:5];
+  [enc setBytes:&e length:4 atIndex:6];
+  [enc dispatchThreads:MTLSizeMake(32, oD, 1)
+      threadsPerThreadgroup:MTLSizeMake(32, 4, 1)];
+  [mc barrier];
+}
 
 void Metal_RMSNormLinear_Q4K_F16(MetalContextRef ctx, MetalBufferRef input,
                                  int offIn, MetalBufferRef normWeight,
@@ -1298,5 +1320,57 @@ void Metal_EmbeddingQ4_0_F16(MetalContextRef ctx, MetalBufferRef weights,
   int threads = (cols < 1024) ? cols : 1024;
   [enc dispatchThreads:MTLSizeMake(cols, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(threads, 1, 1)];
+  [mc barrier];
+}
+
+void Metal_StoreKV_F16_Batch(MetalContextRef ctx, MetalBufferRef k, int offK,
+                            MetalBufferRef v, int offV, MetalBufferRef kC, int offKC,
+                            MetalBufferRef vC, int offVC, int p, int h, int hd,
+                            int windowSize, int batchSize) {
+  MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
+  id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
+  [enc setComputePipelineState:mc.pipelineStoreKV_F16_Batch];
+  int kv_dim = h * hd;
+  [enc setBuffer:(__bridge id<MTLBuffer>)k offset:offK atIndex:0];
+  [enc setBuffer:(__bridge id<MTLBuffer>)v offset:offV atIndex:1];
+  [enc setBuffer:(__bridge id<MTLBuffer>)kC offset:offKC atIndex:2];
+  [enc setBuffer:(__bridge id<MTLBuffer>)vC offset:offVC atIndex:3];
+  [enc setBytes:&p length:4 atIndex:4];
+  [enc setBytes:&kv_dim length:4 atIndex:5];
+  [enc setBytes:&windowSize length:4 atIndex:6];
+  
+  [enc dispatchThreads:MTLSizeMake(kv_dim, batchSize, 1)
+      threadsPerThreadgroup:MTLSizeMake(MIN(kv_dim, 256), 1, 1)];
+  [mc barrier];
+}
+
+void Metal_RMSNormQKV_Q4K_F16(MetalContextRef ctx, MetalBufferRef input, int offIn,
+                             MetalBufferRef normWeight, int offNormWeight,
+                             MetalBufferRef qWeight, int offQW,
+                             MetalBufferRef kWeight, int offKW,
+                             MetalBufferRef vWeight, int offVW,
+                             MetalBufferRef qOut, int offQO, MetalBufferRef kOut,
+                             int offKO, MetalBufferRef vOut, int offVO, int inDim,
+                             int qDim, int kvDim, float eps, float scale) {
+  MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
+  id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
+  [enc setComputePipelineState:mc.pipelineRMSNormQKV_Q4K_F16];
+  [enc setBuffer:(__bridge id<MTLBuffer>)input offset:offIn atIndex:0];
+  [enc setBuffer:(__bridge id<MTLBuffer>)normWeight offset:offNormWeight atIndex:1];
+  [enc setBuffer:(__bridge id<MTLBuffer>)qWeight offset:offQW atIndex:2];
+  [enc setBuffer:(__bridge id<MTLBuffer>)kWeight offset:offKW atIndex:3];
+  [enc setBuffer:(__bridge id<MTLBuffer>)vWeight offset:offVW atIndex:4];
+  [enc setBuffer:(__bridge id<MTLBuffer>)qOut offset:offQO atIndex:5];
+  [enc setBuffer:(__bridge id<MTLBuffer>)kOut offset:offKO atIndex:6];
+  [enc setBuffer:(__bridge id<MTLBuffer>)vOut offset:offVO atIndex:7];
+  [enc setBytes:&inDim length:4 atIndex:8];
+  [enc setBytes:&qDim length:4 atIndex:9];
+  [enc setBytes:&kvDim length:4 atIndex:10];
+  [enc setBytes:&eps length:4 atIndex:11];
+  [enc setBytes:&scale length:4 atIndex:12];
+
+  int max_out_dim = qDim > kvDim ? qDim : kvDim;
+  [enc dispatchThreads:MTLSizeMake(32, max_out_dim, 1)
+      threadsPerThreadgroup:MTLSizeMake(32, 4, 1)];
   [mc barrier];
 }
