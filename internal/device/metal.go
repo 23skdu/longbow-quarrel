@@ -16,7 +16,6 @@ import "C"
 import (
 	_ "embed"
 	"fmt"
-	"log"
 	"math"
 	"runtime"
 	"sync"
@@ -1065,13 +1064,13 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 
 	// Use scratch buffers instead of allocating
 	normed := scratch.Normed
-	
+
 	// 1. RMSNorm (Batched)
 	t0_rmsnorm1 := time.Now()
 	if t.dataType == DataTypeF32 {
 		t.RMSNormFP32_ToF16_Into(attnNorm, eps, normed)
 	} else {
-		C.Metal_RMSNorm_F16(t.ctx.ref, t.buf, C.int(t.Offset), attnNorm.buf, C.int(attnNorm.Offset), 
+		C.Metal_RMSNorm_F16(t.ctx.ref, t.buf, C.int(t.Offset), attnNorm.buf, C.int(attnNorm.Offset),
 			normed.buf, C.int(normed.Offset), C.int(t.rows), C.int(t.cols), C.float(eps))
 	}
 	metrics.RecordKernelDuration("Layer_RMSNorm1", time.Since(t0_rmsnorm1))
@@ -1081,14 +1080,7 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 	kPart := scratch.KPart
 	vPart := scratch.VPart
 
-	if q.dataType == DataTypeF16 && k.dataType == DataTypeF16 && v.dataType == DataTypeF16 {
-		t0_qkv := time.Now()
-		C.Metal_RMSNormQKV_F16(t.ctx.ref, t.buf, C.int(t.Offset), attnNorm.buf, C.int(attnNorm.Offset),
-			q.buf, C.int(q.Offset), k.buf, C.int(k.Offset), v.buf, C.int(v.Offset),
-			qPart.buf, C.int(qPart.Offset), kPart.buf, C.int(kPart.Offset), vPart.buf, C.int(vPart.Offset),
-			C.int(t.cols), C.int(q.rows), C.int(k.rows), C.float(eps))
-		metrics.RecordKernelDuration("Layer_QKV_Fused", time.Since(t0_qkv))
-	} else if q.dataType == DataTypeQ4K && k.dataType == DataTypeQ4K && v.dataType == DataTypeQ4K {
+	if q.dataType == DataTypeQ4K && k.dataType == DataTypeQ4K && v.dataType == DataTypeQ4K {
 		t0_qkv := time.Now()
 		C.Metal_RMSNormQKV_Q4K_F16(t.ctx.ref, t.buf, C.int(t.Offset), attnNorm.buf, C.int(attnNorm.Offset),
 			q.buf, C.int(q.Offset), k.buf, C.int(k.Offset), v.buf, C.int(v.Offset),
@@ -1123,7 +1115,9 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		offQ := i * qStride
 		offAtt := i * qStride
 		maxCtxLen := kCache.Cols()
-		if maxCtxLen == 0 { maxCtxLen = p + 1 }
+		if maxCtxLen == 0 {
+			maxCtxLen = p + 1
+		}
 		C.Metal_AttFused_F16(t.ctx.ref, qPart.buf, C.int(qPart.Offset+offQ),
 			kCache.buf, C.int(kCache.Offset), vCache.buf, C.int(vCache.Offset),
 			attOut.buf, C.int(attOut.Offset+offAtt),
@@ -1215,67 +1209,6 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		}
 	}
 }
-
-// 3. RoPE (Batched)
-	t0_rope := time.Now()
-	// Process Q
-	C.Metal_RoPE_F16(t.ctx.ref, qPart.buf, C.int(qPart.Offset), 1, C.int(t.rows), C.int(heads), C.int(headDim), C.int(pos), C.float(ropeTheta))
-	// Process K
-	C.Metal_RoPE_F16(t.ctx.ref, kPart.buf, C.int(kPart.Offset), 1, C.int(t.rows), C.int(kvHeads), C.int(headDim), C.int(pos), C.float(ropeTheta))
-	metrics.RecordKernelDuration("Layer_RoPE", time.Since(t0_rope))
-
-	// 4. Store K/V (Batched)
-	t0_storekv := time.Now()
-	C.Metal_StoreKV_F16_Batch(t.ctx.ref, kPart.buf, C.int(kPart.Offset), vPart.buf, C.int(vPart.Offset),
-		kCache.buf, C.int(kCache.Offset), vCache.buf, C.int(vCache.Offset),
-		C.int(pos), C.int(kvHeads), C.int(headDim), C.int(windowSize), C.int(t.rows))
-	metrics.RecordKernelDuration("Layer_StoreKV", time.Since(t0_storekv))
-
-	// 5. Attention (Fused kernel, looped per query but much faster than split)
-	attOut := scratch.AttOut
-	qStride := heads * headDim * 2
-	t0_attn := time.Now()
-	for i := 0; i < t.rows; i++ {
-		p := pos + i
-		offQ := i * qStride
-		offAtt := i * qStride
-		maxCtxLen := kCache.Cols() // window size
-		if maxCtxLen == 0 { maxCtxLen = p + 1 }
-
-		C.Metal_AttFused_F16(t.ctx.ref, qPart.buf, C.int(qPart.Offset+offQ),
-			kCache.buf, C.int(kCache.Offset),
-			vCache.buf, C.int(vCache.Offset),
-			attOut.buf, C.int(attOut.Offset+offAtt),
-			C.int(p), C.int(heads), C.int(kvHeads), C.int(headDim), C.int(windowSize), C.int(maxCtxLen))
-	}
-	metrics.RecordKernelDuration("Layer_Attention", time.Since(t0_attn))
-
-	// 6. Attention Output Projection
-	resAtt := scratch.ResAtt
-	t0_attn_out := time.Now()
-	attOut.LinearInto(o, resAtt, globalScale)
-	metrics.RecordKernelDuration("Layer_AttnOut", time.Since(t0_attn_out))
-
-	// 7. Residual Add 1
-	if t.dataType == DataTypeF32 {
-		t.AddMixedInPlace(resAtt)
-	} else {
-		// Simplified residual add for F16
-		C.Metal_Add_F16(t.ctx.ref, t.buf, C.int(t.Offset), resAtt.buf, C.int(resAtt.Offset), t.buf, C.int(t.Offset), C.int(t.rows*t.cols))
-	}
-
-	// 8. FFN Block
-	// (Original FFN block remains below for now, but we could fuse it too)
-
-	// --- Final Cleanup ---
-		normedFFN.ReturnToPool()
-		resFFN.ReturnToPool()
-		// t2 returned if used
-		// t2 returned if used
-	}
-}
-
-// Correct RoPE implementation using arguments expected by Kernel
 func (t *Tensor) RoPE(posOffset, headDim, numHeads, seqLen int, ropeTheta float32) {
 	C.Metal_RoPE_F16(t.ctx.ref, t.buf, C.int(t.Offset), 1, C.int(seqLen), C.int(numHeads), C.int(headDim), C.int(posOffset), C.float(ropeTheta))
 }
@@ -1694,5 +1627,5 @@ func (t *Tensor) CopyFromAt(src *Tensor, destRow int) {
 	if t.dataType == DataTypeF32 {
 		off = destRow * t.cols * 4
 	}
-	C.Metal_Copy_F16(t.ctx.ref, src.buf, C.int(src.Offset), t.buf, C.int(t.Offset + off), C.int(src.rows * src.cols))
+	C.Metal_Copy_F16(t.ctx.ref, src.buf, C.int(src.Offset), t.buf, C.int(t.Offset+off), C.int(src.rows*src.cols))
 }

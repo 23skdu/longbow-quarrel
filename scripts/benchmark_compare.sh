@@ -52,7 +52,7 @@ if [[ "$PROFILE" == "true" ]]; then
     rm -f quarrel.log
     echo "Profile saved to cpu.pprof"
 else
-    QUARREL_OUT=$( "$QUARREL" -model "$MODEL" -n "$N_TOKENS" -prompt "$PROMPT" 2>&1 )
+    QUARREL_OUT=$( go run -tags=darwin,metal ./cmd/quarrel/main.go -model "$MODEL" -n "$N_TOKENS" -prompt "$PROMPT" 2>&1 )
 fi
 
 QUARREL_TPS=$( echo "$QUARREL_OUT" | grep "Inference complete" | sed -E 's/.*\(([0-9.]+) t\/s\).*/\1/' )

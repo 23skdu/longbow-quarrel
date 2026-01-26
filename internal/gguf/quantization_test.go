@@ -82,7 +82,7 @@ func TestQuantizationDequantization(t *testing.T) {
 		q3kData, err := QuantizeWeightsToQ3K(original, len(original))
 		if err != nil {
 			t.Logf("Q3_K quantization not yet implemented: %v", err)
-			t.SkipNow("Q3_K implementation pending")
+			t.SkipNow()
 			return
 		}
 
@@ -133,9 +133,4 @@ func TestQuantizationDequantization(t *testing.T) {
 func QuantizeWeightsToQ3K(weights []float32, numElements int) ([]byte, error) {
 	// Placeholder implementation - Q3_K quantization not yet implemented
 	return nil, nil
-}
-
-func DequantizeQ3K(data []byte, numElements int) []float32 {
-	// Placeholder implementation - Q3_K dequantization not yet implemented
-	return make([]float32, numElements)
 }
