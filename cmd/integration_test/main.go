@@ -1,3 +1,5 @@
+//go:build darwin && metal
+
 package main
 
 import (
@@ -9,7 +11,6 @@ import (
 	"time"
 
 	"github.com/23skdu/longbow-quarrel/internal/engine"
-	"github.com/23skdu/longbow-quarrel/internal/tokenizer"
 )
 
 func main() {
@@ -59,7 +60,7 @@ func main() {
 	for i := 0; i < *warmup; i++ {
 		start := time.Now()
 		prompt := fmt.Sprintf("Warmup iteration %d", i+1)
-		output, err := e.Infer(prompt, *tokens)
+		output, err := e.InferString(prompt, *tokens)
 		if err != nil {
 			results = append(results, InferenceResult{
 				Iteration: i + 1,
@@ -91,7 +92,7 @@ func main() {
 	for i := 0; i < *iterations; i++ {
 		start := time.Now()
 		prompt := fmt.Sprintf("Test iteration %d", i+1)
-		output, err := e.Infer(prompt, *tokens)
+		output, err := e.InferString(prompt, *tokens)
 		if err != nil {
 			results = append(results, InferenceResult{
 				Iteration: *warmup + i + 1,
