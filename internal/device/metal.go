@@ -645,7 +645,7 @@ func (t *Tensor) MatMul(b *Tensor) *Tensor {
 			t.buf, C.int(t.Offset), C.bool(false),
 			b.buf, C.int(b.Offset), C.bool(false),
 			c.buf, C.int(c.Offset),
-			C.int(M), C.int(N), C.int(K))
+			C.int(M), C.int(N), C.int(K), C.float(1.0))
 
 		metrics.RecordKernelDuration("MatMul", time.Since(t0))
 		return c
@@ -730,7 +730,10 @@ func (t *Tensor) LinearInto(weight *Tensor, out *Tensor, scale float32) error {
 	}
 
 	// Use MatMul Kernel
-	if weight.dataType == DataTypeQ4K {
+	if weight.dataType == DataTypeQ3K {
+		C.Metal_MatMul_Q3K_F16(t.ctx.ref, weight.buf, C.int(weight.Offset), C.bool(false), t.buf, C.int(t.Offset), C.bool(false), out.buf, C.int(out.Offset),
+			C.int(t.rows), C.int(weight.rows), C.int(weight.cols), C.float(scale))
+	} else if weight.dataType == DataTypeQ4K {
 		// Q4K weights * F16 input -> F16 output
 		// Swap N, K args to match kernel dim_in (K), dim_out (N)
 		C.Metal_MatMul_Q4K_F16(t.ctx.ref, weight.buf, C.int(weight.Offset), C.bool(false), t.buf, C.int(t.Offset), C.bool(false), out.buf, C.int(out.Offset),
@@ -760,7 +763,8 @@ func (c *Context) RunQ3K_Explicit(w, in, out *Tensor) {
 		w.buf, C.int(w.Offset), C.bool(false),
 		in.buf, C.int(in.Offset), C.bool(false),
 		out.buf, C.int(out.Offset),
-		C.int(1), C.int(w.rows), C.int(w.cols))
+		C.int(1), C.int(w.rows), C.int(w.cols),
+		C.float(1.0))
 }
 
 func (t *Tensor) RMSNorm(weight *Tensor, eps float32) *Tensor {
@@ -777,7 +781,7 @@ func (t *Tensor) RMSNormLinear(normWeight, weight *Tensor, eps float32) *Tensor 
 	C.Metal_RMSNormLinear_F16(t.ctx.ref, t.buf, C.int(t.Offset),
 		normWeight.buf, C.int(normWeight.Offset),
 		weight.buf, C.int(weight.Offset), res.buf, C.int(res.Offset),
-		C.int(t.cols), C.int(weight.rows), C.float(eps))
+		C.int(t.cols), C.int(weight.rows), C.float(eps), C.int(t.rows))
 	return res
 }
 
@@ -799,7 +803,7 @@ func (t *Tensor) RMSNormLinearIntoQ4K(normWeight, weight, out *Tensor, eps float
 		normWeight.buf, C.int(normWeight.Offset),
 		weight.buf, C.int(weight.Offset),
 		out.buf, C.int(out.Offset),
-		C.int(M), C.int(N), C.int(K), C.float(eps), C.float(scale))
+		C.int(M), C.int(N), C.int(K), C.float(eps), C.float(scale), C.int(t.rows))
 }
 
 // SwiGLULinearQ4K performs fused SwiGLU + Linear (Q4_K)
@@ -848,7 +852,7 @@ func (t *Tensor) RMSNormQKV(normWeight, wQ, wK, wV *Tensor, eps float32) (*Tenso
 	C.Metal_RMSNormQKV_F16(t.ctx.ref, t.buf, C.int(t.Offset), normWeight.buf, C.int(normWeight.Offset),
 		wQ.buf, C.int(wQ.Offset), wK.buf, C.int(wK.Offset), wV.buf, C.int(wV.Offset),
 		q.buf, C.int(q.Offset), k.buf, C.int(k.Offset), v.buf, C.int(v.Offset),
-		C.int(t.cols), C.int(wQ.rows), C.int(wK.rows), C.float(eps))
+		C.int(t.cols), C.int(wQ.rows), C.int(wK.rows), C.float(eps), C.int(t.rows))
 	return q, k, v
 }
 
@@ -857,7 +861,7 @@ func (t *Tensor) FusedFFN(normWeight, wGate, wUp, wDown *Tensor, eps float32) *T
 	res := t.ctx.NewTensorPooled(t.rows, t.cols)
 	C.Metal_FusedFFN_F16(t.ctx.ref, t.buf, C.int(t.Offset), normWeight.buf, C.int(normWeight.Offset),
 		wGate.buf, C.int(wGate.Offset), wUp.buf, C.int(wUp.Offset), wDown.buf, C.int(wDown.Offset), res.buf, C.int(res.Offset),
-		C.int(t.cols), C.int(wGate.rows), C.float(eps))
+		C.int(t.cols), C.int(wGate.rows), C.float(eps), C.int(t.rows))
 	return res
 }
 
@@ -1123,7 +1127,7 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		C.Metal_RMSNormQKV_Q4K_F16(t.ctx.ref, t.buf, C.int(t.Offset), attnNorm.buf, C.int(attnNorm.Offset),
 			q.buf, C.int(q.Offset), k.buf, C.int(k.Offset), v.buf, C.int(v.Offset),
 			qPart.buf, C.int(qPart.Offset), kPart.buf, C.int(kPart.Offset), vPart.buf, C.int(vPart.Offset),
-			C.int(t.cols), C.int(q.rows), C.int(k.rows), C.float(eps), C.float(globalScale))
+			C.int(t.cols), C.int(q.rows), C.int(k.rows), C.float(eps), C.float(globalScale), C.int(t.rows))
 		metrics.RecordKernelDuration("Layer_QKV_Fused_Q4K", time.Since(t0_qkv))
 	} else {
 		normed.LinearInto(q, qPart, globalScale)
