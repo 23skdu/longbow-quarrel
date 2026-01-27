@@ -16,10 +16,12 @@ import (
 )
 
 type Output struct {
-	Throughput float64 `json:"throughput_tokens_per_sec"`
-	Output     string  `json:"output"`
-	Duration   float64 `json:"duration_seconds"`
-	Tokens     int     `json:"tokens_generated"`
+	Throughput      float64 `json:"throughput_tokens_per_sec"`
+	Output          string  `json:"output"`
+	TotalDuration   float64 `json:"total_duration_seconds"`
+	PrefillDuration float64 `json:"prefill_duration_seconds"`
+	GenDuration     float64 `json:"generation_duration_seconds"`
+	Tokens          int     `json:"tokens_generated"`
 }
 
 func main() {
@@ -63,7 +65,9 @@ func main() {
 		Temperature: 0.0, // Greedy for coherence check
 	}
 
+	var prefillDuration, genDuration time.Duration
 	start := time.Now()
+	var firstTokenTime time.Time
 
 	// Run inference with timeout
 	type inferResult struct {
@@ -73,7 +77,12 @@ func main() {
 	resultChan := make(chan inferResult, 1)
 
 	go func() {
-		resIds, err := e.Infer(inputTokens, *numTokens, samplerConfig)
+		resIds, err := e.InferWithCallback(inputTokens, *numTokens, samplerConfig, func(token int) {
+			if firstTokenTime.IsZero() {
+				firstTokenTime = time.Now()
+				prefillDuration = time.Since(start)
+			}
+		})
 		resultChan <- inferResult{tokens: resIds, err: err}
 	}()
 
@@ -89,25 +98,39 @@ func main() {
 		log.Fatalf("Inference timed out after %d seconds", *timeoutSec)
 	}
 
-	duration := time.Since(start)
+	totalDuration := time.Since(start)
+	if !firstTokenTime.IsZero() {
+		genDuration = time.Since(firstTokenTime)
+	}
 
 	decoded := tok.Decode(resultIDs)
-	tps := float64(len(resultIDs)) / duration.Seconds()
+
+	// TPS calculation for generation phase (excluding prefill)
+	tps := 0.0
+	if len(resultIDs) > 1 && genDuration > 0 {
+		// We generated N tokens. 1 was during prefill loop completion, N-1 during pure generation loop.
+		tps = float64(len(resultIDs)-1) / genDuration.Seconds()
+	} else if totalDuration > 0 {
+		tps = float64(len(resultIDs)) / totalDuration.Seconds()
+	}
 
 	// Debug: Log tokens
 	log.Printf("DEBUG: Generated Token IDs: %v", resultIDs)
 
 	if *outputFormat == "json" {
 		out := Output{
-			Throughput: tps,
-			Output:     decoded,
-			Duration:   duration.Seconds(),
-			Tokens:     len(resultIDs),
+			Throughput:      tps,
+			Output:          decoded,
+			TotalDuration:   totalDuration.Seconds(),
+			PrefillDuration: prefillDuration.Seconds(),
+			GenDuration:     genDuration.Seconds(),
+			Tokens:          len(resultIDs),
 		}
 		jsonEnc := json.NewEncoder(os.Stdout)
 		jsonEnc.Encode(out)
 	} else {
 		fmt.Printf("Output: %s\n", decoded)
-		fmt.Printf("TPS: %.2f\n", tps)
+		fmt.Printf("TPS (gen): %.2f\n", tps)
+		fmt.Printf("Prefill: %.2fs, Gen: %.2fs\n", prefillDuration.Seconds(), genDuration.Seconds())
 	}
 }

@@ -767,15 +767,17 @@ func (e *Engine) loadModel(path string) error {
 		name := t.Name
 		fmt.Fprintf(os.Stderr, "Loading Tensor %s Dims: %v Type: %vOffset: %d\n", name, t.Dimensions, t.Type, t.Offset)
 
-		// 1. Global weights
-		switch name {
-		case "token_embd.weight":
+		// 1. Global weights (supporting prefixes like nemotron., model., etc.)
+		// Strict check to avoid matching blk.N.attn_output.weight to global output.weight
+		if (strings.HasSuffix(name, "token_embd.weight") || name == "model.embed_tokens.weight") && !strings.Contains(name, "blk.") {
 			e.Weights.TokenEmb = mt
 			continue
-		case "output_norm.weight":
+		}
+		if (strings.HasSuffix(name, "output_norm.weight") || strings.HasSuffix(name, "model.norm.weight")) && !strings.Contains(name, "blk.") {
 			e.Weights.OutputNorm = mt
 			continue
-		case "output.weight":
+		}
+		if (strings.HasSuffix(name, "output.weight") || name == "model.lm_head.weight") && !strings.Contains(name, "blk.") {
 			e.Weights.Output = mt
 			continue
 		}

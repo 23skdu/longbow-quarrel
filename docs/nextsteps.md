@@ -3,87 +3,17 @@
 **Goal:** Close the performance gap (currently ~4x-8x vs Llama.cpp) while maintaining strict coherence and correctness.
 **Targets:** `mistral:latest`, `nemotron-3-nano:latest`, `tinyllama:latest`, `granite4:latest`.
 
-## Phase 0: Mamba/SSM Architecture Support [TOP PRIORITY]
+## Phase 1: Robust Baselines & Regression
 
-**Objective:** Enable full support for Nemotron-3-Nano (Hybrid Mamba/Transformer) which is currently loading but producing incorrect output due to missing SSM layers.
+### 1. New Performance Baselines
 
-### 1. Research & Architecture Design
+- **Objective:** Use the refined benchmark tool to establish accurate, per-phase performance metrics.
+- [ ] Establish new accurate baselines for Mistral, Granite, and TinyLlama (excluding loading/prefill noise).
+- [ ] Compare results against Llama.cpp to quantify the exact gap.
 
-- [ ] Analyze Mamba/SSM data flow (State Space Model parameters: A, B, C, D, dt, z).
-- [ ] Map GGUF tensor names (e.g., `ssm_a`, `ssm_conv1d`) to the correct Mamba algorithm steps.
-- [ ] Design `MambaLayer` struct in Go to handle hybrid architecture (interleaved or blocks).
+### 2. Automated Regression Testing (Coherence)
 
-### 2. Tensor Loading (GGUF)
-
-- [ ] Extend `engine.go` weight loading to capture SSM-specific tensors.
-- [ ] Handle `ssm_in`, `ssm_out`, `ssm_conv1d`, `ssm_a`, `ssm_d`, `ssm_dt` weights.
-- [ ] Add "Hybrid" model architecture flag to `EngineConfig`.
-
-### 3. Metal Kernels: Causal Convolution (Conv1d)
-
-- [ ] Write `conv1d_f16` Metal kernel for causal 1D convolution.
-- [ ] Support flexible kernel size (usually 4 for Mamba).
-- [ ] Add unit test: Compare `conv1d` output against Python/Torch reference.
-
-### 4. Metal Kernels: Selective Scan (SSM Core)
-
-- [ ] **Complex Task:** Implement the parallel or sequential selective scan in Metal (MSL).
-- [ ] Handle `scan_f16` operation with time-variant parameters (A, B, C, dt).
-- [ ] Optimize for threadgroup memory usage (crucial for SSM scan performance).
-
-### 5. Layer Implementation (Go Engine)
-
-- [ ] Implement `ComputeMambaLayer` in `engine.go`.
-- [ ] Integrate Input Projection -> Conv1d -> SSM Scan -> Output Projection flow.
-- [ ] Ensure correct residual connection handling (often different in Mamba vs Transformer).
-
-### 6. Hybrid Engine Integration
-
-- [ ] Modify `Infer` loop to switch between `ComputeAttentionLayer` and `ComputeMambaLayer`.
-- [ ] Handle state passing (Mamba has internal state, unlike stateless Transformer attention).
-
-### 7. Unit Testing & Validation
-
-- [ ] Creating `cmd/smoke_test/mamba_test.go`.
-- [ ] **Unit Test:** Run single Mamba layer with fixed weights/input and verify against pre-computed golden values (from `mamba_ssm` Python lib).
-- [ ] **Integration Test:** Verify Nemotron-3-Nano perplexity on small text compared to `transformers`.
-
-### 8. Fuzz Testing (SSM Stability)
-
-- [ ] Create fuzzer for `Scan` kernel: Randomize inputs and `dt` to check for numeric instability (NaNs/Infs).
-- [ ] Verify handling of extreme float16 values in the recursive scan.
-
-### 9. Prometheus Metrics (SSM Specific)
-
-- [ ] Add metrics for `ssm_scan_latency` and `ssm_conv_latency`.
-- [ ] Track `ssm_state_size` memory usage.
-- [ ] Alert on `ssm_divergence` (NaN detection in state).
-
-### 10. Final Verification
-
-- [ ] Run full Nemotron-3-Nano benchmark.
-- [ ] Confirm throughput matches or exceeds `llama.cpp` (Mamba should be faster than Attention).
-
----
-
-## Phase 1: Critical Fixes & Foundation
-
-### 11. Fix Nemotron Loading [DONE]
-
-- **Objective:** Remedy "token embedding weights not loaded" error.
-- [x] Debug GGUF tensor names for Nemotron.
-- [x] Implement fallback for tied embeddings (`token_embd` <-> `output`).
-- [x] Cap context length to prevent OOM.
-
-### 12. Robust Profiling & Baselines
-
-- **Objective:** Identify exact bottlenecks.
-- [x] Create `scripts/profile_metal.sh`.
-- [x] Establish baseline reports (Mistral, Granite, TinyLlama).
-- [ ] Refine benchmark to exclude GGUF load time.
-
-### 13. Automated Regression Testing (Coherence)
-
+- **Objective:** Ensure optimizations don't break model output.
 - [ ] Implement `cmd/smoke_test/regression_suite.go`.
 - [ ] Enforce "Perplexity/Logit Difference" check.
 
