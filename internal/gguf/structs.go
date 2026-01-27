@@ -77,3 +77,36 @@ type ErrUnsupportedVersion struct{ Version uint32 }
 func (e ErrUnsupportedVersion) Error() string {
 	return fmt.Sprintf("unsupported GGUF version: %d", e.Version)
 }
+
+func (t GGMLType) String() string {
+	switch t {
+	case GGMLTypeF32:
+		return "F32"
+	case GGMLTypeF16:
+		return "F16"
+	case GGMLTypeQ4_0:
+		return "Q4_0"
+	case GGMLTypeQ4_1:
+		return "Q4_1"
+	case GGMLTypeQ5_0:
+		return "Q5_0"
+	case GGMLTypeQ8_0:
+		return "Q8_0"
+	case GGMLTypeQ2_K:
+		return "Q2_K"
+	case GGMLTypeQ3_K:
+		return "Q3_K"
+	case GGMLTypeQ4_K:
+		return "Q4_K"
+	case GGMLTypeQ5_K:
+		return "Q5_K"
+	case GGMLTypeQ6_K:
+		return "Q6_K"
+	case GGMLTypeQ8_K:
+		return "Q8_K"
+	case GGMLTypeQ4_K_S:
+		return "Q4_K_S"
+	default:
+		return fmt.Sprintf("UNKNOWN_TYPE_%d", t)
+	}
+}
