@@ -113,7 +113,7 @@ void Metal_RMSNormLinear_F16(MetalContextRef ctx, MetalBufferRef input,
                              int offIn, MetalBufferRef normWeight,
                              int offNormWeight, MetalBufferRef weight,
                              int offWeight, MetalBufferRef result, int offRes,
-                             int inDim, int outDim, float eps);
+                             int inDim, int outDim, float eps, int batchSize);
 
 // Matrix Multiplication (MPS)
 void Metal_MatMul_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
@@ -127,7 +127,8 @@ void Metal_MatMul_Q4K_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
 
 void Metal_MatMul_Q3K_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
                           bool transA, MetalBufferRef b, int offB, bool transB,
-                          MetalBufferRef c, int offC, int M, int N, int K);
+                          MetalBufferRef c, int offC, int M, int N, int K,
+                          float scale);
 
 void Metal_MatMul_Q6K_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
                           bool transA, MetalBufferRef b, int offB, bool transB,
@@ -140,15 +141,13 @@ void Metal_BatchedMatMul_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
                              MetalBufferRef c, int offC, int strideC, int M,
                              int N, int K, int batchCount);
 
-void Metal_RMSNormQKV_Q4K_F16(MetalContextRef ctx, MetalBufferRef input,
-                              int offIn, MetalBufferRef normWeight,
-                              int offNormWeight, MetalBufferRef qWeight,
-                              int offQW, MetalBufferRef kWeight, int offKW,
-                              MetalBufferRef vWeight, int offVW,
-                              MetalBufferRef qOut, int offQO,
-                              MetalBufferRef kOut, int offKO,
-                              MetalBufferRef vOut, int offVO, int inDim,
-                              int qDim, int kvDim, float eps, float scale);
+void Metal_RMSNormQKV_Q4K_F16(
+    MetalContextRef ctx, MetalBufferRef input, int offIn,
+    MetalBufferRef normWeight, int offNormWeight, MetalBufferRef qWeight,
+    int offQW, MetalBufferRef kWeight, int offKW, MetalBufferRef vWeight,
+    int offVW, MetalBufferRef qOut, int offQO, MetalBufferRef kOut, int offKO,
+    MetalBufferRef vOut, int offVO, int inDim, int qDim, int kvDim, float eps,
+    float scale, int batchSize);
 void Metal_RMSNormQKV_F16(MetalContextRef ctx, MetalBufferRef input, int offIn,
                           MetalBufferRef normWeight, int offNormWeight,
                           MetalBufferRef qWeight, int offQW,
@@ -156,7 +155,7 @@ void Metal_RMSNormQKV_F16(MetalContextRef ctx, MetalBufferRef input, int offIn,
                           MetalBufferRef vWeight, int offVW,
                           MetalBufferRef qOut, int offQO, MetalBufferRef kOut,
                           int offKO, MetalBufferRef vOut, int offVO, int inDim,
-                          int qDim, int kvDim, float eps);
+                          int qDim, int kvDim, float eps, int batchSize);
 
 void Metal_FusedFFN_F16(MetalContextRef ctx, MetalBufferRef input, int offIn,
                         MetalBufferRef normWeight, int offNormWeight,
@@ -164,14 +163,14 @@ void Metal_FusedFFN_F16(MetalContextRef ctx, MetalBufferRef input, int offIn,
                         MetalBufferRef upWeight, int offUW,
                         MetalBufferRef downWeight, int offDW,
                         MetalBufferRef output, int offOut, int inDim,
-                        int interDim, float eps);
+                        int interDim, float eps, int batchSize);
 
 void Metal_RMSNormLinear_Q4K_F16(MetalContextRef ctx, MetalBufferRef input,
                                  int offIn, MetalBufferRef normWeight,
                                  int offNormWeight, MetalBufferRef weight,
                                  int offWeight, MetalBufferRef result,
                                  int offRes, int M, int N, int K, float eps,
-                                 float scale);
+                                 float scale, int batchSize);
 
 void Metal_SwiGLULinear_Q4K_F16(MetalContextRef ctx, MetalBufferRef gateIn,
                                 int offGate, MetalBufferRef upIn, int offUp,
