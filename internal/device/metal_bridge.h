@@ -59,9 +59,9 @@ void Metal_Embedding_F16(MetalContextRef ctx, MetalBufferRef weights, int offW,
 void Metal_Embedding_Q4K(MetalContextRef ctx, MetalBufferRef weights, int offW,
                          MetalBufferRef result, int offRes, int rowIdx,
                          int cols, float scale);
-void Metal_Embedding_Q4K_Optimized(MetalContextRef ctx, MetalBufferRef weights, int offW,
-                                  MetalBufferRef result, int offRes, int rowIdx,
-                                  int cols, float scale);
+void Metal_Embedding_Q4K_Optimized(MetalContextRef ctx, MetalBufferRef weights,
+                                   int offW, MetalBufferRef result, int offRes,
+                                   int rowIdx, int cols, float scale);
 
 // Llama Specific Kernels
 void Metal_RMSNorm_F16(MetalContextRef ctx, MetalBufferRef input, int offIn,
@@ -80,7 +80,11 @@ void Metal_SwiGLU_F16(MetalContextRef ctx, MetalBufferRef inputVal, int offVal,
 void Metal_Softmax_F16(MetalContextRef ctx, MetalBufferRef input, int offIn,
                        MetalBufferRef result, int offRes, int rows, int cols);
 
-void Metal_StoreKV_F16_Batch(MetalContextRef ctx, MetalBufferRef k, int offK, MetalBufferRef v, int offV, MetalBufferRef kCache, int offKC, MetalBufferRef vCache, int offVC, int pos, int heads, int headDim, int windowSize, int batchSize);
+void Metal_StoreKV_F16_Batch(MetalContextRef ctx, MetalBufferRef k, int offK,
+                             MetalBufferRef v, int offV, MetalBufferRef kCache,
+                             int offKC, MetalBufferRef vCache, int offVC,
+                             int pos, int heads, int headDim, int windowSize,
+                             int batchSize);
 void Metal_StoreKV_F16(MetalContextRef ctx, MetalBufferRef k, int offK,
                        MetalBufferRef v, int offV, MetalBufferRef kCache,
                        int offKC, MetalBufferRef vCache, int offVC, int pos,
@@ -136,7 +140,15 @@ void Metal_BatchedMatMul_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
                              MetalBufferRef c, int offC, int strideC, int M,
                              int N, int K, int batchCount);
 
-void Metal_RMSNormQKV_Q4K_F16(MetalContextRef ctx, MetalBufferRef input, int offIn, MetalBufferRef normWeight, int offNormWeight, MetalBufferRef qWeight, int offQW, MetalBufferRef kWeight, int offKW, MetalBufferRef vWeight, int offVW, MetalBufferRef qOut, int offQO, MetalBufferRef kOut, int offKO, MetalBufferRef vOut, int offVO, int inDim, int qDim, int kvDim, float eps, float scale);
+void Metal_RMSNormQKV_Q4K_F16(MetalContextRef ctx, MetalBufferRef input,
+                              int offIn, MetalBufferRef normWeight,
+                              int offNormWeight, MetalBufferRef qWeight,
+                              int offQW, MetalBufferRef kWeight, int offKW,
+                              MetalBufferRef vWeight, int offVW,
+                              MetalBufferRef qOut, int offQO,
+                              MetalBufferRef kOut, int offKO,
+                              MetalBufferRef vOut, int offVO, int inDim,
+                              int qDim, int kvDim, float eps, float scale);
 void Metal_RMSNormQKV_F16(MetalContextRef ctx, MetalBufferRef input, int offIn,
                           MetalBufferRef normWeight, int offNormWeight,
                           MetalBufferRef qWeight, int offQW,
@@ -251,6 +263,12 @@ void Metal_RMSNorm_F32_F16(MetalContextRef ctx, MetalBufferRef input, int offIn,
 void Metal_Add_F32_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
                        MetalBufferRef b, int offB, MetalBufferRef result,
                        int offRes, int count);
+
+void Metal_AttPaged_F16(MetalContextRef ctx, MetalBufferRef q, int offQ,
+                        MetalBufferRef kC, int offK, MetalBufferRef vC,
+                        int offV, MetalBufferRef r, int offR,
+                        MetalBufferRef blockTable, int offBT, int p, int nh,
+                        int kh, int hd, int blockSize, int maxCtxLen);
 
 #ifdef __cplusplus
 }

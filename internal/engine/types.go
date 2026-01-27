@@ -6,18 +6,9 @@ import (
 	"encoding/json"
 	"os"
 
+	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/device"
-
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
-)
-
-type PrecisionMode int
-
-const (
-	PrecisionAuto   PrecisionMode = iota // Heuristic based on Dim
-	PrecisionFP16                        // Full FP16
-	PrecisionF32FFN                      // FP32 FFN for small models
-	PrecisionMixed                       // Mixed precision for large models
 )
 
 type ActivationTrace struct {
@@ -43,25 +34,6 @@ const (
 	CollapseThreshold   = 0.00001
 	SaturationThreshold = 10000.0
 )
-
-type LlamaConfig struct {
-	Dim           int
-	HiddenDim     int
-	Layers        int
-	Heads         int
-	KVHeads       int
-	HeadDim       int // Dim / Heads usually
-	VocabSize     int
-	SeqLen        int
-	Eps           float32
-	RopeTheta     float32
-	WindowSize    int // Sliding window size for attention (4096 for Mistral)
-	PrecisionMode PrecisionMode
-
-	// Debug Flags
-	DebugDequant bool
-	KVCacheSize  int // Overrides model's default if > 0
-}
 
 type LlamaWeights struct {
 	TokenEmb *device.Tensor // vocab x dim
@@ -89,24 +61,22 @@ type LlamaWeights struct {
 type Engine struct {
 	Ctx     *device.Context
 	Model   *gguf.GGUFFile
-	Config  LlamaConfig
+	Config  config.Config
 	Weights *LlamaWeights
 
 	// Quality Evaluation
 	QualityEval *QualityEvaluator
 
 	// KV Cache
-	KVCacheK []*device.Tensor // layers x (seq_len x dim) ? No, pre-allocated buffer
-	KVCacheV []*device.Tensor
+	Cache KVCache
+	// KVCacheK []*device.Tensor // Deprecated: Use Cache.Get()
+	// KVCacheV []*device.Tensor // Deprecated: Use Cache.Get()
 
 	// Cache State
 	CachePos int
 
 	// Tokenizer
 	Tokenizer interface{} // Will be *tokenizer.Tokenizer
-
-	// Debug
-	LastLogits []float32
 
 	// Activation Logger
 	ActLogger *ActivationLogger

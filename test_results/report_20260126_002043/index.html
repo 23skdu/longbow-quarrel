@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Longbow Quarrel Test Report</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .header { background: #f0f0f0; padding: 20px; border-radius: 5px; margin-bottom: 20px; }
+        .section { margin-bottom: 30px; }
+        .success { color: green; font-weight: bold; }
+        .failure { color: red; font-weight: bold; }
+        .warning { color: orange; font-weight: bold; }
+        pre { background: #f5f5f5; padding: 10px; border-radius: 3px; overflow-x: auto; }
+        .timestamp { color: #666; font-size: 0.9em; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Longbow Quarrel Test Report</h1>
+        <p class="timestamp">Generated: Mon Jan 26 00:20:44 PST 2026</p>
+    </div>
+    
+    <div class="section">
+        <h2>Test Environment</h2>
+        <ul>
+            <li>Go Version: go version go1.25.6 darwin/arm64</li>
+            <li>OS: Darwin 25.2.0</li>
+            <li>Architecture: arm64</li>
+            <li>Test Model: SmolLM2 135M</li>
+        </ul>
+    </div>
+    
+    <div class="section">
+        <h2>Test Results</h2>
+<h3>Unit Tests</h3><pre>
+=== Unit Test Summary ===
+Tokenizer: PASS
+GGUF: FAIL
+Metrics: PASS
+
+Detailed reports:
+Tokenizer: /Users/rsd/REPOS/longbow-quarrel/test_results/report_20260126_002043/unit_tests.txt.tokenizer
+GGUF: /Users/rsd/REPOS/longbow-quarrel/test_results/report_20260126_002043/unit_tests.txt.gguf
+Metrics: /Users/rsd/REPOS/longbow-quarrel/test_results/report_20260126_002043/unit_tests.txt.metrics
+</pre>
+    </div>
+</body>
+</html>

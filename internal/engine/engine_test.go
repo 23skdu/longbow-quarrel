@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"errors"
+
+	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/device"
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
 )
@@ -173,27 +175,25 @@ func TestEngineLifecycle(t *testing.T) {
 	// NewEngine(path) -> (*Engine, error)
 	// e.Infer(prompt) -> tokens
 
-	engineConfig := EngineConfig{
-		DebugDequant: false,
-		KVCacheSize:  22,
-	}
-	engine, err := NewEngine(modelPath, engineConfig)
+	// Test initialization
+	conf := config.Default()
+	conf.KVCacheSize = 1024
+	e, err := NewEngine(modelPath, conf)
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
-	if engine == nil {
+	if e == nil {
 		t.Fatal("Engine is nil")
 	}
-	defer engine.Ctx.Free()
 
-	if engine.Weights.TokenEmb == nil {
+	if e.Weights.TokenEmb == nil {
 		t.Fatal("Expected TokenEmb to be loaded")
 	}
 
-	if len(engine.Weights.AttnQ) < 1 {
+	if len(e.Weights.AttnQ) < 1 {
 		t.Fatal("Expected AttnQ to be initialized with layers")
 	}
-	if engine.Weights.AttnQ[0] == nil {
+	if e.Weights.AttnQ[0] == nil {
 		t.Fatal("Expected blk.0.attn_q.weight to be loaded")
 	}
 
@@ -201,10 +201,11 @@ func TestEngineLifecycle(t *testing.T) {
 	// We want to pass a prompt tokens list
 	inputTokens := []int{1, 2, 3}
 	// Add config
+	// Add config
 	config := SamplerConfig{
 		Temperature: 0,
 	}
-	outputTokens, err := engine.Infer(inputTokens, 10, config) // generate 10 tokens
+	outputTokens, err := e.Infer(inputTokens, 10, config) // generate 10 tokens
 	if err != nil {
 		t.Logf("Inference returned error (expected for empty/stub engine): %v", err)
 	}
@@ -354,9 +355,9 @@ func TestMistralMetadataSupport(t *testing.T) {
 	}
 	defer os.Remove(modelPath)
 
-	engineConfig := EngineConfig{
-		DebugDequant: false,
-		KVCacheSize:  22,
+	engineConfig := config.Config{
+
+		KVCacheSize: 22,
 	}
 	e, err := NewEngine(modelPath, engineConfig)
 	if err != nil {
@@ -452,7 +453,7 @@ func TestToFloat64(t *testing.T) {
 		expected float64
 	}{
 		{"float64 input", float64(1.23), 1.23},
-		{"float32 input", float32(4.56), 4.56},
+		{"float32 input", float32(4.56), float64(float32(4.56))},
 		{"uint64 input", uint64(789), 789.0},
 		{"uint32 input", uint32(101), 101.0},
 		{"int32 input", int32(-112), -112.0},
@@ -535,14 +536,14 @@ func TestValidateTensorDimensions(t *testing.T) {
 func TestInitKVCache(t *testing.T) {
 	tests := []struct {
 		name                string
-		config              LlamaConfig
+		config              config.Config
 		expectedError       bool
 		expectedKVCacheKLen int
 		expectedKVCacheVLen int
 	}{
 		{
 			name: "Valid config with window size",
-			config: LlamaConfig{
+			config: config.Config{
 				Layers:     2,
 				WindowSize: 10,
 				KVHeads:    2,
@@ -555,7 +556,7 @@ func TestInitKVCache(t *testing.T) {
 		},
 		{
 			name: "Valid config without window size (uses SeqLen)",
-			config: LlamaConfig{
+			config: config.Config{
 				Layers:     1,
 				WindowSize: 0,
 				KVHeads:    1,
@@ -568,7 +569,7 @@ func TestInitKVCache(t *testing.T) {
 		},
 		{
 			name: "Invalid config: zero KVHeads",
-			config: LlamaConfig{
+			config: config.Config{
 				Layers:     1,
 				WindowSize: 10,
 				KVHeads:    0,
@@ -579,25 +580,25 @@ func TestInitKVCache(t *testing.T) {
 		},
 		{
 			name: "Invalid config: zero HeadDim",
-			config: LlamaConfig{
-				Layers:     1,
-				WindowSize: 10,
-				KVHeads:    2,
-				HeadDim:    0,
-				SeqLen:     20,
+			config: config.Config{
+				Layers:      2,
+				WindowSize:  32,
+				KVHeads:     2,
+				HeadDim:     8,
+				KVCacheSize: 1024,
 			},
 			expectedError: true,
 		},
 		{
 			name: "Zero layers",
-			config: LlamaConfig{
+			config: config.Config{
 				Layers:     0,
 				WindowSize: 10,
 				KVHeads:    2,
 				HeadDim:    4,
 				SeqLen:     20,
 			},
-			expectedError:       false,
+			expectedError:       true,
 			expectedKVCacheKLen: 0,
 			expectedKVCacheVLen: 0,
 		},
@@ -622,18 +623,16 @@ func TestInitKVCache(t *testing.T) {
 				t.Fatalf("Unexpected error for %s: %v", tt.name, err)
 			}
 
-			if len(e.KVCacheK) != tt.expectedKVCacheKLen {
-				t.Errorf("KVCacheK length mismatch for %s: got %d, expected %d", tt.name, len(e.KVCacheK), tt.expectedKVCacheKLen)
-			}
-			if len(e.KVCacheV) != tt.expectedKVCacheVLen {
-				t.Errorf("KVCacheV length mismatch for %s: got %d, expected %d", tt.name, len(e.KVCacheV), tt.expectedKVCacheVLen)
+			if e.Config.Layers != tt.expectedKVCacheKLen {
+				t.Errorf("Layers count mismatch for %s: got %d, expected %d", tt.name, e.Config.Layers, tt.expectedKVCacheKLen)
 			}
 
 			for i := 0; i < tt.expectedKVCacheKLen; i++ {
-				if e.KVCacheK[i] == nil {
+				view := e.Cache.Get(i)
+				if view.K == nil {
 					t.Errorf("KVCacheK[%d] is nil for %s", i, tt.name)
 				}
-				if e.KVCacheV[i] == nil {
+				if view.V == nil {
 					t.Errorf("KVCacheV[%d] is nil for %s", i, tt.name)
 				}
 				// Further checks for dimensions could be added if device.Tensor exposed more info

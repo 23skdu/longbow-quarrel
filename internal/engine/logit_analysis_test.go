@@ -358,7 +358,8 @@ func TestSamplerNaNHandling(t *testing.T) {
 					t.Errorf("Invalid token returned: %d", val)
 				}
 				// Also verify it's not NaN in the logits (if valid)
-				if val < len(tt.logits) && math.IsNaN(float64(tt.logits[val])) {
+				// Exception: If all logits are NaN, any choice will map to NaN, so we can't strictly enforce this check
+				if tt.name != "all NaN" && val < len(tt.logits) && math.IsNaN(float64(tt.logits[val])) {
 					t.Errorf("Returned NaN token")
 				}
 			}

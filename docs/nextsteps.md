@@ -1,30 +1,86 @@
-# Plan: Advanced Attention & Cache Optimization for Longbow-Quarrel
+# Production Readiness & Refactoring Plan
 
-This document outlines a 15-step plan to implement advanced attention and KV cache optimizations in the Longbow-Quarrel inference engine. The primary goals are to increase throughput and reduce latency while maintaining strict output coherence and establishing robust, long-term performance monitoring.
+This document outlines a 10-step plan to refactor `longbow-quarrel` from a research/prototype codebase into a production-ready inference engine. The goal is to remove debug artifacts, standardize interfaces, and ensure stability and observability.
 
-### Phase 1: Foundational Analysis & Infrastructure (Steps 1-5)
+## 1. Codebase Audit & Cleanup Inventory
 
-1.  **Baseline Performance Analysis**: Establish comprehensive benchmarks for the current engine. Define and measure key performance indicators (KPIs) for latency (ms/token), throughput (tokens/sec), GPU memory usage, and output quality (perplexity vs. reference llama.cpp output).
-2.  **Codebase & Architecture Review**: Deep-dive into the existing Metal kernels and Go implementation, focusing on the current attention mechanism (`attention_gqa_test.go`, `kernels.metal`) and the existing KV cache implementation. Document the data flow for autoregressive generation.
-3.  **Identify Optimization Hotspots**: Profile the application under sustained load to pinpoint specific bottlenecks. Use `pprof` and Metal frame capture to analyze memory access patterns, GPU kernel execution time, and CPU overhead in the attention and caching layers.
-4.  **Research State-of-the-Art Techniques**: Conduct a thorough review of modern attention and caching mechanisms suitable for the Metal architecture (e.g., PagedAttention, Sliding Window Attention, FlashAttention adaptations). Evaluate their trade-offs in terms of performance, memory, and implementation complexity on Apple Silicon.
-5.  **Develop Prometheus Metrics Infrastructure**: Instrument the Go application with detailed Prometheus metrics. Key metrics will include KV cache hit/miss rates, attention kernel execution time, end-to-end request latency, and GPU memory allocation. This builds on the existing metrics framework.
+- **Objective**: Identifying all "smoke test" code, debug flags, hardcoded paths, and temporary commands.
+- **Actions**:
+  - Scan for `//go:build` tags that separate debug code.
+  - List all `cmd/` binaries and classify them as "keep", "refactor", or "delete".
+  - Identify `panic()` calls in library code that need error returns.
+  - Locate all `"TODO"` and `"FIXME"` comments related to hacky workarounds.
 
-### Phase 2: Implementation & Unit Testing (Steps 6-8)
+## 2. Removal of Temporary Artifacts
 
-6.  **Implement a Pluggable Cache Abstraction Layer**: Refactor the existing KV cache logic to introduce a standardized `KVCache` interface in Go. This will decouple the engine from a specific cache implementation, allowing for rapid experimentation with different strategies.
-7.  **Unit Test the New Cache Abstraction**: Develop a comprehensive suite of Go unit tests for the `KVCache` interface and the refactored baseline implementation to ensure correctness and prevent regressions.
-8.  **Implement Advanced Cache Strategy 1 (Sliding Window KV Cache)**: Implement the first advanced caching mechanism. Develop thorough unit tests covering its specific logic, including window management, position indexing, and eviction policies.
+- **Objective**: Delete code that was only for initial bring-up.
+- **Actions**:
+  - Delete `cmd/smoke_test`, `cmd/metal_benchmark`, `cmd/quarrel_metal_bench`.
+  - Remove `DebugDequant`, `LastLogits`, and other debug fields from the `Engine` struct unless strictly needed for observability.
+  - Remove strictly temporary test files in `internal/device/` that duplicate proper unit tests.
 
-### Phase 3: Integration, Fuzzing, and Advanced Implementation (Steps 9-12)
+## 3. Structured Logging Implementation
 
-9.  **Integration Testing for Coherency (Strategy 1)**: Build an integration test suite that runs the model with the new cache strategy. The tests will compare model outputs (logits and final tokens) against the baseline to ensure bit-for-bit coherence and numerical stability.
-10. **Implement Advanced Cache Strategy 2 (Paged KV Cache)**: Implement a more complex, high-performance caching mechanism inspired by PagedAttention. This will likely require significant work in memory management within the Go layer and potentially custom Metal kernels for block management. It will be accompanied by its own set of detailed unit tests.
-11. **Integration Testing for Coherency (Strategy 2)**: Expand the integration test suite to cover the paged cache strategy, validating its correctness and impact on output quality against the baseline and Sliding Window versions.
-12. **Develop Fuzz Tests for Cache Layers**: Create a suite of fuzz tests in Go to bombard the cache implementations with random inputs, access patterns, sequence lengths, and concurrency scenarios to uncover stability issues and edge cases.
+- **Objective**: Replace ad-hoc `fmt.Printf` and `log.Println` with a unified structured logger (e.g., `log/slog` or `zap`).
+- **Actions**:
+  - Define a global logger interface/singleton with levels (DEBUG, INFO, WARN, ERROR).
+  - Replace "printf debugging" in hot paths (like `engine.go` loops) with Trace/Debug level logs that are disabled by default.
+  - Ensure kernels do not print to stdout/stderr directly.
 
-### Phase 4: Benchmarking, Deployment, and Monitoring (Steps 13-15)
+## 4. Configuration Unification
 
-13. **Comparative Benchmarking & Analysis**: Conduct rigorous load testing on all implemented cache strategies (baseline, sliding window, paged). Use the previously established Prometheus metrics to analyze performance, memory footprint, and latency under various sequence lengths and batch sizes.
-14. **Documentation and Configuration**: Thoroughly document the new caching strategies, their performance trade-offs, and how to configure them at runtime. Update `README.md` and relevant docs.
-15. **Staged Rollout & Final Validation**: Merge the winning optimization into the `main` branch after a final validation against llama.cpp. Monitor performance metrics to confirm real-world gains.
+- **Objective**: specific configuration structs into a validated configuration module.
+- **Actions**:
+  - Create `internal/config` package.
+  - Define a strict `Config` struct that covers Model, Device, and Engine settings.
+  - Implement validation logic (e.g., check for valid paths, positive dimensions) before Engine startup.
+  - Update `NewEngine` to accept this strongly-typed config.
+
+## 5. Test Suite Consolidation
+
+- **Objective**: Organize tests into Unit, Integration, and Benchmark suites.
+- **Actions**:
+  - Move valid device tests from `internal/device` to `internal/engine` tests where appropriate.
+  - Create a dedicated `test/` directory for integration tests that require model files.
+  - Ensure tests use `internal/config` for setup.
+  - Remove reliance on hardcoded absolute paths in tests; use environment variables or flags.
+
+## 6. Error Handling & Safety
+
+- **Objective**: Make the engine robust against invalid state or inputs.
+- **Actions**:
+  - Audit `internal/device` and `internal/gguf` for `panic()`. Replace with `error` returns.
+  - Ensure all C/Metal resources (`void*`, buffers) are correctly freed in `Defer` or `Close` methods.
+  - Add timeout safety to Metal command buffer executions.
+
+## 7. Observability & Metrics
+
+- **Objective**: Replace one-off timing printouts with standard metrics.
+- **Actions**:
+  - Expand `internal/metrics` to cover all critical paths (token gen time, prompt eval time, cache usage).
+  - Instrument `Engine.Infer` with proper tracing spans.
+  - Expose metrics via a standard endpoint (if running as a server) or hook.
+
+## 8. API Stabilization
+
+- **Objective**: Define clear public interfaces for `Engine` and `Device`.
+- **Actions**:
+  - Make internal helpers private (lowercamelCase).
+  - Document all public Exported methods with GoDoc.
+  - Finalize the `KVCache` interface to allow future swappable implementations.
+
+## 9. Comprehensive Benchmarking Suite
+
+- **Objective**: Create a reproducible benchmark command.
+- **Actions**:
+  - Create `cmd/bench` as the single source of truth for performance.
+  - Support flags for prompt size, batch size, and quantization type.
+  - Output results in a machine-readable format (JSON/CSV) for regression tracking.
+
+## 10. CI/CD & Documentation Finalization
+
+- **Objective**: Ensure the repository is ready for public use and contribution.
+- **Actions**:
+  - Create a `Makefile` with targets: `build`, `test`, `bench`, `lint`.
+  - Update `README.md` and `docs/usage.md` to reflect the new API and commands.
+  - Set up a basic CI workflow (GitHub Actions) to run `make test` on non-Metal inputs (mocked) or skip Metal tests gracefully.

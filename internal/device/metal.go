@@ -492,10 +492,10 @@ func (t *Tensor) ScanMax(name string) (float32, ActivationStats) {
 	stats.Sample = make([]float32, sampleSize)
 	copy(stats.Sample, data[:sampleSize])
 
-	fmt.Printf("[%s] Min: %.4f Max: %.4f Mean: %.4f RMS: %.4f Zeros: %d/%d NaNs: %d Infs: %d\n", name, minVal, maxVal, mean, rms, zeros, len(data), nans, infs)
-	if len(data) >= 32 {
-		fmt.Printf("[%s] Sample: %v\n", name, data[:32])
-	}
+	// fmt.Printf("[%s] Min: %.4f Max: %.4f Mean: %.4f RMS: %.4f Zeros: %d/%d NaNs: %d Infs: %d\n", name, minVal, maxVal, mean, rms, zeros, len(data), nans, infs)
+	// if len(data) >= 32 {
+	// 	fmt.Printf("[%s] Sample: %v\n", name, data[:32])
+	// }
 	return maxVal, stats
 }
 
@@ -1051,7 +1051,8 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		RecordLayer(layerName string, layerIdx int, stats ActivationStats)
 		IsEnabled() bool
 	},
-	pos, heads, kvHeads, headDim int, ropeTheta, eps float32, hiddenDim, ctxLen, windowSize int, globalScale float32, debug bool, precisionMode int) {
+	pos, heads, kvHeads, headDim int, ropeTheta, eps float32, hiddenDim, ctxLen, windowSize int, globalScale float32, debug bool, precisionMode int,
+	blockTable *Tensor, blockSize int, kvStore func(k, v *Tensor)) {
 
 	probe := func(tag string, t *Tensor) {
 		if debug && traceTracker.IsEnabled() {
@@ -1101,12 +1102,16 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 
 	// 4. Store K/V (Batched)
 	t0_storekv := time.Now()
-	C.Metal_StoreKV_F16_Batch(t.ctx.ref, kPart.buf, C.int(kPart.Offset), vPart.buf, C.int(vPart.Offset),
-		kCache.buf, C.int(kCache.Offset), vCache.buf, C.int(vCache.Offset),
-		C.int(pos), C.int(kvHeads), C.int(headDim), C.int(windowSize), C.int(t.rows))
+	if kvStore != nil {
+		kvStore(kPart, vPart)
+	} else {
+		C.Metal_StoreKV_F16_Batch(t.ctx.ref, kPart.buf, C.int(kPart.Offset), vPart.buf, C.int(vPart.Offset),
+			kCache.buf, C.int(kCache.Offset), vCache.buf, C.int(vCache.Offset),
+			C.int(pos), C.int(kvHeads), C.int(headDim), C.int(windowSize), C.int(t.rows))
+	}
 	metrics.RecordKernelDuration("Layer_StoreKV", time.Since(t0_storekv))
 
-	// 5. Attention (Fused)
+	// 5. Attention (Fused or Paged)
 	attOut := scratch.AttOut
 	qStride := heads * headDim * 2
 	t0_attn := time.Now()
@@ -1118,10 +1123,19 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		if maxCtxLen == 0 {
 			maxCtxLen = p + 1
 		}
-		C.Metal_AttFused_F16(t.ctx.ref, qPart.buf, C.int(qPart.Offset+offQ),
-			kCache.buf, C.int(kCache.Offset), vCache.buf, C.int(vCache.Offset),
-			attOut.buf, C.int(attOut.Offset+offAtt),
-			C.int(p), C.int(heads), C.int(kvHeads), C.int(headDim), C.int(windowSize), C.int(maxCtxLen))
+
+		if blockTable != nil {
+			C.Metal_AttPaged_F16(t.ctx.ref, qPart.buf, C.int(qPart.Offset+offQ),
+				kCache.buf, C.int(kCache.Offset), vCache.buf, C.int(vCache.Offset),
+				attOut.buf, C.int(attOut.Offset+offAtt),
+				blockTable.buf, C.int(blockTable.Offset),
+				C.int(p), C.int(heads), C.int(kvHeads), C.int(headDim), C.int(blockSize), C.int(4096))
+		} else {
+			C.Metal_AttFused_F16(t.ctx.ref, qPart.buf, C.int(qPart.Offset+offQ),
+				kCache.buf, C.int(kCache.Offset), vCache.buf, C.int(vCache.Offset),
+				attOut.buf, C.int(attOut.Offset+offAtt),
+				C.int(p), C.int(heads), C.int(kvHeads), C.int(headDim), C.int(windowSize), C.int(maxCtxLen))
+		}
 	}
 	metrics.RecordKernelDuration("Layer_Attention", time.Since(t0_attn))
 
@@ -1310,7 +1324,10 @@ func (t *Tensor) LinearF32_Into(weight *Tensor, out *Tensor, scale float32) {
 				t.buf, C.int(t.Offset), out.buf, C.int(out.Offset),
 				C.int(t.rows), C.int(weight.cols), C.int(weight.rows), C.float(scale))
 		} else {
-			panic("Q4_0 to non-F16 output not implemented in LinearInto")
+			// FP32 output
+			C.Metal_LinearQ4_0_F32(t.ctx.ref, weight.buf, C.int(weight.Offset),
+				t.buf, C.int(t.Offset), out.buf, C.int(out.Offset),
+				C.int(t.rows), C.int(weight.cols), C.int(weight.rows), C.float(scale))
 		}
 	} else {
 		// F16 weights * FP32 input -> FP32 output
@@ -1628,4 +1645,22 @@ func (t *Tensor) CopyFromAt(src *Tensor, destRow int) {
 		off = destRow * t.cols * 4
 	}
 	C.Metal_Copy_F16(t.ctx.ref, src.buf, C.int(src.Offset), t.buf, C.int(t.Offset+off), C.int(src.rows*src.cols))
+}
+
+// AttPaged performs paged attention
+func (t *Tensor) AttPaged(kCache, vCache, blockTable *Tensor, output *Tensor, pos, nh, kh, hd, blockSize int) {
+	C.Metal_AttPaged_F16(
+		t.ctx.ref,
+		t.buf, C.int(t.Offset),
+		kCache.buf, C.int(kCache.Offset),
+		vCache.buf, C.int(vCache.Offset),
+		output.buf, C.int(output.Offset),
+		blockTable.buf, C.int(blockTable.Offset),
+		C.int(pos),
+		C.int(nh),
+		C.int(kh),
+		C.int(hd),
+		C.int(blockSize),
+		C.int(4096), // maxCtxLen (used for internal limit)
+	)
 }

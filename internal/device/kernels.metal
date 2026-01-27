@@ -384,9 +384,9 @@ kernel void rope_f16(device half *x [[ buffer(0) ]],
         int idx1 = lane + half_dim;
         
         // Calculate theta
-        // theta = pos * base^(-2*i/d)
+        // theta = (pos + token_idx) * base^(-2*i/d)
         // i = idx0
-        float theta_i = (float)pos * pow(ropeTheta, -2.0f * (float)idx0 / (float)headDim);
+        float theta_i = (float)(pos + (int)gid.y) * pow(ropeTheta, -2.0f * (float)idx0 / (float)headDim);
         float sin_theta = sin(theta_i);
         float cos_theta = cos(theta_i);
 
@@ -1670,5 +1670,113 @@ kernel void rmsnorm_qkv_q4k_f16(device const half *input [[ buffer(0) ]],
         }
         sum = simd_sum(sum);
         if (lane_id == 0) v_out[batch * kv_dim + row] = safe_half(sum);
+    }
+}
+
+// Paged Attention Kernel
+kernel void att_paged_f16(device const half *q [[ buffer(0) ]],
+                        device const half *k_cache [[ buffer(1) ]],
+                        device const half *v_cache [[ buffer(2) ]],
+                        device half *output [[ buffer(3) ]],
+                        constant int &pos [[ buffer(4) ]],
+                        constant int &num_heads [[ buffer(5) ]],
+                        constant int &kv_heads [[ buffer(6) ]],
+                        constant int &headDim [[ buffer(7) ]],
+                        constant int &block_size [[ buffer(8) ]],
+                        constant int &max_context_len [[ buffer(9) ]],
+                        device const int *block_table [[ buffer(10) ]],
+                        uint3 tid [[ thread_position_in_threadgroup ]],
+                        uint3 nthreads [[ threads_per_threadgroup ]],
+                        uint3 group_id [[ threadgroup_position_in_grid ]]) {
+    uint h = group_id.x; if (h >= (uint)num_heads) return;
+    uint kvh = h / (num_heads / kv_heads);
+    float scale = 1.0f / sqrt((float)headDim);
+
+    device const half *mq = q + h * headDim;
+    uint nt = nthreads.x;
+
+    // Use shared memory for scores
+    // Limit to 4096 tokens for this kernel version
+    threadgroup float s_mem[4096];
+    
+    int effective_len = pos + 1;
+    if (effective_len > 4096) effective_len = 4096; // Cap for safety/smem
+
+    // 1. Parallel score calculation
+    for (int t = tid.x; t < effective_len; t += nt) {
+        int logical_block = t / block_size;
+        int block_offset = t % block_size;
+        int physical_block = block_table[logical_block];
+        
+        int kv_dim = kv_heads * headDim;
+        int block_stride = block_size * kv_dim;
+        
+        device const half *mk = k_cache + physical_block * block_stride + block_offset * kv_dim + kvh * headDim;
+        
+        float d = 0;
+        for (int i = 0; i < headDim; i++) d += (float)mq[i] * (float)mk[i];
+        s_mem[t] = d * scale;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // 2. Softmax Max Reduction
+    threadgroup float tg_mv;
+    float l_mv = -10000.0f;
+    for (int i = tid.x; i < effective_len; i += nt) {
+        float val = s_mem[i];
+        if (val > l_mv) l_mv = val;
+    }
+    l_mv = simd_max(l_mv);
+
+    threadgroup float scratch[32];
+    if ((tid.x & 31) == 0) scratch[tid.x / 32] = l_mv;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (tid.x < 32) {
+        uint n_subgroups = (nt + 31) / 32;
+        float m = (tid.x < n_subgroups) ? scratch[tid.x] : -10000.0f;
+        m = simd_max(m);
+        if (tid.x == 0) tg_mv = m;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float mv = tg_mv;
+
+    // 3. Softmax Sum Reduction
+    threadgroup float tg_se;
+    float l_se = 0;
+    for (int i = tid.x; i < effective_len; i += nt) {
+        float e = exp(s_mem[i] - mv);
+        s_mem[i] = e;
+        l_se += e;
+    }
+    l_se = simd_sum(l_se);
+    if ((tid.x & 31) == 0) scratch[tid.x / 32] = l_se;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (tid.x < 32) {
+        uint n_subgroups = (nt + 31) / 32;
+        float s = (tid.x < n_subgroups) ? scratch[tid.x] : 0.0f;
+        s = simd_sum(s);
+        if (tid.x == 0) tg_se = s;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float se = tg_se;
+    if (se == 0) se = 1e-6f;
+
+    // 4. Result Accumulation
+    if (tid.x < (uint)headDim) {
+        float r = 0;
+        int kv_dim = kv_heads * headDim;
+        int block_stride = block_size * kv_dim;
+
+        for (int t = 0; t < effective_len; t++) {
+            int logical_block = t / block_size;
+            int block_offset = t % block_size;
+            int physical_block = block_table[logical_block];
+            
+            device const half *mv_ptr = v_cache + physical_block * block_stride + block_offset * kv_dim + kvh * headDim + tid.x;
+            r += (s_mem[t] / se) * (float)*mv_ptr;
+        }
+        output[h * headDim + tid.x] = safe_half(r);
     }
 }

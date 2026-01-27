@@ -9,6 +9,7 @@ import (
 	"os"
 	"testing"
 
+	conf "github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/device"
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
 )
@@ -157,9 +158,9 @@ func TestLargeContext_8K_Integration(t *testing.T) {
 	}
 	defer os.Remove(modelPath)
 
-	engineConfig := EngineConfig{
-		DebugDequant: false,
-		KVCacheSize:  22,
+	engineConfig := conf.Config{
+
+		KVCacheSize: 22,
 	}
 	engine, err := NewEngine(modelPath, engineConfig)
 	if err != nil {
@@ -192,9 +193,9 @@ func TestLargeContext_16K_Integration(t *testing.T) {
 	}
 	defer os.Remove(modelPath)
 
-	engineConfig := EngineConfig{
-		DebugDequant: false,
-		KVCacheSize:  22,
+	engineConfig := conf.Config{
+
+		KVCacheSize: 22,
 	}
 	engine, err := NewEngine(modelPath, engineConfig)
 	if err != nil {
@@ -226,9 +227,9 @@ func TestLargeContext_32K_Integration(t *testing.T) {
 	}
 	defer os.Remove(modelPath)
 
-	engineConfig := EngineConfig{
-		DebugDequant: false,
-		KVCacheSize:  22,
+	engineConfig := conf.Config{
+
+		KVCacheSize: 22,
 	}
 	engine, err := NewEngine(modelPath, engineConfig)
 	if err != nil {
@@ -275,9 +276,9 @@ func TestGQA_Configuration_Integration(t *testing.T) {
 			}
 			defer os.Remove(modelPath)
 
-			engineConfig := EngineConfig{
-				DebugDequant: false,
-				KVCacheSize:  22,
+			engineConfig := conf.Config{
+
+				KVCacheSize: 22,
 			}
 			engine, err := NewEngine(modelPath, engineConfig)
 			if err != nil {
@@ -332,9 +333,9 @@ func TestSliding_Window_Integration(t *testing.T) {
 			}
 			defer os.Remove(modelPath)
 
-			engineConfig := EngineConfig{
-				DebugDequant: false,
-				KVCacheSize:  22,
+			engineConfig := conf.Config{
+
+				KVCacheSize: 22,
 			}
 			engine, err := NewEngine(modelPath, engineConfig)
 			if err != nil {

@@ -310,3 +310,36 @@ func Float16ToFloat32(b uint16) float32 {
 		return math.Float32frombits(sign | ((exp + 112) << 23) | frac)
 	}
 }
+
+// DequantizeQ8_0 converts Q8_0 data to Float32.
+// Layout (34 bytes per 32 weights):
+// - d: f16 (scale)
+// - qs: 32 bytes (int8)
+func DequantizeQ8_0(data []byte, numElements int) []float32 {
+	const blockSize = 32
+	const blockSizeBytes = 34 // 2 + 32
+	if numElements%blockSize != 0 {
+		panic(fmt.Sprintf("DequantizeQ8_0: numElements %d must be multiple of 32", numElements))
+	}
+
+	numBlocks := numElements / blockSize
+	out := make([]float32, numElements)
+
+	for i := 0; i < numBlocks; i++ {
+		blockOffset := i * blockSizeBytes
+		if blockOffset+blockSizeBytes > len(data) {
+			break
+		}
+
+		// Parse scale (f16)
+		d := Float16ToFloat32(binary.LittleEndian.Uint16(data[blockOffset : blockOffset+2]))
+
+		// Parse quants (32 * int8)
+		qs := data[blockOffset+2 : blockOffset+34]
+
+		for j := 0; j < blockSize; j++ {
+			out[i*blockSize+j] = d * float32(int8(qs[j]))
+		}
+	}
+	return out
+}

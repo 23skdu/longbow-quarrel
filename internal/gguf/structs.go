@@ -15,6 +15,7 @@ const (
 	GGMLTypeQ4_0   GGMLType = 2
 	GGMLTypeQ4_1   GGMLType = 3
 	GGMLTypeQ5_0   GGMLType = 4
+	GGMLTypeQ8_0   GGMLType = 8
 	GGMLTypeQ2_K   GGMLType = 10
 	GGMLTypeQ3_K   GGMLType = 11
 	GGMLTypeQ4_K   GGMLType = 12

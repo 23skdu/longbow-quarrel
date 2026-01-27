@@ -104,19 +104,24 @@ func CPURoPE(input []float32, pos, heads, headDim int, theta float32) []float32 
 	output := make([]float32, len(input))
 	copy(output, input)
 
-	for h := 0; h < heads; h++ {
-		for i := 0; i < headDim; i += 2 {
-			headOffset := h * headDim
-			freq := float32(pos) / float32(math.Pow(float64(theta), float64(i/2.0)))
-			cosVal := float32(math.Cos(float64(freq)))
-			sinVal := float32(math.Sin(float64(freq)))
+	halfDim := headDim / 2
 
-			if i+1 < headDim {
-				x := output[headOffset+i]
-				y := output[headOffset+i+1]
-				output[headOffset+i] = x*cosVal - y*sinVal
-				output[headOffset+i+1] = y*cosVal + x*sinVal
-			}
+	for h := 0; h < heads; h++ {
+		headOffset := h * headDim
+		for i := 0; i < halfDim; i++ {
+			idx0 := headOffset + i
+			idx1 := headOffset + i + halfDim
+
+			// theta_i = pos * theta^(-2*i/headDim)
+			freq := float64(pos) * math.Pow(float64(theta), -2.0*float64(i)/float64(headDim))
+			cosVal := float32(math.Cos(freq))
+			sinVal := float32(math.Sin(freq))
+
+			x := output[idx0]
+			y := output[idx1]
+
+			output[idx0] = x*cosVal - y*sinVal
+			output[idx1] = x*sinVal + y*cosVal
 		}
 	}
 

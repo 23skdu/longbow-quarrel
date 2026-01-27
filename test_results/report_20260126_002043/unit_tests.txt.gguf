@@ -1,0 +1,44 @@
+=== RUN   TestDequantToken1
+Token 1 Raw: fd008906b6b7f7e8bafcfaf7494caff5
+Token 1 First 10 floats: [-0.00415504 -8.34465e-05 -0.005783677 -8.34465e-05 -8.34465e-05 -0.0025264025 -8.34465e-05 -0.00089776516 -8.34465e-05 -0.0049693584]
+Token 1 Max Abs: 0.007517
+--- PASS: TestDequantToken1 (0.00s)
+=== RUN   TestQ4KDequantization
+    dequant_test.go:62: Q4K dequantization test passed: first 32 weights = -0.000500
+--- PASS: TestQ4KDequantization (0.00s)
+=== RUN   TestQuantizationDequantization
+=== RUN   TestQuantizationDequantization/Q4K_Reversibility
+    quantization_test.go:22: Q4_K quantization failed: not implemented
+=== RUN   TestQuantizationDequantization/Q3K_Reversibility
+    quantization_test.go:117: Index 6: orig=0.500000, deq=0.000000, rel_err=0.999998
+    quantization_test.go:117: Index 7: orig=1.000000, deq=0.000000, rel_err=0.999999
+    quantization_test.go:117: Index 8: orig=2.000000, deq=0.000000, rel_err=1.000000
+    quantization_test.go:117: Index 9: orig=4.000000, deq=0.000000, rel_err=1.000000
+    quantization_test.go:117: Index 10: orig=8.000000, deq=0.000000, rel_err=1.000000
+    quantization_test.go:117: Index 17: orig=0.375000, deq=0.000000, rel_err=0.999997
+    quantization_test.go:117: Index 18: orig=0.750000, deq=0.000000, rel_err=0.999999
+    quantization_test.go:117: Index 19: orig=1.500000, deq=0.000000, rel_err=0.999999
+    quantization_test.go:117: Index 20: orig=3.000000, deq=0.000000, rel_err=1.000000
+    quantization_test.go:117: Index 21: orig=6.000000, deq=0.000000, rel_err=1.000000
+    quantization_test.go:117: Index 22: orig=5.000000, deq=0.000000, rel_err=1.000000
+    quantization_test.go:117: Index 28: orig=0.625000, deq=0.000000, rel_err=0.999998
+    quantization_test.go:117: Index 29: orig=1.250000, deq=0.000000, rel_err=0.999999
+    quantization_test.go:117: Index 30: orig=2.500000, deq=0.000000, rel_err=1.000000
+    quantization_test.go:117: Index 31: orig=5.000000, deq=0.000000, rel_err=1.000000
+    quantization_test.go:117: Index 32: orig=10.000000, deq=0.000000, rel_err=1.000000
+    quantization_test.go:117: Index 33: orig=3.750000, deq=0.000000, rel_err=1.000000
+    quantization_test.go:117: Index 38: orig=0.937500, deq=0.000000, rel_err=0.999999
+    quantization_test.go:117: Index 39: orig=1.875000, deq=0.000000, rel_err=0.999999
+    quantization_test.go:117: Index 40: orig=2.750000, deq=0.000000, rel_err=1.000000
+    quantization_test.go:117: Index 41: orig=3.500000, deq=0.000000, rel_err=1.000000
+    quantization_test.go:117: Index 42: orig=5.000000, deq=0.000000, rel_err=1.000000
+    quantization_test.go:117: Index 43: orig=6.000000, deq=0.000000, rel_err=1.000000
+    quantization_test.go:121: Q3_K quantization: max_abs_error=10.000000, max_rel_error=1.000000
+    quantization_test.go:125: Absolute error too high for Q3_K: 10.000000 > 1.0
+    quantization_test.go:128: Relative error too high for Q3_K: 1.000000 > 0.2
+--- FAIL: TestQuantizationDequantization (0.00s)
+    --- FAIL: TestQuantizationDequantization/Q4K_Reversibility (0.00s)
+    --- FAIL: TestQuantizationDequantization/Q3K_Reversibility (0.00s)
+FAIL
+FAIL	github.com/23skdu/longbow-quarrel/internal/gguf	0.306s
+FAIL

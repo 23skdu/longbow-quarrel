@@ -351,14 +351,14 @@ func TestKVCache_IndexingPrecision(t *testing.T) {
 				kData := make([]float32, kvDim)
 				vData := make([]float32, kvDim)
 				for i := range kData {
-					kData[i] = float32(pos*10 + i)
-					vData[i] = float32(pos*100 + i)
+					kData[i] = float32((pos+i)%100) * 0.1
+					vData[i] = float32((pos+i)%100) * 0.2
 				}
 				k.LoadFrom(kData)
 				v.LoadFrom(vData)
 
 				// Store at position
-				k.StoreKV(v, kCache, vCache, pos, kvHeads, headDim, 0)
+				k.StoreKV(v, kCache, vCache, pos, kvHeads, headDim, windowSize)
 				ctx.Synchronize()
 
 				// Verify stored data

@@ -9,6 +9,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/engine"
 	"github.com/23skdu/longbow-quarrel/internal/tokenizer"
 )
@@ -41,7 +42,9 @@ func main() {
 	if *verbose {
 		fmt.Printf("Loading model: %s\n", resolvedPath)
 	}
-	e, err := engine.NewEngine(resolvedPath, false)
+	conf := config.Default()
+	conf.KVCacheSize = 1024
+	e, err := engine.NewEngine(resolvedPath, conf)
 	if err != nil {
 		log.Fatalf("Failed to load model: %v", err)
 	}
