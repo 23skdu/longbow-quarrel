@@ -13,7 +13,7 @@ func generateVocabGGUF(path string, vocab []string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	// Magic
 	binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMagic))
@@ -43,7 +43,7 @@ func generateVocabGGUF(path string, vocab []string) error {
 
 func writeString(f *os.File, s string) {
 	binary.Write(f, binary.LittleEndian, uint64(len(s)))
-	f.WriteString(s)
+	_, _ = f.WriteString(s)
 }
 
 func TestTokenizerDecode(t *testing.T) {
@@ -52,7 +52,7 @@ func TestTokenizerDecode(t *testing.T) {
 	if err := generateVocabGGUF(tmpFile, vocab); err != nil {
 		t.Fatalf("Failed to generate vocab: %v", err)
 	}
-	defer os.Remove(tmpFile)
+	defer func() { _ = os.Remove(tmpFile) }()
 
 	tk, err := New(tmpFile)
 	if err != nil {

@@ -29,6 +29,8 @@ func main() {
 	outputFormat := flag.String("output", "text", "Output format (text or json)")
 
 	// Ignored flags for compatibility if needed, though we control the script
+	// Additional flags
+	timeoutSec := flag.Int("timeout", 60, "Timeout in seconds")
 	flag.Parse()
 
 	if *modelPath == "" {
@@ -62,14 +64,38 @@ func main() {
 	}
 
 	start := time.Now()
-	resultIDs, err := e.Infer(inputTokens, *numTokens, samplerConfig)
-	if err != nil {
-		log.Fatalf("Inference failed: %v", err)
+
+	// Run inference with timeout
+	type inferResult struct {
+		tokens []int
+		err    error
 	}
+	resultChan := make(chan inferResult, 1)
+
+	go func() {
+		resIds, err := e.Infer(inputTokens, *numTokens, samplerConfig)
+		resultChan <- inferResult{tokens: resIds, err: err}
+	}()
+
+	var resultIDs []int
+
+	select {
+	case res := <-resultChan:
+		if res.err != nil {
+			log.Fatalf("Inference failed: %v", res.err)
+		}
+		resultIDs = res.tokens
+	case <-time.After(time.Duration(*timeoutSec) * time.Second):
+		log.Fatalf("Inference timed out after %d seconds", *timeoutSec)
+	}
+
 	duration := time.Since(start)
 
 	decoded := tok.Decode(resultIDs)
 	tps := float64(len(resultIDs)) / duration.Seconds()
+
+	// Debug: Log tokens
+	log.Printf("DEBUG: Generated Token IDs: %v", resultIDs)
 
 	if *outputFormat == "json" {
 		out := Output{

@@ -136,10 +136,7 @@ func (t *Tokenizer) Encode(text string) []int {
 		}
 
 		// Iteratively merge
-		for {
-			if len(subwords) < 2 {
-				break
-			}
+		for len(subwords) >= 2 {
 
 			// Find best pair
 			bestPairIdx := -1

@@ -270,6 +270,31 @@ void Metal_AttPaged_F16(MetalContextRef ctx, MetalBufferRef q, int offQ,
                         MetalBufferRef blockTable, int offBT, int p, int nh,
                         int kh, int hd, int blockSize, int maxCtxLen);
 
+// Mamba / SSM Kernels
+void Metal_MambaConv1d_F16(MetalContextRef ctx, MetalBufferRef input, int offIn,
+                           MetalBufferRef weight, int offW, MetalBufferRef bias,
+                           int offB, MetalBufferRef state, int offS,
+                           MetalBufferRef output, int offOut, int dim,
+                           int kernelSize);
+
+void Metal_MambaScan_F16(MetalContextRef ctx, MetalBufferRef u, int offU,
+                         MetalBufferRef h, int offH, MetalBufferRef A, int offA,
+                         MetalBufferRef B, int offB, MetalBufferRef C, int offC,
+                         MetalBufferRef D, int offD, MetalBufferRef dt,
+                         int offDt, MetalBufferRef y, int offY, int dim,
+                         int d_state);
+
+void Metal_SiLU_F16(MetalContextRef ctx, MetalBufferRef input, int offIn,
+                    MetalBufferRef output, int offOut, int n);
+
+void Metal_Slice_F16(MetalContextRef ctx, MetalBufferRef input, int offIn,
+                     MetalBufferRef output, int offOut, int startCol,
+                     int numCols, int totalCols, int rows);
+
+void Metal_Mul_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
+                   MetalBufferRef b, int offB, MetalBufferRef result,
+                   int offRes, int n);
+
 #ifdef __cplusplus
 }
 #endif

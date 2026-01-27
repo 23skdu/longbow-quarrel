@@ -90,6 +90,7 @@ const (
 	DataTypeQ3K  DataType = 5
 	DataTypeF32  DataType = 3
 	DataTypeQ6K  DataType = 4
+	DataTypeQ8_0 DataType = 6
 )
 
 // Tensor wraps a Metal buffer. Always FP16 for this engine.
@@ -262,6 +263,12 @@ func (c *Context) NewTensorFP32(rows, cols int) *Tensor {
 	return t
 }
 
+func (c *Context) NewTensorFromData(rows, cols int, dt DataType, data []byte) *Tensor {
+	t := c.NewTensorWithType(rows, cols, dt)
+	C.Metal_CopyToDevice(t.buf, C.int(0), unsafe.Pointer(&data[0]), C.int(len(data)))
+	return t
+}
+
 func (c *Context) NewTensorWithType(rows, cols int, dt DataType) *Tensor {
 	// ... (unchanged - just for context for the next block if needed, but I can target specific ranges)
 	sb := rows * cols * 2
@@ -277,6 +284,13 @@ func (c *Context) NewTensorWithType(rows, cols int, dt DataType) *Tensor {
 		// Validation? Usually blocked by 256.
 		numBlocks := numElements / 256
 		sb = numBlocks * 144
+	} else if dt == DataTypeQ8_0 {
+		numElements := rows * cols
+		if numElements%32 != 0 {
+			panic(fmt.Sprintf("Q8_0 tensor size %d not divisible by 32", numElements))
+		}
+		numBlocks := numElements / 32
+		sb = numBlocks * 34
 	} else if dt == DataTypeQ4_0 {
 		numElements := rows * cols
 		if numElements%32 != 0 {
@@ -403,6 +417,10 @@ func (t *Tensor) DataType() DataType {
 	return t.dataType
 }
 
+func (t *Tensor) Context() *Context {
+	return t.ctx
+}
+
 func (t *Tensor) ScanNaNs(name string) int {
 	if t.dataType == DataTypeQ4K {
 		return 0
@@ -492,10 +510,12 @@ func (t *Tensor) ScanMax(name string) (float32, ActivationStats) {
 	stats.Sample = make([]float32, sampleSize)
 	copy(stats.Sample, data[:sampleSize])
 
-	// fmt.Printf("[%s] Min: %.4f Max: %.4f Mean: %.4f RMS: %.4f Zeros: %d/%d NaNs: %d Infs: %d\n", name, minVal, maxVal, mean, rms, zeros, len(data), nans, infs)
-	// if len(data) >= 32 {
-	// 	fmt.Printf("[%s] Sample: %v\n", name, data[:32])
-	// }
+	fmt.Printf("[%s] Min: %.4f Max: %.4f Mean: %.4f RMS: %.4f Zeros: %d/%d NaNs: %d Infs: %d\n", name, minVal, maxVal, mean, rms, zeros, len(data), nans, infs)
+	if len(data) >= 10 {
+		fmt.Printf("[%s] Sample: %v\n", name, data[:10])
+	} else {
+		fmt.Printf("[%s] Sample: %v\n", name, data)
+	}
 	return maxVal, stats
 }
 
@@ -801,6 +821,23 @@ func (t *Tensor) SwiGLULinearIntoQ4K(up, weight, out *Tensor, scale float32) {
 		weight.buf, C.int(weight.Offset),
 		out.buf, C.int(out.Offset),
 		C.int(M), C.int(N), C.int(K), C.float(scale))
+}
+
+// MambaConv1d performs 1D Causal Convolution
+// Input t: [Batch, Dim] (Current token)
+// Weight: [Dim, KernelSize]
+// Bias: [Dim]
+// State: [Dim, KernelSize] (Ring buffer history)
+// Output: [Batch, Dim]
+func (t *Tensor) MambaConv1d(weight, bias, state, out *Tensor) {
+	// Assumes Batch=1 for now as per kernels
+	C.Metal_MambaConv1d_F16(t.ctx.ref,
+		t.buf, C.int(t.Offset),
+		weight.buf, C.int(weight.Offset),
+		bias.buf, C.int(bias.Offset),
+		state.buf, C.int(state.Offset),
+		out.buf, C.int(out.Offset),
+		C.int(t.cols), C.int(weight.cols)) // weight.cols should be kernel_size
 }
 
 // RMSNormQKV performs fused RMSNorm + QKV Linear projections
@@ -1663,4 +1700,41 @@ func (t *Tensor) AttPaged(kCache, vCache, blockTable *Tensor, output *Tensor, po
 		C.int(blockSize),
 		C.int(4096), // maxCtxLen (used for internal limit)
 	)
+}
+
+// SiLU performs element-wise SiLU activation
+func (t *Tensor) SiLU() *Tensor {
+	res := t.ctx.NewTensorPooled(t.rows, t.cols)
+	C.Metal_SiLU_F16(t.ctx.ref, t.buf, C.int(t.Offset), res.buf, C.int(res.Offset), C.int(t.rows*t.cols))
+	return res
+}
+
+// Slice extracts a sub-tensor of numCols from totalCols starting at startCol
+func (t *Tensor) Slice(startCol, numCols int) *Tensor {
+	res := t.ctx.NewTensorPooled(t.rows, numCols)
+	C.Metal_Slice_F16(t.ctx.ref, t.buf, C.int(t.Offset), res.buf, C.int(res.Offset),
+		C.int(startCol), C.int(numCols), C.int(t.cols), C.int(t.rows))
+	return res
+}
+
+// MambaScan executes a single SSM scan step
+func (t *Tensor) MambaScan(h, A, B, ssmC, D, dt *Tensor, dState int) *Tensor {
+	res := t.ctx.NewTensorPooled(t.rows, t.cols)
+	C.Metal_MambaScan_F16(t.ctx.ref,
+		t.buf, C.int(t.Offset),
+		h.buf, C.int(h.Offset),
+		A.buf, C.int(A.Offset),
+		B.buf, C.int(B.Offset),
+		ssmC.buf, C.int(ssmC.Offset),
+		D.buf, C.int(D.Offset),
+		dt.buf, C.int(dt.Offset),
+		res.buf, C.int(res.Offset),
+		C.int(t.cols), C.int(dState))
+	return res
+}
+
+func (t *Tensor) Mul(other *Tensor) *Tensor {
+	res := t.ctx.NewTensorPooled(t.rows, t.cols)
+	C.Metal_Mul_F16(t.ctx.ref, t.buf, C.int(t.Offset), other.buf, C.int(other.Offset), res.buf, C.int(res.Offset), C.int(t.rows*t.cols))
+	return res
 }

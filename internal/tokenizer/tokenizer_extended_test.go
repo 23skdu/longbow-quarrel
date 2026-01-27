@@ -106,7 +106,7 @@ func TestTokenizerVocabLookup(t *testing.T) {
 	if err := generateTestVocabGGUF(tmpFile, vocab); err != nil {
 		t.Fatalf("Failed to generate vocab: %v", err)
 	}
-	defer os.Remove(tmpFile)
+	defer func() { _ = os.Remove(tmpFile) }()
 
 	tk, err := New(tmpFile)
 	if err != nil {
@@ -217,14 +217,14 @@ func generateTestVocabGGUF(path string, vocab []string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	// Magic
-	binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMagic))
+	_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMagic))
 	// Version
-	binary.Write(f, binary.LittleEndian, uint32(3))
+	_ = binary.Write(f, binary.LittleEndian, uint32(3))
 	// Tensor Count (0)
-	binary.Write(f, binary.LittleEndian, uint64(0))
+	_ = binary.Write(f, binary.LittleEndian, uint64(0))
 	// KV Count (1) - just tokens
 	binary.Write(f, binary.LittleEndian, uint64(1))
 
@@ -250,7 +250,7 @@ func generateVocabWithMergesGGUF(path string, vocab []string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	// GGUF Header
 	binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMagic))
@@ -284,5 +284,5 @@ func generateVocabWithMergesGGUF(path string, vocab []string) error {
 
 func writeTestString(f *os.File, s string) {
 	binary.Write(f, binary.LittleEndian, uint64(len(s)))
-	f.WriteString(s)
+	_, _ = f.WriteString(s)
 }

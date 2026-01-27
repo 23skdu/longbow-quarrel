@@ -1,4 +1,9 @@
 # Go build artifacts
+bench*
+perf*
+bin/
+comp*
+*.json
 *.exe
 *.dll
 *.so

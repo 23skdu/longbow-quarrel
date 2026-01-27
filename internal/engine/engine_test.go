@@ -584,7 +584,7 @@ func TestInitKVCache(t *testing.T) {
 				Layers:      2,
 				WindowSize:  32,
 				KVHeads:     2,
-				HeadDim:     8,
+				HeadDim:     0,
 				KVCacheSize: 1024,
 			},
 			expectedError: true,

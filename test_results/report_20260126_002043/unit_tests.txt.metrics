@@ -1,6 +1,0 @@
-# github.com/23skdu/longbow-quarrel/internal/metrics.test
-ld: warning: '/private/var/folders/q_/mbw97tb50pnfzp1y344ywzv40000gn/T/go-link-2040357144/000013.o' has malformed LC_DYSYMTAB, expected 98 undefined symbols to start at index 1626, found 95 undefined symbols starting at index 1626
-=== RUN   TestMetricsExistence
---- PASS: TestMetricsExistence (0.00s)
-PASS
-ok  	github.com/23skdu/longbow-quarrel/internal/metrics	(cached)

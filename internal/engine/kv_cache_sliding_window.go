@@ -42,6 +42,10 @@ func (c *SlidingWindowKVCache) Init(ctx *device.Context, config config.Config) e
 	if c.windowSize == 0 {
 		// Fallback to SeqLen if WindowSize not explicit, but treat as window
 		c.windowSize = config.SeqLen
+		// SAFETY: If SeqLen is huge (e.g. 1M for Nemotron), cap it to 8192 to prevent OOM
+		if c.windowSize > 8192 {
+			c.windowSize = 8192
+		}
 	}
 	if c.windowSize == 0 {
 		c.windowSize = 2048 // Default

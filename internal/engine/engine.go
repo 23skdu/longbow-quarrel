@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
 
 	"runtime"
 	"sort"
@@ -618,6 +619,7 @@ func (e *Engine) loadModel(path string) error {
 	e.Weights.FfnDown = make([]*device.Tensor, layers)
 	e.Weights.FfnUp = make([]*device.Tensor, layers)
 	e.Weights.FfnNorm = make([]*device.Tensor, layers)
+	e.Weights.Mamba = make([]*MambaWeights, layers) // Initialize Mamba/SSM layer storage
 
 	// Map tensors
 	for _, t := range f.Tensors {
@@ -763,6 +765,7 @@ func (e *Engine) loadModel(path string) error {
 
 		// Mapping Logic
 		name := t.Name
+		fmt.Fprintf(os.Stderr, "Loading Tensor %s Dims: %v Type: %vOffset: %d\n", name, t.Dimensions, t.Type, t.Offset)
 
 		// 1. Global weights
 		switch name {
@@ -826,15 +829,72 @@ func (e *Engine) loadModel(path string) error {
 				e.Weights.FfnUp[layerIdx] = mt
 			case "ffn_norm.weight":
 				e.Weights.FfnNorm[layerIdx] = mt
+
+			// Mamba/SSM Tensors
+			case "ssm_a":
+				if e.Weights.Mamba[layerIdx] == nil {
+					e.Weights.Mamba[layerIdx] = &MambaWeights{}
+				}
+				e.Weights.Mamba[layerIdx].A = mt
+			case "ssm_d":
+				if e.Weights.Mamba[layerIdx] == nil {
+					e.Weights.Mamba[layerIdx] = &MambaWeights{}
+				}
+				e.Weights.Mamba[layerIdx].D = mt
+			case "ssm_conv1d.weight":
+				if e.Weights.Mamba[layerIdx] == nil {
+					e.Weights.Mamba[layerIdx] = &MambaWeights{}
+				}
+				e.Weights.Mamba[layerIdx].Conv1dWeight = mt
+			case "ssm_conv1d.bias":
+				if e.Weights.Mamba[layerIdx] == nil {
+					e.Weights.Mamba[layerIdx] = &MambaWeights{}
+				}
+				e.Weights.Mamba[layerIdx].Conv1dBias = mt
+			case "ssm_dt.weight":
+				if e.Weights.Mamba[layerIdx] == nil {
+					e.Weights.Mamba[layerIdx] = &MambaWeights{}
+				}
+				e.Weights.Mamba[layerIdx].DTWeight = mt
+			case "ssm_dt.bias":
+				if e.Weights.Mamba[layerIdx] == nil {
+					e.Weights.Mamba[layerIdx] = &MambaWeights{}
+				}
+				e.Weights.Mamba[layerIdx].DTBias = mt
+			case "ssm_norm.weight":
+				if e.Weights.Mamba[layerIdx] == nil {
+					e.Weights.Mamba[layerIdx] = &MambaWeights{}
+				}
+				e.Weights.Mamba[layerIdx].NormWeight = mt
+			case "ssm_norm.bias":
+				if e.Weights.Mamba[layerIdx] == nil {
+					e.Weights.Mamba[layerIdx] = &MambaWeights{}
+				}
+				e.Weights.Mamba[layerIdx].NormBias = mt
+			case "ssm_out.weight":
+				if e.Weights.Mamba[layerIdx] == nil {
+					e.Weights.Mamba[layerIdx] = &MambaWeights{}
+				}
+				e.Weights.Mamba[layerIdx].OutWeight = mt
+			case "ssm_in.weight": // Hypothetical, not seen in logs yet
+				if e.Weights.Mamba[layerIdx] == nil {
+					e.Weights.Mamba[layerIdx] = &MambaWeights{}
+				}
+				e.Weights.Mamba[layerIdx].InWeight = mt
 			}
 		}
 	}
 
 	// Fallback: many models share token_embd.weight with output.weight
-	// For Llama/Mistral architectures, always tie output to token_embd for correctness
+	// Case 1: TokenEmb exists, Output missing -> Use TokenEmb as Output
 	if e.Weights.TokenEmb != nil && e.Weights.Output == nil {
 		e.Weights.Output = e.Weights.TokenEmb
 		logger.Log.Debug("Tied output.weight to token_embd.weight")
+	}
+	// Case 2: Output exists, TokenEmb missing (e.g. Nemotron) -> Use Output as TokenEmb
+	if e.Weights.TokenEmb == nil && e.Weights.Output != nil {
+		e.Weights.TokenEmb = e.Weights.Output
+		logger.Log.Info("Using output.weight as token_embd.weight (tied embeddings)")
 	}
 
 	// Update VocabSize based on actual tensor rows (the source of truth)
@@ -843,6 +903,68 @@ func (e *Engine) loadModel(path string) error {
 		if actualVocab != e.Config.VocabSize {
 			logger.Log.Warn("Correcting Vocab Size (from embedding)", "configured", e.Config.VocabSize, "actual", actualVocab)
 			e.Config.VocabSize = actualVocab
+		}
+	}
+
+	// Case 3: Gap recovery for missing Mamba ssm_in tensors (Nemotron specific)
+	if e.Weights.Mamba != nil {
+		gaps := f.GetGapTensors()
+		gapIdx := 0
+		for i := 0; i < e.Config.Layers; i++ {
+			mw := e.Weights.Mamba[i]
+			if mw != nil && mw.InWeight == nil && gapIdx < len(gaps) {
+				gap := gaps[gapIdx]
+				rows := 6144
+				cols := 2688
+
+				if len(gap.Data) < 10*1024*1024 {
+					continue
+				}
+
+				logger.Log.Info("Recovering missing ssm_in weight from GGUF gap", "layer", i, "offset", gap.Offset, "size", len(gap.Data))
+				mt := e.Ctx.NewTensorFromData(rows, cols, device.DataTypeQ8_0, gap.Data)
+				mw.InWeight = mt
+				gapIdx++
+			}
+		}
+	}
+
+	// Initialize Mamba Layers and Cache
+	e.MambaLayers = make([]*MambaLayer, e.Config.Layers)
+	e.SSMCache = make([]*MambaState, e.Config.Layers)
+
+	for i := 0; i < e.Config.Layers; i++ {
+		if e.Weights.Mamba[i] != nil {
+			// Found Mamba weights for this layer
+			layer := &MambaLayer{
+				Index:   i,
+				Weights: e.Weights.Mamba[i],
+			}
+			e.MambaLayers[i] = layer
+
+			dConv := 6144
+			kernelSize := 4
+			dInner := 4096
+			dState := 64
+
+			if layer.Weights.Conv1dWeight != nil {
+				dConv = layer.Weights.Conv1dWeight.Rows()
+				kernelSize = layer.Weights.Conv1dWeight.Cols()
+			}
+			if layer.Weights.OutWeight != nil {
+				dInner = layer.Weights.OutWeight.Cols()
+			}
+
+			convState := e.Ctx.NewTensorPooled(dConv, kernelSize)
+			ssmState := e.Ctx.NewTensorPooled(dInner, dState)
+
+			// Zero states (Manual for now, assuming pooled memory might be dirty)
+			// TODO: Add Zero() to tensor
+
+			e.SSMCache[i] = &MambaState{
+				ConvState: convState,
+				SSMState:  ssmState,
+			}
 		}
 	}
 
@@ -899,7 +1021,7 @@ func (e *Engine) InferString(prompt string, tokensToGenerate int) (string, error
 		TopP:             0.9,
 		RepPenalty:       1.0,
 		Seed:             0,
-		DebugActivations: false,
+		DebugActivations: true,
 		QualityMode:      false,
 	}
 
@@ -1033,16 +1155,42 @@ func (e *Engine) InferWithCallback(inputTokens []int, tokensToGenerate int, samp
 			kCache := view.K
 			vCache := view.V
 
-			currentF32.Layer(l, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, kCache, vCache,
-				scratch, // Pass scratch
-				e.TraceTracker,
-				e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen, e.Config.WindowSize, e.GlobalScale, samplerConfig.DebugActivations, int(e.Config.PrecisionMode),
-				view.BlockTable, view.BlockSize,
-				func(k, v *device.Tensor) {
-					if err := e.Cache.Update(l, e.CachePos, k, v); err != nil {
-						panic(err)
+			if e.IsMambaLayer(l) {
+				mambaLayer := e.MambaLayers[l]
+				ssmState := e.SSMCache[l]
+
+				res, err := mambaLayer.Forward(currentF32, ssmState)
+				if err != nil {
+					panic(fmt.Errorf("layer %d mamba forward failed: %v", l, err))
+				}
+
+				// Add Residual (y = Mamba(Norm(x)) + x)
+				if err := currentF32.AddInPlace(res); err != nil {
+					// Check for type mismatch, try to fix
+					if res.DataType() != device.DataTypeF32 {
+						// Convert res to F32 (Host trip for now, slow but safe)
+						resF32 := e.Ctx.NewTensorFP32(res.Rows(), res.Cols())
+						resF32.LoadFrom(res.ToHostF32()) // CopyFrom expects float32 slice
+						// Retry add
+						if err2 := currentF32.AddInPlace(resF32); err2 != nil {
+							panic(fmt.Errorf("layer %d residual add failed logic: %v", l, err2))
+						}
+					} else {
+						panic(fmt.Errorf("layer %d residual add failed: %v", l, err))
 					}
-				})
+				}
+			} else {
+				currentF32.Layer(l, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, kCache, vCache,
+					scratch, // Pass scratch
+					e.TraceTracker,
+					e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen, e.Config.WindowSize, e.GlobalScale, samplerConfig.DebugActivations, int(e.Config.PrecisionMode),
+					view.BlockTable, view.BlockSize,
+					func(k, v *device.Tensor) {
+						if err := e.Cache.Update(l, e.CachePos, k, v); err != nil {
+							panic(err)
+						}
+					})
+			}
 
 			// Log layer activation details if enabled
 			if e.ActLogger.IsEnabled() {
@@ -1137,6 +1285,10 @@ func (e *Engine) InferWithCallback(inputTokens []int, tokensToGenerate int, samp
 
 			// Debug: check final logits
 			logits.ScanMax(fmt.Sprintf("Layer %d Final Logits", i))
+
+			// ADDED: Debug Scores and Normed
+			scratch.Scores.ScanMax(fmt.Sprintf("Layer %d Attention Scores", i))
+			scratch.Normed.ScanMax(fmt.Sprintf("Layer %d RMSNorm Output", i))
 
 			logitsData := logits.ToHost()
 
@@ -1234,16 +1386,42 @@ func (e *Engine) InferWithCallback(inputTokens []int, tokensToGenerate int, samp
 			}
 
 			// Layer now handles F32 currentF32, using mixed precision
-			currentF32.Layer(l, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, kCache, vCache,
-				scratch, // Pass scratch
-				e.TraceTracker,
-				e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen, e.Config.WindowSize, e.GlobalScale, samplerConfig.DebugActivations, int(e.Config.PrecisionMode),
-				view.BlockTable, view.BlockSize,
-				func(k, v *device.Tensor) {
-					if err := e.Cache.Update(l, e.CachePos, k, v); err != nil {
-						panic(err)
+			if e.IsMambaLayer(l) {
+				mambaLayer := e.MambaLayers[l]
+				ssmState := e.SSMCache[l]
+
+				res, err := mambaLayer.Forward(currentF32, ssmState)
+				if err != nil {
+					panic(fmt.Errorf("layer %d mamba forward failed: %v", l, err))
+				}
+
+				// Add Residual (y = Mamba(Norm(x)) + x)
+				if err := currentF32.AddInPlace(res); err != nil {
+					// Check for type mismatch, try to fix
+					if res.DataType() != device.DataTypeF32 {
+						// Convert res to F32 (Host trip for now, slow but safe)
+						resF32 := e.Ctx.NewTensorFP32(res.Rows(), res.Cols())
+						resF32.LoadFrom(res.ToHostF32()) // CopyFrom expects float32 slice
+						// Retry add
+						if err2 := currentF32.AddInPlace(resF32); err2 != nil {
+							panic(fmt.Errorf("layer %d residual add failed logic: %v", l, err2))
+						}
+					} else {
+						panic(fmt.Errorf("layer %d residual add failed: %v", l, err))
 					}
-				})
+				}
+			} else {
+				currentF32.Layer(l, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, kCache, vCache,
+					scratch, // Pass scratch
+					e.TraceTracker,
+					e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen, e.Config.WindowSize, e.GlobalScale, samplerConfig.DebugActivations, int(e.Config.PrecisionMode),
+					view.BlockTable, view.BlockSize,
+					func(k, v *device.Tensor) {
+						if err := e.Cache.Update(l, e.CachePos, k, v); err != nil {
+							panic(err)
+						}
+					})
+			}
 
 			// Log layer activation details if enabled (generation phase)
 			if e.ActLogger.IsEnabled() && i >= len(inputTokens)-1 {
@@ -1332,28 +1510,17 @@ func (e *Engine) InferWithCallback(inputTokens []int, tokensToGenerate int, samp
 
 func (e *Engine) initKVCache() error {
 	// Determine Cache Strategy
-	useSlidingWindow := false
-	if e.Config.WindowSize > 0 && e.Config.WindowSize < e.Config.SeqLen {
-		useSlidingWindow = true
-		logger.Log.Info("Using Sliding Window Attention", "window", e.Config.WindowSize, "seq_len", e.Config.SeqLen)
-	}
+	// Determine Cache Strategy
+	// We now use SlidingWindowKVCache for ALL cases.
+	// If WindowSize is 0 (Full Context), SlidingWindowKVCache defaults to SeqLen size
+	// and handles the wrapping (circular buffer) automatically.
+	// This prevents crashes when context length is exceeded.
 
-	// Override from command line or config if needed (could added a Config.CacheType enum)
-
-	if useSlidingWindow {
-		cache := &SlidingWindowKVCache{}
-		if err := cache.Init(e.Ctx, e.Config); err != nil {
-			return err
-		}
-		e.Cache = cache
-	} else {
-		// Default to TensorKVCache (Linear Buffer)
-		cache := &TensorKVCache{}
-		if err := cache.Init(e.Ctx, e.Config); err != nil {
-			return err
-		}
-		e.Cache = cache
+	cache := &SlidingWindowKVCache{}
+	if err := cache.Init(e.Ctx, e.Config); err != nil {
+		return err
 	}
+	e.Cache = cache
 
 	return nil
 }
