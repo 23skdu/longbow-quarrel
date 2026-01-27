@@ -1197,10 +1197,10 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		normedFFN := scratch.NormedFFN_F32
 		t0_rmsnorm2 := time.Now()
 		if t.dataType == DataTypeF32 {
-			t.RMSNorm_F32_Into(ffnNorm, eps, normedFFN)
+			t.RMSNormFP32_Into(ffnNorm, eps, normedFFN)
 		} else if useMixedPrecisionFFN {
 			tCopy := t.ToF32()
-			tCopy.RMSNorm_F32_Into(ffnNorm, eps, normedFFN)
+			tCopy.RMSNormFP32_Into(ffnNorm, eps, normedFFN)
 			tCopy.ReturnToPool()
 		} else {
 			t.RMSNormFP32_ToF16_Into(ffnNorm, eps, normedFFN)
@@ -1237,20 +1237,31 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		}
 		metrics.RecordKernelDuration("Layer_RMSNorm2", time.Since(t0_rmsnorm2))
 
-		gatePart := t.ctx.NewTensorPooled(t.rows, ffnGate.rows)
+		var gatePart *Tensor
+		if ffnGate != nil {
+			gatePart = t.ctx.NewTensorPooled(t.rows, ffnGate.rows)
+			normedFFN.LinearInto(ffnGate, gatePart, globalScale)
+		}
+
 		upPart := t.ctx.NewTensorPooled(t.rows, ffnUp.rows)
-		normedFFN.LinearInto(ffnGate, gatePart, globalScale)
 		normedFFN.LinearInto(ffnUp, upPart, globalScale)
 
 		resFFN := scratch.ResFFN
-		if ffnDown.dataType == DataTypeQ4K {
-			gatePart.SwiGLULinearIntoQ4K(upPart, ffnDown, resFFN, globalScale)
+		if ffnGate != nil {
+			if ffnDown.dataType == DataTypeQ4K {
+				gatePart.SwiGLULinearIntoQ4K(upPart, ffnDown, resFFN, globalScale)
+			} else {
+				swiOut, _ := upPart.SwiGLU(gatePart)
+				swiOut.LinearInto(ffnDown, resFFN, globalScale)
+				swiOut.ReturnToPool()
+			}
+			gatePart.ReturnToPool()
 		} else {
-			swiOut, _ := upPart.SwiGLU(gatePart)
-			swiOut.LinearInto(ffnDown, resFFN, globalScale)
-			swiOut.ReturnToPool()
+			// Non-GLU Path (e.g. standard SiLU/GELU FFN)
+			// Apply SiLU to upPart directly (in-place)
+			upPart.SiLUInPlace()
+			upPart.LinearInto(ffnDown, resFFN, globalScale)
 		}
-		gatePart.ReturnToPool()
 		upPart.ReturnToPool()
 
 		if t.dataType == DataTypeF32 {
@@ -1317,8 +1328,13 @@ func (t *Tensor) LinearToFP32(weight *Tensor) *Tensor {
 	return out
 }
 
-// RMSNorm_F32_Into performs RMSNorm (FP32 -> FP32)
-func (t *Tensor) RMSNorm_F32_Into(weight *Tensor, eps float32, out *Tensor) {
+// RMSNormFP32_Into performs RMSNorm (FP32 -> FP32)
+// SiLUInPlace performs in-place element-wise SiLU activation
+func (t *Tensor) SiLUInPlace() {
+	C.Metal_SiLU_F16(t.ctx.ref, t.buf, C.int(t.Offset), t.buf, C.int(t.Offset), C.int(t.rows*t.cols))
+}
+
+func (t *Tensor) RMSNormFP32_Into(weight *Tensor, eps float32, out *Tensor) {
 	C.Metal_RMSNorm_F32(t.ctx.ref, t.buf, C.int(t.Offset), weight.buf, C.int(weight.Offset), out.buf, C.int(out.Offset),
 		C.int(t.rows), C.int(t.cols), C.float(eps))
 }
