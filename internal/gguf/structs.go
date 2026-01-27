@@ -47,15 +47,42 @@ type TensorInfo struct {
 	Name       string
 	Dimensions []uint64 // ne (number of elements) in each dimension
 	Type       GGMLType
-	Offset     uint64 // Offset in the file (absolute or relative to data start?) -> Relative to data start usually
-	Data       []byte // Slice of the mmap'd file
+	Offset     uint64 // Offset relative to data start
+	Data       []byte // Byte slice into the mmap'd file
+}
+
+func (t *TensorInfo) SizeBytes() uint64 {
+	numElements := uint64(1)
+	for _, d := range t.Dimensions {
+		numElements *= d
+	}
+
+	switch t.Type {
+	case GGMLTypeF32:
+		return numElements * 4
+	case GGMLTypeF16:
+		return numElements * 2
+	case GGMLTypeQ4_0:
+		return (numElements / 32) * 18
+	case GGMLTypeQ8_0:
+		return (numElements / 32) * 34
+	case GGMLTypeQ4_K:
+		return (numElements / 256) * 144
+	case GGMLTypeQ6_K:
+		return (numElements / 256) * 210
+	case GGMLTypeQ3_K:
+		return (numElements / 256) * 110
+	default:
+		return 0
+	}
 }
 
 type GGUFFile struct {
-	Header  GGUFHeader
-	KV      map[string]interface{}
-	Tensors []*TensorInfo
-	Data    []byte // The raw mmap'd data
+	Header     GGUFHeader
+	KV         map[string]interface{}
+	Tensors    []*TensorInfo
+	Data       []byte // The raw mmap'd data
+	DataOffset uint64 // Offset where the tensor data starts
 }
 
 type GGUFHeader struct {

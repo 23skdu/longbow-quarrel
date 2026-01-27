@@ -7,6 +7,7 @@ import (
 
 	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/device"
+	"github.com/23skdu/longbow-quarrel/internal/logger"
 	"github.com/23skdu/longbow-quarrel/internal/metrics"
 )
 
@@ -57,6 +58,12 @@ func (c *TensorKVCache) Init(ctx *device.Context, config config.Config) error {
 	}
 	if c.contextLen == 0 {
 		c.contextLen = config.SeqLen
+		// SAFETY: If SeqLen is huge (e.g. 1M for Nemotron), cap it to 8192 to prevent OOM
+		// unless explicitly overridden by WindowSize or KVCacheSize.
+		if c.contextLen > 8192 {
+			logger.Log.Warn("Capping default context length", "original", c.contextLen, "new", 8192)
+			c.contextLen = 8192
+		}
 	}
 	if c.contextLen == 0 {
 		c.contextLen = 2048 // Default fallback

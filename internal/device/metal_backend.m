@@ -62,6 +62,12 @@
 @property(strong) id<MTLComputePipelineState> pipelineLinearQ4_0_F16;
 @property(strong) id<MTLComputePipelineState> pipelineLinearQ4_0_F32;
 @property(strong) id<MTLComputePipelineState> pipelineEmbeddingQ4_0_F16;
+// Mamba / SSM
+@property(strong) id<MTLComputePipelineState> pipelineMambaConv1d_F16;
+@property(strong) id<MTLComputePipelineState> pipelineMambaScan_F16;
+@property(strong) id<MTLComputePipelineState> pipelineSiLU_F16;
+@property(strong) id<MTLComputePipelineState> pipelineSlice_F16;
+@property(strong) id<MTLComputePipelineState> pipelineMul_F16;
 @property(strong) id<MTLCommandBuffer> currentCommandBuffer;
 @property(strong) id<MTLComputeCommandEncoder> currentEncoder;
 @property(strong) id<MTLCommandBuffer> lastCommandBuffer;
@@ -230,6 +236,13 @@ MetalContextRef Metal_Init(const char *libSource) {
   ctx.pipelineDebugDot = loadPipeline(ctx, @"debug_dot");
   ctx.pipelineSwiGLULinear_Q4K_F16 =
       loadPipeline(ctx, @"swiglu_linear_q4k_f16");
+
+  // Mamba / SSM
+  ctx.pipelineMambaConv1d_F16 = loadPipeline(ctx, @"mamba_conv1d_f16");
+  ctx.pipelineMambaScan_F16 = loadPipeline(ctx, @"mamba_scan_step_f16");
+  ctx.pipelineSiLU_F16 = loadPipeline(ctx, @"silu_f16");
+  ctx.pipelineSlice_F16 = loadPipeline(ctx, @"slice_f16");
+  ctx.pipelineMul_F16 = loadPipeline(ctx, @"mul_f16");
 
 #if __has_feature(objc_arc)
   return (__bridge_retained MetalContextRef)ctx;
@@ -810,6 +823,65 @@ void Metal_SwiGLULinear_Q4K_F16(MetalContextRef ctx, MetalBufferRef gateIn,
       threadsPerThreadgroup:MTLSizeMake(32, 4, 1)];
   [mc barrier];
 }
+
+void Metal_MambaConv1d_F16(MetalContextRef ctx, MetalBufferRef input, int offIn,
+                           MetalBufferRef weight, int offW, MetalBufferRef bias,
+                           int offB, MetalBufferRef state, int offS,
+                           MetalBufferRef output, int offOut, int dim,
+                           int kernelSize) {
+  MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
+  id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
+  [enc setComputePipelineState:mc.pipelineMambaConv1d_F16];
+  [enc setBuffer:(__bridge id<MTLBuffer>)input offset:offIn atIndex:0];
+  [enc setBuffer:(__bridge id<MTLBuffer>)weight offset:offW atIndex:1];
+  [enc setBuffer:(__bridge id<MTLBuffer>)bias offset:offB atIndex:2];
+  [enc setBuffer:(__bridge id<MTLBuffer>)state offset:offS atIndex:3];
+  [enc setBuffer:(__bridge id<MTLBuffer>)output offset:offOut atIndex:4];
+  [enc setBytes:&dim length:4 atIndex:5];
+  [enc setBytes:&kernelSize length:4 atIndex:6];
+
+  [enc dispatchThreads:MTLSizeMake(dim, 1, 1)
+      threadsPerThreadgroup:MTLSizeMake(MIN(dim, 256), 1, 1)];
+  [mc barrier];
+}
+
+void Metal_MambaScan_F16(MetalContextRef ctx_ref, MetalBufferRef u, int offU,
+                         MetalBufferRef h, int offH, MetalBufferRef A, int offA,
+                         MetalBufferRef B, int offB, MetalBufferRef C, int offC,
+                         MetalBufferRef D, int offD, MetalBufferRef dt,
+                         int offDt, MetalBufferRef y, int offY, int dim,
+                         int d_state) {
+  @autoreleasepool {
+    MetalWrapper *wrapper = (__bridge MetalWrapper *)ctx_ref;
+    id<MTLComputeCommandEncoder> encoder = [wrapper ensureEncoder];
+    [encoder setComputePipelineState:wrapper.pipelineMambaScan_F16];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)u offset:offU atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)h offset:offH atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)A offset:offA atIndex:2];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)B offset:offB atIndex:3];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)C offset:offC atIndex:4];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)D offset:offD atIndex:5];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)dt offset:offDt atIndex:6];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)y offset:offY atIndex:7];
+
+    int n_heads = 64;
+    int head_dim = dim / n_heads;
+
+    [encoder setBytes:&n_heads length:sizeof(int) atIndex:8];
+    [encoder setBytes:&d_state length:sizeof(int) atIndex:9];
+    [encoder setBytes:&head_dim length:sizeof(int) atIndex:10];
+
+    MTLSize gridSize = MTLSizeMake(dim, 1, 1);
+    NSUInteger threadGroupSize =
+        wrapper.pipelineMambaScan_F16.maxTotalThreadsPerThreadgroup;
+    if (threadGroupSize > dim)
+      threadGroupSize = dim;
+    MTLSize threadsPerGroup = MTLSizeMake(threadGroupSize, 1, 1);
+    [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadsPerGroup];
+    [wrapper barrier];
+  }
+}
+
 void Metal_BatchedMatMul_F16(MetalContextRef ctx, MetalBufferRef a, int oA,
                              int sA, bool tA, MetalBufferRef b, int oB, int sB,
                              bool tB, MetalBufferRef c, int oC, int sC, int M,
@@ -1409,4 +1481,68 @@ void Metal_AttPaged_F16(MetalContextRef ctx, MetalBufferRef q, int offQ,
 
   [enc dispatchThreads:gridSize threadsPerThreadgroup:threadGroupSize];
   [mc barrier];
+}
+
+void Metal_SiLU_F16(MetalContextRef ctx_ref, MetalBufferRef input, int offIn,
+                    MetalBufferRef output, int offOut, int n) {
+  @autoreleasepool {
+    MetalWrapper *wrapper = (__bridge MetalWrapper *)ctx_ref;
+    id<MTLComputeCommandEncoder> encoder = [wrapper ensureEncoder];
+    [encoder setComputePipelineState:wrapper.pipelineSiLU_F16];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)input offset:offIn atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)output offset:offOut atIndex:1];
+
+    MTLSize gridSize = MTLSizeMake(n, 1, 1);
+    NSUInteger threadGroupSize =
+        wrapper.pipelineSiLU_F16.maxTotalThreadsPerThreadgroup;
+    if (threadGroupSize > n)
+      threadGroupSize = n;
+    MTLSize threadsPerGroup = MTLSizeMake(threadGroupSize, 1, 1);
+    [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadsPerGroup];
+  }
+}
+
+void Metal_Slice_F16(MetalContextRef ctx_ref, MetalBufferRef input, int offIn,
+                     MetalBufferRef output, int offOut, int startCol,
+                     int numCols, int totalCols, int rows) {
+  @autoreleasepool {
+    MetalWrapper *wrapper = (__bridge MetalWrapper *)ctx_ref;
+    id<MTLComputeCommandEncoder> encoder = [wrapper ensureEncoder];
+    [encoder setComputePipelineState:wrapper.pipelineSlice_F16];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)input offset:offIn atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)output offset:offOut atIndex:1];
+    [encoder setBytes:&startCol length:sizeof(int) atIndex:2];
+    [encoder setBytes:&numCols length:sizeof(int) atIndex:3];
+    [encoder setBytes:&totalCols length:sizeof(int) atIndex:4];
+
+    int n = rows * numCols;
+    MTLSize gridSize = MTLSizeMake(n, 1, 1);
+    NSUInteger threadGroupSize =
+        wrapper.pipelineSlice_F16.maxTotalThreadsPerThreadgroup;
+    if (threadGroupSize > n)
+      threadGroupSize = n;
+    MTLSize threadsPerGroup = MTLSizeMake(threadGroupSize, 1, 1);
+    [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadsPerGroup];
+  }
+}
+
+void Metal_Mul_F16(MetalContextRef ctx_ref, 
+                  MetalBufferRef a, int offA, 
+                  MetalBufferRef b, int offB, 
+                  MetalBufferRef result, int offRes, 
+                  int n) {
+    @autoreleasepool {
+        MetalWrapper *wrapper = (__bridge MetalWrapper *)ctx_ref;
+        id<MTLComputeCommandEncoder> encoder = [wrapper ensureEncoder];
+        [encoder setComputePipelineState:wrapper.pipelineMul_F16];
+        [encoder setBuffer:(__bridge id<MTLBuffer>)a offset:offA atIndex:0];
+        [encoder setBuffer:(__bridge id<MTLBuffer>)b offset:offB atIndex:1];
+        [encoder setBuffer:(__bridge id<MTLBuffer>)result offset:offRes atIndex:2];
+        
+        MTLSize gridSize = MTLSizeMake(n, 1, 1);
+        NSUInteger threadGroupSize = wrapper.pipelineMul_F16.maxTotalThreadsPerThreadgroup;
+        if (threadGroupSize > n) threadGroupSize = n;
+        MTLSize threadsPerGroup = MTLSizeMake(threadGroupSize, 1, 1);
+        [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadsPerGroup];
+    }
 }

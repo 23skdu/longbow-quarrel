@@ -56,6 +56,9 @@ type LlamaWeights struct {
 	// Final
 	OutputNorm *device.Tensor
 	Output     *device.Tensor // vocab x dim (often shared with TokenEmb?)
+
+	// Mamba/SSM Layers (Hybrid Support)
+	Mamba []*MambaWeights
 }
 
 type Engine struct {
@@ -71,6 +74,10 @@ type Engine struct {
 	Cache KVCache
 	// KVCacheK []*device.Tensor // Deprecated: Use Cache.Get()
 	// KVCacheV []*device.Tensor // Deprecated: Use Cache.Get()
+
+	// SSM Cache (Mamba)
+	SSMCache    []*MambaState
+	MambaLayers []*MambaLayer
 
 	// Cache State
 	CachePos int

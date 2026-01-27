@@ -1,86 +1,135 @@
-# Production Readiness & Refactoring Plan
+# Performance Optimization Plan: Closing the Gap
 
-This document outlines a 10-step plan to refactor `longbow-quarrel` from a research/prototype codebase into a production-ready inference engine. The goal is to remove debug artifacts, standardize interfaces, and ensure stability and observability.
+**Goal:** Close the performance gap (currently ~4x-8x vs Llama.cpp) while maintaining strict coherence and correctness.
+**Targets:** `mistral:latest`, `nemotron-3-nano:latest`, `tinyllama:latest`, `granite4:latest`.
 
-## 1. Codebase Audit & Cleanup Inventory
+## Phase 0: Mamba/SSM Architecture Support [TOP PRIORITY]
 
-- **Objective**: Identifying all "smoke test" code, debug flags, hardcoded paths, and temporary commands.
-- **Actions**:
-  - Scan for `//go:build` tags that separate debug code.
-  - List all `cmd/` binaries and classify them as "keep", "refactor", or "delete".
-  - Identify `panic()` calls in library code that need error returns.
-  - Locate all `"TODO"` and `"FIXME"` comments related to hacky workarounds.
+**Objective:** Enable full support for Nemotron-3-Nano (Hybrid Mamba/Transformer) which is currently loading but producing incorrect output due to missing SSM layers.
 
-## 2. Removal of Temporary Artifacts
+### 1. Research & Architecture Design
 
-- **Objective**: Delete code that was only for initial bring-up.
-- **Actions**:
-  - Delete `cmd/smoke_test`, `cmd/metal_benchmark`, `cmd/quarrel_metal_bench`.
-  - Remove `DebugDequant`, `LastLogits`, and other debug fields from the `Engine` struct unless strictly needed for observability.
-  - Remove strictly temporary test files in `internal/device/` that duplicate proper unit tests.
+- [ ] Analyze Mamba/SSM data flow (State Space Model parameters: A, B, C, D, dt, z).
+- [ ] Map GGUF tensor names (e.g., `ssm_a`, `ssm_conv1d`) to the correct Mamba algorithm steps.
+- [ ] Design `MambaLayer` struct in Go to handle hybrid architecture (interleaved or blocks).
 
-## 3. Structured Logging Implementation
+### 2. Tensor Loading (GGUF)
 
-- **Objective**: Replace ad-hoc `fmt.Printf` and `log.Println` with a unified structured logger (e.g., `log/slog` or `zap`).
-- **Actions**:
-  - Define a global logger interface/singleton with levels (DEBUG, INFO, WARN, ERROR).
-  - Replace "printf debugging" in hot paths (like `engine.go` loops) with Trace/Debug level logs that are disabled by default.
-  - Ensure kernels do not print to stdout/stderr directly.
+- [ ] Extend `engine.go` weight loading to capture SSM-specific tensors.
+- [ ] Handle `ssm_in`, `ssm_out`, `ssm_conv1d`, `ssm_a`, `ssm_d`, `ssm_dt` weights.
+- [ ] Add "Hybrid" model architecture flag to `EngineConfig`.
 
-## 4. Configuration Unification
+### 3. Metal Kernels: Causal Convolution (Conv1d)
 
-- **Objective**: specific configuration structs into a validated configuration module.
-- **Actions**:
-  - Create `internal/config` package.
-  - Define a strict `Config` struct that covers Model, Device, and Engine settings.
-  - Implement validation logic (e.g., check for valid paths, positive dimensions) before Engine startup.
-  - Update `NewEngine` to accept this strongly-typed config.
+- [ ] Write `conv1d_f16` Metal kernel for causal 1D convolution.
+- [ ] Support flexible kernel size (usually 4 for Mamba).
+- [ ] Add unit test: Compare `conv1d` output against Python/Torch reference.
 
-## 5. Test Suite Consolidation
+### 4. Metal Kernels: Selective Scan (SSM Core)
 
-- **Objective**: Organize tests into Unit, Integration, and Benchmark suites.
-- **Actions**:
-  - Move valid device tests from `internal/device` to `internal/engine` tests where appropriate.
-  - Create a dedicated `test/` directory for integration tests that require model files.
-  - Ensure tests use `internal/config` for setup.
-  - Remove reliance on hardcoded absolute paths in tests; use environment variables or flags.
+- [ ] **Complex Task:** Implement the parallel or sequential selective scan in Metal (MSL).
+- [ ] Handle `scan_f16` operation with time-variant parameters (A, B, C, dt).
+- [ ] Optimize for threadgroup memory usage (crucial for SSM scan performance).
 
-## 6. Error Handling & Safety
+### 5. Layer Implementation (Go Engine)
 
-- **Objective**: Make the engine robust against invalid state or inputs.
-- **Actions**:
-  - Audit `internal/device` and `internal/gguf` for `panic()`. Replace with `error` returns.
-  - Ensure all C/Metal resources (`void*`, buffers) are correctly freed in `Defer` or `Close` methods.
-  - Add timeout safety to Metal command buffer executions.
+- [ ] Implement `ComputeMambaLayer` in `engine.go`.
+- [ ] Integrate Input Projection -> Conv1d -> SSM Scan -> Output Projection flow.
+- [ ] Ensure correct residual connection handling (often different in Mamba vs Transformer).
 
-## 7. Observability & Metrics
+### 6. Hybrid Engine Integration
 
-- **Objective**: Replace one-off timing printouts with standard metrics.
-- **Actions**:
-  - Expand `internal/metrics` to cover all critical paths (token gen time, prompt eval time, cache usage).
-  - Instrument `Engine.Infer` with proper tracing spans.
-  - Expose metrics via a standard endpoint (if running as a server) or hook.
+- [ ] Modify `Infer` loop to switch between `ComputeAttentionLayer` and `ComputeMambaLayer`.
+- [ ] Handle state passing (Mamba has internal state, unlike stateless Transformer attention).
 
-## 8. API Stabilization
+### 7. Unit Testing & Validation
 
-- **Objective**: Define clear public interfaces for `Engine` and `Device`.
-- **Actions**:
-  - Make internal helpers private (lowercamelCase).
-  - Document all public Exported methods with GoDoc.
-  - Finalize the `KVCache` interface to allow future swappable implementations.
+- [ ] Creating `cmd/smoke_test/mamba_test.go`.
+- [ ] **Unit Test:** Run single Mamba layer with fixed weights/input and verify against pre-computed golden values (from `mamba_ssm` Python lib).
+- [ ] **Integration Test:** Verify Nemotron-3-Nano perplexity on small text compared to `transformers`.
 
-## 9. Comprehensive Benchmarking Suite
+### 8. Fuzz Testing (SSM Stability)
 
-- **Objective**: Create a reproducible benchmark command.
-- **Actions**:
-  - Create `cmd/bench` as the single source of truth for performance.
-  - Support flags for prompt size, batch size, and quantization type.
-  - Output results in a machine-readable format (JSON/CSV) for regression tracking.
+- [ ] Create fuzzer for `Scan` kernel: Randomize inputs and `dt` to check for numeric instability (NaNs/Infs).
+- [ ] Verify handling of extreme float16 values in the recursive scan.
 
-## 10. CI/CD & Documentation Finalization
+### 9. Prometheus Metrics (SSM Specific)
 
-- **Objective**: Ensure the repository is ready for public use and contribution.
-- **Actions**:
-  - Create a `Makefile` with targets: `build`, `test`, `bench`, `lint`.
-  - Update `README.md` and `docs/usage.md` to reflect the new API and commands.
-  - Set up a basic CI workflow (GitHub Actions) to run `make test` on non-Metal inputs (mocked) or skip Metal tests gracefully.
+- [ ] Add metrics for `ssm_scan_latency` and `ssm_conv_latency`.
+- [ ] Track `ssm_state_size` memory usage.
+- [ ] Alert on `ssm_divergence` (NaN detection in state).
+
+### 10. Final Verification
+
+- [ ] Run full Nemotron-3-Nano benchmark.
+- [ ] Confirm throughput matches or exceeds `llama.cpp` (Mamba should be faster than Attention).
+
+---
+
+## Phase 1: Critical Fixes & Foundation
+
+### 11. Fix Nemotron Loading [DONE]
+
+- **Objective:** Remedy "token embedding weights not loaded" error.
+- [x] Debug GGUF tensor names for Nemotron.
+- [x] Implement fallback for tied embeddings (`token_embd` <-> `output`).
+- [x] Cap context length to prevent OOM.
+
+### 12. Robust Profiling & Baselines
+
+- **Objective:** Identify exact bottlenecks.
+- [x] Create `scripts/profile_metal.sh`.
+- [x] Establish baseline reports (Mistral, Granite, TinyLlama).
+- [ ] Refine benchmark to exclude GGUF load time.
+
+### 13. Automated Regression Testing (Coherence)
+
+- [ ] Implement `cmd/smoke_test/regression_suite.go`.
+- [ ] Enforce "Perplexity/Logit Difference" check.
+
+## Phase 2: Kernel Micro-Optimization
+
+*(See original plan for details on GEMM, Flash Attention, Fusion)*
+
+## Phase 3: System & Architecture
+
+*(See original plan for Sync Reduction, Graph Execution)*
+
+## Phase 4: Model-Specific Tuning
+
+*(See original plan for GQA, MoE)*
+
+## Phase 5: Reliability & Release
+
+*(See original plan for Fuzzing, Soak Tests)*
+
+## Phase 6: Infrastructure & Dependencies
+
+### 17. Apache Arrow Flight Integration (Archer/Longbow Support)
+
+- **Objective:** Enable Quarrel to serve as the Inference Node for Archer, pushing vectors to Longbow via Arrow Flight (Zero Copy).
+- **Core Requirement:** Upgrade all Arrow support libraries to **Apache Arrow v23.0.0**.
+
+#### A. Arrow Client Implementation `internal/arrow_client`
+
+- [ ] Implement `FlightClient` connecting to Longbow.
+  - **Port 3000 (Data):** For `DoPut` (Ingest), `DoGet` (Retrieval), `DoExchange`.
+  - **Port 3001 (Meta):** For `GetFlightInfo` (Schema/Status).
+- [ ] Implement Zero-Copy conversions:
+  - `device.Tensor` (Metal) -> `Host Slice` -> `arrow.RecordBatch`.
+- [ ] Support `DoPut` for streaming Embeddings + Metadata.
+
+#### B. Engine Embedding API
+
+- [ ] Expose `Engine.Embed(prompt string) ([]float32, error)` specifically for embedding models (e.g. `nomic-embed-text`).
+- [ ] ensure `output_norm` is applied correctly for embeddings if model requires it (some use last hidden state, some use mean pool).
+
+#### C. Integration Test Plan
+
+- **Test:** `cmd/integration_test/embedding_flight_test.go`
+- **Scenario:** "Embedding to Vector Store Pipeline"
+  1. **Spin up Longbow (Mock or Docker)** on Ports 3000/3001.
+  2. **Load Model:** `nomic-embed-text` (or equivalent small embedding model) in Quarrel.
+  3. **Generate:** Run `Embed("Hello World")` -> get `[1024]float32`.
+  4. **Transport:** Package as Arrow Record -> Flight `DoPut` -> Port 3000.
+  5. **Verify:** Call Flight `DoGet` (or `GetFlightInfo`) on Port 3001 to confirm vector presence/dimensions.

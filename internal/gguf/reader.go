@@ -7,6 +7,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"sort"
 	"syscall"
 	"unsafe"
 )
@@ -206,6 +207,7 @@ func LoadFile(path string) (*GGUFFile, error) {
 		offset += padding
 	}
 
+	file.DataOffset = offset
 	fmt.Printf("DEBUG: Computed Padding Offset: %d\n", offset)
 
 	// Update tensor pointers
@@ -299,4 +301,35 @@ func math_Float32frombits(b uint32) float32 {
 
 func (f *GGUFFile) Close() error {
 	return syscall.Munmap(f.Data)
+}
+
+func (f *GGUFFile) GetGapTensors() []*TensorInfo {
+	// Sort tensors by offset
+	sortedTensors := make([]*TensorInfo, len(f.Tensors))
+	copy(sortedTensors, f.Tensors)
+	sort.Slice(sortedTensors, func(i, j int) bool {
+		return sortedTensors[i].Offset < sortedTensors[j].Offset
+	})
+
+	var gaps []*TensorInfo
+	for i := 0; i < len(sortedTensors)-1; i++ {
+		curr := sortedTensors[i]
+		next := sortedTensors[i+1]
+
+		currEnd := curr.Offset + curr.SizeBytes()
+
+		if currEnd < next.Offset {
+			gapSize := next.Offset - currEnd
+			if gapSize > 1024*1024 { // Only care about large gaps (>1MB)
+				absStart := f.DataOffset + currEnd
+				absEnd := f.DataOffset + next.Offset
+				gaps = append(gaps, &TensorInfo{
+					Name:   fmt.Sprintf("gap_%d_at_%d", len(gaps), currEnd),
+					Offset: currEnd,
+					Data:   f.Data[absStart:absEnd],
+				})
+			}
+		}
+	}
+	return gaps
 }

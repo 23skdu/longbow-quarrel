@@ -1780,3 +1780,162 @@ kernel void att_paged_f16(device const half *q [[ buffer(0) ]],
         output[h * headDim + tid.x] = safe_half(r);
     }
 }
+
+// ==========================================
+// Mamba / SSM Kernels
+// ==========================================
+
+// 1D Causal Convolution (Depthwise)
+// Arguments:
+// - input: [batch, dim] (Current token)
+// - weight: [dim, kernel_size] (Conv weights)
+// - bias: [dim] (Optional)
+// - state: [batch, dim, kernel_size] (Conv state ring buffer)
+// - output: [batch, dim]
+// - dim: Hidden dimension (d_inner)
+// - kernel_size: usually 4
+// - step: current time step (to index ring buffer)
+kernel void mamba_conv1d_f16(
+    device const half *input [[ buffer(0) ]],
+    device const half *weight [[ buffer(1) ]], // [dim, kernel_size]
+    device const half *bias [[ buffer(2) ]],   // [dim]
+    device half *state [[ buffer(3) ]],        // [dim, kernel_size] (assuming batch=1 for now)
+    device half *output [[ buffer(4) ]],
+    constant int &dim [[ buffer(5) ]],
+    constant int &kernel_size [[ buffer(6) ]],
+    uint tid [[ thread_position_in_grid ]]) {
+
+    if (tid >= (uint)dim) return;
+
+    // Shift state: This is a causal convolution on a stream.
+    // In efficient implementation (like ring buffer), we write new input to state[idx]
+    // and conv across the window.
+    // For simplicity here: we assume 'state' is the history window.
+    // Actually, physically shifting is expensive. Using a ring buffer approach is better.
+    // Let's assume input 'state' is already managed by the host or we do a shift.
+    // For this kernel, let's do a simple shift for correctness first (optimize later with ring buffer).
+    
+    // Shift history (inefficient but clear)
+    // state[tid, 0] = newest
+    // state[tid, k-1] = oldest
+    // Weight is [dim, k], usually weight[tid, 0] corresponds to newest?
+    // Mamba conv is usually: out[t] = sum(k=0..K-1) weight[k] * input[t-k]
+    
+    // Shift logic:
+    for (int k = kernel_size - 1; k > 0; k--) {
+        state[tid * kernel_size + k] = state[tid * kernel_size + (k - 1)];
+    }
+    state[tid * kernel_size + 0] = input[tid];
+
+    float sum = (float)bias[tid];
+    for (int k = 0; k < kernel_size; k++) {
+        float w = (float)weight[tid * kernel_size + k];
+        float x = (float)state[tid * kernel_size + k];
+        sum += w * x;
+    }
+    
+    // Silu activation is typical after conv in Mamba block structure, 
+    // but often it's: x -> conv -> silu -> ssm.
+    // The conv1d output usually goes to the SSM. 
+    // Let's verify Mamba architecture: 
+    // Project -> Conv1d -> Silu -> SSM.
+    // So this kernel just does Conv1d + Bias.
+    
+    output[tid] = (half)sum;
+}
+
+
+// Mamba Selective Scan (SSM) Step - Single Token (Inference Mode)
+// Equations:
+// x_t = input[t] (after conv)
+// dt = softplus(dt_bias + dt_proj(x_t))
+// A_bar = exp(dt * A)
+// B_bar = dt * B
+// h_t = A_bar * h_{t-1} + B_bar * x_t (element-wise A, simplified diagonal)
+// y_t = C * h_t * D * x_t (Wait, D is usually residual)
+// Real Mamba:
+//   dt = softplus(Parameter + dt_proj(x))
+//   dA = exp(dt * A)
+//   dB = dt * B 
+//   h = dA * h + dB * x
+//   y = C * h + D * x
+//
+// Arguments:
+// - u: [dim] (input x)
+// - h: [dim, d_state] (hidden state matrix)
+// - A: [dim, d_state] (-exp(A_log) parameter usually, or just A)
+// - B: [d_state] (input dependent or fixed? In Mamba B is input dependent [batch, d_state] projected from x)
+// - C: [d_state] (projected from x)
+// - D: [dim]
+// - dt_bias: [dim]
+// - dt_weight: [dim] or derived? dt is usually projected from x with rank 1 or small rank.
+//   Actually dt is [batch, dim] in Mamba (projected from x).
+//   Let's assume the host computes dt, B, C if they are input-dependent projections.
+//   Or this kernel computes them if we pass the weights.
+//   For this "Core" kernel, let's assume B, C, dt are ALREADY computed/projected by linear layers in Go.
+//   So we just update the SSM state h.
+kernel void mamba_scan_step_f16(device const half *u [[ buffer(0) ]],
+                               device half *h [[ buffer(1) ]],
+                               device const half *A [[ buffer(2) ]],
+                               device const half *B [[ buffer(3) ]],
+                               device const half *C [[ buffer(4) ]],
+                               device const half *D [[ buffer(5) ]],
+                               device const half *dt [[ buffer(6) ]],
+                               device half *y [[ buffer(7) ]],
+                               constant int &n_heads [[ buffer(8) ]],
+                               constant int &d_state [[ buffer(9) ]],
+                               constant int &head_dim [[ buffer(10) ]],
+                               uint tid [[ thread_position_in_grid ]]) {
+    int i = (int)tid;
+    int head_idx = i / head_dim;
+    int chan_idx = i % head_dim;
+    
+    float u_val = (float)u[i];
+    float dt_val = (float)dt[head_idx];
+    float a_val = (float)A[head_idx];
+    float d_val = (float)D[i];
+    
+    float dA = exp(dt_val * a_val);
+    
+    float out_val = 0;
+    for (int n = 0; n < d_state; n++) {
+        int state_idx = head_idx * (d_state * head_dim) + n * head_dim + chan_idx;
+        float b_val = (float)B[head_idx * d_state + n];
+        float c_val = (float)C[head_idx * d_state + n];
+        
+        float h_prev = (float)h[state_idx];
+        float h_next = dA * h_prev + (dt_val * b_val) * u_val;
+        h[state_idx] = (half)h_next;
+        
+        out_val += h_next * c_val;
+    }
+    
+    y[i] = (half)(out_val + d_val * u_val);
+}
+
+kernel void silu_f16(device const half *input [[ buffer(0) ]],
+                     device half *output [[ buffer(1) ]],
+                     uint id [[ thread_position_in_grid ]]) {
+    float x = (float)input[id];
+    float sig = 1.0f / (1.0f + exp(-x));
+    output[id] = (half)(x * sig);
+}
+
+kernel void slice_f16(device const half *input [[ buffer(0) ]],
+                     device half *output [[ buffer(1) ]],
+                     constant int &start_col [[ buffer(2) ]],
+                     constant int &num_cols [[ buffer(3) ]],
+                     constant int &total_cols [[ buffer(4) ]],
+                     uint id [[ thread_position_in_grid ]]) {
+    int row = id / num_cols;
+    int col = id % num_cols;
+    int in_idx = row * total_cols + start_col + col;
+    output[id] = input[in_idx];
+}
+
+kernel void mul_f16(device const half *a [[ buffer(0) ]],
+                   device const half *b [[ buffer(1) ]],
+                   device half *result [[ buffer(2) ]],
+                   uint id [[ thread_position_in_grid ]]) {
+    result[id] = a[id] * b[id];
+}
