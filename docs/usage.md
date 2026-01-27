@@ -8,9 +8,6 @@ go build -tags metal -o quarrel ./cmd/quarrel
 
 # Run inference
 ./quarrel -model "mistral:latest" -n 50 -prompt "Hello, world"
-
-# (Optional) Direct path
-./quarrel -model ~/.ollama/models/blobs/sha256-... -n 50
 ```
 
 > [!TIP]
@@ -18,16 +15,37 @@ go build -tags metal -o quarrel ./cmd/quarrel
 
 ## Command Line Options
 
+### General
+
 | Flag | Default | Description |
-|------|---------|-------------|
-| `-model` | (required) | Path to GGUF model file |
-| `-prompt` | "Hello" | Input prompt text |
-| `-n` | 10 | Number of tokens to generate |
-| `-chatml` | `false` | Wrap prompt in ChatML template (Instruction Tuning) |
+| :--- | :--- | :--- |
+| `-model` | (required) | Path to GGUF model file, or Ollama model name (e.g., `smollm2:135m`) |
+| `-prompt` | "Hello world" | Input prompt text |
+| `-n` | 20 | Number of tokens to generate |
+| `-stream` | `false` | Stream tokens to stdout as they are generated |
+| `-metrics` | `:9090` | Address to serve Prometheus metrics |
+| `-gpu` | `false` | Explicitly request Metal GPU acceleration (Auto-detected usually) |
+
+### Sampling & quality
+
+| Flag | Default | Description |
+| :--- | :--- | :--- |
 | `-temp` | `0.7` | Sampling Temperature (0.0 = greedy) |
 | `-topk` | `40` | Top-K Sampling |
 | `-topp` | `0.95` | Top-P (Nucleus) Sampling |
 | `-penalty` | `1.1` | Repetition Penalty (1.0 = none) |
+| `-quality` | `false` | Enable advanced quality-guided sampling |
+| `-chatml` | `false` | Wrap prompt in ChatML template (Instruction Tuning) |
+
+### Advanced / Debugging
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-kv-cache-size` | 22 | KV cache size in MiB |
+| `-benchmark` | `false` | Run in benchmark mode (minimal output) |
+| `-debug-dequant` | `false` | Enable dequantization debug dump |
+| `-debug-activations` | `false` | Enable layer-by-layer activation dumping |
+| `-debug-perf` | `false` | Enable performance metric logging for kernels |
 
 ## Model Format
 
@@ -36,9 +54,6 @@ Longbow-quarrel supports GGUF format models with Llama 3 architecture:
 ```bash
 # Example: Download smollm2 via Ollama
 ollama pull smollm2:135m-instruct
-
-# Model location
-~/.ollama/models/blobs/sha256-f535f83ec568d040f88ddc04a199fa6da90923bbb41d4dcaed02caa924d6ef57
 ```
 
 - smollm2-135M/360M-instruct (tested)
@@ -50,20 +65,3 @@ ollama pull smollm2:135m-instruct
 
 - **K-Quantization**: Q3_K, Q4_K, Q6_K (fully accelerated)
 - **Standard**: FP16, FP32
-
-## Examples
-
-### Basic Text Generation
-
-```bash
-./quarrel \
-  -model ~/.ollama/models/blobs/sha256-f535... \
-  -prompt "The capital of France is" \
-  -n 20
-```
-
-Output:
-
-```
-Inference complete: generated 20 tokens in 67.153ms (297.90 t/s)
-Decoded Text: 

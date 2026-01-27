@@ -5,6 +5,7 @@ package engine
 import (
 	"testing"
 
+	conf "github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
 )
 
@@ -41,9 +42,9 @@ func TestRoPEFrequency_Mistral(t *testing.T) {
 	}
 
 	// Test that our config uses the correct value
-	engineConfig := EngineConfig{
-		DebugDequant: false,
-		KVCacheSize:  22,
+	engineConfig := conf.Config{
+
+		KVCacheSize: 22,
 	}
 	engine, err := NewEngine(mistralPath, engineConfig)
 	if err != nil {

@@ -12,7 +12,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/engine"
+	"github.com/23skdu/longbow-quarrel/internal/logger"
 	"github.com/23skdu/longbow-quarrel/internal/ollama"
 	"github.com/23skdu/longbow-quarrel/internal/tokenizer"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -62,19 +64,19 @@ func main() {
 	// Try to resolve as Ollama model name first
 	resolvedPath, err := ollama.ResolveModelPath(*modelPath)
 	if err == nil {
-		log.Printf("Resolved Ollama model '%s' to %s", *modelPath, resolvedPath)
+		logger.Log.Info("Resolved Ollama model", "original", *modelPath, "resolved", resolvedPath)
 		*modelPath = resolvedPath
 	} else {
 		// Not an Ollama model, treat as direct path
-		log.Printf("Using direct model path: %s", *modelPath)
+		logger.Log.Info("Using direct model path", "path", *modelPath)
 	}
 
 	// Start Metrics Server
 	go func() {
 		http.Handle("/metrics", promhttp.Handler())
-		log.Printf("Metrics serving on %s/metrics", *metricsAddr)
+		logger.Log.Info("Metrics serving", "address", *metricsAddr+"/metrics")
 		if err := http.ListenAndServe(*metricsAddr, nil); err != nil {
-			log.Printf("Metrics server error: %v", err)
+			logger.Log.Info("Metrics server error", "error", err)
 		}
 	}()
 
@@ -83,18 +85,18 @@ func main() {
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
 	// Initialize Tokenizer
-	log.Printf("Loading tokenizer from %s...", *modelPath)
+	logger.Log.Info("Loading tokenizer", "model", *modelPath)
 	tok, err := tokenizer.New(*modelPath)
 	if err != nil {
 		log.Fatalf("Failed to initialize tokenizer: %v", err)
 	}
 
 	// Initialize Engine
-	log.Printf("Loading model from %s...", *modelPath)
-	engineConfig := engine.EngineConfig{
-		DebugDequant: *debugDequant,
-		KVCacheSize:  *kvCacheSize,
-	}
+	logger.Log.Info("Loading model", "model", *modelPath)
+	engineConfig := config.Default()
+	engineConfig.KVCacheSize = *kvCacheSize
+	engineConfig.DebugActivations = *debugActivations
+
 	e, err := engine.NewEngine(*modelPath, engineConfig)
 	if err != nil {
 		log.Fatalf("Failed to initialize engine: %v", err)
@@ -141,9 +143,9 @@ func main() {
 		inputTokens = append([]int{1}, inputTokens...)
 	}
 
-	log.Printf("Encoded tokens: %v (len %d)", inputTokens, len(inputTokens))
+	logger.Log.Info("Encoded tokens", "tokens", inputTokens, "length", len(inputTokens))
 
-	log.Printf("Starting inference for %d tokens...", *numTokens)
+	logger.Log.Info("Starting inference", "num_tokens", *numTokens)
 
 	doneChan := make(chan struct{})
 
@@ -160,8 +162,14 @@ func main() {
 			QualityMode:      *qualityMode,
 		}
 
-		log.Printf("Sampling Config: Temp=%.2f TopK=%d TopP=%.2f Penalty=%.2f QualityMode=%v Stream=%v (DebugActivations=%v)",
-			*temperature, *topK, *topP, *repPenalty, *qualityMode, *streamOutput, *debugActivations)
+		logger.Log.Info("Sampling Config",
+			"temp", *temperature,
+			"top_k", *topK,
+			"top_p", *topP,
+			"penalty", *repPenalty,
+			"quality_mode", *qualityMode,
+			"stream", *streamOutput,
+			"debug_activations", *debugActivations)
 
 		var result []int
 		var err error
@@ -181,12 +189,11 @@ func main() {
 			result, err = e.Infer(inputTokens, *numTokens, samplerConfig)
 		}
 		if err != nil {
-			log.Printf("Inference error: %v", err)
+			logger.Log.Info("Inference error", "error", err)
 		} else {
 			duration := time.Since(start)
 			tokensPerSec := float64(len(result)) / duration.Seconds()
-			log.Printf("Inference complete: generated %d tokens in %v (%.2f t/s)",
-				len(result), duration, tokensPerSec)
+			logger.Log.Info("Inference complete", "tokens", len(result), "duration", duration, "tps", tokensPerSec)
 
 			// Debug print each token
 			fmt.Print("Result Tokens Detail: ")
@@ -196,7 +203,7 @@ func main() {
 			}
 			fmt.Println()
 
-			log.Printf("Decoded Text: %s", tok.Decode(result))
+			logger.Log.Info("Decoded Text", "text", tok.Decode(result))
 		}
 		close(doneChan)
 	}()

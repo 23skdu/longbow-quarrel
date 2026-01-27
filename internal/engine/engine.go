@@ -6,8 +6,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"log"
 	"math"
+
 	"runtime"
 	"sort"
 
@@ -15,24 +15,63 @@ import (
 
 	"strings"
 
+	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/device"
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
+	"github.com/23skdu/longbow-quarrel/internal/logger"
 	"github.com/23skdu/longbow-quarrel/internal/metrics"
 	"github.com/23skdu/longbow-quarrel/internal/tokenizer"
 )
 
 // Helper to get KV value with architecture-aware fallback
 func getKV(f *gguf.GGUFFile, llamaKey, qwenKey string) (interface{}, bool) {
-	// Try llama key first
+	// log.Printf("[DEBUG] Searching KV: llama=%s, qwen=%s", llamaKey, qwenKey)
+
+	// 1. Try provided llama key
 	if val, ok := f.KV[llamaKey]; ok {
 		return val, true
 	}
-	// Fallback to qwen key if provided
+
+	// 2. Try provided qwen key
 	if qwenKey != "" {
 		if val, ok := f.KV[qwenKey]; ok {
 			return val, true
 		}
 	}
+
+	// 3. Try general keys if applicable
+	if strings.Contains(llamaKey, "llama.") {
+		generalKey := strings.Replace(llamaKey, "llama.", "general.", 1)
+		if val, ok := f.KV[generalKey]; ok {
+			return val, true
+		}
+	}
+
+	// 4. Try granite prefix (common in Ollama)
+	if strings.Contains(llamaKey, "llama.") {
+		graniteKey := strings.Replace(llamaKey, "llama.", "granite.", 1)
+		if val, ok := f.KV[graniteKey]; ok {
+			return val, true
+		}
+	}
+
+	// 5. Dynamic architecture detection
+	if arch, ok := f.KV["general.architecture"].(string); ok {
+		// Replace "llama." with "<arch>."
+		archKey := strings.Replace(llamaKey, "llama.", arch+".", 1)
+		if val, ok := f.KV[archKey]; ok {
+			return val, true
+		}
+
+		// Also try some variations if arch is like "llama" but keys are different
+		for _, alt := range []string{"mistral", "qwen2", "phi3", "starcoder2"} {
+			altKey := strings.Replace(llamaKey, "llama.", alt+".", 1)
+			if val, ok := f.KV[altKey]; ok {
+				return val, true
+			}
+		}
+	}
+
 	return nil, false
 }
 
@@ -340,21 +379,14 @@ func getCharNGrams(chars []rune, n int) map[string]int {
 	return nGrams
 }
 
-type EngineConfig struct {
-	DebugDequant bool
-	KVCacheSize  int
-}
-
-func NewEngine(modelPath string, config EngineConfig) (*Engine, error) {
+func NewEngine(modelPath string, config config.Config) (*Engine, error) {
 	ctx := device.NewContext()
 
 	e := &Engine{
-		Ctx:        ctx,
-		Weights:    &LlamaWeights{},
-		ActLogger:  NewActivationLogger(),
-		LastLogits: nil,
+		Ctx:       ctx,
+		Weights:   &LlamaWeights{},
+		ActLogger: NewActivationLogger(),
 	}
-	e.Config.DebugDequant = config.DebugDequant
 	e.Config.KVCacheSize = config.KVCacheSize
 
 	if err := e.loadModel(modelPath); err != nil {
@@ -388,6 +420,7 @@ func (e *Engine) loadModel(path string) error {
 	if val, ok := getKV(f, "llama.embedding_length", "qwen3moe.embedding_length"); ok {
 		e.Config.Dim = int(toFloat64(val))
 	}
+	logger.Log.Info("Model dimensions loaded", "dim", e.Config.Dim)
 
 	// Heads
 	if val, ok := getKV(f, "llama.attention.head_count", "qwen3moe.attention.head_count"); ok {
@@ -395,6 +428,7 @@ func (e *Engine) loadModel(path string) error {
 	} else {
 		return errors.New("missing attention.head_count")
 	}
+	logger.Log.Info("Model head count loaded", "heads", e.Config.Heads)
 
 	// Hidden Dim (FFN context)
 	if val, ok := getKV(f, "llama.feed_forward_length", "qwen3moe.feed_forward_length"); ok {
@@ -402,17 +436,40 @@ func (e *Engine) loadModel(path string) error {
 	} else {
 		e.Config.HiddenDim = 4 * e.Config.Dim // fallback
 	}
+	logger.Log.Info("Model hidden dim loaded", "hidden_dim", e.Config.HiddenDim)
 
 	// KV Heads (GQA)
 	if val, ok := getKV(f, "llama.attention.head_count_kv", "qwen3moe.attention.head_count_kv"); ok {
-		e.Config.KVHeads = int(toFloat64(val))
+		// Handle array case specifically for models like Nemotron-3-Nano
+		if arr, ok := val.([]interface{}); ok {
+			maxVal := 0
+			for _, v := range arr {
+				iv := int(toFloat64(v))
+				if iv > maxVal {
+					maxVal = iv
+				}
+			}
+			if maxVal > 0 {
+				e.Config.KVHeads = maxVal
+			} else {
+				e.Config.KVHeads = e.Config.Heads // Fallback if all 0
+			}
+			logger.Log.Info("Model KV heads loaded (from array)", "kv_heads", e.Config.KVHeads, "raw", val)
+		} else {
+			e.Config.KVHeads = int(toFloat64(val))
+			logger.Log.Info("Model KV heads loaded", "kv_heads", e.Config.KVHeads)
+		}
 	} else {
 		// Default to Heads (MHA)
 		e.Config.KVHeads = e.Config.Heads
+		logger.Log.Info("Model KV heads default (MHA)", "kv_heads", e.Config.KVHeads)
 	}
 
 	// Head Dim
-	e.Config.HeadDim = e.Config.Dim / e.Config.Heads
+	if e.Config.Heads > 0 {
+		e.Config.HeadDim = e.Config.Dim / e.Config.Heads
+	}
+	logger.Log.Info("Model head dim calculated", "head_dim", e.Config.HeadDim)
 
 	// Seq Len (Context)
 	if val, ok := getKV(f, "llama.context_length", "qwen3moe.context_length"); ok {
@@ -420,11 +477,12 @@ func (e *Engine) loadModel(path string) error {
 	} else {
 		e.Config.SeqLen = 2048 // default
 	}
+	logger.Log.Info("Model sequence length loaded", "seq_len", e.Config.SeqLen)
 
 	// RoPE Freq
 	if val, ok := getKV(f, "llama.rope.freq_base", "qwen3moe.rope.freq_base"); ok {
 		e.Config.RopeTheta = float32(toFloat64(val))
-		log.Printf("[MODEL] RoPE Theta: %.0f", e.Config.RopeTheta)
+		logger.Log.Info("Model RoPE theta loaded", "theta", e.Config.RopeTheta)
 	} else {
 		// Default to 10k for Llama 2, but Mistral v0.3 uses 1M
 		// We'll set it properly based on architecture below
@@ -448,14 +506,14 @@ func (e *Engine) loadModel(path string) error {
 	// If not specified in GGUF, default to 4096 for Mistral, 0 (disabled) for others
 	if val, ok := getKV(f, "llama.attention.sliding_window", ""); ok {
 		e.Config.WindowSize = int(toFloat64(val))
-		log.Printf("[MODEL] Sliding Window Size: %d", e.Config.WindowSize)
+		logger.Log.Info("Model sliding window size loaded", "window_size", e.Config.WindowSize)
 	} else {
 		// Check if this is Mistral (heuristic: has specific architecture name)
 		if arch, ok := f.KV["general.architecture"].(string); ok && arch == "llama" {
 			// For Mistral models, default to 4096
 			// For other models (Llama, etc.), use 0 (full attention)
 			e.Config.WindowSize = 4096
-			log.Printf("[MODEL] Sliding Window Size (Default for Mistral): %d", e.Config.WindowSize)
+			logger.Log.Info("Model heuristic: using Mistral sliding window default", "window_size", e.Config.WindowSize)
 		} else {
 			e.Config.WindowSize = 0 // Full attention
 		}
@@ -463,7 +521,7 @@ func (e *Engine) loadModel(path string) error {
 
 	// Log Model Architecture
 	if arch, ok := f.KV["general.architecture"].(string); ok {
-		log.Printf("[MODEL] Architecture: %s", arch)
+		logger.Log.Info("Model architecture detected", "arch", arch)
 
 		// Heuristic: If it's llama or mistral and WindowSize not set,
 		// check if we should assume Mistral SWA.
@@ -475,63 +533,63 @@ func (e *Engine) loadModel(path string) error {
 				// Heuristic: If RopeTheta is 1M, it's likely Mistral v0.3.
 				if e.Config.RopeTheta >= 1000000.0 {
 					e.Config.WindowSize = 4096
-					log.Printf("[MODEL] Heuristic: Mistral v0.3 detected, using 4096 SWA")
+					logger.Log.Info("Model heuristic: Mistral v0.3 detected, using 4096 SWA")
 				}
 			}
 		}
 	}
 	if val, ok := getKV(f, "llama.vocab_size", ""); ok {
 		e.Config.VocabSize = int(toFloat64(val))
-		log.Printf("[MODEL] Vocab Size: %d", e.Config.VocabSize)
+		logger.Log.Info("Model vocab size loaded", "vocab_size", e.Config.VocabSize)
 	} else {
 		// Fallback for Smollm2 / Llama3 if missing
 		e.Config.VocabSize = 49152
-		log.Printf("[MODEL] Vocab Size (Default): %d", e.Config.VocabSize)
+		logger.Log.Info("Model vocab size default", "vocab_size", e.Config.VocabSize)
 	}
 
 	// Set Precision Mode based on model dimensions (explicit configuration instead of heuristic)
 	// This can be overridden by metadata if available
 	if arch, ok := f.KV["general.architecture"].(string); ok {
-		log.Printf("[MODEL] Architecture: %s", arch)
+		logger.Log.Info("Model architecture confirmed", "arch", arch)
 	}
 
 	if val, ok := f.KV["llama.attention.precision"]; ok {
 		if prec, ok := val.(string); ok {
 			switch prec {
 			case "f16":
-				e.Config.PrecisionMode = PrecisionFP16
-				log.Printf("[MODEL] Precision Mode: FP16 (from metadata)")
+				e.Config.PrecisionMode = config.PrecisionFP16
+				logger.Log.Info("Model precision mode set (metadata)", "mode", "FP16")
 			case "f32":
-				e.Config.PrecisionMode = PrecisionF32FFN
-				log.Printf("[MODEL] Precision Mode: F32 FFN (from metadata)")
+				e.Config.PrecisionMode = config.PrecisionF32FFN
+				logger.Log.Info("Model precision mode set (metadata)", "mode", "F32_FFN")
 			case "mixed":
-				e.Config.PrecisionMode = PrecisionMixed
-				log.Printf("[MODEL] Precision Mode: Mixed (from metadata)")
+				e.Config.PrecisionMode = config.PrecisionMixed
+				logger.Log.Info("Model precision mode set (metadata)", "mode", "Mixed")
 			default:
-				log.Printf("[MODEL] Unknown precision mode: %s, using auto", prec)
+				logger.Log.Info("Model unknown precision mode, using auto", "mode", prec)
 			}
 		} else {
-			e.Config.PrecisionMode = PrecisionAuto
+			e.Config.PrecisionMode = config.PrecisionAuto
 		}
 	} else {
 		// Auto-detect based on dimension
 		if e.Config.Dim < 1024 {
-			e.Config.PrecisionMode = PrecisionF32FFN
-			log.Printf("[MODEL] Precision Mode: Auto (F32 FFN for small model, dim=%d)", e.Config.Dim)
+			e.Config.PrecisionMode = config.PrecisionF32FFN
+			logger.Log.Info("Model precision mode auto-detected", "mode", "F32_FFN", "dim", e.Config.Dim)
 		} else if e.Config.Dim >= 4096 {
-			e.Config.PrecisionMode = PrecisionMixed
-			log.Printf("[MODEL] Precision Mode: Auto (Mixed precision for large model, dim=%d)", e.Config.Dim)
+			e.Config.PrecisionMode = config.PrecisionMixed
+			logger.Log.Info("Model precision mode auto-detected", "mode", "Mixed", "dim", e.Config.Dim)
 		} else {
-			e.Config.PrecisionMode = PrecisionFP16
-			log.Printf("[MODEL] Precision Mode: Auto (FP16 for medium model, dim=%d)", e.Config.Dim)
+			e.Config.PrecisionMode = config.PrecisionFP16
+			logger.Log.Info("Model precision mode auto-detected", "mode", "FP16", "dim", e.Config.Dim)
 		}
 	}
 
 	if val, ok := f.KV["tokenizer.ggml.bos_token_id"]; ok {
-		log.Printf("[MODEL] BOS Token ID: %d", int(toFloat64(val)))
+		logger.Log.Info("Model BOS token loaded", "id", int(toFloat64(val)))
 	}
 	if val, ok := f.KV["tokenizer.ggml.eos_token_id"]; ok {
-		log.Printf("[MODEL] EOS Token ID: %d", int(toFloat64(val)))
+		logger.Log.Info("Model EOS token loaded", "id", int(toFloat64(val)))
 	}
 
 	// Initialize KV Cache (now that we have dimensions)
@@ -539,8 +597,15 @@ func (e *Engine) loadModel(path string) error {
 		return err
 	}
 
-	log.Printf("[MODEL] Config: Layers=%d, Dim=%d, HiddenDim=%d, Heads=%d, KVHeads=%d, HeadDim=%d, Eps=%e, RopeFreq=%f\n",
-		e.Config.Layers, e.Config.Dim, e.Config.HiddenDim, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.Eps, e.Config.RopeTheta)
+	logger.Log.Info("Model configuration summary",
+		"layers", e.Config.Layers,
+		"dim", e.Config.Dim,
+		"hidden_dim", e.Config.HiddenDim,
+		"heads", e.Config.Heads,
+		"kv_heads", e.Config.KVHeads,
+		"head_dim", e.Config.HeadDim,
+		"eps", e.Config.Eps,
+		"rope_theta", e.Config.RopeTheta)
 
 	// Initialize Weights Slices
 	layers := e.Config.Layers
@@ -570,7 +635,7 @@ func (e *Engine) loadModel(path string) error {
 
 		// Validate tensor dimensions before processing
 		if err := ValidateTensorDimensions(t.Name, rows, cols, t.Type); err != nil {
-			log.Printf("[VALIDATION] %s: %v", t.Name, err)
+			logger.Log.Warn("Tensor validation warning", "name", t.Name, "error", err)
 		}
 
 		// Map tensor types
@@ -657,6 +722,13 @@ func (e *Engine) loadModel(path string) error {
 				}
 				mt.LoadFromRaw(t.Data[:dataBytes])
 
+			} else if t.Type == gguf.GGMLTypeQ8_0 {
+				// Type 8 (Q8_0).
+				// Dequantize to F16 for use in engine
+				f32Data := gguf.DequantizeQ8_0(t.Data, numElements)
+				mt = e.Ctx.NewTensorWithType(rows, cols, device.DataTypeF16)
+				mt.LoadFrom(f32Data)
+
 			} else if t.Type == gguf.GGMLTypeQ6_K {
 				// Type 14 (Q6_K).
 				if t.Name == "output.weight" || e.Config.Dim >= 1024 {
@@ -742,13 +814,12 @@ func (e *Engine) loadModel(path string) error {
 				continue
 			case "ffn_down.weight":
 				e.Weights.FfnDown[layerIdx] = mt
-				// Debug all FFN Down weights
 				if layerIdx <= 5 {
 					if mt.DataType() == device.DataTypeQ4K {
-						log.Printf("blk.%d.ffn_down: Q4K quantized", layerIdx)
+						logger.Log.Debug("FFN Down weight quantized", "layer", layerIdx, "type", "Q4K")
 						mt.ScanQ4KScales(fmt.Sprintf("blk.%d.ffn_down", layerIdx))
 					} else {
-						log.Printf("blk.%d.ffn_down: F16 (rows=%d, cols=%d)", layerIdx, mt.Rows(), mt.Cols())
+						logger.Log.Debug("FFN Down weight loaded", "layer", layerIdx, "type", "F16", "rows", mt.Rows(), "cols", mt.Cols())
 					}
 				}
 			case "ffn_up.weight":
@@ -761,9 +832,18 @@ func (e *Engine) loadModel(path string) error {
 
 	// Fallback: many models share token_embd.weight with output.weight
 	// For Llama/Mistral architectures, always tie output to token_embd for correctness
-	if e.Weights.TokenEmb != nil {
+	if e.Weights.TokenEmb != nil && e.Weights.Output == nil {
 		e.Weights.Output = e.Weights.TokenEmb
-		log.Printf("[MODEL] Tied output.weight to token_embd.weight for Llama architecture")
+		logger.Log.Debug("Tied output.weight to token_embd.weight")
+	}
+
+	// Update VocabSize based on actual tensor rows (the source of truth)
+	if e.Weights.TokenEmb != nil {
+		actualVocab := e.Weights.TokenEmb.Rows()
+		if actualVocab != e.Config.VocabSize {
+			logger.Log.Warn("Correcting Vocab Size (from embedding)", "configured", e.Config.VocabSize, "actual", actualVocab)
+			e.Config.VocabSize = actualVocab
+		}
 	}
 
 	return nil
@@ -776,16 +856,35 @@ func toFloat64(v interface{}) float64 {
 		return i
 	case float32:
 		return float64(i)
+	case int64:
+		return float64(i)
+	case int32:
+		return float64(i)
+	case int:
+		return float64(i)
 	case uint64:
 		return float64(i)
 	case uint32:
 		return float64(i)
-	case int32:
+	case uint16:
 		return float64(i)
-	case int64:
+	case uint8:
 		return float64(i)
-	case int:
-		return float64(i)
+	case []interface{}:
+		if len(i) > 0 {
+			return toFloat64(i[0])
+		}
+		return 0
+	case []uint32:
+		if len(i) > 0 {
+			return float64(i[0])
+		}
+		return 0
+	case []int32:
+		if len(i) > 0 {
+			return float64(i[0])
+		}
+		return 0
 	default:
 		return 0
 	}
@@ -885,7 +984,7 @@ func (e *Engine) InferWithCallback(inputTokens []int, tokensToGenerate int, samp
 	logits := scratch.Logits
 
 	// Phase 1: Prefill all input tokens
-	log.Printf("DEBUG: START INFER, CachePos=%d", e.CachePos)
+	logger.Log.Debug("Start Inference", "cache_pos", e.CachePos)
 	for i := 0; i < len(inputTokens); i++ {
 		// Autorelease Pool for this iteration
 		pool := e.Ctx.AutoreleasePoolPush()
@@ -920,7 +1019,7 @@ func (e *Engine) InferWithCallback(inputTokens []int, tokensToGenerate int, samp
 
 		// Layers (Attention + FFN)
 		for l := 0; l < e.Config.Layers; l++ {
-			log.Printf("DEBUG_PRECISION: Layer %d, Dim=%d, PrecisionMode=%d (0=Auto, 1=FP16, 2=F32FFN, 3=Mixed)", l, e.Config.Dim, e.Config.PrecisionMode)
+			// log.Printf("DEBUG_PRECISION: Layer %d, Dim=%d, PrecisionMode=%d (0=Auto, 1=FP16, 2=F32FFN, 3=Mixed)", l, e.Config.Dim, e.Config.PrecisionMode)
 			attnNorm := e.Weights.AttnNorm[l]
 			q := e.Weights.AttnQ[l]
 			k := e.Weights.AttnK[l]
@@ -930,13 +1029,20 @@ func (e *Engine) InferWithCallback(inputTokens []int, tokensToGenerate int, samp
 			ffnGate := e.Weights.FfnGate[l]
 			ffnUp := e.Weights.FfnUp[l]
 			ffnDown := e.Weights.FfnDown[l]
-			kCache := e.KVCacheK[l]
-			vCache := e.KVCacheV[l]
+			view := e.Cache.Get(l)
+			kCache := view.K
+			vCache := view.V
 
 			currentF32.Layer(l, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, kCache, vCache,
 				scratch, // Pass scratch
 				e.TraceTracker,
-				e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen, e.Config.WindowSize, e.GlobalScale, samplerConfig.DebugActivations, int(e.Config.PrecisionMode))
+				e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen, e.Config.WindowSize, e.GlobalScale, samplerConfig.DebugActivations, int(e.Config.PrecisionMode),
+				view.BlockTable, view.BlockSize,
+				func(k, v *device.Tensor) {
+					if err := e.Cache.Update(l, e.CachePos, k, v); err != nil {
+						panic(err)
+					}
+				})
 
 			// Log layer activation details if enabled
 			if e.ActLogger.IsEnabled() {
@@ -983,7 +1089,7 @@ func (e *Engine) InferWithCallback(inputTokens []int, tokensToGenerate int, samp
 
 			// Check for and handle Inf/NaN values before final norm
 			if infInfo := currentF32.ScanForNaN(fmt.Sprintf("Layer %d Pre-Final Norm", i), 5); infInfo.HasInf || infInfo.HasNaN() {
-				log.Printf("[WARN] Found %d NaN and %d Inf values in pre-final norm, clamping extreme values", infInfo.Count, infInfo.InfCount)
+				logger.Log.Warn("NaN detected in pre-final norm, clamping", "count", infInfo.Count, "inf_count", infInfo.InfCount)
 				// Clamp extreme values to prevent RMSNorm issues
 				hostData := currentF32.ToHost()
 				for j := range hostData {
@@ -1021,7 +1127,7 @@ func (e *Engine) InferWithCallback(inputTokens []int, tokensToGenerate int, samp
 
 			// Check for NaN in normalized output
 			if nanInfo := scratch.Normed.ScanForNaN("Final Norm", 5); nanInfo.HasNaN() {
-				log.Printf("[ERROR] NaN detected in Final Norm: count=%d, positions=%v", nanInfo.Count, nanInfo.Positions)
+				logger.Log.Error("NaN detected in Final Norm", "count", nanInfo.Count, "positions", nanInfo.Positions)
 			}
 
 			// Output Head (F16 -> F32 Logits)
@@ -1037,7 +1143,7 @@ func (e *Engine) InferWithCallback(inputTokens []int, tokensToGenerate int, samp
 			// Check for NaN in logits BEFORE sampling
 			nanInfo := device.DetectNaN(logitsData, 10)
 			if nanInfo.HasNaN() {
-				log.Printf("[ERROR] NaN detected in logits: count=%d, positions=%v, hasInf=%v", nanInfo.Count, nanInfo.Positions, nanInfo.HasInf)
+				logger.Log.Error("NaN detected in logits", "count", nanInfo.Count, "positions", nanInfo.Positions, "has_inf", nanInfo.HasInf)
 				// Try to recover by using argmax of non-NaN values
 				validCount := 0
 				for _, v := range logitsData {
@@ -1046,25 +1152,11 @@ func (e *Engine) InferWithCallback(inputTokens []int, tokensToGenerate int, samp
 					}
 				}
 				if validCount == 0 {
-					log.Printf("[ERROR] All logits are NaN or Inf, cannot recover")
-					// Fallback: use last valid logits if available
-					if e.LastLogits != nil && device.IsValid(e.LastLogits) {
-						log.Printf("[WARN] Using last valid logits for recovery")
-						logitsData = e.LastLogits
-					} else {
-						return nil, fmt.Errorf("all logits are NaN/Inf and no recovery logits available")
-					}
+					logger.Log.Error("All logits are NaN or Inf, cannot recover")
+					return nil, fmt.Errorf("all logits are NaN/Inf and no recovery logits available")
 				} else {
-					log.Printf("[WARN] Found %d valid logits out of %d, filtering NaNs", validCount, len(logitsData))
+					logger.Log.Warn("Filtered NaNs from logits", "valid_count", validCount, "total", len(logitsData))
 				}
-			}
-
-			// Update last valid logits
-			if device.IsValid(logitsData) {
-				if e.LastLogits == nil || len(e.LastLogits) < len(logitsData) {
-					e.LastLogits = make([]float32, len(logitsData))
-				}
-				copy(e.LastLogits, logitsData)
 			}
 
 			params := make([]struct {
@@ -1120,7 +1212,7 @@ func (e *Engine) InferWithCallback(inputTokens []int, tokensToGenerate int, samp
 
 		// Layers (Attention + FFN)
 		for l := 0; l < e.Config.Layers; l++ {
-			log.Printf("DEBUG_PRECISION: Layer %d, Dim=%d, PrecisionMode=%d (0=Auto, 1=FP16, 2=F32FFN, 3=Mixed)", l, e.Config.Dim, e.Config.PrecisionMode)
+			logger.Log.Debug("Layer Precision Info", "layer", l, "dim", e.Config.Dim, "mode", e.Config.PrecisionMode)
 			// e.updateCurrentLayer(l) // This function call is not defined in the provided context. Removed.
 			attnNorm := e.Weights.AttnNorm[l]
 			q := e.Weights.AttnQ[l]
@@ -1132,8 +1224,9 @@ func (e *Engine) InferWithCallback(inputTokens []int, tokensToGenerate int, samp
 			ffnUp := e.Weights.FfnUp[l]
 			ffnDown := e.Weights.FfnDown[l]
 
-			kCache := e.KVCacheK[l] // Corrected from KCache
-			vCache := e.KVCacheV[l] // Corrected from VCache
+			view := e.Cache.Get(l)
+			kCache := view.K
+			vCache := view.V
 
 			if l == e.Config.Layers-1 && i == 0 {
 				// ffnDown.ScanMax("Last Layer FFN Down Weight")
@@ -1144,7 +1237,13 @@ func (e *Engine) InferWithCallback(inputTokens []int, tokensToGenerate int, samp
 			currentF32.Layer(l, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, kCache, vCache,
 				scratch, // Pass scratch
 				e.TraceTracker,
-				e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen, e.Config.WindowSize, e.GlobalScale, samplerConfig.DebugActivations, int(e.Config.PrecisionMode))
+				e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen, e.Config.WindowSize, e.GlobalScale, samplerConfig.DebugActivations, int(e.Config.PrecisionMode),
+				view.BlockTable, view.BlockSize,
+				func(k, v *device.Tensor) {
+					if err := e.Cache.Update(l, e.CachePos, k, v); err != nil {
+						panic(err)
+					}
+				})
 
 			// Log layer activation details if enabled (generation phase)
 			if e.ActLogger.IsEnabled() && i >= len(inputTokens)-1 {
@@ -1193,10 +1292,6 @@ func (e *Engine) InferWithCallback(inputTokens []int, tokensToGenerate int, samp
 		logitsData := logits.ToHost()
 
 		// Save logits for debugging
-		if e.LastLogits == nil || len(e.LastLogits) < len(logitsData) {
-			e.LastLogits = make([]float32, len(logitsData))
-		}
-		copy(e.LastLogits, logitsData)
 
 		currentF32.ReturnToPool()
 
@@ -1228,7 +1323,7 @@ func (e *Engine) InferWithCallback(inputTokens []int, tokensToGenerate int, samp
 	if e.ActLogger.IsEnabled() {
 		err := e.ActLogger.SaveToFile("activation_debug.json")
 		if err != nil {
-			log.Printf("Warning: Failed to save activation log: %v", err)
+			logger.Log.Warn("Failed to save activation log", "error", err)
 		}
 	}
 
@@ -1236,63 +1331,37 @@ func (e *Engine) InferWithCallback(inputTokens []int, tokensToGenerate int, samp
 }
 
 func (e *Engine) initKVCache() error {
-	layers := e.Config.Layers
-	windowSize := e.Config.WindowSize
-	if e.Config.KVCacheSize > 0 {
-		windowSize = e.Config.KVCacheSize
-		log.Printf("[MEMORY] Overriding KV Cache size to %d from command line", windowSize)
-	} else if windowSize == 0 {
-		// Default to full sequence length if not specified
-		windowSize = e.Config.SeqLen
-	}
-	kvHeads := e.Config.KVHeads
-	headDim := e.Config.HeadDim
-
-	// Check verify dims
-	if kvHeads == 0 || headDim == 0 {
-		return errors.New("invalid kv dims")
+	// Determine Cache Strategy
+	useSlidingWindow := false
+	if e.Config.WindowSize > 0 && e.Config.WindowSize < e.Config.SeqLen {
+		useSlidingWindow = true
+		logger.Log.Info("Using Sliding Window Attention", "window", e.Config.WindowSize, "seq_len", e.Config.SeqLen)
 	}
 
-	e.KVCacheK = make([]*device.Tensor, layers)
-	e.KVCacheV = make([]*device.Tensor, layers)
+	// Override from command line or config if needed (could added a Config.CacheType enum)
 
-	// SLIDING WINDOW ATTENTION:
-	// For Mistral, we use a rolling buffer KV cache of size WindowSize (4096)
-	// instead of full SeqLen. This bounds memory usage and implements
-	// the sliding window attention mechanism.
-	// Cache is indexed as: cacheIdx = pos % windowSize
-
-	rows := windowSize // Changed from seqLen to windowSize
-	cols := kvHeads * headDim
-
-	// Align 4096
-	align := func(n int) int {
-		return (n + 4095) & ^4095
-	}
-	szPerTensor := align(rows * cols * 2) // F16
-	totalSz := layers * 2 * szPerTensor
-
-	heap := e.Ctx.NewHeap(totalSz)
-	if heap == nil {
-		return errors.New("KVCache Heap alloc failed")
-	}
-
-	// We don't store heap ref in Engine struct for now (leaks at exit),
-	// assuming Engine lives for lifetime of process or we add Free() later.
-
-	for i := 0; i < layers; i++ {
-		e.KVCacheK[i] = e.Ctx.NewBufferFromHeap(heap, szPerTensor, rows, cols, device.DataTypeF16)
-		e.KVCacheV[i] = e.Ctx.NewBufferFromHeap(heap, szPerTensor, rows, cols, device.DataTypeF16)
-
-		if e.KVCacheK[i] == nil || e.KVCacheV[i] == nil {
-			return errors.New("KVCache Buffer alloc failed")
+	if useSlidingWindow {
+		cache := &SlidingWindowKVCache{}
+		if err := cache.Init(e.Ctx, e.Config); err != nil {
+			return err
 		}
+		e.Cache = cache
+	} else {
+		// Default to TensorKVCache (Linear Buffer)
+		cache := &TensorKVCache{}
+		if err := cache.Init(e.Ctx, e.Config); err != nil {
+			return err
+		}
+		e.Cache = cache
 	}
 
 	return nil
 }
 
 func (e *Engine) Close() {
+	if e.Cache != nil {
+		e.Cache.Free()
+	}
 	if e.Ctx != nil {
 		e.Ctx.Free()
 	}
@@ -1372,9 +1441,4 @@ func ValidateTensorDimensions(name string, rows, cols int, ggufType gguf.GGMLTyp
 		}
 	}
 	return nil
-}
-
-// GetLastLogits returns the logits from the most recent inference step
-func (e *Engine) GetLastLogits() []float32 {
-	return e.LastLogits
 }

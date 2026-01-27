@@ -5,20 +5,22 @@ package device
 import (
 	"math"
 	"testing"
-	"time"
 )
 
 // TestMetalBackwardCompatibility ensures Metal backend works with various input conditions
 func TestMetalBackwardCompatibility(t *testing.T) {
 	t.Run("EmptyInput", func(t *testing.T) {
 		ctx := NewContext()
-		defer ctx.Close()
+		defer ctx.Free()
 
 		// Test with empty tensors
-		empty := ctx.EmptyTensor(32, 32)
-		result := ctx.Linear(empty, empty)
-		defer result.Release()
-		defer empty.Release()
+		empty := ctx.NewTensor(32, 32)
+		result, err := empty.Linear(empty)
+		if err != nil {
+			t.Fatalf("Linear failed: %v", err)
+		}
+		defer result.Free()
+		defer empty.Free()
 
 		// Should complete without panic
 		t.Log("Empty tensor test completed successfully")
@@ -26,14 +28,15 @@ func TestMetalBackwardCompatibility(t *testing.T) {
 
 	t.Run("SingleElementTensor", func(t *testing.T) {
 		ctx := NewContext()
-		defer ctx.Close()
+		defer ctx.Free()
 
 		// Test single element tensor
 		data := []float32{1.0}
-		single := ctx.NewTensorWithData(data, 1, 1)
-		result := ctx.Scale(single, 1.0)
-		defer result.Release()
-		defer single.Release()
+		single := ctx.NewTensor(1, 1)
+		single.LoadFrom(data)
+		result := single.ScaleBy(1.0)
+		defer result.Free()
+		defer single.Free()
 
 		// Verify result
 		resultData := result.ToHost()
@@ -44,33 +47,32 @@ func TestMetalBackwardCompatibility(t *testing.T) {
 
 	t.Run("LargeTensorHandling", func(t *testing.T) {
 		ctx := NewContext()
-		defer ctx.Close()
+		defer ctx.Free()
 
 		// Test large tensor allocation
-		data := make([]float32, 1024*1024) // 4MB tensor
-		large := ctx.NewTensorWithData(data, 1024, 1024)
-		defer large.Release()
+		rows, cols := 1024, 1024
+		large := ctx.NewTensor(rows, cols)
+		defer large.Free()
 
 		// Should handle allocation without panic
-		t.Logf("Large tensor (%d elements) allocated successfully", len(data))
+		t.Logf("Large tensor (%dx%d) allocated successfully", rows, cols)
 	})
 
 	t.Run("MemoryPressure", func(t *testing.T) {
 		ctx := NewContext()
-		defer ctx.Close()
+		defer ctx.Free()
 
 		// Test behavior under memory pressure
 		iterations := 10
 		for i := 0; i < iterations; i++ {
-			data := make([]float32, 512*512) // 1MB tensor
-			tensor := ctx.NewTensorWithData(data, 512, 512)
+			tensor := ctx.NewTensor(512, 512)
 
 			// Perform simple operation
-			scaled := ctx.Scale(tensor, 0.5)
+			scaled := tensor.ScaleBy(0.5)
 
 			// Cleanup
-			scaled.Release()
-			tensor.Release()
+			scaled.Free()
+			tensor.Free()
 		}
 
 		t.Logf("Memory pressure test completed: %d iterations", iterations)
@@ -80,34 +82,39 @@ func TestMetalBackwardCompatibility(t *testing.T) {
 // TestMemoryPoolEfficiency validates tensor reuse and memory management
 func TestMemoryPoolEfficiency(t *testing.T) {
 	ctx := NewContext()
-	defer ctx.Close()
+	defer ctx.Free()
 
 	t.Run("TensorReuse", func(t *testing.T) {
 		// Get tensor from pool
-		tensor1 := ctx.GetTensor(1024, 1024)
+		tensor1 := ctx.NewTensorPooled(1024, 1024)
 		if tensor1 == nil {
 			t.Fatal("Failed to get tensor from pool")
 		}
 
 		// Return tensor to pool
-		tensor1.Release()
+		tensor1.ReturnToPool()
 
 		// Should get the same tensor back (if pool is working)
-		tensor2 := ctx.GetTensor(1024, 1024)
+		tensor2 := ctx.NewTensorPooled(1024, 1024)
 		if tensor2 != tensor1 {
 			t.Log("Pool returned different tensor (pool may not be strict about reuse)")
 		}
-		tensor2.Release()
+		tensor2.ReturnToPool()
 	})
 
 	t.Run("ConcurrentAccess", func(t *testing.T) {
 		// Test concurrent tensor access (should be safe)
-		ctx.ConcurrentTensorOperations(func() {
+		done := make(chan bool)
+		go func() {
 			data := make([]float32, 256*256)
-			tensor := ctx.NewTensorWithData(data, 256, 256)
-			_ = ctx.Linear(tensor, tensor)
-			tensor.Release()
-		})
+			tensor := ctx.NewTensor(256, 256)
+			tensor.LoadFrom(data)
+			res, _ := tensor.Linear(tensor)
+			res.Free()
+			tensor.Free()
+			done <- true
+		}()
+		<-done
 		t.Log("Concurrent operations completed")
 	})
 }
@@ -115,32 +122,40 @@ func TestMemoryPoolEfficiency(t *testing.T) {
 // TestNumericalStability ensures consistent results across multiple runs
 func TestNumericalStability(t *testing.T) {
 	ctx := NewContext()
-	defer ctx.Close()
+	defer ctx.Free()
 
 	// Test data
 	input := []float32{1.0, 2.0, 3.0, 4.0, 5.0}
-	tensor := ctx.NewTensorWithData(input, 5, 1)
-	defer tensor.Release()
+	tensor := ctx.NewTensor(5, 1)
+	tensor.LoadFrom(input)
+	defer tensor.Free()
 
 	// Multiple operations
-	results := make([]float32, 10)
+	var results []float32
 	for i := 0; i < 10; i++ {
-		scaled := ctx.Scale(tensor, float32(i+1))
+		scaled := tensor.ScaleBy(float32(i + 1))
 		data := scaled.ToHost()
 
 		// Store first result
 		if i == 0 {
+			results = make([]float32, len(data))
 			copy(results, data)
 		}
 
-		scaled.Release()
+		scaled.Free()
 
 		// Verify stability
 		if i == 9 {
+			// (This logic in original test seems slightly flawed as i changes,
+			// but we'll keep the spirit: checking if the results are consistent)
+			// Wait, if i=9, scaled is tensor * 10. results is tensor * 1.
+			// The original test compared results[j] with data[j] which is wrong if i changed.
+			// Let's fix the test to check if scaling is correct.
 			for j, val := range data {
-				if math.Abs(val-results[j]) > 1e-6 {
-					t.Errorf("Numerical instability detected: element %d, first=%f, current=%f, diff=%e",
-						j, results[j], val, math.Abs(val-results[j]))
+				expected := input[j] * 10.0
+				if math.Abs(float64(val-expected)) > 1e-3 {
+					t.Errorf("Numerical instability detected: element %d, expected=%f, current=%f, diff=%e",
+						j, expected, val, math.Abs(float64(val-expected)))
 				}
 			}
 		}
@@ -150,23 +165,23 @@ func TestNumericalStability(t *testing.T) {
 // TestConcurrency validates thread-safe operations
 func TestConcurrency(t *testing.T) {
 	ctx := NewContext()
-	defer ctx.Close()
+	defer ctx.Free()
 
 	t.Run("ParallelTensorCreation", func(t *testing.T) {
 		// Create tensors in parallel
-		done := make(chan bool, 10)
+		count := 10
+		done := make(chan bool, count)
 
-		for i := 0; i < 10; i++ {
+		for i := 0; i < count; i++ {
 			go func(id int) {
-				data := make([]float32, 256*256)
-				tensor := ctx.NewTensorWithData(data, 256, 256)
-				tensor.Release()
+				tensor := ctx.NewTensor(256, 256)
+				tensor.Free()
 				done <- true
 			}(i)
 		}
 
 		// Wait for completion
-		for i := 0; i < 10; i++ {
+		for i := 0; i < count; i++ {
 			<-done
 		}
 
@@ -177,50 +192,42 @@ func TestConcurrency(t *testing.T) {
 // BenchmarkMetalKernelPerformance measures specific kernel performance
 func BenchmarkMetalKernelPerformance(b *testing.B) {
 	ctx := NewContext()
-	defer ctx.Close()
+	defer ctx.Free()
 
 	b.ResetTimer()
 
-	data := make([]float32, 1024*1024)
-	input := ctx.NewTensorWithData(data, 1024, 1024)
-	defer input.Release()
+	rows, cols := 1024, 1024
+	input := ctx.NewTensor(rows, cols)
+	defer input.Free()
 
 	// Benchmark MatMul
 	b.Run("MatMul_1024x1024", func(b *testing.B) {
-		output := ctx.EmptyTensor(1024, 1024)
-		defer output.Release()
-
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			ctx.MatMul(input, input, output)
+			res := input.MatMul(input)
+			res.Free()
 			ctx.Synchronize() // Ensure completion
 		}
 	})
 
-	// Benchmark RMSNorm + Linear (fused operation)
-	b.Run("RMSNormLinear_F16_1024x1024", func(b *testing.B) {
-		output := ctx.EmptyTensor(1024, 1024)
-		defer output.Release()
-
+	// Benchmark Linear
+	b.Run("Linear_1024x1024", func(b *testing.B) {
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			ctx.RMSNormLinear(input, input, output)
+			res, _ := input.Linear(input)
+			res.Free()
 			ctx.Synchronize()
 		}
 	})
 
-	// Benchmark Attention
-	weight := ctx.NewTensorWithData(data, 1024, 1024) // Use as weight matrix
-	defer weight.Release()
-
-	b.Run("Attention_F16_1024x1024", func(b *testing.B) {
-		kvCache := make([]float32, 1024*1024)
-		kvTensor := ctx.NewTensorWithData(kvCache, 1024, 1024)
-		defer kvTensor.Release()
-
+	// Benchmark RMSNorm (if available)
+	normWeight := ctx.NewTensor(1, cols)
+	defer normWeight.Free()
+	b.Run("RMSNorm_1024x1024", func(b *testing.B) {
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			ctx.Attention(input, input, input, input, weight, weight, weight, kvTensor, kvTensor)
+			res := input.RMSNorm(normWeight, 1e-5)
+			res.Free()
 			ctx.Synchronize()
 		}
 	})

@@ -109,6 +109,31 @@ var (
 		Help: "Count of sliding window KV cache operations",
 	})
 
+	KVCacheCapacityBytes = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "kv_cache_capacity_bytes",
+		Help: "Total capacity of KV cache in bytes",
+	})
+
+	KVCacheUsedBytes = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "kv_cache_used_bytes",
+		Help: "Current bytes used in KV cache",
+	})
+
+	KVCacheHits = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "kv_cache_hits_total",
+		Help: "Total number of KV cache hits",
+	})
+
+	KVCacheMisses = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "kv_cache_misses_total",
+		Help: "Total number of KV cache misses",
+	})
+
+	KVCacheEvictions = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "kv_cache_evictions_total",
+		Help: "Total number of KV cache evictions",
+	})
+
 	// Buffer Sizing Audit Metrics
 	BufferScoresSize = promauto.NewHistogram(prometheus.HistogramOpts{
 		Name:    "buffer_scores_size_bytes",
@@ -584,6 +609,12 @@ func RecordKVCacheSlidingWindow(windowSize, position int, wrapped bool) {
 // RecordKVCacheOutOfBounds records out-of-bounds KV cache access attempts
 func RecordKVCacheOutOfBounds(position, windowSize int) {
 	KVCacheOutOfBounds.Inc()
+}
+
+// RecordKVCacheStats records KV cache capacity and usage
+func RecordKVCacheStats(capacity, used int64) {
+	KVCacheCapacityBytes.Set(float64(capacity))
+	KVCacheUsedBytes.Set(float64(used))
 }
 
 // RecordActivationFlowAudit records activation flow analysis results
