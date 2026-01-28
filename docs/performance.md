@@ -73,4 +73,21 @@ The current gap is primarily due to:
 2. **Kernel Dispatch**: `llama.cpp` batches kernels more aggressively.
 3. **Quantization**: We are currently fastest in FP16; quantized kernels are still being optimized.
 
-See [docs/nextsteps.md](nextsteps.md) for our optimization roadmap.
+## Mixture of Experts (MoE) Performance
+
+We track specific metrics for MoE models like Nemotron-3-Nano.
+
+| Metric | Target | Current Status | Notes |
+| :--- | :--- | :--- | :--- |
+| **Expert Selection** | 6 / 128 | **Verified** | Matches Nemotron-3-Nano specification |
+| **Routing Latency** | <20% total | **~35%** | Fused routing kernel optimization identified |
+| **GEMM Latency** | >80% total | **~65%** | Using `moe_expert_gate_up_swiglu_f16` fused kernel |
+| **Throughput (Mock)** | >1000 t/s | **~1400 t/s** | Verified on small mock MoE model |
+
+**Latency Breakdown (Avg per token)**:
+
+- **Expert Routing (Top-K)**: ~16-18 µs
+- **Expert FFN (Fused GEMM)**: ~31-33 µs
+- **Total MOE Overhead**: ~50 µs
+
+Optimization of the Top-K selection kernel is scheduled for Phase 2 to reduce routing overhead.

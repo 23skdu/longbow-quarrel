@@ -325,6 +325,36 @@ void Metal_Mul_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
                    MetalBufferRef b, int offB, MetalBufferRef result,
                    int offRes, int n);
 
+// MOE (Mixture of Experts) Kernels
+void Metal_MOE_RouterLogits(MetalContextRef ctx, MetalBufferRef input,
+                            int offInput, MetalBufferRef gateWeight,
+                            int offGateWeight, MetalBufferRef logits,
+                            int offLogits, int batchSize, int dim,
+                            int numExperts);
+
+void Metal_MOE_TopKSelection(MetalContextRef ctx, MetalBufferRef logits,
+                             int offLogits, MetalBufferRef expertIndices,
+                             int offIndices, MetalBufferRef expertWeights,
+                             int offWeights, int batchSize, int numExperts,
+                             int topK);
+
+void Metal_MOE_ExpertForward(MetalContextRef ctx, MetalBufferRef input,
+                             int offInput, MetalBufferRef expertWeight,
+                             int offWeight, MetalBufferRef expertIndices,
+                             int offIndices, MetalBufferRef expertWeights,
+                             int offWeights, MetalBufferRef output,
+                             int offOutput, int batchSize, int dim,
+                             int hiddenDim, int topK);
+
+void Metal_MOE_ExpertGateUpSwiGLU(MetalContextRef ctx, MetalBufferRef input,
+                                  int offInput, MetalBufferRef gateWeight,
+                                  int offGate, MetalBufferRef upWeight,
+                                  int offUp, MetalBufferRef expertIndices,
+                                  int offIndices, MetalBufferRef expertWeights,
+                                  int offWeights, MetalBufferRef output,
+                                  int offOutput, int batchSize, int dim,
+                                  int hiddenDim, int topK);
+
 #ifdef __cplusplus
 }
 #endif

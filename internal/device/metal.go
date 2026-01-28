@@ -40,6 +40,14 @@ void Metal_RMSNormQKV_Q6K_F16(MetalContextRef ctx, MetalBufferRef input,
                               MetalBufferRef vOut, int offVO, int dimIn,
                               int qDim, int kvDim, float eps, float scale,
                               int batchSize);
+void Metal_MOE_ExpertGateUpSwiGLU(MetalContextRef ctx, MetalBufferRef input,
+                                  int offInput, MetalBufferRef gateWeight,
+                                  int offGate, MetalBufferRef upWeight,
+                                  int offUp, MetalBufferRef expertIndices,
+                                  int offIndices, MetalBufferRef expertWeights,
+                                  int offWeights, MetalBufferRef output,
+                                  int offOutput, int batchSize, int dim,
+                                  int hiddenDim, int topK);
 */
 import "C"
 import (
@@ -58,8 +66,17 @@ import (
 
 var allocatedBytes int64
 
-// MaxGPUMemory is a soft limit for total allocations (default: 8GB)
-var MaxGPUMemory int64 = 8 * 1024 * 1024 * 1024
+func traceAlloc(ptr *Tensor, delta int64, label string) {
+	newVal := atomic.AddInt64(&allocatedBytes, delta)
+	metrics.RecordGPUMemory(newVal)
+}
+
+func AllocatedBytes() int64 {
+	return atomic.LoadInt64(&allocatedBytes)
+}
+
+// MaxGPUMemory is a soft limit for total allocations (default: 32GB)
+var MaxGPUMemory int64 = 32 * 1024 * 1024 * 1024
 
 //go:embed kernels.metal
 var kernelsSource string
@@ -101,10 +118,13 @@ func (c *Context) ClearPool() {
 
 	for key, tensors := range c.pool {
 		for _, t := range tensors {
-			C.Metal_FreeBuffer(c.ref, t.buf)
-			atomic.AddInt64(&allocatedBytes, -int64(t.sizeBytes))
-			metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
-			t.buf = nil // Prevent double free
+			if t.buf != nil {
+				runtime.SetFinalizer(t, nil)
+				C.Metal_FreeBuffer(c.ref, t.buf)
+				traceAlloc(t, -int64(t.sizeBytes), "ClearPool")
+				metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
+				t.buf = nil // Prevent double free
+			}
 		}
 		delete(c.pool, key)
 	}
@@ -129,8 +149,9 @@ type Tensor struct {
 	cols      int
 	sizeBytes int
 	buf       C.MetalBufferRef
-	Offset    int      // Offset in bytes from buf start
-	dataType  DataType // 0=F16, 1=Q4K, 2=Q3K
+	heap      unsafe.Pointer // Track if this buffer is part of a heap
+	Offset    int            // Offset in bytes from buf start
+	dataType  DataType       // 0=F16, 1=Q4K, 2=Q3K
 }
 
 func (t *Tensor) Rows() int { return t.rows }
@@ -168,13 +189,13 @@ func (c *Context) NewQ3KTensor(rows, cols int) (*Tensor, error) {
 		buf:       buf,
 		dataType:  DataTypeQ3K,
 	}
-	atomic.AddInt64(&allocatedBytes, int64(sizeBytes))
+	traceAlloc(t, int64(sizeBytes), "NewQ3KTensor")
 	metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
 
 	runtime.SetFinalizer(t, func(ft *Tensor) {
 		if ft.buf != nil {
 			C.Metal_FreeBuffer(ft.ctx.ref, ft.buf)
-			atomic.AddInt64(&allocatedBytes, -int64(ft.sizeBytes))
+			traceAlloc(ft, -int64(ft.sizeBytes), "FinalizerQ3K")
 			metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
 		}
 	})
@@ -214,13 +235,13 @@ func (c *Context) NewQ4KTensor(rows, cols int) (*Tensor, error) {
 		buf:       buf,
 		dataType:  DataTypeQ4K,
 	}
-	atomic.AddInt64(&allocatedBytes, int64(sizeBytes))
+	traceAlloc(t, int64(sizeBytes), "NewQ4KTensor")
 	metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
 
 	runtime.SetFinalizer(t, func(ft *Tensor) {
 		if ft.buf != nil {
 			C.Metal_FreeBuffer(ft.ctx.ref, ft.buf)
-			atomic.AddInt64(&allocatedBytes, -int64(ft.sizeBytes))
+			traceAlloc(ft, -int64(ft.sizeBytes), "FinalizerQ4K")
 			metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
 		}
 	})
@@ -259,13 +280,13 @@ func (c *Context) NewQ8_0Tensor(rows, cols int) (*Tensor, error) {
 		buf:       buf,
 		dataType:  DataTypeQ8_0,
 	}
-	atomic.AddInt64(&allocatedBytes, int64(sizeBytes))
+	traceAlloc(t, int64(sizeBytes), "NewQ8_0Tensor")
 	metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
 
 	runtime.SetFinalizer(t, func(ft *Tensor) {
 		if ft.buf != nil {
 			C.Metal_FreeBuffer(ft.ctx.ref, ft.buf)
-			atomic.AddInt64(&allocatedBytes, -int64(ft.sizeBytes))
+			traceAlloc(ft, -int64(ft.sizeBytes), "FinalizerQ8_0")
 			metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
 		}
 	})
@@ -305,13 +326,13 @@ func (c *Context) NewQ6KTensor(rows, cols int) (*Tensor, error) {
 		buf:       buf,
 		dataType:  DataTypeQ6K,
 	}
-	atomic.AddInt64(&allocatedBytes, int64(sizeBytes))
+	traceAlloc(t, int64(sizeBytes), "NewQ6KTensor")
 	metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
 
 	runtime.SetFinalizer(t, func(ft *Tensor) {
 		if ft.buf != nil {
 			C.Metal_FreeBuffer(ft.ctx.ref, ft.buf)
-			atomic.AddInt64(&allocatedBytes, -int64(ft.sizeBytes))
+			traceAlloc(ft, -int64(ft.sizeBytes), "FinalizerQ6K")
 			metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
 		}
 	})
@@ -344,13 +365,15 @@ func (c *Context) NewTensor(rows, cols int) *Tensor {
 		dataType:  DataTypeF16,
 	}
 
-	atomic.AddInt64(&allocatedBytes, int64(sizeBytes))
+	traceAlloc(t, int64(sizeBytes), "NewTensor")
 	metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
 
 	runtime.SetFinalizer(t, func(ft *Tensor) {
-		C.Metal_FreeBuffer(ft.ctx.ref, ft.buf)
-		atomic.AddInt64(&allocatedBytes, -int64(ft.sizeBytes))
-		metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
+		if ft.buf != nil {
+			C.Metal_FreeBuffer(ft.ctx.ref, ft.buf)
+			traceAlloc(ft, -int64(ft.sizeBytes), "Finalizer")
+			metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
+		}
 	})
 
 	return t
@@ -358,15 +381,31 @@ func (c *Context) NewTensor(rows, cols int) *Tensor {
 
 // Free explicitly releases the Metal buffer.
 // Use this for large tensors in tight loops to avoid OOM due to lazy GC finalizers.
-func (t *Tensor) Free() {
-	if t.buf != nil {
-		// Clear finalizer first to prevent double free
-		runtime.SetFinalizer(t, nil)
-		C.Metal_FreeBuffer(t.ctx.ref, t.buf)
-		atomic.AddInt64(&allocatedBytes, -int64(t.sizeBytes))
-		metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
-		t.buf = nil // Mark as freed
+func (t *Tensor) BufferID() uintptr {
+	if t == nil {
+		return 0
 	}
+	return uintptr(t.buf)
+}
+
+func (t *Tensor) Free() {
+	if t == nil {
+		return
+	}
+	if t.buf == nil {
+		return
+	}
+	// Clear finalizer first to prevent double free
+	runtime.SetFinalizer(t, nil)
+	C.Metal_FreeBuffer(t.ctx.ref, t.buf)
+
+	// Only track memory if it's NOT a heap-backed buffer
+	// (Heap memory is tracked when the heap itself is allocated/freed)
+	if t.heap == nil {
+		traceAlloc(t, -int64(t.sizeBytes), "Free")
+	}
+	metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
+	t.buf = nil // Mark as freed
 }
 
 // NewTensorFP32 creates a standard F32 tensor
@@ -397,12 +436,14 @@ func (c *Context) NewTensorFP32(rows, cols int) *Tensor {
 		panic("Metal_Alloc returned nil!")
 	}
 	t := &Tensor{ctx: c, buf: buf, sizeBytes: sizeBytes, rows: rows, cols: cols, dataType: DataTypeF32}
-	atomic.AddInt64(&allocatedBytes, int64(sizeBytes))
+	traceAlloc(t, int64(sizeBytes), "NewTensorFP32")
 	metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
 	runtime.SetFinalizer(t, func(ft *Tensor) {
-		C.Metal_FreeBuffer(ft.ctx.ref, ft.buf)
-		atomic.AddInt64(&allocatedBytes, -int64(ft.sizeBytes))
-		metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
+		if ft.buf != nil {
+			C.Metal_FreeBuffer(ft.ctx.ref, ft.buf)
+			traceAlloc(ft, -int64(ft.sizeBytes), "FinalizerFP32")
+			metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
+		}
 	})
 	return t
 }
@@ -461,13 +502,13 @@ func (c *Context) NewTensorWithType(rows, cols int, dt DataType) *Tensor {
 	}
 
 	t := &Tensor{ctx: c, rows: rows, cols: cols, sizeBytes: sb, buf: buf, dataType: dt}
-	atomic.AddInt64(&allocatedBytes, int64(sb))
+	traceAlloc(t, int64(sb), "NewTensorWithType")
 	metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
 
 	runtime.SetFinalizer(t, func(ft *Tensor) {
 		if ft.buf != nil {
 			C.Metal_FreeBuffer(ft.ctx.ref, ft.buf)
-			atomic.AddInt64(&allocatedBytes, -int64(ft.sizeBytes))
+			traceAlloc(ft, -int64(ft.sizeBytes), "FinalizerWithType")
 			metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
 		}
 	})
@@ -1089,6 +1130,7 @@ type LayerScratch struct {
 	Logits *Tensor // [1, VocabSize]
 
 	heap unsafe.Pointer // Reference to Metal Heap
+	size int            // Total size of heap for accounting
 }
 
 // NewTensorFromBuffer creates a tensor sharing existing buffer at offset
@@ -1117,7 +1159,11 @@ func (c *Context) AutoreleasePoolPop(pool unsafe.Pointer) {
 
 // NewHeap allocates a Metal Heap
 func (c *Context) NewHeap(size int) unsafe.Pointer {
-	return C.Metal_NewHeap(c.ref, C.longlong(size))
+	heap := C.Metal_NewHeap(c.ref, C.longlong(size))
+	if heap != nil {
+		traceAlloc(nil, int64(size), "NewHeap")
+	}
+	return heap
 }
 
 // NewBufferFromHeap allocates from heap
@@ -1132,6 +1178,7 @@ func (c *Context) NewBufferFromHeap(heap unsafe.Pointer, size, rows, cols int, d
 		cols:      cols,
 		sizeBytes: size,
 		buf:       buf,
+		heap:      heap,
 		Offset:    0,
 		dataType:  dt,
 	}
@@ -1171,40 +1218,18 @@ func (c *Context) NewLayerScratch(batch, dim, hiddenDim, heads, kvHeads, headDim
 	total := szNormed + szQPart + szKPart + szVPart + szAttOut + szResAtt +
 		szNormedFFN + szNormedFFN_F32 + szResFFN + szResFFN_F32 + szScores + szGate + szUp + szSwiOut + szLogits
 
-	fmt.Printf("Alloc Heap: %d bytes\n", total)
-	heap := C.Metal_NewHeap(c.ref, C.longlong(total))
+	heap := c.NewHeap(total)
 	if heap == nil {
 		panic("Heap Alloc failed")
 	}
 
 	newT := func(sz, r, cols int, dt DataType) *Tensor {
-		buf := C.Metal_NewBufferFromHeap(heap, C.longlong(sz))
-		if buf == nil {
-			panic("Buffer from Heap failed")
-		}
-		// Manually retain? Metal_NewBufferFromHeap does manual retain (in backend).
-		// Tensor needs Free() to release manual retain.
-		sb := r * cols * 2
-		if dt == DataTypeF32 {
-			sb = r * cols * 4
-		}
-		return &Tensor{
-			ctx:       c,
-			rows:      r,
-			cols:      cols,
-			sizeBytes: sb,
-			buf:       buf,
-			Offset:    0,
-			dataType:  dt,
-			// We need a way to release Heap?
-			// The Tensor does NOT own the Heap.
-			// The Heap leaks if not released.
-			// We should attach Heap to LayerScratch to free it?
-			// Or let it leak (1 object).
-		}
+		return c.NewBufferFromHeap(heap, sz, r, cols, dt)
 	}
+
 	// We need to store heap ref to free it?
-	s.heap = heap // Add field to struct
+	s.heap = heap // Store heap pointer
+	s.size = total
 
 	s.Normed = newT(szNormed, batch, dim, DataTypeF16)
 	s.QPart = newT(szQPart, batch, dim, DataTypeF16)
@@ -1290,6 +1315,7 @@ func (s *LayerScratch) Free() {
 	}
 
 	if s.heap != nil {
+		traceAlloc(nil, -int64(s.size), "FreeLayerScratchHeap")
 		C.Metal_FreeHeap(s.heap)
 		s.heap = nil
 	}
@@ -1410,6 +1436,10 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 	}
 
 	// 8. FFN Block
+	if ffnUp == nil {
+		return
+	}
+
 	useF32FFN := precisionMode == 2
 	useMixedPrecisionFFN := precisionMode == 3
 
@@ -1975,4 +2005,85 @@ func (t *Tensor) Mul(other *Tensor) *Tensor {
 	res := t.ctx.NewTensorPooled(t.rows, t.cols)
 	C.Metal_Mul_F16(t.ctx.ref, t.buf, C.int(t.Offset), other.buf, C.int(other.Offset), res.buf, C.int(res.Offset), C.int(t.rows*t.cols))
 	return res
+}
+
+// ============================================================================
+// MOE (Mixture of Experts) Operations
+// ============================================================================
+
+// MOERouterLogits computes routing logits for MOE layer
+// input: [batch_size, dim]
+// gateWeight: [num_experts, dim]
+// Returns: [batch_size, num_experts] logits
+func (ctx *Context) MOERouterLogits(input, gateWeight *Tensor) *Tensor {
+	batchSize := input.Rows()
+	dim := input.Cols()
+	numExperts := gateWeight.Rows()
+
+	logits := ctx.NewTensorFP32(batchSize, numExperts)
+	C.Metal_MOE_RouterLogits(ctx.ref,
+		input.buf, C.int(input.Offset),
+		gateWeight.buf, C.int(gateWeight.Offset),
+		logits.buf, C.int(logits.Offset),
+		C.int(batchSize), C.int(dim), C.int(numExperts))
+	return logits
+}
+
+// MOETopKSelection selects top-k experts per token and computes softmax weights
+// logits: [batch_size, num_experts]
+// Returns: expertIndices [batch_size, top_k] (int32), expertWeights [batch_size, top_k] (float32)
+func (ctx *Context) MOETopKSelection(logits *Tensor, topK int) (*Tensor, *Tensor) {
+	batchSize := logits.Rows()
+	numExperts := logits.Cols()
+
+	expertIndices := ctx.NewTensorFP32(batchSize, topK) // Will store int32
+	expertWeights := ctx.NewTensorFP32(batchSize, topK)
+
+	C.Metal_MOE_TopKSelection(ctx.ref,
+		logits.buf, C.int(logits.Offset),
+		expertIndices.buf, C.int(expertIndices.Offset),
+		expertWeights.buf, C.int(expertWeights.Offset),
+		C.int(batchSize), C.int(numExperts), C.int(topK))
+
+	return expertIndices, expertWeights
+}
+
+// MOEExpertForward applies selected experts to input with weighted mixing
+// input: [batch_size, dim]
+// expertWeight: [hidden_dim * num_experts, dim] (flattened 3D)
+// expertIndices: [batch_size, top_k] (int32)
+// expertWeights: [batch_size, top_k] (float32)
+// Returns: [batch_size, hidden_dim]
+func (ctx *Context) MOEExpertForward(input, expertWeight, expertIndices, expertWeights *Tensor, hiddenDim int) *Tensor {
+	batchSize := input.Rows()
+	dim := input.Cols()
+	topK := expertIndices.Cols()
+
+	output := ctx.NewTensorPooled(batchSize, hiddenDim)
+	C.Metal_MOE_ExpertForward(ctx.ref,
+		input.buf, C.int(input.Offset),
+		expertWeight.buf, C.int(expertWeight.Offset),
+		expertIndices.buf, C.int(expertIndices.Offset),
+		expertWeights.buf, C.int(expertWeights.Offset),
+		output.buf, C.int(output.Offset),
+		C.int(batchSize), C.int(dim), C.int(hiddenDim), C.int(topK))
+	return output
+}
+
+// MOEExpertGateUpSwiGLU applies fused gate, up and SwiGLU forward pass for multiple experts
+func (ctx *Context) MOEExpertGateUpSwiGLU(input, gateWeight, upWeight, expertIndices, expertWeights *Tensor, hiddenDim int) *Tensor {
+	batchSize := input.Rows()
+	dim := input.Cols()
+	topK := expertIndices.Cols()
+
+	output := ctx.NewTensorPooled(batchSize, hiddenDim)
+	C.Metal_MOE_ExpertGateUpSwiGLU(ctx.ref,
+		input.buf, C.int(input.Offset),
+		gateWeight.buf, C.int(gateWeight.Offset),
+		upWeight.buf, C.int(upWeight.Offset),
+		expertIndices.buf, C.int(expertIndices.Offset),
+		expertWeights.buf, C.int(expertWeights.Offset),
+		output.buf, C.int(output.Offset),
+		C.int(batchSize), C.int(dim), C.int(hiddenDim), C.int(topK))
+	return output
 }

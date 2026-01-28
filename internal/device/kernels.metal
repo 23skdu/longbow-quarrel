@@ -2259,3 +2259,222 @@ kernel void mul_f16(device const half *a [[ buffer(0) ]],
                    uint id [[ thread_position_in_grid ]]) {
     result[id] = a[id] * b[id];
 }
+
+// ============================================================================
+// MOE (Mixture of Experts) Kernels
+// ============================================================================
+
+// MOE Router: Compute expert routing logits
+// input: [batch_size, dim] - input hidden states
+// gate_weight: [num_experts, dim] - router weight matrix  
+// logits: [batch_size, num_experts] - output routing logits
+kernel void moe_router_logits_f16(
+    device const half *input [[ buffer(0) ]],
+    device const half *gate_weight [[ buffer(1) ]],
+    device float *logits [[ buffer(2) ]],
+    constant int &batch_size [[ buffer(3) ]],
+    constant int &dim [[ buffer(4) ]],
+    constant int &num_experts [[ buffer(5) ]],
+    uint2 gid [[ thread_position_in_grid ]],
+    uint tid [[ thread_index_in_threadgroup ]])
+{
+    int batch_idx = gid.x / 32;
+    int expert_idx = gid.y;
+    
+    if (batch_idx >= batch_size || expert_idx >= num_experts) return;
+    
+    // Compute dot product: logits[batch_idx, expert_idx] = input[batch_idx] · gate_weight[expert_idx]
+    float sum = 0.0f;
+    for (int i = tid; i < dim; i += 32) {
+        float in_val = float(input[batch_idx * dim + i]);
+        float weight_val = float(gate_weight[expert_idx * dim + i]);
+        sum += in_val * weight_val;
+    }
+    
+    // Reduce across SIMD group
+    sum = simd_sum(sum);
+    
+    if (tid == 0) {
+        logits[batch_idx * num_experts + expert_idx] = sum;
+    }
+}
+
+// MOE TopK Selection: Select top-k experts per token
+// logits: [batch_size, num_experts] - routing logits
+// expert_indices: [batch_size, top_k] - selected expert indices (int32)
+// expert_weights: [batch_size, top_k] - normalized expert weights (after softmax)
+kernel void moe_topk_selection_f32(
+    device const float *logits [[ buffer(0) ]],
+    device float *expert_indices [[ buffer(1) ]],
+    device float *expert_weights [[ buffer(2) ]],
+    constant int &batch_size [[ buffer(3) ]],
+    constant int &num_experts [[ buffer(4) ]],
+    constant int &top_k [[ buffer(5) ]],
+    uint gid [[ thread_position_in_grid ]])
+{
+    if (gid >= (uint)batch_size) return;
+    
+    int offset = gid * num_experts;
+    device const float *row = logits + offset;
+    
+    // Find top-k experts using selection algorithm
+    int selected[8]; // Max top_k = 8
+    float selected_logits[8];
+    
+    for (int k = 0; k < top_k; k++) {
+        float max_val = -INFINITY;
+        int max_idx = 0;
+        
+        for (int i = 0; i < num_experts; i++) {
+            // Skip already selected experts
+            bool already_selected = false;
+            for (int j = 0; j < k; j++) {
+                if (selected[j] == i) {
+                    already_selected = true;
+                    break;
+                }
+            }
+            if (already_selected) continue;
+            
+            if (row[i] > max_val) {
+                max_val = row[i];
+                max_idx = i;
+            }
+        }
+        selected[k] = max_idx;
+        selected_logits[k] = max_val;
+    }
+    
+    // Compute softmax over selected experts
+    float max_logit = selected_logits[0];
+    for (int k = 1; k < top_k; k++) {
+        max_logit = max(max_logit, selected_logits[k]);
+    }
+    
+    float sum_exp = 0.0f;
+    float exp_vals[8];
+    for (int k = 0; k < top_k; k++) {
+        exp_vals[k] = exp(selected_logits[k] - max_logit);
+        sum_exp += exp_vals[k];
+    }
+    
+    // Write results
+    for (int k = 0; k < top_k; k++) {
+        expert_indices[gid * top_k + k] = (float)selected[k];
+        expert_weights[gid * top_k + k] = exp_vals[k] / sum_exp;
+    }
+}
+
+// MOE Expert Computation: Apply selected experts to input
+// input: [batch_size, dim] - input hidden states
+// expert_weight: [hidden_dim * num_experts, dim] - flattened 3D expert weights
+// expert_indices: [batch_size, top_k] - selected expert indices
+// expert_weights: [batch_size, top_k] - expert mixing weights
+// output: [batch_size, hidden_dim] - weighted sum of expert outputs
+kernel void moe_expert_forward_f16(
+    device const half *input [[ buffer(0) ]],
+    device const half *expert_weight [[ buffer(1) ]],
+    device const float *expert_indices [[ buffer(2) ]],
+    device const float *expert_weights [[ buffer(3) ]],
+    device half *output [[ buffer(4) ]],
+    constant int &batch_size [[ buffer(5) ]],
+    constant int &dim [[ buffer(6) ]],
+    constant int &hidden_dim [[ buffer(7) ]],
+    constant int &top_k [[ buffer(8) ]],
+    uint2 gid [[ thread_position_in_grid ]],
+    uint tid [[ thread_index_in_threadgroup ]])
+{
+    int batch_idx = gid.x / 32;
+    int out_idx = gid.y;
+    
+    if (batch_idx >= batch_size || out_idx >= hidden_dim) return;
+    
+    float sum = 0.0f;
+    
+    // Weighted sum over top-k experts
+    for (int k = 0; k < top_k; k++) {
+        int expert_idx = (int)expert_indices[batch_idx * top_k + k];
+        float weight = expert_weights[batch_idx * top_k + k];
+        
+        // Compute expert output: expert_weight[expert_idx][out_idx] · input[batch_idx]
+        float expert_out = 0.0f;
+        int expert_offset = expert_idx * hidden_dim * dim + out_idx * dim;
+        
+        for (int i = tid; i < dim; i += 32) {
+            float in_val = float(input[batch_idx * dim + i]);
+            float w_val = float(expert_weight[expert_offset + i]);
+            expert_out += in_val * w_val;
+        }
+        
+        // Reduce across SIMD group
+        expert_out = simd_sum(expert_out);
+        
+        if (tid == 0) {
+            sum += weight * expert_out;
+        }
+    }
+    
+    if (tid == 0) {
+        output[batch_idx * hidden_dim + out_idx] = safe_half(sum);
+    }
+}
+
+// Fused MOE Expert Gate+Up+SwiGLU: 
+// input: [batch_size, dim]
+// gate_weight: [num_experts, hidden_dim, dim]
+// up_weight: [num_experts, hidden_dim, dim]
+// expert_indices: [batch_size, top_k] 
+// expert_weights: [batch_size, top_k]
+// output: [batch_size, hidden_dim]
+kernel void moe_expert_gate_up_swiglu_f16(
+    device const half *input [[ buffer(0) ]],
+    device const half *gate_weight [[ buffer(1) ]],
+    device const half *up_weight [[ buffer(2) ]],
+    device const float *expert_indices [[ buffer(3) ]],
+    device const float *expert_weights [[ buffer(4) ]],
+    device half *output [[ buffer(5) ]],
+    constant int &batch_size [[ buffer(6) ]],
+    constant int &dim [[ buffer(7) ]],
+    constant int &hidden_dim [[ buffer(8) ]],
+    constant int &top_k [[ buffer(9) ]],
+    uint2 gid [[ thread_position_in_grid ]],
+    uint tid [[ thread_index_in_threadgroup ]])
+{
+    int batch_idx = gid.x / 32;
+    int out_idx = gid.y;
+    
+    if (batch_idx >= batch_size || out_idx >= hidden_dim) return;
+    
+    float sum_activated = 0.0f;
+    
+    for (int k = 0; k < top_k; k++) {
+        int expert_idx = (int)expert_indices[batch_idx * top_k + k];
+        float mixing_weight = expert_weights[batch_idx * top_k + k];
+        
+        int expert_offset = expert_idx * hidden_dim * dim + out_idx * dim;
+        
+        float gate_val = 0.0f;
+        float up_val = 0.0f;
+        
+        for (int i = tid; i < dim; i += 32) {
+            float in_v = float(input[batch_idx * dim + i]);
+            gate_val += in_v * float(gate_weight[expert_offset + i]);
+            up_val += in_v * float(up_weight[expert_offset + i]);
+        }
+        
+        gate_val = simd_sum(gate_val);
+        up_val = simd_sum(up_val);
+        
+        if (tid == 0) {
+            // SwiGLU: up * (gate * sigmoid(gate))
+            float g_clamped = clamp(gate_val, -10.0f, 10.0f);
+            float sigmoid_g = g_clamped / (1.0f + exp(-g_clamped));
+            float activated = up_val * sigmoid_g;
+            sum_activated += mixing_weight * activated;
+        }
+    }
+    
+    if (tid == 0) {
+        output[batch_idx * hidden_dim + out_idx] = safe_half(sum_activated);
+    }
+}

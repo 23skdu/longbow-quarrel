@@ -1,3 +1,5 @@
+//go:build darwin && metal
+
 package engine
 
 import (

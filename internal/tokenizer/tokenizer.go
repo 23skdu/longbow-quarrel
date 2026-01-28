@@ -13,6 +13,10 @@ func New(path string) (*Tokenizer, error) {
 		return nil, err
 	}
 	defer f.Close()
+	return NewFromGGUF(f)
+}
+
+func NewFromGGUF(f *gguf.GGUFFile) (*Tokenizer, error) {
 
 	// Extract tokens
 	val, ok := f.KV["tokenizer.ggml.tokens"]

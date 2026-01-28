@@ -181,6 +181,7 @@ func LoadFile(path string) (*GGUFFile, error) {
 			Type:       typ,
 			Offset:     tensorOffset,
 		})
+		fmt.Fprintf(os.Stderr, "GGUF: Found tensor %s (Type: %v, Dims: %v)\n", name, typ, dimArr)
 	}
 
 	// Align to 32 bytes (GGUF alignment) before data starts

@@ -1,11 +1,18 @@
 package metrics
 
 import (
+	"fmt"
+	"os"
+	"sync"
 	"time"
+
+	"sync/atomic"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
+
+var totalTokens atomic.Int64
 
 var (
 	InferenceTokensTotal = promauto.NewCounter(prometheus.CounterOpts{
@@ -480,10 +487,34 @@ var (
 		Help:    "Maximum activation value after residual addition",
 		Buckets: []float64{0, 1, 2, 5, 10, 20, 50, 100},
 	})
+
+	// MOE Metrics
+	MOELayerLatency = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "quarrel_moe_layer_latency_seconds",
+		Help:    "MOE layer forward pass latency",
+		Buckets: prometheus.DefBuckets,
+	})
+
+	MOEExpertSelection = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "quarrel_moe_expert_selection_total",
+		Help: "Total number of times an expert was selected",
+	}, []string{"layer", "expert_id"})
+
+	MOERoutingLatency = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "quarrel_moe_routing_latency_seconds",
+		Help:    "Expert routing (topk selection) latency",
+		Buckets: prometheus.DefBuckets,
+	})
+
+	MOEExpertUtilization = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "quarrel_moe_expert_utilization",
+		Help: "Expert utilization rate (selections / total tokens across time)",
+	}, []string{"layer", "expert_id"})
 )
 
 func RecordInference(tokens int, duration time.Duration) {
 	InferenceTokensTotal.Add(float64(tokens))
+	totalTokens.Add(int64(tokens))
 	InferenceDuration.Observe(duration.Seconds())
 }
 
@@ -687,4 +718,46 @@ func RecordActivationPrecision(activationType string, maxValue float32) {
 	case "residual":
 		ActivationResidualMax.Observe(float64(maxValue))
 	}
+}
+
+// RecordMOELayerLatency records the latency of an MOE layer forward pass
+func RecordMOELayerLatency(duration time.Duration) {
+	MOELayerLatency.Observe(duration.Seconds())
+}
+
+// RecordMOERoutingLatency records the latency of MOE expert routing
+func RecordMOERoutingLatency(duration time.Duration) {
+	MOERoutingLatency.Observe(duration.Seconds())
+}
+
+var moeExpertCounts sync.Map // map[string]*atomic.Int64
+
+// RecordMOEExpertSelection records which experts were selected for a layer
+func RecordMOEExpertSelection(layerIdx int, expertIndices []int32) {
+	layerStr := fmt.Sprintf("%d", layerIdx)
+	total := totalTokens.Load()
+
+	for _, idx := range expertIndices {
+		expertStr := fmt.Sprintf("%d", idx)
+		MOEExpertSelection.WithLabelValues(layerStr, expertStr).Inc()
+
+		// Update internal counters for utilization calculation
+		key := layerStr + ":" + expertStr
+		actual, _ := moeExpertCounts.LoadOrStore(key, &atomic.Int64{})
+		counter := actual.(*atomic.Int64)
+		count := counter.Add(1)
+
+		if total > 0 {
+			utilization := float64(count) / float64(total)
+			MOEExpertUtilization.WithLabelValues(layerStr, expertStr).Set(utilization)
+		}
+	}
+	fmt.Fprintf(os.Stderr, "METRIC: Layer %d selected experts: %v\n", layerIdx, expertIndices)
+}
+
+// RecordMOEExpertUtilization updates the utilization rate for an expert
+func RecordMOEExpertUtilization(layerIdx int, expertID int, utilization float64) {
+	layerStr := fmt.Sprintf("%d", layerIdx)
+	expertStr := fmt.Sprintf("%d", expertID)
+	MOEExpertUtilization.WithLabelValues(layerStr, expertStr).Set(utilization)
 }
