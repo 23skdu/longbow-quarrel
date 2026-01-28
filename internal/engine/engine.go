@@ -1047,9 +1047,28 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 	return e.InferWithCallback(inputTokens, tokensToGenerate, samplerConfig, nil)
 }
 
+// InferWithLogits generates tokens and returns them along with the logits of the last token
+func (e *Engine) InferWithLogits(inputTokens []int, tokensToGenerate int, samplerConfig SamplerConfig) ([]int, []float32, error) {
+	var lastLogits []float32
+	tokens, err := e.InferWithCallbackLogits(inputTokens, tokensToGenerate, samplerConfig, nil, func(logits []float32) {
+		lastLogits = make([]float32, len(logits))
+		copy(lastLogits, logits)
+	})
+	return tokens, lastLogits, err
+}
+
+// InferWithCallbackLogits is like InferWithCallback but also provides logits for each generated token
+func (e *Engine) InferWithCallbackLogits(inputTokens []int, tokensToGenerate int, samplerConfig SamplerConfig, tokenCallback func(int), logitsCallback func([]float32)) ([]int, error) {
+	return e.inferInternal(inputTokens, tokensToGenerate, samplerConfig, tokenCallback, logitsCallback)
+}
+
 // InferWithCallback generates tokens with optional streaming callback
 // If callback is provided, it's called for each generated token
 func (e *Engine) InferWithCallback(inputTokens []int, tokensToGenerate int, samplerConfig SamplerConfig, callback func(token int)) ([]int, error) {
+	return e.inferInternal(inputTokens, tokensToGenerate, samplerConfig, callback, nil)
+}
+
+func (e *Engine) inferInternal(inputTokens []int, tokensToGenerate int, samplerConfig SamplerConfig, tokenCallback func(int), logitsCallback func([]float32)) ([]int, error) {
 	// Validation
 	if len(inputTokens) == 0 {
 		return nil, errors.New("empty input tokens")
@@ -1333,9 +1352,13 @@ func (e *Engine) InferWithCallback(inputTokens []int, tokensToGenerate int, samp
 
 			result = append(result, nextToken)
 
+			if logitsCallback != nil {
+				logitsCallback(logitsData)
+			}
+
 			// Call streaming callback if provided
-			if callback != nil {
-				callback(nextToken)
+			if tokenCallback != nil {
+				tokenCallback(nextToken)
 			}
 		}
 
@@ -1490,9 +1513,13 @@ func (e *Engine) InferWithCallback(inputTokens []int, tokensToGenerate int, samp
 
 		result = append(result, maxIdx)
 
+		if logitsCallback != nil {
+			logitsCallback(logitsData)
+		}
+
 		// Call streaming callback if provided
-		if callback != nil {
-			callback(maxIdx)
+		if tokenCallback != nil {
+			tokenCallback(maxIdx)
 		}
 		e.CachePos++
 		metrics.RecordInference(1, time.Since(tToken))

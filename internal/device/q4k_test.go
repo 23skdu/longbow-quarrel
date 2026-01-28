@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"encoding/binary"
+
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
 )
 
@@ -160,11 +161,11 @@ func TestQ3K_Correctness(t *testing.T) {
 		t.Fatalf("Failed to load Q3K data: %v", err)
 	}
 
-	inTen := ctx.NewTensor(cols, 1)
+	inTen := ctx.NewTensor(1, cols)
 	inTen.LoadFrom(inputF32)
 
 	// Explicit Dispatch to allow ZeroInit
-	c := ctx.NewTensor(rows, 1)
+	c := ctx.NewTensor(1, 1)
 	c.ZeroInit() // Start with 0.0
 
 	ctx.RunQ3K_Explicit(wTen, inTen, c)

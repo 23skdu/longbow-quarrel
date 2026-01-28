@@ -11,6 +11,35 @@ void Metal_AutoreleasePoolPop(void* pool);
 void* Metal_NewHeap(MetalContextRef ctx, long long size);
 MetalBufferRef Metal_NewBufferFromHeap(void* heap, long long size);
 void Metal_FreeHeap(void* heap);
+void Metal_LinearQ8_0_F16(MetalContextRef ctx, MetalBufferRef weight,
+                          int offWeight, MetalBufferRef input, int offInput,
+                          MetalBufferRef output, int offOutput, int rows,
+                          int dimIn, int dimOut, float scale);
+void Metal_LinearQ8_0_F32(MetalContextRef ctx, MetalBufferRef weight,
+                          int offWeight, MetalBufferRef input, int offInput,
+                          MetalBufferRef output, int offOutput, int rows,
+                          int dimIn, int dimOut, float scale);
+void Metal_RMSNormLinear_Q6K_F16(MetalContextRef ctx, MetalBufferRef input,
+                                 int offIn, MetalBufferRef normWeight,
+                                 int offNormWeight, MetalBufferRef weight,
+                                 int offWeight, MetalBufferRef result,
+                                 int offRes, int M, int N, int K, float eps,
+                                 float scale, int batchSize);
+void Metal_SwiGLULinear_Q6K_F16(MetalContextRef ctx, MetalBufferRef gateIn,
+                                int offGate, MetalBufferRef upIn, int offUp,
+                                MetalBufferRef weight, int offWeight,
+                                MetalBufferRef result, int offRes, int M, int N,
+                                int K, float scale);
+void Metal_RMSNormQKV_Q6K_F16(MetalContextRef ctx, MetalBufferRef input,
+                              int offIn, MetalBufferRef normWeight,
+                              int offNormWeight, MetalBufferRef qWeight,
+                              int offQW, MetalBufferRef kWeight, int offKW,
+                              MetalBufferRef vWeight, int offVW,
+                              MetalBufferRef qOut, int offQO,
+                              MetalBufferRef kOut, int offKO,
+                              MetalBufferRef vOut, int offVO, int dimIn,
+                              int qDim, int kvDim, float eps, float scale,
+                              int batchSize);
 */
 import "C"
 import (
@@ -150,6 +179,28 @@ func (c *Context) NewQ4KTensor(rows, cols int) (*Tensor, error) {
 		sizeBytes: int(sizeBytes),
 		buf:       buf,
 		dataType:  DataTypeQ4K,
+	}, nil
+}
+
+// NewQ8_0Tensor creates a tensor with Q8_0 quantization layout (34 bytes per 32 weights)
+func (c *Context) NewQ8_0Tensor(rows, cols int) (*Tensor, error) {
+	numElements := rows * cols
+	if numElements%32 != 0 {
+		return nil, NewValidationError("NewQ8_0Tensor",
+			fmt.Sprintf("Q8_0 tensor size must be divisible by 32, got %d", numElements),
+			"tensor_dims")
+	}
+	numBlocks := numElements / 32
+	sizeBytes := numBlocks * 34
+
+	buf := C.Metal_Alloc(c.ref, C.longlong(sizeBytes))
+	return &Tensor{
+		ctx:       c,
+		rows:      rows,
+		cols:      cols,
+		sizeBytes: int(sizeBytes),
+		buf:       buf,
+		dataType:  DataTypeQ8_0,
 	}, nil
 }
 
@@ -749,6 +800,11 @@ func (t *Tensor) LinearInto(weight *Tensor, out *Tensor, scale float32) error {
 		C.Metal_LinearQ4_0_F16(t.ctx.ref, weight.buf, C.int(weight.Offset),
 			t.buf, C.int(t.Offset), out.buf, C.int(out.Offset),
 			C.int(t.rows), C.int(weight.cols), C.int(weight.rows), C.float(scale))
+	} else if weight.dataType == DataTypeQ8_0 {
+		// Q8_0 Support
+		C.Metal_LinearQ8_0_F16(t.ctx.ref, weight.buf, C.int(weight.Offset),
+			t.buf, C.int(t.Offset), out.buf, C.int(out.Offset),
+			C.int(t.rows), C.int(weight.cols), C.int(weight.rows), C.float(scale))
 	} else {
 		// Fallback F16
 		C.Metal_MatMul_F16(t.ctx.ref, weight.buf, C.int(weight.Offset), C.bool(false), t.buf, C.int(t.Offset), C.bool(false), out.buf, C.int(out.Offset),
@@ -821,6 +877,48 @@ func (t *Tensor) SwiGLULinearIntoQ4K(up, weight, out *Tensor, scale float32) {
 	N := weight.rows
 	K := weight.cols
 	C.Metal_SwiGLULinear_Q4K_F16(t.ctx.ref, t.buf, C.int(t.Offset),
+		up.buf, C.int(up.Offset),
+		weight.buf, C.int(weight.Offset),
+		out.buf, C.int(out.Offset),
+		C.int(M), C.int(N), C.int(K), C.float(scale))
+}
+
+// RMSNormLinearQ6K performs fused RMSNorm + Linear (Q6_K)
+func (t *Tensor) RMSNormLinearQ6K(normWeight, weight *Tensor, eps float32, scale float32) *Tensor {
+	M := t.rows
+	N := weight.rows
+	res := t.ctx.NewTensorPooled(M, N)
+	t.RMSNormLinearIntoQ6K(normWeight, weight, res, eps, scale)
+	return res
+}
+
+// RMSNormLinearIntoQ6K performs fused RMSNorm + Linear (Q6_K) into existing destination
+func (t *Tensor) RMSNormLinearIntoQ6K(normWeight, weight, out *Tensor, eps float32, scale float32) {
+	M := t.rows
+	N := weight.rows
+	K := weight.cols
+	C.Metal_RMSNormLinear_Q6K_F16(t.ctx.ref, t.buf, C.int(t.Offset),
+		normWeight.buf, C.int(normWeight.Offset),
+		weight.buf, C.int(weight.Offset),
+		out.buf, C.int(out.Offset),
+		C.int(M), C.int(N), C.int(K), C.float(eps), C.float(scale), C.int(t.rows))
+}
+
+// SwiGLULinearQ6K performs fused SwiGLU + Linear (Q6_K)
+func (t *Tensor) SwiGLULinearQ6K(up, weight *Tensor, scale float32) *Tensor {
+	M := t.rows
+	N := weight.rows
+	res := t.ctx.NewTensorPooled(M, N)
+	t.SwiGLULinearIntoQ6K(up, weight, res, scale)
+	return res
+}
+
+// SwiGLULinearIntoQ6K performs fused SwiGLU + Linear (Q6_K) into existing destination
+func (t *Tensor) SwiGLULinearIntoQ6K(up, weight, out *Tensor, scale float32) {
+	M := t.rows
+	N := weight.rows
+	K := weight.cols
+	C.Metal_SwiGLULinear_Q6K_F16(t.ctx.ref, t.buf, C.int(t.Offset),
 		up.buf, C.int(up.Offset),
 		weight.buf, C.int(weight.Offset),
 		out.buf, C.int(out.Offset),
@@ -1129,6 +1227,13 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 			qPart.buf, C.int(qPart.Offset), kPart.buf, C.int(kPart.Offset), vPart.buf, C.int(vPart.Offset),
 			C.int(t.cols), C.int(q.rows), C.int(k.rows), C.float(eps), C.float(globalScale), C.int(t.rows))
 		metrics.RecordKernelDuration("Layer_QKV_Fused_Q4K", time.Since(t0_qkv))
+	} else if q.dataType == DataTypeQ6K && k.dataType == DataTypeQ6K && v.dataType == DataTypeQ6K {
+		t0_qkv := time.Now()
+		C.Metal_RMSNormQKV_Q6K_F16(t.ctx.ref, t.buf, C.int(t.Offset), attnNorm.buf, C.int(attnNorm.Offset),
+			q.buf, C.int(q.Offset), k.buf, C.int(k.Offset), v.buf, C.int(v.Offset),
+			qPart.buf, C.int(qPart.Offset), kPart.buf, C.int(kPart.Offset), vPart.buf, C.int(vPart.Offset),
+			C.int(t.cols), C.int(q.rows), C.int(k.rows), C.float(eps), C.float(globalScale), C.int(t.rows))
+		metrics.RecordKernelDuration("Layer_QKV_Fused_Q6K", time.Since(t0_qkv))
 	} else {
 		normed.LinearInto(q, qPart, globalScale)
 		normed.LinearInto(k, kPart, globalScale)
@@ -1254,6 +1359,8 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		if ffnGate != nil {
 			if ffnDown.dataType == DataTypeQ4K {
 				gatePart.SwiGLULinearIntoQ4K(upPart, ffnDown, resFFN, globalScale)
+			} else if ffnDown.dataType == DataTypeQ6K {
+				gatePart.SwiGLULinearIntoQ6K(upPart, ffnDown, resFFN, globalScale)
 			} else {
 				swiOut, _ := upPart.SwiGLU(gatePart)
 				swiOut.LinearInto(ffnDown, resFFN, globalScale)

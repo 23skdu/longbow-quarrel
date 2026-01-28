@@ -19,7 +19,18 @@
 
 ## Phase 2: Kernel Micro-Optimization
 
-*(See original plan for details on GEMM, Flash Attention, Fusion)*
+### 10-Part Plan: Q6_K Fusion & Q8_0 Metal Support [DONE]
+
+1. **Q8_0 Reference Implementation**: Validate `gguf.DequantizeQ8_0` against llama.cpp expectations to ensure the 34-byte block format is correctly understood.
+2. **Base Q8_0 Kernel**: Implement `linear_q8_0_f16` in `kernels.metal` using `simd_sum` for reduction, initially targeting FP16 input/output.
+3. **CGO Bridge for Q8_0**: Add `pipelineLinearQ8_0_F16` to `MetalWrapper` and create the `Metal_LinearQ8_0_F16` entry point in `metal_backend.m`.
+4. **Go-Side Dispatch**: Wire `DataTypeQ8_0` into `internal/device/metal.go`'s `LinearInto` method.
+5. **Q8_0 Validation**: Create `TestQ8_0_LinearAccuracy` in `metal_test.go` to verify numerical parity with CPU dequantization.
+6. **Q6_K RMSNorm Fusion**: Implement `rmsnorm_linear_q6k_f16` to eliminate intermediate buffer roundtrips for Mistral/Llama models using Q6_K.
+7. **Q6_K SwiGLU Fusion**: Implement `swiglu_linear_q6k_f16` to speed up the FFN block for Q6_K quantized models.
+8. **Engine Integration**: Update `internal/engine/engine.go` to detect and utilize fused Q6_K kernels where applicable.
+9. **Mixed-Precision Q8_0**: Implement `linear_q8_0_f32` for high-precision accumulation paths.
+10. **Performance Benchmarking**: Run `cmd/bench` on Q6_K (fused) vs Q4_K (fused) to quantify the performance/quality trade-off on Apple Silicon.
 
 ## Phase 3: System & Architecture
 

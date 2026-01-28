@@ -6,6 +6,8 @@ import (
 	"math/rand"
 	"testing"
 	"time"
+
+	"github.com/23skdu/longbow-quarrel/internal/gguf"
 )
 
 func TestLayer4_Q4KMatMul(t *testing.T) {
@@ -51,7 +53,17 @@ func TestLayer4_Q4KMatMul(t *testing.T) {
 	}
 
 	// 3. CPU Reference
-	cpuOut := CPUQ4KMatMul(input, q4kData, M, N, K)
+	weightsF32 := gguf.DequantizeQ4K(q4kData, N*K)
+	cpuOut := make([]float32, M*N)
+	for i := 0; i < M; i++ {
+		for j := 0; j < N; j++ {
+			var sum float32
+			for k := 0; k < K; k++ {
+				sum += input[i*K+k] * weightsF32[j*K+k]
+			}
+			cpuOut[i*N+j] = sum
+		}
+	}
 
 	// 4. GPU Implementation
 	// Load Input (F16)
@@ -165,7 +177,17 @@ func TestLayer4_Q4KMatMul_FP32(t *testing.T) {
 	}
 
 	// 3. CPU Reference (Same function, it handles F32 A, Q4K B)
-	cpuOut := CPUQ4KMatMul(input, q4kData, M, N, K)
+	weightsF32 := gguf.DequantizeQ4K(q4kData, N*K)
+	cpuOut := make([]float32, M*N)
+	for i := 0; i < M; i++ {
+		for j := 0; j < N; j++ {
+			var sum float32
+			for k := 0; k < K; k++ {
+				sum += input[i*K+k] * weightsF32[j*K+k]
+			}
+			cpuOut[i*N+j] = sum
+		}
+	}
 
 	// 4. GPU Implementation (FP32 Path)
 	// Input Tensor: F32
