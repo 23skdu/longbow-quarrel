@@ -3,6 +3,21 @@
 **Goal:** Close the performance gap (currently ~4x-8x vs Llama.cpp) while maintaining strict coherence and correctness.
 **Targets:** `mistral:latest`, `nemotron-3-nano:latest`, `tinyllama:latest`, `granite4:latest`.
 
+## Phase 0: Specialized MOE & Nemotron Support [TOP PRIORITY]
+
+### 10-Part Plan: Robust MOE & SSM In-Weight Support
+
+1. **GGUF MOE Metadata Parsing**: Implement support for `llama.expert_count`, `llama.expert_used_count`, and `llama.expert_shared_count` to robustly detect MOE architectures.
+2. **Shared vs. Expert-Specific Weight Containers**: Update `ModelWeights` to differentiate between shared (common) and expert-specific tensors, avoiding monolithic loading.
+3. **Adaptive Expert Loading Mechanism**: Create a loader that honors memory budgets by prioritizing shared weights and strictly filtering expert weights for MOE models.
+4. **Specialized SSM In-Weight Logic**: Debug Nemotron-3-Nano's `ssm_in` placement across different quantization tools (Ollama, llama.cpp) to standardize its identification.
+5. **Refactored Gap Recovery (Metadata-Hinted)**: Replace heuristic gap searching with metadata-driven offset calculation to reliably load unconventional tensor layouts.
+6. **3D Tensor & Batch Dispatching**: Support multi-dimensional expert tensors (e.g. `[8 2048 512]`) and implement Metal kernels that can process batches of Experts.
+7. **Expert Routing (Gate/Router) Kernels**: Implement Top-K expert selection logic (Softmax + TopK) in Metal to handle the router phase of MOE layers.
+8. **MoE Expert-Fusion Kernels**: Optimize the FFN block by fusing expert-selection with expert GEMM to reduce memory bandwidth usage.
+9. **Granular Context Budgeting for MOE**: Refine `KVCacheSize` handling to account for the additional memory overhead of Experts when calculating prefill budgets.
+10. **MOE Coherence & Performance Validation**: Add dedicated smoke tests for Nemotron-3-Nano and Mixtral-8x7B to verify both numerical correctness and latency.
+
 ## Phase 1: Robust Baselines & Regression
 
 ### 1. New Performance Baselines
@@ -16,21 +31,6 @@
 - **Objective:** Ensure optimizations don't break model output.
 - [ ] Implement `cmd/smoke_test/regression_suite.go`.
 - [ ] Enforce "Perplexity/Logit Difference" check.
-
-## Phase 2: Kernel Micro-Optimization
-
-### 10-Part Plan: Q6_K Fusion & Q8_0 Metal Support [DONE]
-
-1. **Q8_0 Reference Implementation**: Validate `gguf.DequantizeQ8_0` against llama.cpp expectations to ensure the 34-byte block format is correctly understood.
-2. **Base Q8_0 Kernel**: Implement `linear_q8_0_f16` in `kernels.metal` using `simd_sum` for reduction, initially targeting FP16 input/output.
-3. **CGO Bridge for Q8_0**: Add `pipelineLinearQ8_0_F16` to `MetalWrapper` and create the `Metal_LinearQ8_0_F16` entry point in `metal_backend.m`.
-4. **Go-Side Dispatch**: Wire `DataTypeQ8_0` into `internal/device/metal.go`'s `LinearInto` method.
-5. **Q8_0 Validation**: Create `TestQ8_0_LinearAccuracy` in `metal_test.go` to verify numerical parity with CPU dequantization.
-6. **Q6_K RMSNorm Fusion**: Implement `rmsnorm_linear_q6k_f16` to eliminate intermediate buffer roundtrips for Mistral/Llama models using Q6_K.
-7. **Q6_K SwiGLU Fusion**: Implement `swiglu_linear_q6k_f16` to speed up the FFN block for Q6_K quantized models.
-8. **Engine Integration**: Update `internal/engine/engine.go` to detect and utilize fused Q6_K kernels where applicable.
-9. **Mixed-Precision Q8_0**: Implement `linear_q8_0_f32` for high-precision accumulation paths.
-10. **Performance Benchmarking**: Run `cmd/bench` on Q6_K (fused) vs Q4_K (fused) to quantify the performance/quality trade-off on Apple Silicon.
 
 ## Phase 3: System & Architecture
 

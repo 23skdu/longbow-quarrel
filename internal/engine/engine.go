@@ -402,12 +402,43 @@ func NewEngine(modelPath string, config config.Config) (*Engine, error) {
 
 // Internal load method
 // Internal load method
+func isNeededTensor(name string) bool {
+	lowerName := strings.ToLower(name)
+	// Global weights
+	if (strings.HasSuffix(lowerName, "token_embd.weight") ||
+		strings.HasSuffix(lowerName, "output_norm.weight") ||
+		strings.HasSuffix(lowerName, "output.weight") ||
+		strings.HasSuffix(lowerName, "model.embed_tokens.weight") ||
+		strings.HasSuffix(lowerName, "model.norm.weight") ||
+		strings.HasSuffix(lowerName, "model.lm_head.weight")) && !strings.Contains(lowerName, "blk.") {
+		return true
+	}
+
+	// Layer weights
+	if strings.Contains(lowerName, "blk.") {
+		suffixes := []string{
+			"attn_q.weight", "attn_k.weight", "attn_v.weight", "attn_output.weight", "attn_norm.weight",
+			"ffn_gate.weight", "ffn_up.weight", "ffn_down.weight", "ffn_norm.weight",
+			"ssm_a", "ssm_d", "ssm_conv1d.weight", "ssm_conv1d.bias", "ssm_dt.weight", "ssm_dt.bias",
+			"ssm_norm.weight", "ssm_norm.bias", "ssm_out.weight", "ssm_in.weight",
+		}
+		for _, s := range suffixes {
+			if strings.HasSuffix(lowerName, s) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (e *Engine) loadModel(path string) error {
 	f, err := gguf.LoadFile(path)
 	if err != nil {
 		return err
 	}
 	e.Model = f
+
+	// ... (metadata loading remains same)
 
 	// Read Metadata
 	// Block Count
@@ -434,8 +465,9 @@ func (e *Engine) loadModel(path string) error {
 	// Hidden Dim (FFN context)
 	if val, ok := getKV(f, "llama.feed_forward_length", "qwen3moe.feed_forward_length"); ok {
 		e.Config.HiddenDim = int(toFloat64(val))
-	} else {
-		e.Config.HiddenDim = 4 * e.Config.Dim // fallback
+	}
+	if e.Config.HiddenDim == 0 {
+		e.Config.HiddenDim = 4 * e.Config.Dim // fallback if missing or 0
 	}
 	logger.Log.Info("Model hidden dim loaded", "hidden_dim", e.Config.HiddenDim)
 
@@ -623,6 +655,10 @@ func (e *Engine) loadModel(path string) error {
 
 	// Map tensors
 	for _, t := range f.Tensors {
+		if !isNeededTensor(t.Name) {
+			continue
+		}
+
 		cols := int(t.Dimensions[0])
 		rows := 1
 		if len(t.Dimensions) > 1 {
@@ -632,8 +668,8 @@ func (e *Engine) loadModel(path string) error {
 			rows *= int(t.Dimensions[i])
 		}
 
-		var mt *device.Tensor
 		numElements := rows * cols
+		var mt *device.Tensor
 
 		// Validate tensor dimensions before processing
 		if err := ValidateTensorDimensions(t.Name, rows, cols, t.Type); err != nil {
@@ -769,7 +805,10 @@ func (e *Engine) loadModel(path string) error {
 
 		// 1. Global weights (supporting prefixes like nemotron., model., etc.)
 		// Strict check to avoid matching blk.N.attn_output.weight to global output.weight
-		if (strings.HasSuffix(name, "token_embd.weight") || name == "model.embed_tokens.weight") && !strings.Contains(name, "blk.") {
+		lowerName := strings.ToLower(name)
+		if (strings.HasSuffix(lowerName, "token_embd.weight") ||
+			strings.HasSuffix(lowerName, "embed_tokens.weight") ||
+			lowerName == "model.embed_tokens.weight") && !strings.Contains(lowerName, "blk.") {
 			e.Weights.TokenEmb = mt
 			continue
 		}
@@ -887,7 +926,7 @@ func (e *Engine) loadModel(path string) error {
 		}
 	}
 
-	// Fallback: many models share token_embd.weight with output.weight
+	// Fallback: many models share token_embd.weight with output.weight (Tied Embeddings)
 	// Case 1: TokenEmb exists, Output missing -> Use TokenEmb as Output
 	if e.Weights.TokenEmb != nil && e.Weights.Output == nil {
 		e.Weights.Output = e.Weights.TokenEmb
@@ -896,7 +935,7 @@ func (e *Engine) loadModel(path string) error {
 	// Case 2: Output exists, TokenEmb missing (e.g. Nemotron) -> Use Output as TokenEmb
 	if e.Weights.TokenEmb == nil && e.Weights.Output != nil {
 		e.Weights.TokenEmb = e.Weights.Output
-		logger.Log.Info("Using output.weight as token_embd.weight (tied embeddings)")
+		logger.Log.Info("Using output.weight as token_embd.weight (tied embeddings recovery)")
 	}
 
 	// Update VocabSize based on actual tensor rows (the source of truth)
@@ -914,19 +953,25 @@ func (e *Engine) loadModel(path string) error {
 		gapIdx := 0
 		for i := 0; i < e.Config.Layers; i++ {
 			mw := e.Weights.Mamba[i]
-			if mw != nil && mw.InWeight == nil && gapIdx < len(gaps) {
-				gap := gaps[gapIdx]
-				rows := 6144
-				cols := 2688
-
-				if len(gap.Data) < 10*1024*1024 {
-					continue
+			if mw != nil && mw.InWeight == nil {
+				// Search for a gap that matches the expected size (approx)
+				for gapIdx < len(gaps) {
+					gap := gaps[gapIdx]
+					gapIdx++
+					if len(gap.Data) < 10*1024*1024 {
+						continue
+					}
+					rows := 6144
+					cols := 2688
+					logger.Log.Info("Recovering missing ssm_in weight from GGUF gap", "layer", i, "offset", gap.Offset, "size", len(gap.Data))
+					mt, err := e.Ctx.NewTensorFromData(rows, cols, device.DataTypeQ8_0, gap.Data)
+					if err != nil {
+						logger.Log.Warn("Failed to recover ssm_in weight from gap", "error", err)
+						continue
+					}
+					mw.InWeight = mt
+					break // Found one for this layer
 				}
-
-				logger.Log.Info("Recovering missing ssm_in weight from GGUF gap", "layer", i, "offset", gap.Offset, "size", len(gap.Data))
-				mt := e.Ctx.NewTensorFromData(rows, cols, device.DataTypeQ8_0, gap.Data)
-				mw.InWeight = mt
-				gapIdx++
 			}
 		}
 	}

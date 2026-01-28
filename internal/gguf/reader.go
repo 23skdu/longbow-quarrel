@@ -65,7 +65,7 @@ func LoadFile(path string) (*GGUFFile, error) {
 	file.Header.KVCount = binary.LittleEndian.Uint64(data[offset:])
 	offset += 8
 
-	fmt.Printf("GGUF: Version=%d, Tensors=%d, KV=%d\n", file.Header.Version, file.Header.TensorCount, file.Header.KVCount)
+	fmt.Fprintf(os.Stderr, "GGUF: Version=%d, Tensors=%d, KV=%d\n", file.Header.Version, file.Header.TensorCount, file.Header.KVCount)
 
 	// Ollama format stores KV pairs at the END of the file, not at the beginning
 	// If KVCount is 0, search for tokenizer data at the end
@@ -73,7 +73,7 @@ func LoadFile(path string) (*GGUFFile, error) {
 		// Search for "tokenizer.ggml.tokens" in the file
 		tokenizerIdx := bytes.Index(data, []byte("tokenizer.ggml.tokens"))
 		if tokenizerIdx > 0 {
-			fmt.Printf("DEBUG: Found ollama format with tokenizer at offset %d\n", tokenizerIdx)
+			fmt.Fprintf(os.Stderr, "DEBUG: Found ollama format with tokenizer at offset %d\n", tokenizerIdx)
 			// Parse KV pairs from the end of the file
 			// Search backwards from tokenizer to find the KV section
 			// The format is: [string key][uint32 type][value...] repeated
@@ -119,7 +119,7 @@ func LoadFile(path string) (*GGUFFile, error) {
 				}
 
 				file.KV[key] = val
-				fmt.Printf("DEBUG: Loaded KV: %s\n", key)
+				fmt.Fprintf(os.Stderr, "DEBUG: Loaded KV: %s\n", key)
 
 				// Move back to find more keys
 				pos = keyOff - 8
@@ -198,8 +198,8 @@ func LoadFile(path string) (*GGUFFile, error) {
 		alignment = uint64(alignVal)
 	}
 
-	fmt.Printf("DEBUG: Alignment = %d\n", alignment)
-	fmt.Printf("DEBUG: Offset BEFORE padding: %d\n", offset)
+	fmt.Fprintf(os.Stderr, "DEBUG: Alignment = %d\n", alignment)
+	fmt.Fprintf(os.Stderr, "DEBUG: Offset BEFORE padding: %d\n", offset)
 
 	// Pad offset to alignment
 	padding := alignment - (offset % alignment)
@@ -208,10 +208,10 @@ func LoadFile(path string) (*GGUFFile, error) {
 	}
 
 	file.DataOffset = offset
-	fmt.Printf("DEBUG: Computed Padding Offset: %d\n", offset)
+	fmt.Fprintf(os.Stderr, "DEBUG: Computed Padding Offset: %d\n", offset)
 
 	// Update tensor pointers
-	fmt.Printf("DEBUG: Data Start Offset: %d\n", offset)
+	fmt.Fprintf(os.Stderr, "DEBUG: Data Start Offset: %d\n", offset)
 	for _, t := range file.Tensors {
 		// Absolute offset = dataStart + t.Offset
 		absOffset := offset + t.Offset

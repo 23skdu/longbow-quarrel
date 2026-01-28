@@ -148,15 +148,38 @@ func (c *Context) NewQ3KTensor(rows, cols int) (*Tensor, error) {
 	numBlocks := numElements / 256
 	sizeBytes := numBlocks * 110
 
+	if atomic.LoadInt64(&allocatedBytes)+int64(sizeBytes) > MaxGPUMemory {
+		c.ClearPool()
+		if atomic.LoadInt64(&allocatedBytes)+int64(sizeBytes) > MaxGPUMemory {
+			return nil, fmt.Errorf("Metal_Alloc: Exceeded memory budget of %d bytes (requested %d)", MaxGPUMemory, sizeBytes)
+		}
+	}
+
 	buf := C.Metal_Alloc(c.ref, C.longlong(sizeBytes))
-	return &Tensor{
+	if buf == nil {
+		return nil, fmt.Errorf("Metal_Alloc returned nil for %d bytes", sizeBytes)
+	}
+
+	t := &Tensor{
 		ctx:       c,
 		rows:      rows,
 		cols:      cols,
 		sizeBytes: int(sizeBytes),
 		buf:       buf,
 		dataType:  DataTypeQ3K,
-	}, nil
+	}
+	atomic.AddInt64(&allocatedBytes, int64(sizeBytes))
+	metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
+
+	runtime.SetFinalizer(t, func(ft *Tensor) {
+		if ft.buf != nil {
+			C.Metal_FreeBuffer(ft.ctx.ref, ft.buf)
+			atomic.AddInt64(&allocatedBytes, -int64(ft.sizeBytes))
+			metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
+		}
+	})
+
+	return t, nil
 }
 
 // NewQ4KTensor creates a tensor with Q4_K quantization layout (144 bytes per 256 weights)
@@ -171,15 +194,38 @@ func (c *Context) NewQ4KTensor(rows, cols int) (*Tensor, error) {
 	numBlocks := numElements / 256
 	sizeBytes := numBlocks * 144
 
+	if atomic.LoadInt64(&allocatedBytes)+int64(sizeBytes) > MaxGPUMemory {
+		c.ClearPool()
+		if atomic.LoadInt64(&allocatedBytes)+int64(sizeBytes) > MaxGPUMemory {
+			return nil, fmt.Errorf("Metal_Alloc: Exceeded memory budget of %d bytes (requested %d)", MaxGPUMemory, sizeBytes)
+		}
+	}
+
 	buf := C.Metal_Alloc(c.ref, C.longlong(sizeBytes))
-	return &Tensor{
+	if buf == nil {
+		return nil, fmt.Errorf("Metal_Alloc returned nil for %d bytes", sizeBytes)
+	}
+
+	t := &Tensor{
 		ctx:       c,
 		rows:      rows,
 		cols:      cols,
 		sizeBytes: int(sizeBytes),
 		buf:       buf,
 		dataType:  DataTypeQ4K,
-	}, nil
+	}
+	atomic.AddInt64(&allocatedBytes, int64(sizeBytes))
+	metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
+
+	runtime.SetFinalizer(t, func(ft *Tensor) {
+		if ft.buf != nil {
+			C.Metal_FreeBuffer(ft.ctx.ref, ft.buf)
+			atomic.AddInt64(&allocatedBytes, -int64(ft.sizeBytes))
+			metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
+		}
+	})
+
+	return t, nil
 }
 
 // NewQ8_0Tensor creates a tensor with Q8_0 quantization layout (34 bytes per 32 weights)
@@ -193,15 +239,38 @@ func (c *Context) NewQ8_0Tensor(rows, cols int) (*Tensor, error) {
 	numBlocks := numElements / 32
 	sizeBytes := numBlocks * 34
 
+	if atomic.LoadInt64(&allocatedBytes)+int64(sizeBytes) > MaxGPUMemory {
+		c.ClearPool()
+		if atomic.LoadInt64(&allocatedBytes)+int64(sizeBytes) > MaxGPUMemory {
+			return nil, fmt.Errorf("Metal_Alloc: Exceeded memory budget of %d bytes (requested %d)", MaxGPUMemory, sizeBytes)
+		}
+	}
+
 	buf := C.Metal_Alloc(c.ref, C.longlong(sizeBytes))
-	return &Tensor{
+	if buf == nil {
+		return nil, fmt.Errorf("Metal_Alloc returned nil for %d bytes", sizeBytes)
+	}
+
+	t := &Tensor{
 		ctx:       c,
 		rows:      rows,
 		cols:      cols,
 		sizeBytes: int(sizeBytes),
 		buf:       buf,
 		dataType:  DataTypeQ8_0,
-	}, nil
+	}
+	atomic.AddInt64(&allocatedBytes, int64(sizeBytes))
+	metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
+
+	runtime.SetFinalizer(t, func(ft *Tensor) {
+		if ft.buf != nil {
+			C.Metal_FreeBuffer(ft.ctx.ref, ft.buf)
+			atomic.AddInt64(&allocatedBytes, -int64(ft.sizeBytes))
+			metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
+		}
+	})
+
+	return t, nil
 }
 
 // NewQ6KTensor creates a tensor with Q6_K quantization layout (210 bytes per 256 weights)
@@ -215,15 +284,39 @@ func (c *Context) NewQ6KTensor(rows, cols int) (*Tensor, error) {
 	}
 	numBlocks := numElements / 256
 	sizeBytes := numBlocks * 210
+
+	if atomic.LoadInt64(&allocatedBytes)+int64(sizeBytes) > MaxGPUMemory {
+		c.ClearPool()
+		if atomic.LoadInt64(&allocatedBytes)+int64(sizeBytes) > MaxGPUMemory {
+			return nil, fmt.Errorf("Metal_Alloc: Exceeded memory budget of %d bytes (requested %d)", MaxGPUMemory, sizeBytes)
+		}
+	}
+
 	buf := C.Metal_Alloc(c.ref, C.longlong(sizeBytes))
-	return &Tensor{
+	if buf == nil {
+		return nil, fmt.Errorf("Metal_Alloc returned nil for %d bytes", sizeBytes)
+	}
+
+	t := &Tensor{
 		ctx:       c,
 		rows:      rows,
 		cols:      cols,
 		sizeBytes: sizeBytes,
 		buf:       buf,
 		dataType:  DataTypeQ6K,
-	}, nil
+	}
+	atomic.AddInt64(&allocatedBytes, int64(sizeBytes))
+	metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
+
+	runtime.SetFinalizer(t, func(ft *Tensor) {
+		if ft.buf != nil {
+			C.Metal_FreeBuffer(ft.ctx.ref, ft.buf)
+			atomic.AddInt64(&allocatedBytes, -int64(ft.sizeBytes))
+			metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
+		}
+	})
+
+	return t, nil
 }
 
 // NewTensor creates a standard F16 tensor
@@ -314,14 +407,20 @@ func (c *Context) NewTensorFP32(rows, cols int) *Tensor {
 	return t
 }
 
-func (c *Context) NewTensorFromData(rows, cols int, dt DataType, data []byte) *Tensor {
+func (c *Context) NewTensorFromData(rows, cols int, dt DataType, data []byte) (*Tensor, error) {
 	t := c.NewTensorWithType(rows, cols, dt)
-	C.Metal_CopyToDevice(t.buf, C.int(0), unsafe.Pointer(&data[0]), C.int(len(data)))
-	return t
+	if len(data) != t.sizeBytes {
+		return nil, NewValidationError("NewTensorFromData",
+			fmt.Sprintf("data size mismatch: expected %d, got %d", t.sizeBytes, len(data)),
+			"data_size")
+	}
+	if len(data) > 0 {
+		C.Metal_CopyToDevice(t.buf, C.int(0), unsafe.Pointer(&data[0]), C.int(len(data)))
+	}
+	return t, nil
 }
 
 func (c *Context) NewTensorWithType(rows, cols int, dt DataType) *Tensor {
-	// ... (unchanged - just for context for the next block if needed, but I can target specific ranges)
 	sb := rows * cols * 2
 	if dt == DataTypeF32 {
 		sb = rows * cols * 4
@@ -329,10 +428,8 @@ func (c *Context) NewTensorWithType(rows, cols int, dt DataType) *Tensor {
 		numElements := rows * cols
 		numBlocks := numElements / 256
 		sb = numBlocks * 210
-		// ...
 	} else if dt == DataTypeQ4K {
 		numElements := rows * cols
-		// Validation? Usually blocked by 256.
 		numBlocks := numElements / 256
 		sb = numBlocks * 144
 	} else if dt == DataTypeQ8_0 {
@@ -345,20 +442,34 @@ func (c *Context) NewTensorWithType(rows, cols int, dt DataType) *Tensor {
 	} else if dt == DataTypeQ4_0 {
 		numElements := rows * cols
 		if numElements%32 != 0 {
-			// Pad if needed? Or Panic?
-			// GGUF Usually padded.
-			//Panic for now.
 			panic(fmt.Sprintf("Q4_0 tensor size %d not divisible by 32", numElements))
 		}
 		numBlocks := numElements / 32
 		sb = numBlocks * 18
 	}
+
+	if atomic.LoadInt64(&allocatedBytes)+int64(sb) > MaxGPUMemory {
+		c.ClearPool()
+		if atomic.LoadInt64(&allocatedBytes)+int64(sb) > MaxGPUMemory {
+			panic(fmt.Sprintf("Metal_Alloc: Exceeded memory budget of %d bytes (requested %d)", MaxGPUMemory, sb))
+		}
+	}
+
 	buf := C.Metal_Alloc(c.ref, C.longlong(sb))
+	if buf == nil {
+		panic(fmt.Sprintf("Metal_Alloc returned nil for %d bytes", sb))
+	}
+
 	t := &Tensor{ctx: c, rows: rows, cols: cols, sizeBytes: sb, buf: buf, dataType: dt}
 	atomic.AddInt64(&allocatedBytes, int64(sb))
+	metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
+
 	runtime.SetFinalizer(t, func(ft *Tensor) {
-		C.Metal_FreeBuffer(ft.ctx.ref, ft.buf)
-		atomic.AddInt64(&allocatedBytes, -int64(ft.sizeBytes))
+		if ft.buf != nil {
+			C.Metal_FreeBuffer(ft.ctx.ref, ft.buf)
+			atomic.AddInt64(&allocatedBytes, -int64(ft.sizeBytes))
+			metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
+		}
 	})
 	return t
 }
