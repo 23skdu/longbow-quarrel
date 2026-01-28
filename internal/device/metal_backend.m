@@ -62,12 +62,17 @@
 @property(strong) id<MTLComputePipelineState> pipelineLinearQ4_0_F16;
 @property(strong) id<MTLComputePipelineState> pipelineLinearQ4_0_F32;
 @property(strong) id<MTLComputePipelineState> pipelineEmbeddingQ4_0_F16;
+@property(strong) id<MTLComputePipelineState> pipelineLinearQ8_0_F16;
+@property(strong) id<MTLComputePipelineState> pipelineLinearQ8_0_F32;
 // Mamba / SSM
 @property(strong) id<MTLComputePipelineState> pipelineMambaConv1d_F16;
 @property(strong) id<MTLComputePipelineState> pipelineMambaScan_F16;
 @property(strong) id<MTLComputePipelineState> pipelineSiLU_F16;
 @property(strong) id<MTLComputePipelineState> pipelineSlice_F16;
 @property(strong) id<MTLComputePipelineState> pipelineMul_F16;
+@property(strong) id<MTLComputePipelineState> pipelineRMSNormLinear_Q6K_F16;
+@property(strong) id<MTLComputePipelineState> pipelineSwiGLULinear_Q6K_F16;
+@property(strong) id<MTLComputePipelineState> pipelineRMSNormQKV_Q6K_F16;
 @property(strong) id<MTLCommandBuffer> currentCommandBuffer;
 @property(strong) id<MTLComputeCommandEncoder> currentEncoder;
 @property(strong) id<MTLCommandBuffer> lastCommandBuffer;
@@ -217,6 +222,8 @@ MetalContextRef Metal_Init(const char *libSource) {
   ctx.pipelineLinearQ4_0_F16 = loadPipeline(ctx, @"linear_q4_0_f16");
   ctx.pipelineLinearQ4_0_F32 = loadPipeline(ctx, @"linear_q4_0_f32");
   ctx.pipelineEmbeddingQ4_0_F16 = loadPipeline(ctx, @"embedding_q4_0_f16");
+  ctx.pipelineLinearQ8_0_F16 = loadPipeline(ctx, @"linear_q8_0_f16");
+  ctx.pipelineLinearQ8_0_F32 = loadPipeline(ctx, @"linear_q8_0_f32");
   ctx.pipelineMatMul_F16_F32 = loadPipeline(ctx, @"linear_f16_f32");
   ctx.pipelineCopy_F16_F32 = loadPipeline(ctx, @"copy_f16_to_f32");
   ctx.pipelineCopy_F32_F16 = loadPipeline(ctx, @"copy_f32_to_f16");
@@ -243,6 +250,11 @@ MetalContextRef Metal_Init(const char *libSource) {
   ctx.pipelineSiLU_F16 = loadPipeline(ctx, @"silu_f16");
   ctx.pipelineSlice_F16 = loadPipeline(ctx, @"slice_f16");
   ctx.pipelineMul_F16 = loadPipeline(ctx, @"mul_f16");
+  ctx.pipelineRMSNormLinear_Q6K_F16 =
+      loadPipeline(ctx, @"rmsnorm_linear_q6k_f16");
+  ctx.pipelineSwiGLULinear_Q6K_F16 =
+      loadPipeline(ctx, @"swiglu_linear_q6k_f16");
+  ctx.pipelineRMSNormQKV_Q6K_F16 = loadPipeline(ctx, @"rmsnorm_qkv_q6k_f16");
 
 #if __has_feature(objc_arc)
   return (__bridge_retained MetalContextRef)ctx;
@@ -826,6 +838,86 @@ void Metal_SwiGLULinear_Q4K_F16(MetalContextRef ctx, MetalBufferRef gateIn,
   [mc barrier];
 }
 
+void Metal_RMSNormLinear_Q6K_F16(MetalContextRef ctx, MetalBufferRef input,
+                                 int offIn, MetalBufferRef normWeight,
+                                 int offNormWeight, MetalBufferRef weight,
+                                 int offWeight, MetalBufferRef result,
+                                 int offRes, int M, int N, int K, float eps,
+                                 float scale, int batchSize) {
+  MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
+  id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
+  [enc setComputePipelineState:mc.pipelineRMSNormLinear_Q6K_F16];
+  [enc setBuffer:(__bridge id<MTLBuffer>)input offset:offIn atIndex:0];
+  [enc setBuffer:(__bridge id<MTLBuffer>)normWeight
+          offset:offNormWeight
+         atIndex:1];
+  [enc setBuffer:(__bridge id<MTLBuffer>)weight offset:offWeight atIndex:2];
+  [enc setBuffer:(__bridge id<MTLBuffer>)result offset:offRes atIndex:3];
+  [enc setBytes:&eps length:4 atIndex:4];
+  [enc setBytes:&K length:4 atIndex:5];
+  [enc setBytes:&N length:4 atIndex:6];
+  [enc setBytes:&scale length:4 atIndex:7];
+  [enc setBytes:&batchSize length:4 atIndex:8];
+
+  [enc dispatchThreads:MTLSizeMake(1024, N, batchSize)
+      threadsPerThreadgroup:MTLSizeMake(1024, 1, 1)];
+  [mc barrier];
+}
+
+void Metal_SwiGLULinear_Q6K_F16(MetalContextRef ctx, MetalBufferRef gateIn,
+                                int offGate, MetalBufferRef upIn, int offUp,
+                                MetalBufferRef weight, int offWeight,
+                                MetalBufferRef result, int offRes, int M, int N,
+                                int K, float scale) {
+  MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
+  id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
+  [enc setComputePipelineState:mc.pipelineSwiGLULinear_Q6K_F16];
+  [enc setBuffer:(__bridge id<MTLBuffer>)gateIn offset:offGate atIndex:0];
+  [enc setBuffer:(__bridge id<MTLBuffer>)upIn offset:offUp atIndex:1];
+  [enc setBuffer:(__bridge id<MTLBuffer>)weight offset:offWeight atIndex:2];
+  [enc setBuffer:(__bridge id<MTLBuffer>)result offset:offRes atIndex:3];
+  [enc setBytes:&K length:4 atIndex:4];
+  [enc setBytes:&N length:4 atIndex:5];
+  [enc setBytes:&scale length:4 atIndex:6];
+
+  [enc dispatchThreads:MTLSizeMake(32, N, M)
+      threadsPerThreadgroup:MTLSizeMake(32, 4, 1)];
+  [mc barrier];
+}
+
+void Metal_RMSNormQKV_Q6K_F16(
+    MetalContextRef ctx, MetalBufferRef input, int offIn,
+    MetalBufferRef normWeight, int offNormWeight, MetalBufferRef qWeight,
+    int offQW, MetalBufferRef kWeight, int offKW, MetalBufferRef vWeight,
+    int offVW, MetalBufferRef qOut, int offQO, MetalBufferRef kOut, int offKO,
+    MetalBufferRef vOut, int offVO, int dimIn, int qDim, int kvDim, float eps,
+    float scale, int batchSize) {
+  MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
+  id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
+  [enc setComputePipelineState:mc.pipelineRMSNormQKV_Q6K_F16];
+  [enc setBuffer:(__bridge id<MTLBuffer>)input offset:offIn atIndex:0];
+  [enc setBuffer:(__bridge id<MTLBuffer>)normWeight
+          offset:offNormWeight
+         atIndex:1];
+  [enc setBuffer:(__bridge id<MTLBuffer>)qWeight offset:offQW atIndex:2];
+  [enc setBuffer:(__bridge id<MTLBuffer>)kWeight offset:offKW atIndex:3];
+  [enc setBuffer:(__bridge id<MTLBuffer>)vWeight offset:offVW atIndex:4];
+  [enc setBuffer:(__bridge id<MTLBuffer>)qOut offset:offQO atIndex:5];
+  [enc setBuffer:(__bridge id<MTLBuffer>)kOut offset:offKO atIndex:6];
+  [enc setBuffer:(__bridge id<MTLBuffer>)vOut offset:offVO atIndex:7];
+  [enc setBytes:&dimIn length:4 atIndex:8];
+  [enc setBytes:&qDim length:4 atIndex:9];
+  [enc setBytes:&kvDim length:4 atIndex:10];
+  [enc setBytes:&eps length:4 atIndex:11];
+  [enc setBytes:&scale length:4 atIndex:12];
+  [enc setBytes:&batchSize length:4 atIndex:13];
+
+  [enc dispatchThreads:MTLSizeMake(1024, (qDim > kvDim ? qDim : kvDim),
+                                   batchSize)
+      threadsPerThreadgroup:MTLSizeMake(1024, 1, 1)];
+  [mc barrier];
+}
+
 void Metal_MambaConv1d_F16(MetalContextRef ctx, MetalBufferRef input, int offIn,
                            MetalBufferRef weight, int offW, MetalBufferRef bias,
                            int offB, MetalBufferRef state, int offS,
@@ -1335,6 +1427,42 @@ void Metal_LinearQ4_0_F32(MetalContextRef ctx, MetalBufferRef weight,
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
   id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
   [enc setComputePipelineState:mc.pipelineLinearQ4_0_F32];
+  [enc setBuffer:(__bridge id<MTLBuffer>)weight offset:offWeight atIndex:0];
+  [enc setBuffer:(__bridge id<MTLBuffer>)input offset:offInput atIndex:1];
+  [enc setBuffer:(__bridge id<MTLBuffer>)output offset:offOutput atIndex:2];
+  [enc setBytes:&dimIn length:4 atIndex:3];
+  [enc setBytes:&dimOut length:4 atIndex:4];
+  [enc setBytes:&scale length:4 atIndex:5];
+  [enc dispatchThreadgroups:MTLSizeMake(1, dimOut, rows)
+      threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+  [mc barrier];
+}
+
+void Metal_LinearQ8_0_F16(MetalContextRef ctx, MetalBufferRef weight,
+                          int offWeight, MetalBufferRef input, int offInput,
+                          MetalBufferRef output, int offOutput, int rows,
+                          int dimIn, int dimOut, float scale) {
+  MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
+  id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
+  [enc setComputePipelineState:mc.pipelineLinearQ8_0_F16];
+  [enc setBuffer:(__bridge id<MTLBuffer>)weight offset:offWeight atIndex:0];
+  [enc setBuffer:(__bridge id<MTLBuffer>)input offset:offInput atIndex:1];
+  [enc setBuffer:(__bridge id<MTLBuffer>)output offset:offOutput atIndex:2];
+  [enc setBytes:&dimIn length:4 atIndex:3];
+  [enc setBytes:&dimOut length:4 atIndex:4];
+  [enc setBytes:&scale length:4 atIndex:5];
+  [enc dispatchThreadgroups:MTLSizeMake(1, dimOut, rows)
+      threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+  [mc barrier];
+}
+
+void Metal_LinearQ8_0_F32(MetalContextRef ctx, MetalBufferRef weight,
+                          int offWeight, MetalBufferRef input, int offInput,
+                          MetalBufferRef output, int offOutput, int rows,
+                          int dimIn, int dimOut, float scale) {
+  MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
+  id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
+  [enc setComputePipelineState:mc.pipelineLinearQ8_0_F32];
   [enc setBuffer:(__bridge id<MTLBuffer>)weight offset:offWeight atIndex:0];
   [enc setBuffer:(__bridge id<MTLBuffer>)input offset:offInput atIndex:1];
   [enc setBuffer:(__bridge id<MTLBuffer>)output offset:offOutput atIndex:2];

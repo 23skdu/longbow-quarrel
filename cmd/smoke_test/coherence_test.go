@@ -1,3 +1,5 @@
+//go:build darwin && metal
+
 package main
 
 import (
@@ -16,23 +18,23 @@ func generateTestGGUF(path string, seqLen uint32) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
-	binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMagic))
-	binary.Write(f, binary.LittleEndian, uint32(3))
-	binary.Write(f, binary.LittleEndian, uint64(12)) // Tensor count
-	binary.Write(f, binary.LittleEndian, uint64(6))  // KV count
+	_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMagic))
+	_ = binary.Write(f, binary.LittleEndian, uint32(3))
+	_ = binary.Write(f, binary.LittleEndian, uint64(12)) // Tensor count
+	_ = binary.Write(f, binary.LittleEndian, uint64(6))  // KV count
 
 	writeKV := func(key string, val interface{}) {
-		binary.Write(f, binary.LittleEndian, uint64(len(key)))
-		f.WriteString(key)
+		_ = binary.Write(f, binary.LittleEndian, uint64(len(key)))
+		_, _ = f.WriteString(key)
 		switch v := val.(type) {
 		case uint32:
-			binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeUint32))
-			binary.Write(f, binary.LittleEndian, v)
+			_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeUint32))
+			_ = binary.Write(f, binary.LittleEndian, v)
 		case float32:
-			binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeFloat32))
-			binary.Write(f, binary.LittleEndian, v)
+			_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeFloat32))
+			_ = binary.Write(f, binary.LittleEndian, v)
 		}
 	}
 
@@ -45,14 +47,14 @@ func generateTestGGUF(path string, seqLen uint32) error {
 
 	// Tensors
 	writeTensor := func(name string, rows, cols int) {
-		binary.Write(f, binary.LittleEndian, uint64(len(name)))
-		f.WriteString(name)
-		binary.Write(f, binary.LittleEndian, uint32(2)) // 2 dims
-		binary.Write(f, binary.LittleEndian, uint64(cols))
-		binary.Write(f, binary.LittleEndian, uint64(rows))
-		binary.Write(f, binary.LittleEndian, uint32(gguf.GGMLTypeF32)) // Type F32
+		_ = binary.Write(f, binary.LittleEndian, uint64(len(name)))
+		_, _ = f.WriteString(name)
+		_ = binary.Write(f, binary.LittleEndian, uint32(2)) // 2 dims
+		_ = binary.Write(f, binary.LittleEndian, uint64(cols))
+		_ = binary.Write(f, binary.LittleEndian, uint64(rows))
+		_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGMLTypeF32)) // Type F32
 		offset := uint64(0)
-		binary.Write(f, binary.LittleEndian, offset)
+		_ = binary.Write(f, binary.LittleEndian, offset)
 	}
 
 	tensorNames := []string{
@@ -81,18 +83,19 @@ func generateTestGGUF(path string, seqLen uint32) error {
 	}
 
 	// Fake Data Padding
-	f.Write(make([]byte, 1024))
+	_, _ = f.Write(make([]byte, 1024))
 
 	// Write dummy float data
 	data := make([]byte, 100*32*4) // Max size needed
-	f.Write(data)
+	_, _ = f.Write(data)
 
+	_ = f.Close()
 	return nil
 }
 
 func TestCoherenceWrapping(t *testing.T) {
 	modelPath := "test_coherence.gguf"
-	defer os.Remove(modelPath)
+	defer func() { _ = os.Remove(modelPath) }()
 
 	// Generate model with small context limit
 	seqLen := uint32(32)
@@ -141,8 +144,7 @@ func TestCoherenceWrapping(t *testing.T) {
 	}
 }
 
-func main() {
-	test := []testing.InternalTest{{"TestCoherenceWrapping", TestCoherenceWrapping}}
-	match := func(pat, str string) (bool, error) { return true, nil }
-	testing.Main(match, test, nil, nil)
+func TestMainCoherence(t *testing.T) {
+	// This test is usually run via go test, so this is just a wrapper if needed
+	TestCoherenceWrapping(t)
 }

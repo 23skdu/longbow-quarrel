@@ -27,6 +27,16 @@ void Metal_LinearQ4_0_F32(MetalContextRef ctx, MetalBufferRef weight,
                           MetalBufferRef output, int offOutput, int rows,
                           int dimIn, int dimOut, float scale);
 
+void Metal_LinearQ8_0_F16(MetalContextRef ctx, MetalBufferRef weight,
+                          int offWeight, MetalBufferRef input, int offInput,
+                          MetalBufferRef output, int offOutput, int rows,
+                          int dimIn, int dimOut, float scale);
+
+void Metal_LinearQ8_0_F32(MetalContextRef ctx, MetalBufferRef weight,
+                          int offWeight, MetalBufferRef input, int offInput,
+                          MetalBufferRef output, int offOutput, int rows,
+                          int dimIn, int dimOut, float scale);
+
 void Metal_EmbeddingQ4_0_F16(MetalContextRef ctx, MetalBufferRef weights,
                              int offW, MetalBufferRef result, int offRes,
                              int rowIdx, int cols);
@@ -177,6 +187,27 @@ void Metal_SwiGLULinear_Q4K_F16(MetalContextRef ctx, MetalBufferRef gateIn,
                                 MetalBufferRef weight, int offWeight,
                                 MetalBufferRef result, int offRes, int M, int N,
                                 int K, float scale);
+
+void Metal_RMSNormLinear_Q6K_F16(MetalContextRef ctx, MetalBufferRef input,
+                                 int offIn, MetalBufferRef normWeight,
+                                 int offNormWeight, MetalBufferRef weight,
+                                 int offWeight, MetalBufferRef result,
+                                 int offRes, int M, int N, int K, float eps,
+                                 float scale, int batchSize);
+
+void Metal_SwiGLULinear_Q6K_F16(MetalContextRef ctx, MetalBufferRef gateIn,
+                                int offGate, MetalBufferRef upIn, int offUp,
+                                MetalBufferRef weight, int offWeight,
+                                MetalBufferRef result, int offRes, int M, int N,
+                                int K, float scale);
+
+void Metal_RMSNormQKV_Q6K_F16(
+    MetalContextRef ctx, MetalBufferRef input, int offIn,
+    MetalBufferRef normWeight, int offNormWeight, MetalBufferRef qWeight,
+    int offQW, MetalBufferRef kWeight, int offKW, MetalBufferRef vWeight,
+    int offVW, MetalBufferRef qOut, int offQO, MetalBufferRef kOut, int offKO,
+    MetalBufferRef vOut, int offVO, int dimIn, int qDim, int kvDim, float eps,
+    float scale, int batchSize);
 
 // FP32 Ops
 void Metal_RMSNorm_F32(MetalContextRef ctx, MetalBufferRef input, int offIn,
