@@ -73,6 +73,10 @@
 @property(strong) id<MTLComputePipelineState> pipelineRMSNormLinear_Q6K_F16;
 @property(strong) id<MTLComputePipelineState> pipelineSwiGLULinear_Q6K_F16;
 @property(strong) id<MTLComputePipelineState> pipelineRMSNormQKV_Q6K_F16;
+@property(strong) id<MTLComputePipelineState> pipelineMOERouterLogits;
+@property(strong) id<MTLComputePipelineState> pipelineMOETopKSelection;
+@property(strong) id<MTLComputePipelineState> pipelineMOEExpertForward;
+@property(strong) id<MTLComputePipelineState> pipelineMOEExpertGateUpSwiGLU;
 @property(strong) id<MTLCommandBuffer> currentCommandBuffer;
 @property(strong) id<MTLComputeCommandEncoder> currentEncoder;
 @property(strong) id<MTLCommandBuffer> lastCommandBuffer;
@@ -255,6 +259,11 @@ MetalContextRef Metal_Init(const char *libSource) {
   ctx.pipelineSwiGLULinear_Q6K_F16 =
       loadPipeline(ctx, @"swiglu_linear_q6k_f16");
   ctx.pipelineRMSNormQKV_Q6K_F16 = loadPipeline(ctx, @"rmsnorm_qkv_q6k_f16");
+  ctx.pipelineMOERouterLogits = loadPipeline(ctx, @"moe_router_logits_f16");
+  ctx.pipelineMOETopKSelection = loadPipeline(ctx, @"moe_topk_selection_f32");
+  ctx.pipelineMOEExpertForward = loadPipeline(ctx, @"moe_expert_forward_f16");
+  ctx.pipelineMOEExpertGateUpSwiGLU =
+      loadPipeline(ctx, @"moe_expert_gate_up_swiglu_f16");
 
 #if __has_feature(objc_arc)
   return (__bridge_retained MetalContextRef)ctx;
@@ -1635,5 +1644,143 @@ void Metal_Mul_F16(MetalContextRef ctx_ref, MetalBufferRef a, int offA,
       threadGroupSize = n;
     MTLSize threadsPerGroup = MTLSizeMake(threadGroupSize, 1, 1);
     [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadsPerGroup];
+  }
+}
+
+// ============================================================================
+// MOE (Mixture of Experts) Bridge Functions
+// ============================================================================
+
+void Metal_MOE_RouterLogits(MetalContextRef ctx_ref, MetalBufferRef input,
+                            int offInput, MetalBufferRef gateWeight,
+                            int offGateWeight, MetalBufferRef logits,
+                            int offLogits, int batchSize, int dim,
+                            int numExperts) {
+  @autoreleasepool {
+    MetalWrapper *wrapper = (__bridge MetalWrapper *)ctx_ref;
+    id<MTLComputeCommandEncoder> encoder = [wrapper ensureEncoder];
+    [encoder setComputePipelineState:wrapper.pipelineMOERouterLogits];
+
+    [encoder setBuffer:(__bridge id<MTLBuffer>)input offset:offInput atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)gateWeight
+                offset:offGateWeight
+               atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)logits
+                offset:offLogits
+               atIndex:2];
+    [encoder setBytes:&batchSize length:sizeof(int) atIndex:3];
+    [encoder setBytes:&dim length:sizeof(int) atIndex:4];
+    [encoder setBytes:&numExperts length:sizeof(int) atIndex:5];
+
+    MTLSize gridSize = MTLSizeMake(batchSize * 32, numExperts, 1);
+    MTLSize threadGroupSize = MTLSizeMake(32, 1, 1);
+    [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadGroupSize];
+    [wrapper barrier];
+  }
+}
+
+void Metal_MOE_TopKSelection(MetalContextRef ctx_ref, MetalBufferRef logits,
+                             int offLogits, MetalBufferRef expertIndices,
+                             int offIndices, MetalBufferRef expertWeights,
+                             int offWeights, int batchSize, int numExperts,
+                             int topK) {
+  @autoreleasepool {
+    MetalWrapper *wrapper = (__bridge MetalWrapper *)ctx_ref;
+    id<MTLComputeCommandEncoder> encoder = [wrapper ensureEncoder];
+    [encoder setComputePipelineState:wrapper.pipelineMOETopKSelection];
+
+    [encoder setBuffer:(__bridge id<MTLBuffer>)logits
+                offset:offLogits
+               atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)expertIndices
+                offset:offIndices
+               atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)expertWeights
+                offset:offWeights
+               atIndex:2];
+    [encoder setBytes:&batchSize length:sizeof(int) atIndex:3];
+    [encoder setBytes:&numExperts length:sizeof(int) atIndex:4];
+    [encoder setBytes:&topK length:sizeof(int) atIndex:5];
+
+    MTLSize gridSize = MTLSizeMake(batchSize, 1, 1);
+    MTLSize threadGroupSize = MTLSizeMake(1, 1, 1);
+    [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadGroupSize];
+    [wrapper barrier];
+  }
+}
+
+void Metal_MOE_ExpertForward(MetalContextRef ctx_ref, MetalBufferRef input,
+                             int offInput, MetalBufferRef expertWeight,
+                             int offWeight, MetalBufferRef expertIndices,
+                             int offIndices, MetalBufferRef expertWeights,
+                             int offWeights, MetalBufferRef output,
+                             int offOutput, int batchSize, int dim,
+                             int hiddenDim, int topK) {
+  @autoreleasepool {
+    MetalWrapper *wrapper = (__bridge MetalWrapper *)ctx_ref;
+    id<MTLComputeCommandEncoder> encoder = [wrapper ensureEncoder];
+    [encoder setComputePipelineState:wrapper.pipelineMOEExpertForward];
+
+    [encoder setBuffer:(__bridge id<MTLBuffer>)input offset:offInput atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)expertWeight
+                offset:offWeight
+               atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)expertIndices
+                offset:offIndices
+               atIndex:2];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)expertWeights
+                offset:offWeights
+               atIndex:3];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)output
+                offset:offOutput
+               atIndex:4];
+    [encoder setBytes:&batchSize length:sizeof(int) atIndex:5];
+    [encoder setBytes:&dim length:sizeof(int) atIndex:6];
+    [encoder setBytes:&hiddenDim length:sizeof(int) atIndex:7];
+    [encoder setBytes:&topK length:sizeof(int) atIndex:8];
+
+    MTLSize gridSize = MTLSizeMake(batchSize * 32, hiddenDim, 1);
+    MTLSize threadGroupSize = MTLSizeMake(32, 1, 1);
+    [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadGroupSize];
+    [wrapper barrier];
+  }
+}
+
+void Metal_MOE_ExpertGateUpSwiGLU(MetalContextRef ctx_ref, MetalBufferRef input,
+                                  int offInput, MetalBufferRef gateWeight,
+                                  int offGate, MetalBufferRef upWeight,
+                                  int offUp, MetalBufferRef expertIndices,
+                                  int offIndices, MetalBufferRef expertWeights,
+                                  int offWeights, MetalBufferRef output,
+                                  int offOutput, int batchSize, int dim,
+                                  int hiddenDim, int topK) {
+  @autoreleasepool {
+    MetalWrapper *wrapper = (__bridge MetalWrapper *)ctx_ref;
+    id<MTLComputeCommandEncoder> encoder = [wrapper ensureEncoder];
+    [encoder setComputePipelineState:wrapper.pipelineMOEExpertGateUpSwiGLU];
+
+    [encoder setBuffer:(__bridge id<MTLBuffer>)input offset:offInput atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)gateWeight
+                offset:offGate
+               atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)upWeight offset:offUp atIndex:2];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)expertIndices
+                offset:offIndices
+               atIndex:3];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)expertWeights
+                offset:offWeights
+               atIndex:4];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)output
+                offset:offOutput
+               atIndex:5];
+    [encoder setBytes:&batchSize length:sizeof(int) atIndex:6];
+    [encoder setBytes:&dim length:sizeof(int) atIndex:7];
+    [encoder setBytes:&hiddenDim length:sizeof(int) atIndex:8];
+    [encoder setBytes:&topK length:sizeof(int) atIndex:9];
+
+    MTLSize gridSize = MTLSizeMake(batchSize * 32, hiddenDim, 1);
+    MTLSize threadGroupSize = MTLSizeMake(32, 1, 1);
+    [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadGroupSize];
+    [wrapper barrier];
   }
 }

@@ -14,7 +14,7 @@ const (
 	GGMLTypeF16    GGMLType = 1
 	GGMLTypeQ4_0   GGMLType = 2
 	GGMLTypeQ4_1   GGMLType = 3
-	GGMLTypeQ5_0   GGMLType = 4
+	GGMLTypeQ5_0   GGMLType = 6
 	GGMLTypeQ8_0   GGMLType = 8
 	GGMLTypeQ2_K   GGMLType = 10
 	GGMLTypeQ3_K   GGMLType = 11
@@ -64,6 +64,8 @@ func (t *TensorInfo) SizeBytes() uint64 {
 		return numElements * 2
 	case GGMLTypeQ4_0:
 		return (numElements / 32) * 18
+	case GGMLTypeQ5_0:
+		return (numElements / 32) * 22
 	case GGMLTypeQ8_0:
 		return (numElements / 32) * 34
 	case GGMLTypeQ4_K:

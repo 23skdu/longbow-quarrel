@@ -421,6 +421,10 @@ func isNeededTensor(name string) bool {
 			"ffn_gate.weight", "ffn_up.weight", "ffn_down.weight", "ffn_norm.weight",
 			"ssm_a", "ssm_d", "ssm_conv1d.weight", "ssm_conv1d.bias", "ssm_dt.weight", "ssm_dt.bias",
 			"ssm_norm.weight", "ssm_norm.bias", "ssm_out.weight", "ssm_in.weight",
+			// MOE weights
+			"ffn_gate_inp.weight", "exp_probs_b.bias",
+			"ffn_down_exps.weight", "ffn_up_exps.weight", "ffn_gate_exps.weight",
+			"ffn_down_shexp.weight", "ffn_up_shexp.weight", "ffn_gate_shexp.weight",
 		}
 		for _, s := range suffixes {
 			if strings.HasSuffix(lowerName, s) {
@@ -437,6 +441,12 @@ func (e *Engine) loadModel(path string) error {
 		return err
 	}
 	e.Model = f
+	tok, err := tokenizer.NewFromGGUF(f)
+	if err != nil {
+		logger.Log.Warn("Failed to initialize tokenizer from GGUF", "error", err)
+	} else {
+		e.Tokenizer = tok
+	}
 
 	// ... (metadata loading remains same)
 
@@ -580,10 +590,76 @@ func (e *Engine) loadModel(path string) error {
 		logger.Log.Info("Model vocab size default", "vocab_size", e.Config.VocabSize)
 	}
 
+	// MOE Metadata (Mixture of Experts)
+	if val, ok := getKV(f, "llama.expert_count", ""); ok {
+		e.Config.ExpertCount = int(toFloat64(val))
+		e.Config.IsMOE = true
+		logger.Log.Info("MOE architecture detected", "expert_count", e.Config.ExpertCount)
+	}
+
+	if val, ok := getKV(f, "llama.expert_used_count", ""); ok {
+		e.Config.ExpertUsedCount = int(toFloat64(val))
+		logger.Log.Info("MOE expert usage", "expert_used_count", e.Config.ExpertUsedCount)
+	}
+
+	if val, ok := getKV(f, "llama.expert_shared_count", ""); ok {
+		e.Config.ExpertSharedCount = int(toFloat64(val))
+		logger.Log.Info("MOE shared experts", "expert_shared_count", e.Config.ExpertSharedCount)
+	}
+
+	if val, ok := getKV(f, "llama.expert_feed_forward_length", ""); ok {
+		e.Config.ExpertFeedForwardLength = int(toFloat64(val))
+		logger.Log.Info("MOE expert FFN dimension", "expert_feed_forward_length", e.Config.ExpertFeedForwardLength)
+	}
+
+	if val, ok := getKV(f, "llama.expert_shared_feed_forward_length", ""); ok {
+		e.Config.ExpertSharedFeedForwardLength = int(toFloat64(val))
+		logger.Log.Info("MOE shared expert FFN dimension", "expert_shared_feed_forward_length", e.Config.ExpertSharedFeedForwardLength)
+	}
+
+	if val, ok := getKV(f, "llama.expert_group_count", ""); ok {
+		e.Config.ExpertGroupCount = int(toFloat64(val))
+	}
+
+	if val, ok := getKV(f, "llama.expert_group_used_count", ""); ok {
+		e.Config.ExpertGroupUsedCount = int(toFloat64(val))
+	}
+
+	if val, ok := getKV(f, "llama.expert_weights_norm", ""); ok {
+		if norm, ok := val.(bool); ok {
+			e.Config.ExpertWeightsNorm = norm
+		}
+	}
+
+	if val, ok := getKV(f, "llama.expert_weights_scale", ""); ok {
+		e.Config.ExpertWeightsScale = float32(toFloat64(val))
+	}
+
+	// Log MOE configuration summary if MOE is detected
+	if e.Config.IsMOE {
+		logger.Log.Info("MOE configuration summary",
+			"expert_count", e.Config.ExpertCount,
+			"expert_used_count", e.Config.ExpertUsedCount,
+			"expert_shared_count", e.Config.ExpertSharedCount,
+			"expert_ffn_dim", e.Config.ExpertFeedForwardLength,
+			"expert_shared_ffn_dim", e.Config.ExpertSharedFeedForwardLength)
+	}
+
 	// Set Precision Mode based on model dimensions (explicit configuration instead of heuristic)
-	// This can be overridden by metadata if available
+	// Architecture detection
 	if arch, ok := f.KV["general.architecture"].(string); ok {
+		e.Config.Architecture = arch
+		if arch == "nemo" || arch == "nemotron" {
+			e.Config.IsMOE = true
+			logger.Log.Debug("Architecture detected as MOE (Nemotron)", "arch", arch)
+		}
 		logger.Log.Info("Model architecture confirmed", "arch", arch)
+	}
+	// MOE-specific metadata
+	if val, ok := f.KV["llama.expert_count"].(uint32); ok {
+		e.Config.ExpertCount = int(val)
+		e.Config.IsMOE = true
+		logger.Log.Debug("Architecture detected as MOE (llama.expert_count)", "count", val)
 	}
 
 	if val, ok := f.KV["llama.attention.precision"]; ok {
@@ -652,6 +728,12 @@ func (e *Engine) loadModel(path string) error {
 	e.Weights.FfnUp = make([]*device.Tensor, layers)
 	e.Weights.FfnNorm = make([]*device.Tensor, layers)
 	e.Weights.Mamba = make([]*MambaWeights, layers) // Initialize Mamba/SSM layer storage
+
+	// Initialize MOE weight containers if MOE architecture detected
+	if e.Config.IsMOE {
+		e.Weights.MOE = make([]*MOELayerWeights, layers)
+		logger.Log.Info("Initialized MOE weight containers", "layers", layers)
+	}
 
 	// Map tensors
 	for _, t := range f.Tensors {
@@ -922,6 +1004,104 @@ func (e *Engine) loadModel(path string) error {
 					e.Weights.Mamba[layerIdx] = &MambaWeights{}
 				}
 				e.Weights.Mamba[layerIdx].InWeight = mt
+
+			// MOE Router Weights
+			case "ffn_gate_inp.weight":
+				if e.Weights.MOE[layerIdx] == nil {
+					e.Weights.MOE[layerIdx] = &MOELayerWeights{}
+				}
+				if e.Weights.MOE[layerIdx].Router == nil {
+					e.Weights.MOE[layerIdx].Router = &MOERouterWeights{}
+				}
+				e.Weights.MOE[layerIdx].Router.GateInput = mt
+				logger.Log.Debug("Loaded MOE router gate", "layer", layerIdx, "shape", fmt.Sprintf("[%d, %d]", mt.Rows(), mt.Cols()))
+
+			case "exp_probs_b.bias":
+				if e.Weights.MOE[layerIdx] == nil {
+					e.Weights.MOE[layerIdx] = &MOELayerWeights{}
+				}
+				if e.Weights.MOE[layerIdx].Router == nil {
+					e.Weights.MOE[layerIdx].Router = &MOERouterWeights{}
+				}
+				e.Weights.MOE[layerIdx].Router.ExpertProbBias = mt
+
+			// MOE Expert Weights (3D tensors)
+			case "ffn_down_exps.weight":
+				if e.Weights.MOE[layerIdx] == nil {
+					e.Weights.MOE[layerIdx] = &MOELayerWeights{}
+				}
+				if e.Weights.MOE[layerIdx].Experts == nil {
+					e.Weights.MOE[layerIdx].Experts = &MOEExpertWeights{}
+				}
+				e.Weights.MOE[layerIdx].Experts.FfnDownExperts = mt
+				// Extract 3D metadata from tensor dimensions [hidden_dim, dim, num_experts]
+				if len(t.Dimensions) == 3 {
+					e.Weights.MOE[layerIdx].Experts.HiddenDim = int(t.Dimensions[0])
+					e.Weights.MOE[layerIdx].Experts.Dim = int(t.Dimensions[1])
+					e.Weights.MOE[layerIdx].Experts.NumExperts = int(t.Dimensions[2])
+					logger.Log.Debug("Loaded MOE expert down weights", "layer", layerIdx,
+						"hidden_dim", t.Dimensions[0], "dim", t.Dimensions[1], "num_experts", t.Dimensions[2])
+				} else {
+					logger.Log.Debug("Loaded MOE expert down weights", "layer", layerIdx, "shape", t.Dimensions)
+				}
+
+			case "ffn_up_exps.weight":
+				if e.Weights.MOE[layerIdx] == nil {
+					e.Weights.MOE[layerIdx] = &MOELayerWeights{}
+				}
+				if e.Weights.MOE[layerIdx].Experts == nil {
+					e.Weights.MOE[layerIdx].Experts = &MOEExpertWeights{}
+				}
+				e.Weights.MOE[layerIdx].Experts.FfnUpExperts = mt
+				// Extract 3D metadata if not already set
+				if len(t.Dimensions) == 3 && e.Weights.MOE[layerIdx].Experts.NumExperts == 0 {
+					e.Weights.MOE[layerIdx].Experts.HiddenDim = int(t.Dimensions[0])
+					e.Weights.MOE[layerIdx].Experts.Dim = int(t.Dimensions[1])
+					e.Weights.MOE[layerIdx].Experts.NumExperts = int(t.Dimensions[2])
+					logger.Log.Debug("Loaded MOE expert up weights", "layer", layerIdx,
+						"hidden_dim", t.Dimensions[0], "dim", t.Dimensions[1], "num_experts", t.Dimensions[2])
+				} else {
+					logger.Log.Debug("Loaded MOE expert up weights", "layer", layerIdx, "shape", t.Dimensions)
+				}
+
+			case "ffn_gate_exps.weight":
+				if e.Weights.MOE[layerIdx] == nil {
+					e.Weights.MOE[layerIdx] = &MOELayerWeights{}
+				}
+				if e.Weights.MOE[layerIdx].Experts == nil {
+					e.Weights.MOE[layerIdx].Experts = &MOEExpertWeights{}
+				}
+				e.Weights.MOE[layerIdx].Experts.FfnGateExperts = mt
+
+			// MOE Shared Expert Weights
+			case "ffn_down_shexp.weight":
+				if e.Weights.MOE[layerIdx] == nil {
+					e.Weights.MOE[layerIdx] = &MOELayerWeights{}
+				}
+				if e.Weights.MOE[layerIdx].Shared == nil {
+					e.Weights.MOE[layerIdx].Shared = &MOESharedWeights{}
+				}
+				e.Weights.MOE[layerIdx].Shared.FfnDownShared = mt
+				logger.Log.Debug("Loaded MOE shared expert down weights", "layer", layerIdx, "shape", fmt.Sprintf("[%d, %d]", mt.Rows(), mt.Cols()))
+
+			case "ffn_up_shexp.weight":
+				if e.Weights.MOE[layerIdx] == nil {
+					e.Weights.MOE[layerIdx] = &MOELayerWeights{}
+				}
+				if e.Weights.MOE[layerIdx].Shared == nil {
+					e.Weights.MOE[layerIdx].Shared = &MOESharedWeights{}
+				}
+				e.Weights.MOE[layerIdx].Shared.FfnUpShared = mt
+				logger.Log.Debug("Loaded MOE shared expert up weights", "layer", layerIdx, "shape", fmt.Sprintf("[%d, %d]", mt.Rows(), mt.Cols()))
+
+			case "ffn_gate_shexp.weight":
+				if e.Weights.MOE[layerIdx] == nil {
+					e.Weights.MOE[layerIdx] = &MOELayerWeights{}
+				}
+				if e.Weights.MOE[layerIdx].Shared == nil {
+					e.Weights.MOE[layerIdx].Shared = &MOESharedWeights{}
+				}
+				e.Weights.MOE[layerIdx].Shared.FfnGateShared = mt
 			}
 		}
 	}
@@ -950,6 +1130,10 @@ func (e *Engine) loadModel(path string) error {
 	// Case 3: Gap recovery for missing Mamba ssm_in tensors (Nemotron specific)
 	if e.Weights.Mamba != nil {
 		gaps := f.GetGapTensors()
+		logger.Log.Debug("Gap recovery triggered", "num_gaps", len(gaps))
+		for idx, gap := range gaps {
+			logger.Log.Debug("Found GGUF gap", "idx", idx, "offset", gap.Offset, "size", len(gap.Data))
+		}
 		gapIdx := 0
 		for i := 0; i < e.Config.Layers; i++ {
 			mw := e.Weights.Mamba[i]
@@ -970,6 +1154,7 @@ func (e *Engine) loadModel(path string) error {
 						continue
 					}
 					mw.InWeight = mt
+					logger.Log.Info("Successfully recovered ssm_in weight from gap", "layer", i)
 					break // Found one for this layer
 				}
 			}
@@ -1245,6 +1430,31 @@ func (e *Engine) inferInternal(inputTokens []int, tokensToGenerate int, samplerC
 						panic(fmt.Errorf("layer %d residual add failed: %v", l, err))
 					}
 				}
+			} else if e.IsMOELayer(l) {
+				// MOE Layer (Attention + MOE FFN)
+				// 1. Attention Part (passing nil for FFN up weight to skip FFN block in Layer method)
+				currentF32.Layer(l, attnNorm, q, k, v, o, ffnNorm, ffnGate, nil, ffnDown, kCache, vCache,
+					scratch, // Pass scratch
+					e.TraceTracker,
+					e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen, e.Config.WindowSize, e.GlobalScale, samplerConfig.DebugActivations, int(e.Config.PrecisionMode),
+					view.BlockTable, view.BlockSize,
+					func(k, v *device.Tensor) {
+						if err := e.Cache.Update(l, e.CachePos, k, v); err != nil {
+							panic(err)
+						}
+					})
+
+				// 2. MOE Part
+				// Need to apply FFN Norm first
+				normedFFN := currentF32.RMSNorm(ffnNorm, e.Config.Eps)
+
+				// MOE Forward
+				moeOut := e.MOELayerForward(l, normedFFN)
+				normedFFN.Free()
+
+				// Add Residual (y = MOE(Norm(x)) + x)
+				currentF32.AddInPlace(moeOut)
+				moeOut.Free()
 			} else {
 				currentF32.Layer(l, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, kCache, vCache,
 					scratch, // Pass scratch
@@ -1600,8 +1810,16 @@ func (e *Engine) initKVCache() error {
 }
 
 func (e *Engine) Close() {
+	if e.Weights != nil {
+		e.Weights.Free()
+	}
 	if e.Cache != nil {
 		e.Cache.Free()
+	}
+	for _, s := range e.SSMCache {
+		if s != nil {
+			s.Free()
+		}
 	}
 	if e.Ctx != nil {
 		e.Ctx.Free()

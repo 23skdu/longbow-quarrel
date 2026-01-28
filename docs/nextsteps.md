@@ -1,22 +1,137 @@
 # Performance Optimization Plan: Closing the Gap
 
+## Current Task: Phase 1 - Robust Baselines & Regression
+
+- [x] Planning Phase 1 implementation
+- [/] Implement `cmd/smoke_test/regression_suite.go`
+  - [ ] Define baseline prompts and expected outputs
+  - [ ] Implement logit difference / perplexity check
+  - [ ] Support multi-model batch testing
+- [ ] Establish new performance baselines
+  - [ ] Benchmark Mistral 7B (FP16/Quant)
+  - [ ] Benchmark Granite 4B
+  - [ ] Benchmark TinyLlama 1.1B
+  - [ ] Benchmark Nemotron-3-Nano
+  - [ ] Benchmark GPT-OSS
+- [ ] Update `docs/performance.md` with new baselines
+
+---
+
 **Goal:** Close the performance gap (currently ~4x-8x vs Llama.cpp) while maintaining strict coherence and correctness.
 **Targets:** `mistral:latest`, `nemotron-3-nano:latest`, `tinyllama:latest`, `granite4:latest`.
 
-## Phase 0: Specialized MOE & Nemotron Support [TOP PRIORITY]
+## Phase 0: MOE & Nemotron Support [TOP PRIORITY]
 
-### 10-Part Plan: Robust MOE & SSM In-Weight Support
+**Status:** Steps 1, 2, 6, and 7 complete ✅. Proceeding to Step 10 (Smoke Test) and Step 8 (Optimization).
 
-1. **GGUF MOE Metadata Parsing**: Implement support for `llama.expert_count`, `llama.expert_used_count`, and `llama.expert_shared_count` to robustly detect MOE architectures.
-2. **Shared vs. Expert-Specific Weight Containers**: Update `ModelWeights` to differentiate between shared (common) and expert-specific tensors, avoiding monolithic loading.
-3. **Adaptive Expert Loading Mechanism**: Create a loader that honors memory budgets by prioritizing shared weights and strictly filtering expert weights for MOE models.
-4. **Specialized SSM In-Weight Logic**: Debug Nemotron-3-Nano's `ssm_in` placement across different quantization tools (Ollama, llama.cpp) to standardize its identification.
-5. **Refactored Gap Recovery (Metadata-Hinted)**: Replace heuristic gap searching with metadata-driven offset calculation to reliably load unconventional tensor layouts.
-6. **3D Tensor & Batch Dispatching**: Support multi-dimensional expert tensors (e.g. `[8 2048 512]`) and implement Metal kernels that can process batches of Experts.
-7. **Expert Routing (Gate/Router) Kernels**: Implement Top-K expert selection logic (Softmax + TopK) in Metal to handle the router phase of MOE layers.
-8. **MoE Expert-Fusion Kernels**: Optimize the FFN block by fusing expert-selection with expert GEMM to reduce memory bandwidth usage.
-9. **Granular Context Budgeting for MOE**: Refine `KVCacheSize` handling to account for the additional memory overhead of Experts when calculating prefill budgets.
-10. **MOE Coherence & Performance Validation**: Add dedicated smoke tests for Nemotron-3-Nano and Mixtral-8x7B to verify both numerical correctness and latency.
+### Core MOE Inference Implementation (Priority Order)
+
+#### Context and Goal
+
+#### Status Update
+
+Steps 1, 2, 6, and 7 are complete ✅. Core MOE loading, 3D tensor support, routing, and basic expert forward passes are implemented and verified.
+
+#### 8. ✅ MoE Expert-Fusion Kernels [COMPLETE]
+
+#### Goal
+
+Optimize FFN block by fusing expert-selection with expert GEMM
+
+#### Status
+
+Implemented and verified. Consolidates Gate, Up, and SwiGLU into a single Metal kernel.
+
+- [x] Implement `moe_expert_gate_up_swiglu_f16` Metal kernel
+- [x] Add C bridge and Go wrapper
+- [x] Update `MOELayerForward` to use fused kernel
+- [x] Verify correctness with `moe_test.go` and `moe_coherence_test.go`
+
+#### 10. MOE Coherence & Performance Validation
+
+**Goal:** Verify numerical correctness and latency for MOE models
+**Status:** Not started (depends on Steps 6-8)
+
+**Subtasks:**
+
+- [ ] **Add Prometheus metrics in `internal/metrics/metrics.go`:**
+  - [ ] `quarrel_moe_layer_latency_seconds`: MOE layer forward pass latency
+  - [ ] `quarrel_moe_expert_selection`: Distribution of expert selections per layer
+**Status:** Complete
+
+**Subtasks:**
+
+- [x] **Add Prometheus metrics in `internal/metrics/metrics.go`:**
+  - [x] `quarrel_moe_layer_latency_seconds`: MOE layer forward pass latency
+  - [x] `quarrel_moe_expert_selection`: Distribution of expert selections per layer
+  - [x] `quarrel_moe_routing_latency_seconds`: Expert routing (topk) latency
+  - [x] `quarrel_moe_expert_utilization`: Expert utilization rate
+- [x] **Create smoke tests:**
+  - [x] `TestNemotronMOECoherence`: Generate text with Nemotron-3-Nano, verify output quality
+  - [ ] `TestMixtralMOECoherence`: Generate text with Mixtral-8x7B (if available)
+  - [ ] Compare outputs with llama.cpp for same prompts
+- [x] **Step 10: MoE Coherence & Performance Validation**
+  - Done: Implemented observability metrics and performance benchmark tool.
+  - Verified: Expert selection (6/128), latency breakdown (~2:1 GEMM:Routing), and high TPS on fused kernels.
+  - Results documented in [performance.md](performance.md).
+- [x] **Performance benchmarks:**
+  - [x] Measure tokens/sec for Nemotron-3-Nano
+  - [x] Measure MOE layer latency breakdown (routing vs. expert computation)
+  - [x] Compare with llama.cpp performance
+- [x] **Validation:**
+  - [x] Verify expert selection distribution matches expected (e.g., 6 out of 128 for Nemotron)
+  - [x] Check for numerical stability (no NaNs/Infs in expert outputs)
+  - [x] Validate memory usage stays within bounds
+
+### MOE Optimization & Edge Cases (Lower Priority)
+
+#### 3. Adaptive Expert Loading Mechanism
+
+**Goal:** Create loader that honors memory budgets by prioritizing shared weights
+**Status:** Deferred until core inference is working
+
+**Subtasks:**
+
+- [ ] Analyze memory footprint of expert weights vs. shared weights
+- [ ] Implement selective expert loading based on memory budget
+- [ ] Add configuration for max expert memory usage
+- [ ] Test with large MOE models (Mixtral-8x22B if available)
+
+#### 4. Specialized SSM In-Weight Logic
+
+**Goal:** Debug Nemotron-3-Nano's `ssm_in` placement across different quantization tools
+**Status:** Deferred (SSM layers currently work, but `ssm_in` mapping may need refinement)
+
+**Subtasks:**
+
+- [ ] Compare `ssm_in` tensor placement between Ollama and llama.cpp quantized models
+- [ ] Identify discrepancies in tensor naming or offset calculation
+- [ ] Standardize `ssm_in` identification logic
+- [ ] Add validation tests for SSM weight loading
+
+#### 5. Refactored Gap Recovery (Metadata-Hinted)
+
+**Goal:** Replace heuristic gap searching with metadata-driven offset calculation
+**Status:** Deferred (current gap recovery works for most models)
+
+**Subtasks:**
+
+- [ ] Analyze GGUF metadata for offset hints
+- [ ] Implement metadata-driven offset calculation
+- [ ] Remove heuristic gap searching fallback
+- [ ] Test with unconventional tensor layouts
+
+#### 9. Granular Context Budgeting for MOE
+
+**Goal:** Refine `KVCacheSize` handling to account for MOE memory overhead
+**Status:** Deferred until MOE inference is stable
+
+**Subtasks:**
+
+- [ ] Calculate additional memory overhead for MOE layers (router logits, expert indices, etc.)
+- [ ] Update `KVCacheSize` calculation to include MOE overhead
+- [ ] Add configuration for MOE-specific memory budgets
+- [ ] Test with various context lengths and expert counts
 
 ## Phase 1: Robust Baselines & Regression
 

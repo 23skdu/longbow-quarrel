@@ -49,6 +49,42 @@ type MambaWeights struct {
 	InWeight *device.Tensor
 }
 
+func (w *MambaWeights) Free() {
+	if w == nil {
+		return
+	}
+	if w.A != nil {
+		w.A.Free()
+	}
+	if w.D != nil {
+		w.D.Free()
+	}
+	if w.Conv1dWeight != nil {
+		w.Conv1dWeight.Free()
+	}
+	if w.Conv1dBias != nil {
+		w.Conv1dBias.Free()
+	}
+	if w.DTWeight != nil {
+		w.DTWeight.Free()
+	}
+	if w.DTBias != nil {
+		w.DTBias.Free()
+	}
+	if w.NormWeight != nil {
+		w.NormWeight.Free()
+	}
+	if w.NormBias != nil {
+		w.NormBias.Free()
+	}
+	if w.OutWeight != nil {
+		w.OutWeight.Free()
+	}
+	if w.InWeight != nil {
+		w.InWeight.Free()
+	}
+}
+
 // IsMambaLayer checks if a layer index corresponds to a Mamba layer
 // for a hybrid model. This depends on the specific architecture (interleaving pattern).
 func (e *Engine) IsMambaLayer(layerIdx int) bool {
@@ -75,4 +111,16 @@ type MambaState struct {
 	// Shape: [d_ssm, d_state]
 	// Typically [d_inner, 16] or [d_inner, 64]
 	SSMState *device.Tensor
+}
+
+func (s *MambaState) Free() {
+	if s == nil {
+		return
+	}
+	if s.ConvState != nil {
+		s.ConvState.Free()
+	}
+	if s.SSMState != nil {
+		s.SSMState.Free()
+	}
 }
