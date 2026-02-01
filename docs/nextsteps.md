@@ -162,24 +162,29 @@ Implemented and verified. Consolidates Gate, Up, and SwiGLU into a single Metal 
 - **Objective:** Use the refined benchmark tool to establish accurate, per-phase performance metrics.
 - [x] Establish new accurate baselines for Mistral, Granite, and Smollm2 (excluding loading/prefill noise).
 - [x] Compare results against Llama.cpp to quantify the exact gap.
-- [ ] **CRITICAL: Performance Regression Investigation Needed**
-  - Current results show significant degradation vs Jan 29, 2026 baselines
-  - Granite 4B: 12.53 t/s (was 186.1 t/s) - 14.8x worse
-  - Mistral 7B: 1.91 t/s (was 5.6 t/s) - 2.9x worse
-  - Possible causes: Thermal throttling, code changes, benchmark differences
-  - Next: Re-run after 5+ min system cooldown
+ - [ ] **CRITICAL: Performance Regression Investigation Needed**
+   - Current results show significant degradation vs Jan 29, 2026 baselines
+   - Granite 4B: 12.53 t/s (was 186.1 t/s) - 14.8x worse
+   - Mistral 7B: 1.91 t/s (was 5.6 t/s) - 2.9x worse
+   - Possible causes: Thermal throttling, code changes, benchmark differences
+   - Next: Re-run after 5+ min system cooldown
+   - **ADDITIONAL ISSUE FOUND:** Kernel optimizations (Q4K/Q6K linear kernels) introduced in commit d075073 produce incorrect logits
+   - Fixed: Reverted broken kernel optimizations to original working versions
+   - Root cause: Optimized kernels used `if (tid.y == 0)` pattern which breaks with current threadgroup configuration
+   - Needs: Proper re-implementation of optimizations with correct threadgroup handling
 
 ### 2. Automated Regression Testing (Coherence)
 
 - **Objective:** Ensure optimizations don't break model output.
 - [x] Implement `cmd/smoke_test/regression_suite.go`.
 - [x] Enforce "Perplexity/Logit Difference" check.
-- [ ] **Issue Found: Smollm2 Model Regression**
-  - Running regression suite on Smollm2 135M (608M file) produces all-zero logits
-  - Output consists entirely of `<unk>` tokens
-  - This indicates a model loading or tokenizer mismatch issue
-  - Previous benchmarks showed 38.81 t/s which suggests model did work at some point
-  - Needs investigation of tokenization/inference path for this specific model
+ - [x] **Issue Found: Smollm2 Model Regression** - RESOLVED
+   - Root Cause: `internal/tokenizer/tokenizer.go` was accidentally deleted and replaced with a stub file
+   - This broke all tokenization, causing all-zero logits and `<unk>` token output
+   - Fixed: Restored full tokenizer implementation from git history (commit 9be3bfc)
+   - Added missing build tags `//go:build darwin && metal` to all tokenizer test files
+   - Verified tokenizer package builds successfully
+   - Note: Smollm2 model file not available in current environment for direct verification
 
 ## Phase 3: System & Architecture
 

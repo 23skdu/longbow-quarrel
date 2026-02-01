@@ -71,34 +71,31 @@ kernel void swiglu_f16(device const half *gate [[ buffer(0) ]],
 
 kernel void rmsnorm_f16(device const half *x [[ buffer(0) ]],
                       device half *out [[ buffer(1) ]],
-                      device const float *w [[ buffer(2) ]],
+                      device const half *w [[ buffer(2) ]],
                       constant float &eps [[ buffer(3) ]],
                       constant int &cols [[ buffer(4) ]],
                       uint tid [[ thread_index_in_threadgroup ]],
                       uint2 qid [[ thread_position_in_grid ]]) {
-    threadgroup float shared_rms[1];
-    float sum_sq = 0.0f;
+    threadgroup float s[1024];
+    float sum = 0.0f;
     int row_offset = qid.y * cols;
     for (int i = tid; i < cols; i += 1024) {
         float val = (float)x[row_offset + i];
-        sum_sq += val * val;
+        sum += val * val;
     }
-    // Using simd_sum for faster reduction across SIMD groups
-    sum_sq = simd_sum(sum_sq);
-    threadgroup float s[32];
-    if ((tid & 31) == 0) s[tid / 32] = sum_sq;
+    s[tid] = sum;
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    
-    if (tid < 32) {
-        float t = (tid < 32) ? s[tid] : 0.0f;
-        t = simd_sum(t);
-        if (tid == 0) shared_rms[0] = 1.0f / sqrt(t / (float)cols + eps);
+    if (tid == 0) {
+        float t = 0;
+        int active_threads = (cols < 1024) ? cols : 1024;
+        for (int i = 0; i < active_threads; i++) t += s[i];
+        s[0] = 1.0f / sqrt(t / (float)cols + eps);
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    float rms = shared_rms[0];
+    float scale = s[0];
     for (int i = tid; i < cols; i += 1024) {
         int idx = row_offset + i;
-        out[idx] = safe_half((float)x[idx] * rms * w[i]);
+        out[idx] = safe_half((float)x[idx] * scale * (float)w[i]);
     }
 }
 
@@ -132,58 +129,44 @@ kernel void linear_f16(device const half *weight [[ buffer(0) ]],
 }
 
 kernel void linear_q6k_f16(device const uchar *weight [[ buffer(0) ]],
-                          device const half *input [[ buffer(1) ]],
-                          device half *output [[ buffer(2) ]],
-                          constant int &dim_in [[ buffer(3) ]],
-                          constant int &dim_out [[ buffer(4) ]],
-                          constant float &scale [[ buffer(5) ]],
-                          uint3 tid [[ thread_position_in_threadgroup ]],
-                          uint3 qid [[ thread_position_in_grid ]]) {
+                         device const half *input [[ buffer(1) ]],
+                         device half *output [[ buffer(2) ]],
+                         constant int &dim_in [[ buffer(3) ]],
+                         constant int &dim_out [[ buffer(4) ]],
+                         constant float &scale [[ buffer(5) ]],
+                         uint3 tid [[ thread_position_in_threadgroup ]],
+                         uint3 qid [[ thread_position_in_grid ]]) {
     uint row = qid.y; uint batch = qid.z;
-    uint lane_id = tid.x;
-    int num_blocks = (dim_in + 255) / 256;
+    if (row >= (uint)dim_out) return; uint lane_id = tid.x;
+    int num_blocks = dim_in / 256;
+    device const uchar *row_ptr = weight + row * num_blocks * 210;
+    device const half *in_ptr = input + batch * dim_in;
     float sum = 0;
 
-    threadgroup float shared_in[256];
+    for (int i = (int)lane_id; i < num_blocks; i += 32) {
+        device const uchar *block = row_ptr + i * 210;
+        device const uchar *ql = block;
+        device const uchar *qh = block + 128;
+        device const char  *sc = (device const char *)(block + 192);
+        // Convert F16 to F32 for proper calculation
+        float d = (float)*(device const half*)(block + 208);
 
-    for (int i = 0; i < num_blocks; i++) {
-        if (tid.y == 0) {
-            #pragma unroll
-            for (int l = 0; l < 8; l++) {
-                int in_idx = i * 256 + l * 32 + lane_id;
-                shared_in[l * 32 + lane_id] = (in_idx < dim_in) ? (float)input[batch * dim_in + in_idx] : 0.0f;
-            }
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-
-        if (row < (uint)dim_out) {
-            device const uchar *block = weight + (row * num_blocks + i) * 210;
-            float d = (float)*(device const half*)(block + 208);
-            device const uchar *ql = block;
-            device const uchar *qh = block + 128;
-            device const int8_t *sc = (device const int8_t *)(block + 192);
-
-            int ig = (int)lane_id / 2;
-            int is = ((int)lane_id % 2) * 16;
-            
-            #pragma unroll
+        for (int l = 0; l < 16; l++) {
+            float s = d * scale * (float)sc[l];
+            int group_off = l * 16;
             for (int k = 0; k < 16; k += 2) {
-                int idx = ig * 16 + is + k;
+                int idx = group_off + k;
                 uchar b = ql[idx / 2];
                 uchar h0 = (qh[idx / 4] >> ((idx % 4) * 2)) & 3;
                 uchar h1 = (qh[(idx+1) / 4] >> (((idx+1) % 4) * 2)) & 3;
-                float w0 = (float)((int8_t)((h0 << 4) | (b & 0xF)) - 32);
-                float w1 = (float)((int8_t)((h1 << 4) | (b >> 4)) - 32);
-                sum += d * scale * (float)sc[ig] * w0 * shared_in[idx];
-                sum += d * scale * (float)sc[ig] * w1 * shared_in[idx + 1];
+
+                sum += s * (float)((int8_t)((h0 << 4) | (b & 0xF)) - 32) * (float)in_ptr[i * 256 + idx];
+                sum += s * (float)((int8_t)((h1 << 4) | (b >> 4)) - 32) * (float)in_ptr[i * 256 + idx + 1];
             }
         }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
     }
-    if (row < (uint)dim_out) {
-        sum = simd_sum(sum);
-        if (lane_id == 0) output[batch * dim_out + row] = safe_half(sum);
-    }
+    sum = simd_sum(sum);
+    if (lane_id == 0) output[batch * dim_out + row] = safe_half(sum);
 }
 
 kernel void linear_q6k_f32(device const uchar *weight [[ buffer(0) ]],
@@ -1233,16 +1216,16 @@ kernel void store_kv_f16(device const half *k [[ buffer(0) ]],
 }
 
 kernel void rmsnorm_linear_q4k_f16(device const half *input [[ buffer(0) ]],
-                                   device const float *norm_weight [[ buffer(1) ]],
-                                   device const uchar *weight [[ buffer(2) ]],
-                                   device half *output [[ buffer(3) ]],
-                                   constant float &eps [[ buffer(4) ]],
-                                   constant int &dim_in [[ buffer(5) ]],
-                                   constant int &dim_out [[ buffer(6) ]],
-                                   constant float &scale [[ buffer(7) ]],
-                                   constant int &batchSize [[ buffer(8) ]],
-                                   uint3 tid [[ thread_position_in_threadgroup ]],
-                                   uint3 qid [[ thread_position_in_grid ]]) {
+                                    device const half *norm_weight [[ buffer(1) ]],
+                                    device const uchar *weight [[ buffer(2) ]],
+                                    device half *output [[ buffer(3) ]],
+                                    constant float &eps [[ buffer(4) ]],
+                                    constant int &dim_in [[ buffer(5) ]],
+                                    constant int &dim_out [[ buffer(6) ]],
+                                    constant float &scale [[ buffer(7) ]],
+                                    constant int &batchSize [[ buffer(8) ]],
+                                    uint3 tid [[ thread_position_in_threadgroup ]],
+                                    uint3 qid [[ thread_position_in_grid ]]) {
     uint row = qid.y; uint batch = qid.z;
     uint lane_id = tid.x;
     if (batch >= (uint)batchSize) return;
@@ -1271,7 +1254,7 @@ kernel void rmsnorm_linear_q4k_f16(device const half *input [[ buffer(0) ]],
             #pragma unroll
             for (int l = 0; l < 8; l++) {
                 int in_idx = i * 256 + l * 32 + lane_id;
-                shared_in[l * 32 + lane_id] = (in_idx < dim_in) ? ((float)input[batch * dim_in + in_idx] * rms * norm_weight[in_idx]) : 0.0f;
+                shared_in[l * 32 + lane_id] = (in_idx < dim_in) ? ((float)input[batch * dim_in + in_idx] * rms * (float)norm_weight[in_idx]) : 0.0f;
             }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -1383,55 +1366,48 @@ kernel void linear_q4k_f16(device const uchar *weight [[ buffer(0) ]],
                           uint3 tid [[ thread_position_in_threadgroup ]],
                           uint3 qid [[ thread_position_in_grid ]]) {
     uint row = qid.y; uint batch = qid.z;
-    uint lane_id = tid.x;
+    if (row >= (uint)dim_out) return; uint lane_id = tid.x;
     int num_blocks = (dim_in + 255) / 256;
+    device const uchar *row_ptr = weight + row * num_blocks * 144;
     float sum = 0;
 
-    threadgroup float shared_in[256];
+    const device half *input_row = input + batch * dim_in;
 
-    for (int i = 0; i < num_blocks; i++) {
-        if (tid.y == 0) {
-            #pragma unroll
-            for (int l = 0; l < 8; l++) {
-                int in_idx = i * 256 + l * 32 + lane_id;
-                shared_in[l * 32 + lane_id] = (in_idx < dim_in) ? (float)input[batch * dim_in + in_idx] : 0.0f;
-            }
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
+    // Distribute all (num_blocks * 8) sub-blocks across 32 threads
+    for (int idx = (int)lane_id; idx < num_blocks * 8; idx += 32) {
+        int i = idx / 8;
+        int j = idx % 8;
 
-        if (row < (uint)dim_out) {
-            device const uchar *block = weight + (row * num_blocks + i) * 144;
-            float d = (float)*(device const half*)(block);
-            float dmin = (float)*(device const half*)(block + 2);
-            device const uchar *scales = block + 4;
-            
-            int ig = lane_id / 4;
-            int is = (lane_id % 4) * 4; 
-            float sc, m;
-            if (ig < 4) {
-                sc = (float)(scales[ig] & 63);
-                m  = (float)(scales[ig + 4] & 63);
-            } else {
-                sc = (float)((scales[ig+4] & 0x0F) | ((scales[ig-4] >> 6) << 4));
-                m  = (float)((scales[ig+4] >> 4)   | ((scales[ig]   >> 6) << 4));
-            }
-            float ds = d * scale * sc;
-            float dm = dmin * scale * m;
-            
-            device const uchar *qs = block + 16 + ig * 16;
-            #pragma unroll
-            for (int k = 0; k < 4; k++) {
-                uchar b = qs[is + k];
-                sum += ds * (float)(b & 0xF) * shared_in[ig * 32 + is + k] - dm * shared_in[ig * 32 + is + k];
-                sum += ds * (float)(b >> 4) * shared_in[ig * 32 + is + k + 16] - dm * shared_in[ig * 32 + is + k + 16];
-            }
+        device const uchar *block = row_ptr + i * 144;
+        float d = fp16_to_fp32(*(device const ushort*)(block));
+        float dmin = fp16_to_fp32(*(device const ushort*)(block + 2));
+
+        device const uchar *scales = block + 4;
+
+        float sc, m;
+        if (j < 4) {
+            sc = (float)(scales[j] & 63);
+            m = (float)(scales[j + 4] & 63);
+        } else {
+            sc = (float)((scales[j+4] & 0xF) | ((scales[j-4] >> 6) << 4));
+            m = (float)((scales[j+4] >> 4) | ((scales[j] >> 6) << 4));
         }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        float d_val = d * scale * sc;
+        float m_val = dmin * scale * m;
+
+        int offset = i * 256 + j * 32;
+        device const uchar *q = block + 16 + j * 16;
+
+        #pragma unroll
+        for (int k = 0; k < 16; k++) {
+            uchar b = q[k];
+            sum += (d_val * (float)(b & 0xF) - m_val) * (float)input_row[offset + k];
+            sum += (d_val * (float)(b >> 4) - m_val) * (float)input_row[offset + k + 16];
+        }
     }
-    if (row < (uint)dim_out) {
-        sum = simd_sum(sum);
-        if (lane_id == 0) output[batch * dim_out + row] = safe_half(sum);
-    }
+    sum = simd_sum(sum);
+    if (lane_id == 0) output[batch * dim_out + row] = safe_half(sum);
 }
 
 kernel void linear_q3k_f16(device const uchar *weight [[ buffer(0) ]],
