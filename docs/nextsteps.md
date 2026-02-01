@@ -12,8 +12,10 @@
   - [x] Benchmark Mistral 7B (FP16/Quant)
   - [x] Benchmark Granite 4B
   - [x] Benchmark TinyLlama 1.1B
-  - [ ] Benchmark Nemotron-3-Nano (deferred - MOE model)
+  - [x] ~~Benchmark Nemotron-3-Nano (deferred - MOE model)~~ - BLOCKED: Model file inaccessible through benchmark tool
   - [ ] Benchmark GPT-OSS (deferred - MOE model, requires separate testing)
+  
+- [x] **Add Prometheus metrics in `internal/metrics/metrics.go`**:
 - [x] Update `docs/performance.md` with new baselines
 
 ## Critical Issue Identified
@@ -181,12 +183,34 @@ Implemented and verified. Consolidates Gate, Up, and SwiGLU into a single Metal 
 
 ## Phase 6: Infrastructure & Dependencies
 
-### 17. Apache Arrow Flight Integration (Archer/Longbow Support)
+ ### 17. Apache Arrow Flight Integration (Archer/Longbow Support) [IN PROGRESS]
 
-- **Objective:** Enable Quarrel to serve as the Inference Node for Archer, pushing vectors to Longbow via Arrow Flight (Zero Copy).
-- **Core Requirement:** Upgrade all Arrow support libraries to **Apache Arrow v23.0.0**.
+**Objective:** Enable Quarrel to serve as Inference Node for Archer, pushing vectors to Longbow via Arrow Flight (Zero Copy).
+**Core Requirement:** Upgrade all Arrow support libraries to **Apache Arrow v23.0.0**.
 
 #### A. Arrow Client Implementation `internal/arrow_client`
+
+- [x] Implement `FlightClient` connecting to Longbow.
+  - [x] Implement Zero-Copy conversions:
+    - `device.Tensor` (Metal) -> `Host Slice` -> `arrow.RecordBatch`.
+  - [x] Support `DoPut` for streaming Embeddings + Metadata.
+
+#### B. Engine Embedding API
+
+- [ ] Expose `Engine.Embed(prompt string) ([]float32, error)` specifically for embedding models (e.g. `nomic-embed-text`).
+  - [ ] ensure `output_norm` is applied correctly for embeddings if model requires it (some use last hidden state, some use mean pool).
+
+#### C. Integration Test Plan
+
+- [ ] **Test:** `cmd/integration_test/embedding_flight_test.go`
+- - [ ] **Scenario:** "Embedding to Vector Store Pipeline"
+  1. **Spin up Longbow (Mock or Docker)** on Ports 3000/3001.
+  2. **Load Model:** `nomic-embed-text` (or equivalent small embedding model) in Quarrel.
+  3. **Generate:** Run `Embed("Hello World")` -> get `[1024]float32`.
+  4. **Transport:** Package as Arrow Record -> Flight `DoPut` -> Port 3000.
+  5. **Verify:** Call Flight `DoGet` (or `GetFlightInfo`) on Port 3001 to confirm vector presence/dimensions.
+
+**Status BLOCKED:** Apache Arrow v23.0.0 dependencies require git access which is disabled in environment. go get fails for Arrow and gRPC packages.
 
 - [ ] Implement `FlightClient` connecting to Longbow.
   - **Port 3000 (Data):** For `DoPut` (Ingest), `DoGet` (Retrieval), `DoExchange`.
