@@ -1806,6 +1806,57 @@ func (e *Engine) Close() {
 	}
 }
 
+// GetEmbedding returns the embedding vector for a single token as a float32 slice
+func (e *Engine) GetEmbedding(token int) ([]float32, error) {
+	if e.Weights.TokenEmb == nil {
+		return nil, errors.New("token embedding weights not loaded")
+	}
+	if token < 0 || token >= e.Weights.TokenEmb.Rows() {
+		return nil, fmt.Errorf("token %d out of vocab range [0, %d)", token, e.Weights.TokenEmb.Rows())
+	}
+
+	emb := e.Weights.TokenEmb.EmbeddingLookup(token, e.GlobalScale)
+	defer emb.Free()
+
+	embF32 := emb.ToHost()
+	return embF32, nil
+}
+
+// GetEmbeddings returns embedding vectors for multiple tokens
+func (e *Engine) GetEmbeddings(tokens []int) ([][]float32, error) {
+	embeddings := make([][]float32, len(tokens))
+	for i, token := range tokens {
+		emb, err := e.GetEmbedding(token)
+		if err != nil {
+			return nil, fmt.Errorf("error embedding token %d: %w", i, err)
+		}
+		embeddings[i] = emb
+	}
+	return embeddings, nil
+}
+
+// TextToEmbedding tokenizes the input text and returns embeddings for all tokens
+func (e *Engine) TextToEmbedding(text string) ([][]float32, error) {
+	if e.Tokenizer == nil {
+		return nil, errors.New("tokenizer not available")
+	}
+
+	tokens := e.Tokenizer.Encode(text)
+	if len(tokens) == 0 {
+		return nil, errors.New("text tokenized to empty sequence")
+	}
+
+	return e.GetEmbeddings(tokens)
+}
+
+// EmbeddingDim returns the dimension of the embedding vectors
+func (e *Engine) EmbeddingDim() int {
+	if e.Weights.TokenEmb == nil {
+		return 0
+	}
+	return e.Weights.TokenEmb.Cols()
+}
+
 // LoadWeightFromGGUF decodes weights to F32 for CPU reference
 func LoadWeightFromGGUF(e *Engine, name string) []float32 {
 	var t *gguf.TensorInfo

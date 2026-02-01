@@ -493,7 +493,7 @@ void Metal_Embedding_Q4K(MetalContextRef ctx, MetalBufferRef weights, int offW,
   [enc setBytes:&cols length:4 atIndex:3];
   [enc setBytes:&scale length:4 atIndex:4];
   [enc dispatchThreads:MTLSizeMake(1024, 1, 1)
-      threadsPerThreadgroup:MTLSizeMake(1024, 1, 1)];
+      threadsPerThreadgroup:MTLSizeMake(32, 4, 1)];
   [mc barrier];
 }
 
@@ -821,8 +821,8 @@ void Metal_RMSNormLinear_Q4K_F16(MetalContextRef ctx, MetalBufferRef input,
   [enc setBytes:&scale length:4 atIndex:7];
   [enc setBytes:&batchSize length:4 atIndex:8];
 
-  [enc dispatchThreads:MTLSizeMake(1024, N, batchSize)
-      threadsPerThreadgroup:MTLSizeMake(1024, 1, 1)];
+  [enc dispatchThreads:MTLSizeMake(32, N, batchSize)
+      threadsPerThreadgroup:MTLSizeMake(32, 4, 1)];
   [mc barrier];
 }
 
@@ -868,8 +868,8 @@ void Metal_RMSNormLinear_Q6K_F16(MetalContextRef ctx, MetalBufferRef input,
   [enc setBytes:&scale length:4 atIndex:7];
   [enc setBytes:&batchSize length:4 atIndex:8];
 
-  [enc dispatchThreads:MTLSizeMake(1024, N, batchSize)
-      threadsPerThreadgroup:MTLSizeMake(1024, 1, 1)];
+  [enc dispatchThreads:MTLSizeMake(32, N, batchSize)
+      threadsPerThreadgroup:MTLSizeMake(32, 4, 1)];
   [mc barrier];
 }
 
@@ -923,7 +923,7 @@ void Metal_RMSNormQKV_Q6K_F16(
 
   [enc dispatchThreads:MTLSizeMake(1024, (qDim > kvDim ? qDim : kvDim),
                                    batchSize)
-      threadsPerThreadgroup:MTLSizeMake(1024, 1, 1)];
+      threadsPerThreadgroup:MTLSizeMake(32, 4, 1)];
   [mc barrier];
 }
 
@@ -1237,7 +1237,7 @@ void Metal_Copy_F16(MetalContextRef ctx, MetalBufferRef src, int oS,
   [enc setBuffer:(__bridge id<MTLBuffer>)src offset:oS atIndex:0];
   [enc setBuffer:(__bridge id<MTLBuffer>)dst offset:oD atIndex:1];
   [enc dispatchThreads:MTLSizeMake(count, 1, 1)
-      threadsPerThreadgroup:MTLSizeMake(1024, 1, 1)];
+      threadsPerThreadgroup:MTLSizeMake(32, 4, 1)];
 }
 
 void Metal_Copy_F16_F32(MetalContextRef ctx, MetalBufferRef src, int oS,
@@ -1319,7 +1319,7 @@ void Metal_AttFused_F16(MetalContextRef ctx, MetalBufferRef q, int oQ,
   [enc setBytes:&windowSize length:4 atIndex:8];
   [enc setBytes:&maxCtxLen length:4 atIndex:9];
   [enc dispatchThreadgroups:MTLSizeMake(nh, 1, 1)
-      threadsPerThreadgroup:MTLSizeMake(1024, 1, 1)];
+      threadsPerThreadgroup:MTLSizeMake(32, 4, 1)];
   [mc barrier];
 }
 

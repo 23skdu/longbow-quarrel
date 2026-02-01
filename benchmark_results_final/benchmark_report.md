@@ -1,14 +1,14 @@
-# Performance Benchmark Results (20260126_235137)
+# Performance Benchmark Results (20260201_012407)
 
 Prompt: The quick brown fox jumps over the lazy dog
 Tokens: 16
 
 | Model | Engine | Throughput (t/s) |
 |---|---|---|
-| Mistral | longbow-quarrel | 0.0 |
-| Mistral | llama.cpp (bench) | 28.41 |
+| Mistral | longbow-quarrel | 1.910155172223298 |
+| Mistral | llama.cpp (bench) | 25.29 |
 
-| Granite4 | longbow-quarrel | 5.783283730241313 |
-| Granite4 | llama.cpp (bench) | 49.21 |
+| Granite4 | longbow-quarrel | 12.527238915116055 |
+| Granite4 | llama.cpp (bench) | 45.38 |
 
 

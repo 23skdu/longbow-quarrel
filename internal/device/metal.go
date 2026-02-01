@@ -356,6 +356,9 @@ func (c *Context) NewTensor(rows, cols int) *Tensor {
 		panic("Metal_Alloc returned nil!")
 	}
 
+	// Zero initialize buffer to prevent corruption from previous allocations
+	C.Metal_ZeroBufferGPU(c.ref, buf, C.int(0), C.int(sizeBytes))
+
 	t := &Tensor{
 		ctx:       c,
 		buf:       buf,
@@ -435,6 +438,8 @@ func (c *Context) NewTensorFP32(rows, cols int) *Tensor {
 	if buf == nil {
 		panic("Metal_Alloc returned nil!")
 	}
+	// Zero initialize buffer to prevent corruption from previous allocations
+	C.Metal_ZeroBufferGPU(c.ref, buf, C.int(0), C.int(sizeBytes))
 	t := &Tensor{ctx: c, buf: buf, sizeBytes: sizeBytes, rows: rows, cols: cols, dataType: DataTypeF32}
 	traceAlloc(t, int64(sizeBytes), "NewTensorFP32")
 	metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
@@ -938,25 +943,22 @@ func (t *Tensor) LinearInto(weight *Tensor, out *Tensor, scale float32) error {
 			C.int(t.rows), C.int(weight.rows), C.int(weight.cols), C.float(scale))
 	} else if weight.dataType == DataTypeQ4K {
 		// Q4K weights * F16 input -> F16 output
-		// Swap N, K args to match kernel dim_in (K), dim_out (N)
 		C.Metal_MatMul_Q4K_F16(t.ctx.ref, weight.buf, C.int(weight.Offset), C.bool(false), t.buf, C.int(t.Offset), C.bool(false), out.buf, C.int(out.Offset),
-			C.int(t.rows), C.int(weight.cols), C.int(weight.rows), C.float(scale))
+			C.int(t.rows), C.int(weight.rows), C.int(weight.cols), C.float(scale))
 	} else if weight.dataType == DataTypeQ6K {
 		// Q6K weights * F16 input -> F16 output
-		// Swap N, K args
 		C.Metal_MatMul_Q6K_F16(t.ctx.ref, weight.buf, C.int(weight.Offset), C.bool(false), t.buf, C.int(t.Offset), C.bool(false), out.buf, C.int(out.Offset),
-			C.int(t.rows), C.int(weight.cols), C.int(weight.rows), C.float(scale))
+			C.int(t.rows), C.int(weight.rows), C.int(weight.cols), C.float(scale))
 	} else if weight.dataType == DataTypeQ4_0 {
 		// Q4_0 Support
-		// Pass K, N (swapped) to match kernel dim_in, dim_out
 		C.Metal_LinearQ4_0_F16(t.ctx.ref, weight.buf, C.int(weight.Offset),
 			t.buf, C.int(t.Offset), out.buf, C.int(out.Offset),
-			C.int(t.rows), C.int(weight.cols), C.int(weight.rows), C.float(scale))
+			C.int(t.rows), C.int(weight.rows), C.int(weight.cols), C.float(scale))
 	} else if weight.dataType == DataTypeQ8_0 {
 		// Q8_0 Support
 		C.Metal_LinearQ8_0_F16(t.ctx.ref, weight.buf, C.int(weight.Offset),
 			t.buf, C.int(t.Offset), out.buf, C.int(out.Offset),
-			C.int(t.rows), C.int(weight.cols), C.int(weight.rows), C.float(scale))
+			C.int(t.rows), C.int(weight.rows), C.int(weight.cols), C.float(scale))
 	} else {
 		// Fallback F16
 		C.Metal_MatMul_F16(t.ctx.ref, weight.buf, C.int(weight.Offset), C.bool(false), t.buf, C.int(t.Offset), C.bool(false), out.buf, C.int(out.Offset),
