@@ -8,13 +8,10 @@ import (
 	"fmt"
 	"math"
 	"os"
-
 	"runtime"
 	"sort"
-
-	"time"
-
 	"strings"
+	"time"
 
 	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/device"
@@ -1385,9 +1382,16 @@ func (e *Engine) inferInternal(inputTokens []int, tokensToGenerate int, samplerC
 		}
 
 		// Track embedding stats for first token
-		if i == 0 {
+		if samplerConfig.DebugActivations || (i == 0) {
 			stats := currentF32.GetStats(16)
 			e.TraceTracker.RecordLayer("embedding", -1, stats)
+		}
+
+		// DEBUG: Log embedding values
+		if e.Config.DebugEmbedding {
+			embData := current.ToHost()
+			fmt.Printf("DEBUG: [%d] Embedding values: %v\n", e.CachePos, embData[:4])
+			current.ReturnToPool()
 		}
 
 		// Layers (Attention + FFN)
@@ -1438,7 +1442,7 @@ func (e *Engine) inferInternal(inputTokens []int, tokensToGenerate int, samplerC
 					e.TraceTracker,
 					e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen, e.Config.WindowSize, e.GlobalScale, samplerConfig.DebugActivations, int(e.Config.PrecisionMode),
 					view.BlockTable, view.BlockSize,
-					func(k, v *device.Tensor) {
+					func(k *device.Tensor, v *device.Tensor) {
 						if err := e.Cache.Update(l, e.CachePos, k, v); err != nil {
 							panic(err)
 						}
@@ -1461,7 +1465,7 @@ func (e *Engine) inferInternal(inputTokens []int, tokensToGenerate int, samplerC
 					e.TraceTracker,
 					e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen, e.Config.WindowSize, e.GlobalScale, samplerConfig.DebugActivations, int(e.Config.PrecisionMode),
 					view.BlockTable, view.BlockSize,
-					func(k, v *device.Tensor) {
+					func(k *device.Tensor, v *device.Tensor) {
 						if err := e.Cache.Update(l, e.CachePos, k, v); err != nil {
 							panic(err)
 						}
@@ -1470,21 +1474,19 @@ func (e *Engine) inferInternal(inputTokens []int, tokensToGenerate int, samplerC
 
 			// Log layer activation details if enabled
 			if e.ActLogger.IsEnabled() {
-				// Get samples and max values for logging
-				qSample := GetSampleFromTensor(scratch.QPart.ToHost(), 10)
-				kSample := GetSampleFromTensor(scratch.KPart.ToHost(), 10)
-				vSample := GetSampleFromTensor(scratch.VPart.ToHost(), 10)
-
-				qMax := GetMaxFromTensor(scratch.QPart.ToHost())
-				kMax := GetMaxFromTensor(scratch.KPart.ToHost())
-				vMax := GetMaxFromTensor(scratch.VPart.ToHost())
-				attnMax := GetMaxFromTensor(scratch.AttOut.ToHost())
-				ffnMax := GetMaxFromTensor(currentF32.ToHost())
-
-				e.ActLogger.LogLayer(l, qMax, kMax, vMax, attnMax, ffnMax,
-					qSample, kSample, vSample,
-					scratch.QPart.ToHost(), scratch.KPart.ToHost(), scratch.VPart.ToHost(),
-					scratch.AttOut.ToHost(), currentF32.ToHost())
+				if e.Config.DebugAttention {
+					scratch.QPart.ScanMax(fmt.Sprintf("[%d] Q", e.CachePos))
+					scratch.KPart.ScanMax(fmt.Sprintf("[%d] K", e.CachePos))
+					scratch.VPart.ScanMax(fmt.Sprintf("[%d] V", e.CachePos))
+					scratch.AttOut.ScanMax(fmt.Sprintf("[%d] Attention", e.CachePos))
+					scratch.AttOut.ScanMax(fmt.Sprintf("[%d] FFN", e.CachePos))
+				}
+				if e.Config.DebugFFN {
+					scratch.QPart.ScanMax(fmt.Sprintf("[%d] Q", e.CachePos))
+					scratch.KPart.ScanMax(fmt.Sprintf("[%d] K", e.CachePos))
+					scratch.VPart.ScanMax(fmt.Sprintf("[%d] V", e.CachePos))
+					scratch.AttOut.ScanMax(fmt.Sprintf("[%d] FFN", e.CachePos))
+				}
 			}
 
 			// Log layer output if enabled OR if first token (for recovery analysis)
@@ -1559,7 +1561,6 @@ func (e *Engine) inferInternal(inputTokens []int, tokensToGenerate int, samplerC
 			scratch.Normed.LinearToFP32_Into(e.Weights.Output, logits)
 			e.Ctx.Synchronize()
 
-			// Debug: check final logits
 			logits.ScanMax(fmt.Sprintf("Layer %d Final Logits", i))
 
 			// ADDED: Debug Scores and Normed
@@ -1567,25 +1568,6 @@ func (e *Engine) inferInternal(inputTokens []int, tokensToGenerate int, samplerC
 			scratch.Normed.ScanMax(fmt.Sprintf("Layer %d RMSNorm Output", i))
 
 			logitsData := logits.ToHost()
-
-			// Check for NaN in logits BEFORE sampling
-			nanInfo := device.DetectNaN(logitsData, 10)
-			if nanInfo.HasNaN() {
-				logger.Log.Error("NaN detected in logits", "count", nanInfo.Count, "positions", nanInfo.Positions, "has_inf", nanInfo.HasInf)
-				// Try to recover by using argmax of non-NaN values
-				validCount := 0
-				for _, v := range logitsData {
-					if !math.IsNaN(float64(v)) && !math.IsInf(float64(v), 0) {
-						validCount++
-					}
-				}
-				if validCount == 0 {
-					logger.Log.Error("All logits are NaN or Inf, cannot recover")
-					return nil, fmt.Errorf("all logits are NaN/Inf and no recovery logits available")
-				} else {
-					logger.Log.Warn("Filtered NaNs from logits", "valid_count", validCount, "total", len(logitsData))
-				}
-			}
 
 			params := make([]struct {
 				idx int
@@ -1696,7 +1678,7 @@ func (e *Engine) inferInternal(inputTokens []int, tokensToGenerate int, samplerC
 					e.TraceTracker,
 					e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen, e.Config.WindowSize, e.GlobalScale, samplerConfig.DebugActivations, int(e.Config.PrecisionMode),
 					view.BlockTable, view.BlockSize,
-					func(k, v *device.Tensor) {
+					func(k *device.Tensor, v *device.Tensor) {
 						if err := e.Cache.Update(l, e.CachePos, k, v); err != nil {
 							panic(err)
 						}
@@ -1731,12 +1713,10 @@ func (e *Engine) inferInternal(inputTokens []int, tokensToGenerate int, samplerC
 		// Use Into to avoid alloc
 		currentF32.RMSNormFP32_ToF16_Into(e.Weights.OutputNorm, e.Config.Eps, scratch.Normed)
 
-		// Output Head (F16 -> F32 Logits)
+		// Output Head (F16 -> F32 Logits) - FIXED: Use same path as Phase 1
 		// Reuse pre-allocated logits buffer
 		// Output into scratch.Logits (which is 'logits')
-		normedF32 := scratch.Normed.ToF32()
-		normedF32.LinearF32_Into(e.Weights.Output, logits, e.GlobalScale)
-		normedF32.ReturnToPool()
+		scratch.Normed.LinearToFP32_Into(e.Weights.Output, logits)
 
 		// Logic update: RMSNormFP32_ToF16_Into does NOT allocate.
 		// It writes to scratch.Normed.
