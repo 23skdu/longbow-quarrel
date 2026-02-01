@@ -46,8 +46,16 @@ type Config struct {
 	IsMOE                         bool    // Flag to indicate MOE architecture
 
 	// Feature Flags / Toggles
-	DebugDequant     bool // Deprecated/Removed, kept for compatibility if needed, but we removed it physically
+	DebugDequant     bool
 	DebugActivations bool
+
+	DebugEmbedding   bool
+	DebugAttention   bool
+	DebugFFN         bool
+	DebugLayerOutput bool
+	DebugLogits      bool
+
+	DebugMemory bool
 }
 
 // Validate ensures the configuration is sane
@@ -74,5 +82,12 @@ func Default() Config {
 		Eps:           1e-5,
 		RopeTheta:     10000.0,
 		PrecisionMode: PrecisionAuto,
+
+		DebugEmbedding:   true,
+		DebugAttention:   true,
+		DebugFFN:         true,
+		DebugLayerOutput: true,
+		DebugLogits:      true,
+		DebugMemory:      true,
 	}
 }

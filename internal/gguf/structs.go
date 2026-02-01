@@ -10,19 +10,30 @@ const (
 type GGMLType uint32
 
 const (
-	GGMLTypeF32    GGMLType = 0
-	GGMLTypeF16    GGMLType = 1
-	GGMLTypeQ4_0   GGMLType = 2
-	GGMLTypeQ4_1   GGMLType = 3
-	GGMLTypeQ5_0   GGMLType = 6
-	GGMLTypeQ8_0   GGMLType = 8
-	GGMLTypeQ2_K   GGMLType = 10
-	GGMLTypeQ3_K   GGMLType = 11
-	GGMLTypeQ4_K   GGMLType = 12
-	GGMLTypeQ5_K   GGMLType = 13
-	GGMLTypeQ6_K   GGMLType = 14
-	GGMLTypeQ8_K   GGMLType = 15
-	GGMLTypeQ4_K_S GGMLType = 99 // Deprecated/Unused
+	GGMLTypeF32      GGMLType = 0
+	GGMLTypeF16      GGMLType = 1
+	GGMLTypeQ4_0     GGMLType = 2
+	GGMLTypeQ4_1     GGMLType = 3
+	GGMLTypeQ5_0     GGMLType = 6
+	GGMLTypeQ8_0     GGMLType = 8
+	GGMLTypeQ2_K     GGMLType = 10
+	GGMLTypeQ3_K     GGMLType = 11
+	GGMLTypeQ4_K     GGMLType = 12
+	GGMLTypeQ5_K     GGMLType = 13
+	GGMLTypeQ6_K     GGMLType = 14
+	GGMLTypeQ8_K     GGMLType = 15
+	GGMLTypeIQ2_XXS  GGMLType = 16
+	GGMLTypeIQ2_XS   GGMLType = 17
+	GGMLTypeIQ3_XXS  GGMLType = 18
+	GGMLTypeIQ1_S    GGMLType = 19
+	GGMLTypeIQ4_NL   GGMLType = 20
+	GGMLTypeIQ3_S    GGMLType = 21
+	GGMLTypeIQ2_S    GGMLType = 22
+	GGMLTypeIQ4_XS   GGMLType = 23
+	GGMLTypeIQ1_M    GGMLType = 24
+	GGMLTypeIQ4_NL_2 GGMLType = 30 // Sometimes used for IQ4_NL in newer formats
+	GGMLTypeMXFP4    GGMLType = 39 // MXFP4 for Nemotron-3-Nano
+	GGMLTypeQ4_K_S   GGMLType = 99 // Deprecated/Unused
 )
 
 type GGUFMetadataValueType uint32
@@ -74,6 +85,24 @@ func (t *TensorInfo) SizeBytes() uint64 {
 		return (numElements / 256) * 210
 	case GGMLTypeQ3_K:
 		return (numElements / 256) * 110
+	case GGMLTypeIQ1_S:
+		return (numElements / 256) * 48
+	case GGMLTypeIQ2_XXS:
+		return (numElements / 256) * 66
+	case GGMLTypeIQ2_XS:
+		return (numElements / 256) * 74
+	case GGMLTypeIQ2_S:
+		return (numElements / 256) * 82
+	case GGMLTypeIQ3_XXS:
+		return (numElements / 256) * 98
+	case GGMLTypeIQ3_S:
+		return (numElements / 256) * 110
+	case GGMLTypeIQ4_XS:
+		return (numElements / 256) * 138
+	case GGMLTypeIQ4_NL, GGMLTypeIQ4_NL_2:
+		return (numElements / 32) * 18
+	case GGMLTypeMXFP4:
+		return (numElements / 32) * 18 // Estimate for MXFP4
 	default:
 		return 0
 	}
@@ -133,6 +162,28 @@ func (t GGMLType) String() string {
 		return "Q6_K"
 	case GGMLTypeQ8_K:
 		return "Q8_K"
+	case GGMLTypeIQ2_XXS:
+		return "IQ2_XXS"
+	case GGMLTypeIQ2_XS:
+		return "IQ2_XS"
+	case GGMLTypeIQ3_XXS:
+		return "IQ3_XXS"
+	case GGMLTypeIQ1_S:
+		return "IQ1_S"
+	case GGMLTypeIQ4_NL:
+		return "IQ4_NL"
+	case GGMLTypeIQ3_S:
+		return "IQ3_S"
+	case GGMLTypeIQ2_S:
+		return "IQ2_S"
+	case GGMLTypeIQ4_XS:
+		return "IQ4_XS"
+	case GGMLTypeIQ1_M:
+		return "IQ1_M"
+	case GGMLTypeIQ4_NL_2:
+		return "IQ4_NL (30)"
+	case GGMLTypeMXFP4:
+		return "MXFP4"
 	case GGMLTypeQ4_K_S:
 		return "Q4_K_S"
 	default:
