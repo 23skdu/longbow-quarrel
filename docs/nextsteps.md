@@ -160,14 +160,26 @@ Implemented and verified. Consolidates Gate, Up, and SwiGLU into a single Metal 
 ### 1. New Performance Baselines
 
 - **Objective:** Use the refined benchmark tool to establish accurate, per-phase performance metrics.
-- [ ] Establish new accurate baselines for Mistral, Granite, and TinyLlama (excluding loading/prefill noise).
-- [ ] Compare results against Llama.cpp to quantify the exact gap.
+- [x] Establish new accurate baselines for Mistral, Granite, and Smollm2 (excluding loading/prefill noise).
+- [x] Compare results against Llama.cpp to quantify the exact gap.
+- [ ] **CRITICAL: Performance Regression Investigation Needed**
+  - Current results show significant degradation vs Jan 29, 2026 baselines
+  - Granite 4B: 12.53 t/s (was 186.1 t/s) - 14.8x worse
+  - Mistral 7B: 1.91 t/s (was 5.6 t/s) - 2.9x worse
+  - Possible causes: Thermal throttling, code changes, benchmark differences
+  - Next: Re-run after 5+ min system cooldown
 
 ### 2. Automated Regression Testing (Coherence)
 
 - **Objective:** Ensure optimizations don't break model output.
-- [ ] Implement `cmd/smoke_test/regression_suite.go`.
-- [ ] Enforce "Perplexity/Logit Difference" check.
+- [x] Implement `cmd/smoke_test/regression_suite.go`.
+- [x] Enforce "Perplexity/Logit Difference" check.
+- [ ] **Issue Found: Smollm2 Model Regression**
+  - Running regression suite on Smollm2 135M (608M file) produces all-zero logits
+  - Output consists entirely of `<unk>` tokens
+  - This indicates a model loading or tokenizer mismatch issue
+  - Previous benchmarks showed 38.81 t/s which suggests model did work at some point
+  - Needs investigation of tokenization/inference path for this specific model
 
 ## Phase 3: System & Architecture
 
@@ -197,8 +209,14 @@ Implemented and verified. Consolidates Gate, Up, and SwiGLU into a single Metal 
 
 #### B. Engine Embedding API
 
-- [ ] Expose `Engine.Embed(prompt string) ([]float32, error)` specifically for embedding models (e.g. `nomic-embed-text`).
-  - [ ] ensure `output_norm` is applied correctly for embeddings if model requires it (some use last hidden state, some use mean pool).
+- [x] Expose `Engine.Embed(prompt string) ([]float32, error)` specifically for embedding models (e.g. `nomic-embed-text`).
+  - [x] Implemented `GetEmbedding(token int) ([]float32, error)` - Single token embedding lookup
+  - [x] Implemented `GetEmbeddings(tokens []int) ([][]float32, error)` - Multiple token embeddings
+  - [x] Implemented `TextToEmbedding(text string) ([][]float32, error)` - Text to embeddings with tokenization
+  - [x] Implemented `EmbeddingDim() int` - Returns embedding dimension
+  - [ ] ~~ensure `output_norm` is applied correctly for embeddings if model requires it (some use last hidden state, some use mean pool)~~ - Deferred until embedding model testing
+  - [x] Created `internal/engine/embedding_test.go` with unit tests and benchmarks
+  - [ ] Add integration test with real embedding model (requires `nomic-embed-text` or similar)
 
 #### C. Integration Test Plan
 
@@ -210,7 +228,13 @@ Implemented and verified. Consolidates Gate, Up, and SwiGLU into a single Metal 
   4. **Transport:** Package as Arrow Record -> Flight `DoPut` -> Port 3000.
   5. **Verify:** Call Flight `DoGet` (or `GetFlightInfo`) on Port 3001 to confirm vector presence/dimensions.
 
-**Status BLOCKED:** Apache Arrow v23.0.0 dependencies require git access which is disabled in environment. go get fails for Arrow and gRPC packages.
+**Status BLOCKED:** Apache Arrow v23.0.0 dependencies require git access which is disabled in environment. go get fails for Arrow and gRPC packages. Arrow Flight client implementation in `internal/arrow_client/client.go` has compilation errors due to missing dependencies:
+- github.com/apache/arrow/go/v16/arrow
+- github.com/apache/arrow/go/v16/arrow/flight
+- google.golang.org/grpc
+- google.golang.org/grpc/credentials/insecure
+
+Integration tests cannot run until these dependencies are available.
 
 - [ ] Implement `FlightClient` connecting to Longbow.
   - **Port 3000 (Data):** For `DoPut` (Ingest), `DoGet` (Retrieval), `DoExchange`.

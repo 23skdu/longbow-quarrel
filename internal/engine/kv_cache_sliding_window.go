@@ -79,6 +79,8 @@ func (c *SlidingWindowKVCache) Init(ctx *device.Context, config config.Config) e
 			c.Free()
 			return fmt.Errorf("failed to allocate K cache for layer %d", i)
 		}
+		// Zero initialize to prevent stale data from previous allocations
+		k.ZeroInit()
 		c.kCache[i] = k
 
 		v := ctx.NewTensor(c.windowSize, kvDim)
@@ -86,6 +88,8 @@ func (c *SlidingWindowKVCache) Init(ctx *device.Context, config config.Config) e
 			c.Free()
 			return fmt.Errorf("failed to allocate V cache for layer %d", i)
 		}
+		// Zero initialize to prevent stale data from previous allocations
+		v.ZeroInit()
 		c.vCache[i] = v
 	}
 
