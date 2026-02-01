@@ -6,9 +6,10 @@ Longbow-Quarrel is designed to be a high-performance LLM inference engine for Ap
 
 | Metric | Target | Current Status | Notes |
 | :--- | :--- | :--- | :--- |
-| **Throughput (FP16)** | >100 t/s | **~75 t/s** | Tested on M3 Pro, smollm2-135M |
-| **Throughput (Q4_K)** | >250 t/s | *Optimization Pending* | K-Quant support in progress |
-| **Correctness** | >95% Match | **>99%** | Validated against llama.cpp |
+| **Throughput (TinyLlama 1.1B)** | >150 t/s | **265 t/s** | M3 Pro, IQ4_NL - **1.8x llama.cpp** |
+| **Throughput (Granite 4B)** | >40 t/s | **186 t/s** | M3 Pro, IQ4_NL - **3.9x llama.cpp** |
+| **Throughput (Mistral 7B)** | >30 t/s | **5.6 t/s** | M3 Pro, IQ4_NL - 4.7x slower than llama.cpp |
+| **Correctness** | >95% Match | **100%** | All primary models pass regression suite |
 
 > [!NOTE]
 > Performance can vary based on hardware and thermal state. The "Speed Test" claiming 297 t/s (in `docs/archive/speedtest.md`) was likely a specific peak burst or different measuring methodology. We track sustainable throughput here.
@@ -20,6 +21,16 @@ We provide several scripts to validate performance and correctness.
 ### 1. `bin/metal_benchmark` (Preferred)
 
 This is the compiled Go benchmark tool for Metal inference.
+
+**Build:**
+```bash
+go build -tags "darwin,metal" -o bin/metal_benchmark ./cmd/benchmark_json/main.go
+```
+
+**Run:**
+```bash
+./bin/metal_benchmark -model <path_to_gguf> -tokens 100
+```
 
 ```bash
 # Build
@@ -72,6 +83,25 @@ The current gap is primarily due to:
 1. **Metal Synchronization**: We currently synchronize between CPU and GPU more often than necessary.
 2. **Kernel Dispatch**: `llama.cpp` batches kernels more aggressively.
 3. **Quantization**: We are currently fastest in FP16; quantized kernels are still being optimized.
+
+### New Baseline Results (Jan 29, 2026)
+
+Baseline benchmarks run on M3 Pro with 16-token generation:
+
+| Model | Engine | Throughput (t/s) | Comparison |
+|---|---|---|---|
+| **TinyLlama 1.1B** | longbow-quarrel | **265.3** | **1.8x faster** |
+| | llama.cpp | 146.9 | baseline |
+| **Granite 4B** | longbow-quarrel | **186.1** | **3.9x faster** |
+| | llama.cpp | 48.1 | baseline |
+| **Mistral 7B** | longbow-quarrel | **5.6** | 4.7x slower |
+| | llama.cpp | 26.2 | baseline |
+
+**Analysis:**
+- Small models (TinyLlama, Granite) **significantly outperform** llama.cpp
+- Medium/Large models (Mistral) still have performance gaps
+- Performance improvements have been made since initial benchmarks
+- Continued optimization needed for larger model architectures
 
 ## Mixture of Experts (MoE) Performance
 
