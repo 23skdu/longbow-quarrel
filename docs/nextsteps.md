@@ -3,19 +3,39 @@
 ## Current Task: Phase 1 - Robust Baselines & Regression
 
 - [x] Planning Phase 1 implementation
-- [/] Implement `cmd/smoke_test/regression_suite.go`
-  - [ ] Define baseline prompts and expected outputs
-  - [ ] Implement logit difference / perplexity check
-  - [ ] Support multi-model batch testing
-- [ ] Establish new performance baselines
-  - [ ] Benchmark Mistral 7B (FP16/Quant)
-  - [ ] Benchmark Granite 4B
-  - [ ] Benchmark TinyLlama 1.1B
-  - [ ] Benchmark Nemotron-3-Nano
-  - [ ] Benchmark GPT-OSS
-- [ ] Update `docs/performance.md` with new baselines
+- [x] Implement `cmd/smoke_test/regression_suite.go`
+  - [x] Define baseline prompts and expected outputs
+  - [x] Implement logit difference / perplexity check
+  - [x] Support multi-model batch testing
+  - [x] **Add multi-token coherence tests** (expanded to detect tokenization corruption)
+- [x] Establish new performance baselines
+  - [x] Benchmark Mistral 7B (FP16/Quant)
+  - [x] Benchmark Granite 4B
+  - [x] Benchmark TinyLlama 1.1B
+  - [ ] Benchmark Nemotron-3-Nano (deferred - MOE model)
+  - [ ] Benchmark GPT-OSS (deferred - MOE model, requires separate testing)
+- [x] Update `docs/performance.md` with new baselines
 
----
+## Critical Issue Identified
+
+**Status:** Tokenization/Generation corruption RESOLVED ✅
+
+**Root Cause:** Missing GPU synchronization in NaN/Inf clamping path
+- **File:** `internal/engine.go:1545` (missing `e.Cx.Synchronize()` after async Metal kernel)
+- **Impact:** Async RMSNorm write was read before Metal kernel completed, causing stale/uninitialized data in subsequent operations
+
+**Fix Applied:** Added synchronization after pool return
+**Verification:**
+- ✅ Multi-token coherence: All 3 tests now COHERENT  
+- ✅ KV Cache wrapping: Verified (CachePos reaches 44 with window size 32)
+- ✅ No more mixed alphabet gibberish output
+
+**Next Required Actions:**
+1. ~~Debug tokenizer decoding (mixed alphabets suggests token table corruption)~~ ✅ RESOLVED
+2. ~~Investigate KV cache corruption between generation steps~~ ✅ RESOLVED (no corruption - sync bug was the issue)
+3. ~~Compare token-by-token output with llama.cpp to isolate issue~~ ✅ RESOLVED (sync bug was the issue, not algorithmic)
+
+**Analysis:** The issue was NOT tokenizer corruption or KV cache algorithm error. The high MSE failures in baseline tests were caused by missing GPU synchronization that led to zero logits and gibberish output. After adding the sync call, all coherence tests pass.
 
 **Goal:** Close the performance gap (currently ~4x-8x vs Llama.cpp) while maintaining strict coherence and correctness.
 **Targets:** `mistral:latest`, `nemotron-3-nano:latest`, `tinyllama:latest`, `granite4:latest`.
