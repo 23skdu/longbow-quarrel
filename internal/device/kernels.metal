@@ -481,15 +481,22 @@ kernel void debug_dot(device const half *a [[ buffer(0) ]],
 
 // Optimized Embedding Lookup: Q4_K weights → FP16 output with vectorization
 kernel void embedding_q4k_f16_optimized(device const uchar *weight [[ buffer(0) ]],
-                                        device half *output [[ buffer(1) ]],
-                                        constant int &idx [[ buffer(2) ]],
-                                        constant int &cols [[ buffer(3) ]],
-                                        constant float &scale [[ buffer(4) ]],
-                                        uint tid [[ thread_position_in_grid ]]) {
+                                         device half *output [[ buffer(1) ]],
+                                         constant int &idx [[ buffer(2) ]],
+                                         constant int &cols [[ buffer(3) ]],
+                                         constant float &scale [[ buffer(4) ]],
+                                         uint tid [[ thread_position_in_grid ]]) {
     if (tid >= (uint)cols) return;
     
     int num_blocks = (cols + 255) / 256;
     int block_idx = tid / 256;
+    
+    // Safety check: ensure block_idx is within bounds
+    if (block_idx >= num_blocks) {
+        output[tid] = (half)0.0;
+        return;
+    }
+    
     int lane_in_block = tid % 256;
     
     device const uchar *row_ptr = weight + (uint)idx * num_blocks * 144;
@@ -513,8 +520,9 @@ kernel void embedding_q4k_f16_optimized(device const uchar *weight [[ buffer(0) 
         sc = scales[group] & 63;
         m = scales[group + 4] & 63;
     } else {
-        sc = (scales[group+4] & 0xF) | ((scales[group-4] >> 6) << 4);
-        m = (scales[group+4] >> 4) | ((scales[group] >> 6) << 4);
+        // For groups 4-7, reconstruct from upper bits
+        sc = (scales[group-4] >> 6) | ((scales[group+4] & 0xF) << 2);
+        m = (scales[group-4] >> 6) << 4 | (scales[group+4] >> 4);
     }
     
     float d_val = d * scale * (float)sc;
@@ -525,7 +533,8 @@ kernel void embedding_q4k_f16_optimized(device const uchar *weight [[ buffer(0) 
     uchar q4 = (sub_lane % 2 == 0) ? (b & 0xF) : (b >> 4);
     
     // Final dequantization
-    output[tid] = (half)(d_val * (float)q4 - m_val);
+    float result = d_val * (float)q4 - m_val;
+    output[tid] = isinf(result) ? (half)0.0 : (half)result;
 }
 
 // Legacy version kept for compatibility

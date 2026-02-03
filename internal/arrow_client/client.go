@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/apache/arrow/go/v16/arrow"
-	"github.com/apache/arrow/go/v16/arrow/array"
-	"github.com/apache/arrow/go/v16/arrow/flight"
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/flight"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -47,18 +47,18 @@ func NewFlightClient(dataHost string, dataPort int, metaHost string, metaPort in
 
 // Connect establishes connection to Flight server
 func (fc *FlightClient) Connect(ctx context.Context) error {
-	client, err := flight.NewClient(ctx, "grpc://"+fc.dataAddr, insecure.NewCredentials(), grpc.WithBlock(false))
+	client, err := flight.NewFlightClient(fc.dataAddr, nil, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return fmt.Errorf("failed to create Flight client: %w", err)
 	}
-	fc.client = client
+	fc.client = &client
 	return nil
 }
 
 // Close disconnects from Flight server
 func (fc *FlightClient) Close() error {
 	if fc.client != nil {
-		return fc.client.Close()
+		return (*fc.client).Close()
 	}
 	return nil
 }
@@ -92,24 +92,16 @@ func (fc *FlightClient) DoPut(ctx context.Context, vectors [][]float32, ids []st
 
 	// Create schema
 	schema := arrow.NewSchema([]arrow.Field{
-		arrow.Field{Name: "vector", Type: arrow.FixedSizeListOf(arrow.Float32, int32(len(vectors[0])))},
-		arrow.Field{Name: "id", Type: arrow.Binary},
-	})
+		arrow.Field{Name: "vector", Type: arrow.ListOf(arrow.PrimitiveTypes.Float32)},
+		arrow.Field{Name: "id", Type: arrow.BinaryTypes.Binary},
+	}, nil)
 
 	// Create record with all vectors
-	record := arrow.NewRecord(schema, int64(len(vectors)), nil)
+	record := array.NewRecord(schema, nil, int64(len(vectors)), nil)
 	defer record.Release()
 
-	// Convert vectors to Arrow array
-	vectorBuilder := array.NewFloat64Builder(int32(len(vectors[0])))
-	vectorBuilder.Reserve(int64(len(vectors)) * int64(len(vectors[0])))
-
-	for _, vec := range vectors {
-		vectorBuilder.AppendValues(vec)
-	}
-
 	// Create array
-	vectorsArray := vectorBuilder.NewArray()
+	vectorsArray := array.NewFloat32Array(vectors)
 
 	// Set record columns
 	record.SetColumn(0, vectorsArray)
