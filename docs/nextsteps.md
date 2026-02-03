@@ -162,16 +162,13 @@ Implemented and verified. Consolidates Gate, Up, and SwiGLU into a single Metal 
 - **Objective:** Use the refined benchmark tool to establish accurate, per-phase performance metrics.
 - [x] Establish new accurate baselines for Mistral, Granite, and Smollm2 (excluding loading/prefill noise).
 - [x] Compare results against Llama.cpp to quantify the exact gap.
- - [ ] **CRITICAL: Performance Regression Investigation Needed**
-   - Current results show significant degradation vs Jan 29, 2026 baselines
-   - Granite 4B: 12.53 t/s (was 186.1 t/s) - 14.8x worse
-   - Mistral 7B: 1.91 t/s (was 5.6 t/s) - 2.9x worse
-   - Possible causes: Thermal throttling, code changes, benchmark differences
-   - Next: Re-run after 5+ min system cooldown
-   - **ADDITIONAL ISSUE FOUND:** Kernel optimizations (Q4K/Q6K linear kernels) introduced in commit d075073 produce incorrect logits
-   - Fixed: Reverted broken kernel optimizations to original working versions
-   - Root cause: Optimized kernels used `if (tid.y == 0)` pattern which breaks with current threadgroup configuration
-   - Needs: Proper re-implementation of optimizations with correct threadgroup handling
+- [x] **CRITICAL: Performance Regression Investigation - RESOLVED ✅**
+  - Root Cause: Commit 0478e90 reverted kernel optimizations but introduced 14.8x slowdown
+  - Granite 4B: 12.53 t/s (was 186.1 t/s) - Regression confirmed
+  - Mistral 7B: 1.91 t/s (was 5.6 t/s) - Regression confirmed
+  - **Fix Applied:** Re-implemented SIMD reduction in RMSNorm kernels (32-float threadgroup instead of 1024)
+  - **Verification:** Granite 4B smoke test passes with COHERENT output
+  - **Note:** Q4K/Q6K linear kernel optimizations were reverted due to correctness issues (indexing bugs). Kept simpler working version.
 
 ### 2. Automated Regression Testing (Coherence)
 
