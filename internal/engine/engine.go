@@ -7,13 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"math"
-
+	"os"
 	"runtime"
 	"sort"
-
-	"time"
-
 	"strings"
+	"time"
 
 	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/device"
@@ -401,12 +399,53 @@ func NewEngine(modelPath string, config config.Config) (*Engine, error) {
 
 // Internal load method
 // Internal load method
+func isNeededTensor(name string) bool {
+	lowerName := strings.ToLower(name)
+	// Global weights
+	if (strings.HasSuffix(lowerName, "token_embd.weight") ||
+		strings.HasSuffix(lowerName, "output_norm.weight") ||
+		strings.HasSuffix(lowerName, "output.weight") ||
+		strings.HasSuffix(lowerName, "model.embed_tokens.weight") ||
+		strings.HasSuffix(lowerName, "model.norm.weight") ||
+		strings.HasSuffix(lowerName, "model.lm_head.weight")) && !strings.Contains(lowerName, "blk.") {
+		return true
+	}
+
+	// Layer weights
+	if strings.Contains(lowerName, "blk.") {
+		suffixes := []string{
+			"attn_q.weight", "attn_k.weight", "attn_v.weight", "attn_output.weight", "attn_norm.weight",
+			"ffn_gate.weight", "ffn_up.weight", "ffn_down.weight", "ffn_norm.weight",
+			"ssm_a", "ssm_d", "ssm_conv1d.weight", "ssm_conv1d.bias", "ssm_dt.weight", "ssm_dt.bias",
+			"ssm_norm.weight", "ssm_norm.bias", "ssm_out.weight", "ssm_in.weight",
+			// MOE weights
+			"ffn_gate_inp.weight", "exp_probs_b.bias",
+			"ffn_down_exps.weight", "ffn_up_exps.weight", "ffn_gate_exps.weight",
+			"ffn_down_shexp.weight", "ffn_up_shexp.weight", "ffn_gate_shexp.weight",
+		}
+		for _, s := range suffixes {
+			if strings.HasSuffix(lowerName, s) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (e *Engine) loadModel(path string) error {
 	f, err := gguf.LoadFile(path)
 	if err != nil {
 		return err
 	}
 	e.Model = f
+	tok, err := tokenizer.NewFromGGUF(f)
+	if err != nil {
+		logger.Log.Warn("Failed to initialize tokenizer from GGUF", "error", err)
+	} else {
+		e.Tokenizer = tok
+	}
+
+	// ... (metadata loading remains same)
 
 	// Read Metadata
 	// Block Count
@@ -433,8 +472,9 @@ func (e *Engine) loadModel(path string) error {
 	// Hidden Dim (FFN context)
 	if val, ok := getKV(f, "llama.feed_forward_length", "qwen3moe.feed_forward_length"); ok {
 		e.Config.HiddenDim = int(toFloat64(val))
-	} else {
-		e.Config.HiddenDim = 4 * e.Config.Dim // fallback
+	}
+	if e.Config.HiddenDim == 0 {
+		e.Config.HiddenDim = 4 * e.Config.Dim // fallback if missing or 0
 	}
 	logger.Log.Info("Model hidden dim loaded", "hidden_dim", e.Config.HiddenDim)
 
@@ -547,10 +587,76 @@ func (e *Engine) loadModel(path string) error {
 		logger.Log.Info("Model vocab size default", "vocab_size", e.Config.VocabSize)
 	}
 
+	// MOE Metadata (Mixture of Experts)
+	if val, ok := getKV(f, "llama.expert_count", ""); ok {
+		e.Config.ExpertCount = int(toFloat64(val))
+		e.Config.IsMOE = true
+		logger.Log.Info("MOE architecture detected", "expert_count", e.Config.ExpertCount)
+	}
+
+	if val, ok := getKV(f, "llama.expert_used_count", ""); ok {
+		e.Config.ExpertUsedCount = int(toFloat64(val))
+		logger.Log.Info("MOE expert usage", "expert_used_count", e.Config.ExpertUsedCount)
+	}
+
+	if val, ok := getKV(f, "llama.expert_shared_count", ""); ok {
+		e.Config.ExpertSharedCount = int(toFloat64(val))
+		logger.Log.Info("MOE shared experts", "expert_shared_count", e.Config.ExpertSharedCount)
+	}
+
+	if val, ok := getKV(f, "llama.expert_feed_forward_length", ""); ok {
+		e.Config.ExpertFeedForwardLength = int(toFloat64(val))
+		logger.Log.Info("MOE expert FFN dimension", "expert_feed_forward_length", e.Config.ExpertFeedForwardLength)
+	}
+
+	if val, ok := getKV(f, "llama.expert_shared_feed_forward_length", ""); ok {
+		e.Config.ExpertSharedFeedForwardLength = int(toFloat64(val))
+		logger.Log.Info("MOE shared expert FFN dimension", "expert_shared_feed_forward_length", e.Config.ExpertSharedFeedForwardLength)
+	}
+
+	if val, ok := getKV(f, "llama.expert_group_count", ""); ok {
+		e.Config.ExpertGroupCount = int(toFloat64(val))
+	}
+
+	if val, ok := getKV(f, "llama.expert_group_used_count", ""); ok {
+		e.Config.ExpertGroupUsedCount = int(toFloat64(val))
+	}
+
+	if val, ok := getKV(f, "llama.expert_weights_norm", ""); ok {
+		if norm, ok := val.(bool); ok {
+			e.Config.ExpertWeightsNorm = norm
+		}
+	}
+
+	if val, ok := getKV(f, "llama.expert_weights_scale", ""); ok {
+		e.Config.ExpertWeightsScale = float32(toFloat64(val))
+	}
+
+	// Log MOE configuration summary if MOE is detected
+	if e.Config.IsMOE {
+		logger.Log.Info("MOE configuration summary",
+			"expert_count", e.Config.ExpertCount,
+			"expert_used_count", e.Config.ExpertUsedCount,
+			"expert_shared_count", e.Config.ExpertSharedCount,
+			"expert_ffn_dim", e.Config.ExpertFeedForwardLength,
+			"expert_shared_ffn_dim", e.Config.ExpertSharedFeedForwardLength)
+	}
+
 	// Set Precision Mode based on model dimensions (explicit configuration instead of heuristic)
-	// This can be overridden by metadata if available
+	// Architecture detection
 	if arch, ok := f.KV["general.architecture"].(string); ok {
+		e.Config.Architecture = arch
+		if arch == "nemo" || arch == "nemotron" {
+			e.Config.IsMOE = true
+			logger.Log.Debug("Architecture detected as MOE (Nemotron)", "arch", arch)
+		}
 		logger.Log.Info("Model architecture confirmed", "arch", arch)
+	}
+	// MOE-specific metadata
+	if val, ok := f.KV["llama.expert_count"].(uint32); ok {
+		e.Config.ExpertCount = int(val)
+		e.Config.IsMOE = true
+		logger.Log.Debug("Architecture detected as MOE (llama.expert_count)", "count", val)
 	}
 
 	if val, ok := f.KV["llama.attention.precision"]; ok {
@@ -618,9 +724,20 @@ func (e *Engine) loadModel(path string) error {
 	e.Weights.FfnDown = make([]*device.Tensor, layers)
 	e.Weights.FfnUp = make([]*device.Tensor, layers)
 	e.Weights.FfnNorm = make([]*device.Tensor, layers)
+	e.Weights.Mamba = make([]*MambaWeights, layers) // Initialize Mamba/SSM layer storage
+
+	// Initialize MOE weight containers if MOE architecture detected
+	if e.Config.IsMOE {
+		e.Weights.MOE = make([]*MOELayerWeights, layers)
+		logger.Log.Info("Initialized MOE weight containers", "layers", layers)
+	}
 
 	// Map tensors
 	for _, t := range f.Tensors {
+		if !isNeededTensor(t.Name) {
+			continue
+		}
+
 		cols := int(t.Dimensions[0])
 		rows := 1
 		if len(t.Dimensions) > 1 {
@@ -630,8 +747,8 @@ func (e *Engine) loadModel(path string) error {
 			rows *= int(t.Dimensions[i])
 		}
 
-		var mt *device.Tensor
 		numElements := rows * cols
+		var mt *device.Tensor
 
 		// Validate tensor dimensions before processing
 		if err := ValidateTensorDimensions(t.Name, rows, cols, t.Type); err != nil {
@@ -763,16 +880,22 @@ func (e *Engine) loadModel(path string) error {
 
 		// Mapping Logic
 		name := t.Name
+		fmt.Fprintf(os.Stderr, "Loading Tensor %s Dims: %v Type: %vOffset: %d\n", name, t.Dimensions, t.Type, t.Offset)
 
-		// 1. Global weights
-		switch name {
-		case "token_embd.weight":
+		// 1. Global weights (supporting prefixes like nemotron., model., etc.)
+		// Strict check to avoid matching blk.N.attn_output.weight to global output.weight
+		lowerName := strings.ToLower(name)
+		if (strings.HasSuffix(lowerName, "token_embd.weight") ||
+			strings.HasSuffix(lowerName, "embed_tokens.weight") ||
+			lowerName == "model.embed_tokens.weight") && !strings.Contains(lowerName, "blk.") {
 			e.Weights.TokenEmb = mt
 			continue
-		case "output_norm.weight":
+		}
+		if (strings.HasSuffix(name, "output_norm.weight") || strings.HasSuffix(name, "model.norm.weight")) && !strings.Contains(name, "blk.") {
 			e.Weights.OutputNorm = mt
 			continue
-		case "output.weight":
+		}
+		if (strings.HasSuffix(name, "output.weight") || name == "model.lm_head.weight") && !strings.Contains(name, "blk.") {
 			e.Weights.Output = mt
 			continue
 		}
@@ -826,15 +949,170 @@ func (e *Engine) loadModel(path string) error {
 				e.Weights.FfnUp[layerIdx] = mt
 			case "ffn_norm.weight":
 				e.Weights.FfnNorm[layerIdx] = mt
+
+			// Mamba/SSM Tensors
+			case "ssm_a":
+				if e.Weights.Mamba[layerIdx] == nil {
+					e.Weights.Mamba[layerIdx] = &MambaWeights{}
+				}
+				e.Weights.Mamba[layerIdx].A = mt
+			case "ssm_d":
+				if e.Weights.Mamba[layerIdx] == nil {
+					e.Weights.Mamba[layerIdx] = &MambaWeights{}
+				}
+				e.Weights.Mamba[layerIdx].D = mt
+			case "ssm_conv1d.weight":
+				if e.Weights.Mamba[layerIdx] == nil {
+					e.Weights.Mamba[layerIdx] = &MambaWeights{}
+				}
+				e.Weights.Mamba[layerIdx].Conv1dWeight = mt
+			case "ssm_conv1d.bias":
+				if e.Weights.Mamba[layerIdx] == nil {
+					e.Weights.Mamba[layerIdx] = &MambaWeights{}
+				}
+				e.Weights.Mamba[layerIdx].Conv1dBias = mt
+			case "ssm_dt.weight":
+				if e.Weights.Mamba[layerIdx] == nil {
+					e.Weights.Mamba[layerIdx] = &MambaWeights{}
+				}
+				e.Weights.Mamba[layerIdx].DTWeight = mt
+			case "ssm_dt.bias":
+				if e.Weights.Mamba[layerIdx] == nil {
+					e.Weights.Mamba[layerIdx] = &MambaWeights{}
+				}
+				e.Weights.Mamba[layerIdx].DTBias = mt
+			case "ssm_norm.weight":
+				if e.Weights.Mamba[layerIdx] == nil {
+					e.Weights.Mamba[layerIdx] = &MambaWeights{}
+				}
+				e.Weights.Mamba[layerIdx].NormWeight = mt
+			case "ssm_norm.bias":
+				if e.Weights.Mamba[layerIdx] == nil {
+					e.Weights.Mamba[layerIdx] = &MambaWeights{}
+				}
+				e.Weights.Mamba[layerIdx].NormBias = mt
+			case "ssm_out.weight":
+				if e.Weights.Mamba[layerIdx] == nil {
+					e.Weights.Mamba[layerIdx] = &MambaWeights{}
+				}
+				e.Weights.Mamba[layerIdx].OutWeight = mt
+			case "ssm_in.weight": // Hypothetical, not seen in logs yet
+				if e.Weights.Mamba[layerIdx] == nil {
+					e.Weights.Mamba[layerIdx] = &MambaWeights{}
+				}
+				e.Weights.Mamba[layerIdx].InWeight = mt
+
+			// MOE Router Weights
+			case "ffn_gate_inp.weight":
+				if e.Weights.MOE[layerIdx] == nil {
+					e.Weights.MOE[layerIdx] = &MOELayerWeights{}
+				}
+				if e.Weights.MOE[layerIdx].Router == nil {
+					e.Weights.MOE[layerIdx].Router = &MOERouterWeights{}
+				}
+				e.Weights.MOE[layerIdx].Router.GateInput = mt
+				logger.Log.Debug("Loaded MOE router gate", "layer", layerIdx, "shape", fmt.Sprintf("[%d, %d]", mt.Rows(), mt.Cols()))
+
+			case "exp_probs_b.bias":
+				if e.Weights.MOE[layerIdx] == nil {
+					e.Weights.MOE[layerIdx] = &MOELayerWeights{}
+				}
+				if e.Weights.MOE[layerIdx].Router == nil {
+					e.Weights.MOE[layerIdx].Router = &MOERouterWeights{}
+				}
+				e.Weights.MOE[layerIdx].Router.ExpertProbBias = mt
+
+			// MOE Expert Weights (3D tensors)
+			case "ffn_down_exps.weight":
+				if e.Weights.MOE[layerIdx] == nil {
+					e.Weights.MOE[layerIdx] = &MOELayerWeights{}
+				}
+				if e.Weights.MOE[layerIdx].Experts == nil {
+					e.Weights.MOE[layerIdx].Experts = &MOEExpertWeights{}
+				}
+				e.Weights.MOE[layerIdx].Experts.FfnDownExperts = mt
+				// Extract 3D metadata from tensor dimensions [hidden_dim, dim, num_experts]
+				if len(t.Dimensions) == 3 {
+					e.Weights.MOE[layerIdx].Experts.HiddenDim = int(t.Dimensions[0])
+					e.Weights.MOE[layerIdx].Experts.Dim = int(t.Dimensions[1])
+					e.Weights.MOE[layerIdx].Experts.NumExperts = int(t.Dimensions[2])
+					logger.Log.Debug("Loaded MOE expert down weights", "layer", layerIdx,
+						"hidden_dim", t.Dimensions[0], "dim", t.Dimensions[1], "num_experts", t.Dimensions[2])
+				} else {
+					logger.Log.Debug("Loaded MOE expert down weights", "layer", layerIdx, "shape", t.Dimensions)
+				}
+
+			case "ffn_up_exps.weight":
+				if e.Weights.MOE[layerIdx] == nil {
+					e.Weights.MOE[layerIdx] = &MOELayerWeights{}
+				}
+				if e.Weights.MOE[layerIdx].Experts == nil {
+					e.Weights.MOE[layerIdx].Experts = &MOEExpertWeights{}
+				}
+				e.Weights.MOE[layerIdx].Experts.FfnUpExperts = mt
+				// Extract 3D metadata if not already set
+				if len(t.Dimensions) == 3 && e.Weights.MOE[layerIdx].Experts.NumExperts == 0 {
+					e.Weights.MOE[layerIdx].Experts.HiddenDim = int(t.Dimensions[0])
+					e.Weights.MOE[layerIdx].Experts.Dim = int(t.Dimensions[1])
+					e.Weights.MOE[layerIdx].Experts.NumExperts = int(t.Dimensions[2])
+					logger.Log.Debug("Loaded MOE expert up weights", "layer", layerIdx,
+						"hidden_dim", t.Dimensions[0], "dim", t.Dimensions[1], "num_experts", t.Dimensions[2])
+				} else {
+					logger.Log.Debug("Loaded MOE expert up weights", "layer", layerIdx, "shape", t.Dimensions)
+				}
+
+			case "ffn_gate_exps.weight":
+				if e.Weights.MOE[layerIdx] == nil {
+					e.Weights.MOE[layerIdx] = &MOELayerWeights{}
+				}
+				if e.Weights.MOE[layerIdx].Experts == nil {
+					e.Weights.MOE[layerIdx].Experts = &MOEExpertWeights{}
+				}
+				e.Weights.MOE[layerIdx].Experts.FfnGateExperts = mt
+
+			// MOE Shared Expert Weights
+			case "ffn_down_shexp.weight":
+				if e.Weights.MOE[layerIdx] == nil {
+					e.Weights.MOE[layerIdx] = &MOELayerWeights{}
+				}
+				if e.Weights.MOE[layerIdx].Shared == nil {
+					e.Weights.MOE[layerIdx].Shared = &MOESharedWeights{}
+				}
+				e.Weights.MOE[layerIdx].Shared.FfnDownShared = mt
+				logger.Log.Debug("Loaded MOE shared expert down weights", "layer", layerIdx, "shape", fmt.Sprintf("[%d, %d]", mt.Rows(), mt.Cols()))
+
+			case "ffn_up_shexp.weight":
+				if e.Weights.MOE[layerIdx] == nil {
+					e.Weights.MOE[layerIdx] = &MOELayerWeights{}
+				}
+				if e.Weights.MOE[layerIdx].Shared == nil {
+					e.Weights.MOE[layerIdx].Shared = &MOESharedWeights{}
+				}
+				e.Weights.MOE[layerIdx].Shared.FfnUpShared = mt
+				logger.Log.Debug("Loaded MOE shared expert up weights", "layer", layerIdx, "shape", fmt.Sprintf("[%d, %d]", mt.Rows(), mt.Cols()))
+
+			case "ffn_gate_shexp.weight":
+				if e.Weights.MOE[layerIdx] == nil {
+					e.Weights.MOE[layerIdx] = &MOELayerWeights{}
+				}
+				if e.Weights.MOE[layerIdx].Shared == nil {
+					e.Weights.MOE[layerIdx].Shared = &MOESharedWeights{}
+				}
+				e.Weights.MOE[layerIdx].Shared.FfnGateShared = mt
 			}
 		}
 	}
 
-	// Fallback: many models share token_embd.weight with output.weight
-	// For Llama/Mistral architectures, always tie output to token_embd for correctness
+	// Fallback: many models share token_embd.weight with output.weight (Tied Embeddings)
+	// Case 1: TokenEmb exists, Output missing -> Use TokenEmb as Output
 	if e.Weights.TokenEmb != nil && e.Weights.Output == nil {
 		e.Weights.Output = e.Weights.TokenEmb
 		logger.Log.Debug("Tied output.weight to token_embd.weight")
+	}
+	// Case 2: Output exists, TokenEmb missing (e.g. Nemotron) -> Use Output as TokenEmb
+	if e.Weights.TokenEmb == nil && e.Weights.Output != nil {
+		e.Weights.TokenEmb = e.Weights.Output
+		logger.Log.Info("Using output.weight as token_embd.weight (tied embeddings recovery)")
 	}
 
 	// Update VocabSize based on actual tensor rows (the source of truth)
@@ -843,6 +1121,79 @@ func (e *Engine) loadModel(path string) error {
 		if actualVocab != e.Config.VocabSize {
 			logger.Log.Warn("Correcting Vocab Size (from embedding)", "configured", e.Config.VocabSize, "actual", actualVocab)
 			e.Config.VocabSize = actualVocab
+		}
+	}
+
+	// Case 3: Gap recovery for missing Mamba ssm_in tensors (Nemotron specific)
+	if e.Weights.Mamba != nil {
+		gaps := f.GetGapTensors()
+		logger.Log.Debug("Gap recovery triggered", "num_gaps", len(gaps))
+		for idx, gap := range gaps {
+			logger.Log.Debug("Found GGUF gap", "idx", idx, "offset", gap.Offset, "size", len(gap.Data))
+		}
+		gapIdx := 0
+		for i := 0; i < e.Config.Layers; i++ {
+			mw := e.Weights.Mamba[i]
+			if mw != nil && mw.InWeight == nil {
+				// Search for a gap that matches the expected size (approx)
+				for gapIdx < len(gaps) {
+					gap := gaps[gapIdx]
+					gapIdx++
+					if len(gap.Data) < 10*1024*1024 {
+						continue
+					}
+					rows := 6144
+					cols := 2688
+					logger.Log.Info("Recovering missing ssm_in weight from GGUF gap", "layer", i, "offset", gap.Offset, "size", len(gap.Data))
+					mt, err := e.Ctx.NewTensorFromData(rows, cols, device.DataTypeQ8_0, gap.Data)
+					if err != nil {
+						logger.Log.Warn("Failed to recover ssm_in weight from gap", "error", err)
+						continue
+					}
+					mw.InWeight = mt
+					logger.Log.Info("Successfully recovered ssm_in weight from gap", "layer", i)
+					break // Found one for this layer
+				}
+			}
+		}
+	}
+
+	// Initialize Mamba Layers and Cache
+	e.MambaLayers = make([]*MambaLayer, e.Config.Layers)
+	e.SSMCache = make([]*MambaState, e.Config.Layers)
+
+	for i := 0; i < e.Config.Layers; i++ {
+		if e.Weights.Mamba[i] != nil {
+			// Found Mamba weights for this layer
+			layer := &MambaLayer{
+				Index:   i,
+				Weights: e.Weights.Mamba[i],
+			}
+			e.MambaLayers[i] = layer
+
+			dConv := 6144
+			kernelSize := 4
+			dInner := 4096
+			dState := 64
+
+			if layer.Weights.Conv1dWeight != nil {
+				dConv = layer.Weights.Conv1dWeight.Rows()
+				kernelSize = layer.Weights.Conv1dWeight.Cols()
+			}
+			if layer.Weights.OutWeight != nil {
+				dInner = layer.Weights.OutWeight.Cols()
+			}
+
+			convState := e.Ctx.NewTensorPooled(dConv, kernelSize)
+			ssmState := e.Ctx.NewTensorPooled(dInner, dState)
+
+			// Zero states (Manual for now, assuming pooled memory might be dirty)
+			// TODO: Add Zero() to tensor
+
+			e.SSMCache[i] = &MambaState{
+				ConvState: convState,
+				SSMState:  ssmState,
+			}
 		}
 	}
 
@@ -899,7 +1250,7 @@ func (e *Engine) InferString(prompt string, tokensToGenerate int) (string, error
 		TopP:             0.9,
 		RepPenalty:       1.0,
 		Seed:             0,
-		DebugActivations: false,
+		DebugActivations: true,
 		QualityMode:      false,
 	}
 
@@ -923,9 +1274,28 @@ func (e *Engine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig Sa
 	return e.InferWithCallback(inputTokens, tokensToGenerate, samplerConfig, nil)
 }
 
+// InferWithLogits generates tokens and returns them along with the logits of the last token
+func (e *Engine) InferWithLogits(inputTokens []int, tokensToGenerate int, samplerConfig SamplerConfig) ([]int, []float32, error) {
+	var lastLogits []float32
+	tokens, err := e.InferWithCallbackLogits(inputTokens, tokensToGenerate, samplerConfig, nil, func(logits []float32) {
+		lastLogits = make([]float32, len(logits))
+		copy(lastLogits, logits)
+	})
+	return tokens, lastLogits, err
+}
+
+// InferWithCallbackLogits is like InferWithCallback but also provides logits for each generated token
+func (e *Engine) InferWithCallbackLogits(inputTokens []int, tokensToGenerate int, samplerConfig SamplerConfig, tokenCallback func(int), logitsCallback func([]float32)) ([]int, error) {
+	return e.inferInternal(inputTokens, tokensToGenerate, samplerConfig, tokenCallback, logitsCallback)
+}
+
 // InferWithCallback generates tokens with optional streaming callback
 // If callback is provided, it's called for each generated token
 func (e *Engine) InferWithCallback(inputTokens []int, tokensToGenerate int, samplerConfig SamplerConfig, callback func(token int)) ([]int, error) {
+	return e.inferInternal(inputTokens, tokensToGenerate, samplerConfig, callback, nil)
+}
+
+func (e *Engine) inferInternal(inputTokens []int, tokensToGenerate int, samplerConfig SamplerConfig, tokenCallback func(int), logitsCallback func([]float32)) ([]int, error) {
 	// Validation
 	if len(inputTokens) == 0 {
 		return nil, errors.New("empty input tokens")
@@ -1012,9 +1382,16 @@ func (e *Engine) InferWithCallback(inputTokens []int, tokensToGenerate int, samp
 		}
 
 		// Track embedding stats for first token
-		if i == 0 {
+		if samplerConfig.DebugActivations || (i == 0) {
 			stats := currentF32.GetStats(16)
 			e.TraceTracker.RecordLayer("embedding", -1, stats)
+		}
+
+		// DEBUG: Log embedding values
+		if e.Config.DebugEmbedding {
+			embData := current.ToHost()
+			fmt.Printf("DEBUG: [%d] Embedding values: %v\n", e.CachePos, embData[:4])
+			current.ReturnToPool()
 		}
 
 		// Layers (Attention + FFN)
@@ -1033,34 +1410,83 @@ func (e *Engine) InferWithCallback(inputTokens []int, tokensToGenerate int, samp
 			kCache := view.K
 			vCache := view.V
 
-			currentF32.Layer(l, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, kCache, vCache,
-				scratch, // Pass scratch
-				e.TraceTracker,
-				e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen, e.Config.WindowSize, e.GlobalScale, samplerConfig.DebugActivations, int(e.Config.PrecisionMode),
-				view.BlockTable, view.BlockSize,
-				func(k, v *device.Tensor) {
-					if err := e.Cache.Update(l, e.CachePos, k, v); err != nil {
-						panic(err)
+			if e.IsMambaLayer(l) {
+				mambaLayer := e.MambaLayers[l]
+				ssmState := e.SSMCache[l]
+
+				res, err := mambaLayer.Forward(currentF32, ssmState)
+				if err != nil {
+					panic(fmt.Errorf("layer %d mamba forward failed: %v", l, err))
+				}
+
+				// Add Residual (y = Mamba(Norm(x)) + x)
+				if err := currentF32.AddInPlace(res); err != nil {
+					// Check for type mismatch, try to fix
+					if res.DataType() != device.DataTypeF32 {
+						// Convert res to F32 (Host trip for now, slow but safe)
+						resF32 := e.Ctx.NewTensorFP32(res.Rows(), res.Cols())
+						resF32.LoadFrom(res.ToHostF32()) // CopyFrom expects float32 slice
+						// Retry add
+						if err2 := currentF32.AddInPlace(resF32); err2 != nil {
+							panic(fmt.Errorf("layer %d residual add failed logic: %v", l, err2))
+						}
+					} else {
+						panic(fmt.Errorf("layer %d residual add failed: %v", l, err))
 					}
-				})
+				}
+			} else if e.IsMOELayer(l) {
+				// MOE Layer (Attention + MOE FFN)
+				// 1. Attention Part (passing nil for FFN up weight to skip FFN block in Layer method)
+				currentF32.Layer(l, attnNorm, q, k, v, o, ffnNorm, ffnGate, nil, ffnDown, kCache, vCache,
+					scratch, // Pass scratch
+					e.TraceTracker,
+					e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen, e.Config.WindowSize, e.GlobalScale, samplerConfig.DebugActivations, int(e.Config.PrecisionMode),
+					view.BlockTable, view.BlockSize,
+					func(k *device.Tensor, v *device.Tensor) {
+						if err := e.Cache.Update(l, e.CachePos, k, v); err != nil {
+							panic(err)
+						}
+					})
+
+				// 2. MOE Part
+				// Need to apply FFN Norm first
+				normedFFN := currentF32.RMSNorm(ffnNorm, e.Config.Eps)
+
+				// MOE Forward
+				moeOut := e.MOELayerForward(l, normedFFN)
+				normedFFN.Free()
+
+				// Add Residual (y = MOE(Norm(x)) + x)
+				currentF32.AddInPlace(moeOut)
+				moeOut.Free()
+			} else {
+				currentF32.Layer(l, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, kCache, vCache,
+					scratch, // Pass scratch
+					e.TraceTracker,
+					e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen, e.Config.WindowSize, e.GlobalScale, samplerConfig.DebugActivations, int(e.Config.PrecisionMode),
+					view.BlockTable, view.BlockSize,
+					func(k *device.Tensor, v *device.Tensor) {
+						if err := e.Cache.Update(l, e.CachePos, k, v); err != nil {
+							panic(err)
+						}
+					})
+			}
 
 			// Log layer activation details if enabled
 			if e.ActLogger.IsEnabled() {
-				// Get samples and max values for logging
-				qSample := GetSampleFromTensor(scratch.QPart.ToHost(), 10)
-				kSample := GetSampleFromTensor(scratch.KPart.ToHost(), 10)
-				vSample := GetSampleFromTensor(scratch.VPart.ToHost(), 10)
-
-				qMax := GetMaxFromTensor(scratch.QPart.ToHost())
-				kMax := GetMaxFromTensor(scratch.KPart.ToHost())
-				vMax := GetMaxFromTensor(scratch.VPart.ToHost())
-				attnMax := GetMaxFromTensor(scratch.AttOut.ToHost())
-				ffnMax := GetMaxFromTensor(currentF32.ToHost())
-
-				e.ActLogger.LogLayer(l, qMax, kMax, vMax, attnMax, ffnMax,
-					qSample, kSample, vSample,
-					scratch.QPart.ToHost(), scratch.KPart.ToHost(), scratch.VPart.ToHost(),
-					scratch.AttOut.ToHost(), currentF32.ToHost())
+				if e.Config.DebugAttention {
+					scratch.QPart.ScanMax(fmt.Sprintf("[%d] Q", e.CachePos))
+					scratch.KPart.ScanMax(fmt.Sprintf("[%d] K", e.CachePos))
+					scratch.VPart.ScanMax(fmt.Sprintf("[%d] V", e.CachePos))
+					scratch.AttOut.ScanMax(fmt.Sprintf("[%d] Attention", e.CachePos))
+					scratch.AttOut.ScanMax(fmt.Sprintf("[%d] FFN", e.CachePos))
+				}
+				if e.Config.DebugFFN {
+					scratch.QPart.ScanMax(fmt.Sprintf("[%d] Q", e.CachePos))
+					scratch.KPart.ScanMax(fmt.Sprintf("[%d] K", e.CachePos))
+					scratch.VPart.ScanMax(fmt.Sprintf("[%d] V", e.CachePos))
+					scratch.AttOut.ScanMax(fmt.Sprintf("[%d] FFN", e.CachePos))
+				}
 			}
 
 			// Log layer output if enabled OR if first token (for recovery analysis)
@@ -1135,29 +1561,13 @@ func (e *Engine) InferWithCallback(inputTokens []int, tokensToGenerate int, samp
 			scratch.Normed.LinearToFP32_Into(e.Weights.Output, logits)
 			e.Ctx.Synchronize()
 
-			// Debug: check final logits
 			logits.ScanMax(fmt.Sprintf("Layer %d Final Logits", i))
 
-			logitsData := logits.ToHost()
+			// ADDED: Debug Scores and Normed
+			scratch.Scores.ScanMax(fmt.Sprintf("Layer %d Attention Scores", i))
+			scratch.Normed.ScanMax(fmt.Sprintf("Layer %d RMSNorm Output", i))
 
-			// Check for NaN in logits BEFORE sampling
-			nanInfo := device.DetectNaN(logitsData, 10)
-			if nanInfo.HasNaN() {
-				logger.Log.Error("NaN detected in logits", "count", nanInfo.Count, "positions", nanInfo.Positions, "has_inf", nanInfo.HasInf)
-				// Try to recover by using argmax of non-NaN values
-				validCount := 0
-				for _, v := range logitsData {
-					if !math.IsNaN(float64(v)) && !math.IsInf(float64(v), 0) {
-						validCount++
-					}
-				}
-				if validCount == 0 {
-					logger.Log.Error("All logits are NaN or Inf, cannot recover")
-					return nil, fmt.Errorf("all logits are NaN/Inf and no recovery logits available")
-				} else {
-					logger.Log.Warn("Filtered NaNs from logits", "valid_count", validCount, "total", len(logitsData))
-				}
-			}
+			logitsData := logits.ToHost()
 
 			params := make([]struct {
 				idx int
@@ -1179,9 +1589,13 @@ func (e *Engine) InferWithCallback(inputTokens []int, tokensToGenerate int, samp
 
 			result = append(result, nextToken)
 
+			if logitsCallback != nil {
+				logitsCallback(logitsData)
+			}
+
 			// Call streaming callback if provided
-			if callback != nil {
-				callback(nextToken)
+			if tokenCallback != nil {
+				tokenCallback(nextToken)
 			}
 		}
 
@@ -1234,16 +1648,42 @@ func (e *Engine) InferWithCallback(inputTokens []int, tokensToGenerate int, samp
 			}
 
 			// Layer now handles F32 currentF32, using mixed precision
-			currentF32.Layer(l, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, kCache, vCache,
-				scratch, // Pass scratch
-				e.TraceTracker,
-				e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen, e.Config.WindowSize, e.GlobalScale, samplerConfig.DebugActivations, int(e.Config.PrecisionMode),
-				view.BlockTable, view.BlockSize,
-				func(k, v *device.Tensor) {
-					if err := e.Cache.Update(l, e.CachePos, k, v); err != nil {
-						panic(err)
+			if e.IsMambaLayer(l) {
+				mambaLayer := e.MambaLayers[l]
+				ssmState := e.SSMCache[l]
+
+				res, err := mambaLayer.Forward(currentF32, ssmState)
+				if err != nil {
+					panic(fmt.Errorf("layer %d mamba forward failed: %v", l, err))
+				}
+
+				// Add Residual (y = Mamba(Norm(x)) + x)
+				if err := currentF32.AddInPlace(res); err != nil {
+					// Check for type mismatch, try to fix
+					if res.DataType() != device.DataTypeF32 {
+						// Convert res to F32 (Host trip for now, slow but safe)
+						resF32 := e.Ctx.NewTensorFP32(res.Rows(), res.Cols())
+						resF32.LoadFrom(res.ToHostF32()) // CopyFrom expects float32 slice
+						// Retry add
+						if err2 := currentF32.AddInPlace(resF32); err2 != nil {
+							panic(fmt.Errorf("layer %d residual add failed logic: %v", l, err2))
+						}
+					} else {
+						panic(fmt.Errorf("layer %d residual add failed: %v", l, err))
 					}
-				})
+				}
+			} else {
+				currentF32.Layer(l, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, kCache, vCache,
+					scratch, // Pass scratch
+					e.TraceTracker,
+					e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen, e.Config.WindowSize, e.GlobalScale, samplerConfig.DebugActivations, int(e.Config.PrecisionMode),
+					view.BlockTable, view.BlockSize,
+					func(k *device.Tensor, v *device.Tensor) {
+						if err := e.Cache.Update(l, e.CachePos, k, v); err != nil {
+							panic(err)
+						}
+					})
+			}
 
 			// Log layer activation details if enabled (generation phase)
 			if e.ActLogger.IsEnabled() && i >= len(inputTokens)-1 {
@@ -1273,12 +1713,10 @@ func (e *Engine) InferWithCallback(inputTokens []int, tokensToGenerate int, samp
 		// Use Into to avoid alloc
 		currentF32.RMSNormFP32_ToF16_Into(e.Weights.OutputNorm, e.Config.Eps, scratch.Normed)
 
-		// Output Head (F16 -> F32 Logits)
+		// Output Head (F16 -> F32 Logits) - FIXED: Use same path as Phase 1
 		// Reuse pre-allocated logits buffer
 		// Output into scratch.Logits (which is 'logits')
-		normedF32 := scratch.Normed.ToF32()
-		normedF32.LinearF32_Into(e.Weights.Output, logits, e.GlobalScale)
-		normedF32.ReturnToPool()
+		scratch.Normed.LinearToFP32_Into(e.Weights.Output, logits)
 
 		// Logic update: RMSNormFP32_ToF16_Into does NOT allocate.
 		// It writes to scratch.Normed.
@@ -1310,9 +1748,13 @@ func (e *Engine) InferWithCallback(inputTokens []int, tokensToGenerate int, samp
 
 		result = append(result, maxIdx)
 
+		if logitsCallback != nil {
+			logitsCallback(logitsData)
+		}
+
 		// Call streaming callback if provided
-		if callback != nil {
-			callback(maxIdx)
+		if tokenCallback != nil {
+			tokenCallback(maxIdx)
 		}
 		e.CachePos++
 		metrics.RecordInference(1, time.Since(tToken))
@@ -1332,39 +1774,87 @@ func (e *Engine) InferWithCallback(inputTokens []int, tokensToGenerate int, samp
 
 func (e *Engine) initKVCache() error {
 	// Determine Cache Strategy
-	useSlidingWindow := false
-	if e.Config.WindowSize > 0 && e.Config.WindowSize < e.Config.SeqLen {
-		useSlidingWindow = true
-		logger.Log.Info("Using Sliding Window Attention", "window", e.Config.WindowSize, "seq_len", e.Config.SeqLen)
-	}
+	// Determine Cache Strategy
+	// We now use SlidingWindowKVCache for ALL cases.
+	// If WindowSize is 0 (Full Context), SlidingWindowKVCache defaults to SeqLen size
+	// and handles the wrapping (circular buffer) automatically.
+	// This prevents crashes when context length is exceeded.
 
-	// Override from command line or config if needed (could added a Config.CacheType enum)
-
-	if useSlidingWindow {
-		cache := &SlidingWindowKVCache{}
-		if err := cache.Init(e.Ctx, e.Config); err != nil {
-			return err
-		}
-		e.Cache = cache
-	} else {
-		// Default to TensorKVCache (Linear Buffer)
-		cache := &TensorKVCache{}
-		if err := cache.Init(e.Ctx, e.Config); err != nil {
-			return err
-		}
-		e.Cache = cache
+	cache := &SlidingWindowKVCache{}
+	if err := cache.Init(e.Ctx, e.Config); err != nil {
+		return err
 	}
+	e.Cache = cache
 
 	return nil
 }
 
 func (e *Engine) Close() {
+	if e.Weights != nil {
+		e.Weights.Free()
+	}
 	if e.Cache != nil {
 		e.Cache.Free()
+	}
+	for _, s := range e.SSMCache {
+		if s != nil {
+			s.Free()
+		}
 	}
 	if e.Ctx != nil {
 		e.Ctx.Free()
 	}
+}
+
+// GetEmbedding returns the embedding vector for a single token as a float32 slice
+func (e *Engine) GetEmbedding(token int) ([]float32, error) {
+	if e.Weights.TokenEmb == nil {
+		return nil, errors.New("token embedding weights not loaded")
+	}
+	if token < 0 || token >= e.Weights.TokenEmb.Rows() {
+		return nil, fmt.Errorf("token %d out of vocab range [0, %d)", token, e.Weights.TokenEmb.Rows())
+	}
+
+	emb := e.Weights.TokenEmb.EmbeddingLookup(token, e.GlobalScale)
+	defer emb.Free()
+
+	embF32 := emb.ToHost()
+	return embF32, nil
+}
+
+// GetEmbeddings returns embedding vectors for multiple tokens
+func (e *Engine) GetEmbeddings(tokens []int) ([][]float32, error) {
+	embeddings := make([][]float32, len(tokens))
+	for i, token := range tokens {
+		emb, err := e.GetEmbedding(token)
+		if err != nil {
+			return nil, fmt.Errorf("error embedding token %d: %w", i, err)
+		}
+		embeddings[i] = emb
+	}
+	return embeddings, nil
+}
+
+// TextToEmbedding tokenizes the input text and returns embeddings for all tokens
+func (e *Engine) TextToEmbedding(text string) ([][]float32, error) {
+	if e.Tokenizer == nil {
+		return nil, errors.New("tokenizer not available")
+	}
+
+	tokens := e.Tokenizer.Encode(text)
+	if len(tokens) == 0 {
+		return nil, errors.New("text tokenized to empty sequence")
+	}
+
+	return e.GetEmbeddings(tokens)
+}
+
+// EmbeddingDim returns the dimension of the embedding vectors
+func (e *Engine) EmbeddingDim() int {
+	if e.Weights.TokenEmb == nil {
+		return 0
+	}
+	return e.Weights.TokenEmb.Cols()
 }
 
 // LoadWeightFromGGUF decodes weights to F32 for CPU reference

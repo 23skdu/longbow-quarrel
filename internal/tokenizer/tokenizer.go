@@ -1,3 +1,5 @@
+//go:build darwin && metal
+
 package tokenizer
 
 import (
@@ -13,6 +15,10 @@ func New(path string) (*Tokenizer, error) {
 		return nil, err
 	}
 	defer f.Close()
+	return NewFromGGUF(f)
+}
+
+func NewFromGGUF(f *gguf.GGUFFile) (*Tokenizer, error) {
 
 	// Extract tokens
 	val, ok := f.KV["tokenizer.ggml.tokens"]
@@ -136,10 +142,7 @@ func (t *Tokenizer) Encode(text string) []int {
 		}
 
 		// Iteratively merge
-		for {
-			if len(subwords) < 2 {
-				break
-			}
+		for len(subwords) >= 2 {
 
 			// Find best pair
 			bestPairIdx := -1

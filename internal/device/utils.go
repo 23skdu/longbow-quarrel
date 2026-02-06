@@ -16,9 +16,10 @@ func Float32ToFloat16(f float32) uint16 {
 	exp := (bits >> 23) & 0xff
 	mant := bits & 0x7fffff
 
-	if exp == 0 {
+	switch exp {
+	case 0:
 		return uint16(sign << 15)
-	} else if exp == 0xff {
+	case 0xff:
 		return uint16((sign << 15) | 0x7c00 | (mant >> 13))
 	}
 
@@ -37,7 +38,8 @@ func Float16ToFloat32(f uint16) float32 {
 	exp := (uint32(f) >> 10) & 0x1f
 	mant := uint32(f) & 0x3ff
 
-	if exp == 0 {
+	switch exp {
+	case 0:
 		if mant == 0 {
 			return math.Float32frombits(sign << 31)
 		}
@@ -54,7 +56,7 @@ func Float16ToFloat32(f uint16) float32 {
 		mant = (temp & 0x3ff) << 13 // Keep only fractional part, shift to FP32 position
 		exp = 127 - 14 - shift      // FP32 bias - FP16 subnormal exp - normalization shift
 		return math.Float32frombits((sign << 31) | (exp << 23) | mant)
-	} else if exp == 31 {
+	case 31:
 		if mant == 0 {
 			return math.Float32frombits((sign << 31) | 0x7f800000)
 		}

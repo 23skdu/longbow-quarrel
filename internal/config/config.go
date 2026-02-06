@@ -16,25 +16,46 @@ const (
 // Config holds all configuration for the engine
 type Config struct {
 	// Model Architecture
-	Dim        int
-	HiddenDim  int
-	Layers     int
-	Heads      int
-	KVHeads    int
-	HeadDim    int // Dim / Heads usually
-	VocabSize  int
-	SeqLen     int
-	Eps        float32
-	RopeTheta  float32
-	WindowSize int // Sliding window size for attention (4096 for Mistral)
+	Architecture string
+	Dim          int
+	HiddenDim    int
+	Layers       int
+	Heads        int
+	KVHeads      int
+	HeadDim      int // Dim / Heads usually
+	VocabSize    int
+	SeqLen       int
+	Eps          float32
+	RopeTheta    float32
+	WindowSize   int // Sliding window size for attention (4096 for Mistral)
 
 	// Runtime Configuration
 	PrecisionMode PrecisionMode
 	KVCacheSize   int // Overrides model's default if > 0
 
+	// MOE (Mixture of Experts) Configuration
+	ExpertCount                   int     // Total number of experts (e.g., 128 for Nemotron, 8 for Mixtral)
+	ExpertUsedCount               int     // Number of experts used per token (e.g., 6 for Nemotron, 2 for Mixtral)
+	ExpertSharedCount             int     // Number of shared experts (always active)
+	ExpertFeedForwardLength       int     // Hidden dimension for expert-specific FFN
+	ExpertSharedFeedForwardLength int     // Hidden dimension for shared expert FFN
+	ExpertGroupCount              int     // Number of expert groups (for grouped MOE)
+	ExpertGroupUsedCount          int     // Number of groups used per token
+	ExpertWeightsNorm             bool    // Whether expert weights are normalized
+	ExpertWeightsScale            float32 // Scaling factor for expert weights
+	IsMOE                         bool    // Flag to indicate MOE architecture
+
 	// Feature Flags / Toggles
-	DebugDequant     bool // Deprecated/Removed, kept for compatibility if needed, but we removed it physically
+	DebugDequant     bool
 	DebugActivations bool
+
+	DebugEmbedding   bool
+	DebugAttention   bool
+	DebugFFN         bool
+	DebugLayerOutput bool
+	DebugLogits      bool
+
+	DebugMemory bool
 }
 
 // Validate ensures the configuration is sane
@@ -61,5 +82,12 @@ func Default() Config {
 		Eps:           1e-5,
 		RopeTheta:     10000.0,
 		PrecisionMode: PrecisionAuto,
+
+		DebugEmbedding:   true,
+		DebugAttention:   true,
+		DebugFFN:         true,
+		DebugLayerOutput: true,
+		DebugLogits:      true,
+		DebugMemory:      true,
 	}
 }

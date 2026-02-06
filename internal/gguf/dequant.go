@@ -343,3 +343,79 @@ func DequantizeQ8_0(data []byte, numElements int) []float32 {
 	}
 	return out
 }
+
+// DequantizeQ4_0 converts Q4_0 data to Float32.
+// Layout (18 bytes per 32 weights):
+// - d: f16 (scale)
+// - qs: 16 bytes (32 * 4 bits)
+func DequantizeQ4_0(data []byte, numElements int) []float32 {
+	const blockSize = 32
+	const blockSizeBytes = 18
+	if numElements%blockSize != 0 {
+		panic(fmt.Sprintf("DequantizeQ4_0: numElements %d must be multiple of 32", numElements))
+	}
+
+	numBlocks := numElements / blockSize
+	out := make([]float32, numElements)
+
+	for i := 0; i < numBlocks; i++ {
+		blockOffset := i * blockSizeBytes
+		if blockOffset+blockSizeBytes > len(data) {
+			break
+		}
+
+		d := Float16ToFloat32(binary.LittleEndian.Uint16(data[blockOffset : blockOffset+2]))
+		qs := data[blockOffset+2 : blockOffset+18]
+
+		for j := 0; j < 16; j++ {
+			v0 := qs[j] & 0x0F
+			v1 := qs[j] >> 4
+
+			out[i*blockSize+j] = d * (float32(v0) - 8.0)
+			out[i*blockSize+j+16] = d * (float32(v1) - 8.0)
+		}
+	}
+	return out
+}
+
+// DequantizeQ5_0 converts Q5_0 data to Float32.
+// Layout (22 bytes per 32 weights):
+// - d: f16 (scale)
+// - m: uint32 (32 * 1 high bit)
+// - qs: 16 bytes (32 * 4 bits)
+func DequantizeQ5_0(data []byte, numElements int) []float32 {
+	const blockSize = 32
+	const blockSizeBytes = 22
+	if numElements%blockSize != 0 {
+		panic(fmt.Sprintf("DequantizeQ5_0: numElements %d must be multiple of 32", numElements))
+	}
+
+	numBlocks := numElements / blockSize
+	out := make([]float32, numElements)
+
+	for i := 0; i < numBlocks; i++ {
+		blockOffset := i * blockSizeBytes
+		if blockOffset+blockSizeBytes > len(data) {
+			break
+		}
+
+		d := Float16ToFloat32(binary.LittleEndian.Uint16(data[blockOffset : blockOffset+2]))
+		m := binary.LittleEndian.Uint32(data[blockOffset+2 : blockOffset+6])
+		qs := data[blockOffset+6 : blockOffset+22]
+
+		for j := 0; j < 16; j++ {
+			v0 := qs[j] & 0x0F
+			v1 := qs[j] >> 4
+
+			high0 := (m >> j) & 1
+			high1 := (m >> (j + 16)) & 1
+
+			val0 := uint8(v0) | (uint8(high0) << 4)
+			val1 := uint8(v1) | (uint8(high1) << 4)
+
+			out[i*blockSize+j] = d * (float32(val0) - 16.0)
+			out[i*blockSize+j+16] = d * (float32(val1) - 16.0)
+		}
+	}
+	return out
+}

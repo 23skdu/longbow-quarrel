@@ -7,6 +7,7 @@ import (
 
 	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/device"
+	"github.com/23skdu/longbow-quarrel/internal/logger"
 	"github.com/23skdu/longbow-quarrel/internal/metrics"
 )
 
@@ -34,17 +35,28 @@ func (c *SlidingWindowKVCache) Init(ctx *device.Context, config config.Config) e
 	c.kvHeads = config.KVHeads
 	c.headDim = config.HeadDim
 
-	// Use WindowSize from config.
-	// If WindowSize is 0, this cache strategy degenerates to a standard cache (if SeqLen fits)
-	// or fails if usage exceeds SeqLen.
-	// But generally SlidingWindow cache implies we enforce a window.
+	// Use WindowSize from config if explicitly set for SWA
 	c.windowSize = config.WindowSize
-	if c.windowSize == 0 {
-		// Fallback to SeqLen if WindowSize not explicit, but treat as window
+
+	// Priority:
+	// 1. Explicit EngineConfig.KVCacheSize (user override)
+	// 2. config.WindowSize (model metadata for SWA)
+	// 3. config.SeqLen (fallback to full context)
+	if config.KVCacheSize > 0 {
+		c.windowSize = config.KVCacheSize
+		logger.Log.Info("KV Cache using explicit override size", "size", c.windowSize)
+	} else if c.windowSize == 0 {
 		c.windowSize = config.SeqLen
+		// SAFETY: If SeqLen is huge (e.g. 1M for Nemotron), cap it to 8192 to prevent OOM
+		// only if we are using the fallback and no explicit size was given.
+		if c.windowSize > 8192 {
+			logger.Log.Warn("Capping excessively large context length for KV Cache", "original", config.SeqLen, "capped", 8192)
+			c.windowSize = 8192
+		}
 	}
-	if c.windowSize == 0 {
-		c.windowSize = 2048 // Default
+
+	if c.windowSize <= 0 {
+		c.windowSize = 2048 // Hard default
 	}
 
 	c.layers = config.Layers
@@ -67,6 +79,8 @@ func (c *SlidingWindowKVCache) Init(ctx *device.Context, config config.Config) e
 			c.Free()
 			return fmt.Errorf("failed to allocate K cache for layer %d", i)
 		}
+		// Zero initialize to prevent stale data from previous allocations
+		k.ZeroInit()
 		c.kCache[i] = k
 
 		v := ctx.NewTensor(c.windowSize, kvDim)
@@ -74,6 +88,8 @@ func (c *SlidingWindowKVCache) Init(ctx *device.Context, config config.Config) e
 			c.Free()
 			return fmt.Errorf("failed to allocate V cache for layer %d", i)
 		}
+		// Zero initialize to prevent stale data from previous allocations
+		v.ZeroInit()
 		c.vCache[i] = v
 	}
 

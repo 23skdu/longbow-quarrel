@@ -22,7 +22,7 @@ func TestRMSNormLinearQ4K(t *testing.T) {
 	for i := range inputData {
 		inputData[i] = 2.0
 	}
-	tIn := ctx.NewTensorFP32(M, K)
+	tIn := ctx.NewTensor(M, K) // Default to FP16
 	tIn.LoadFrom(inputData)
 
 	// 2. Prepare Norm Weight (all 0.5s)
@@ -31,7 +31,7 @@ func TestRMSNormLinearQ4K(t *testing.T) {
 	for i := range normWeightData {
 		normWeightData[i] = 0.5
 	}
-	tNormW := ctx.NewTensorFP32(1, K) // F32
+	tNormW := ctx.NewTensor(1, K) // NewTensor defaults to FP16
 	tNormW.LoadFrom(normWeightData)
 
 	// 3. Prepare Q4K Weights (Expected weight = 1.0)
@@ -81,8 +81,7 @@ func TestRMSNormLinearQ4K(t *testing.T) {
 	fusedRes := tFused.ToHost()
 
 	// 5. Run Sequential for Reference
-	tNormed := ctx.NewTensorPooled(M, K)
-	tIn.RMSNormFP32_ToF16_Into(tNormW, eps, tNormed)
+	tNormed := tIn.RMSNorm(tNormW, eps)
 	tSeq, _ := tNormed.Linear(tWeight)
 	seqRes := tSeq.ToHost()
 
