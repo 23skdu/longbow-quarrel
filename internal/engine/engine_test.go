@@ -584,7 +584,7 @@ func TestInitKVCache(t *testing.T) {
 				Layers:      2,
 				WindowSize:  32,
 				KVHeads:     2,
-				HeadDim:     8,
+				HeadDim:     0,
 				KVCacheSize: 1024,
 			},
 			expectedError: true,
@@ -639,5 +639,83 @@ func TestInitKVCache(t *testing.T) {
 				// For now, checking if it's not nil implies successful allocation to some degree
 			}
 		})
+	}
+}
+func TestNemotronStyleLoading(t *testing.T) {
+	modelPath := "test_nemotron_loading.gguf"
+	f, err := os.Create(modelPath)
+	if err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+	// Note: f.Close() is called inside if we need to ensure it's closed before NewEngine
+
+	// Magic + Version
+	binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMagic))
+	binary.Write(f, binary.LittleEndian, uint32(3))
+	// Tensor Count (3)
+	binary.Write(f, binary.LittleEndian, uint64(3))
+	// KV Count (4)
+	binary.Write(f, binary.LittleEndian, uint64(4))
+
+	// KV: llama.embedding_length = 128
+	writeString(f, "llama.embedding_length")
+	binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeUint32))
+	binary.Write(f, binary.LittleEndian, uint32(128))
+
+	// KV: llama.block_count = 1
+	writeString(f, "llama.block_count")
+	binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeUint32))
+	binary.Write(f, binary.LittleEndian, uint32(1))
+
+	// KV: llama.attention.head_count = 1
+	writeString(f, "llama.attention.head_count")
+	binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeUint32))
+	binary.Write(f, binary.LittleEndian, uint32(1))
+
+	// KV: general.architecture = "nemotron"
+	writeString(f, "general.architecture")
+	binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeString))
+	writeString(f, "nemotron")
+
+	// Tensors: nemotron.token_embd.weight, nemotron.output_norm.weight, nemotron.output.weight
+	names := []string{
+		"nemotron.token_embd.weight",
+		"nemotron.output_norm.weight",
+		"nemotron.output.weight",
+	}
+
+	for i, name := range names {
+		writeString(f, name)
+		binary.Write(f, binary.LittleEndian, uint32(2))             // Dims
+		binary.Write(f, binary.LittleEndian, uint64(128))           // Ne[0]
+		binary.Write(f, binary.LittleEndian, uint64(1))             // Ne[1]
+		binary.Write(f, binary.LittleEndian, uint32(0))             // Type F32
+		binary.Write(f, binary.LittleEndian, uint64(uint64(i)*512)) // Offset
+	}
+
+	f.Write(make([]byte, 1024)) // Header pad
+	for i := 0; i < 3; i++ {
+		binary.Write(f, binary.LittleEndian, make([]float32, 128))
+	}
+	f.Close()
+	defer os.Remove(modelPath)
+
+	conf := config.Default()
+	e, err := NewEngine(modelPath, conf)
+	if err != nil {
+		t.Fatalf("Failed to create engine: %v", err)
+	}
+	defer e.Ctx.Free()
+
+	if e.Weights.TokenEmb == nil {
+		t.Error("Expected TokenEmb to be loaded via suffix match")
+	}
+	if e.Weights.OutputNorm == nil {
+		t.Error("Expected OutputNorm to be loaded via suffix match")
+	}
+	// Note: Tied embeddings logic might overwrite Output if it's missing,
+	// but here we expect it to be loaded directly.
+	if e.Weights.Output == nil {
+		t.Error("Expected Output to be loaded via suffix match")
 	}
 }

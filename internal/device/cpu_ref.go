@@ -134,7 +134,7 @@ func CPUSwiGLU(gate, up []float32) []float32 {
 		panic("gate and up must have same length")
 	}
 
-	output := make([]float32, len(gate)/2)
+	output := make([]float32, len(gate))
 
 	for i := 0; i < len(output); i++ {
 		gateVal := gate[i]

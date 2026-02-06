@@ -7,6 +7,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"sort"
 	"syscall"
 	"unsafe"
 )
@@ -64,7 +65,7 @@ func LoadFile(path string) (*GGUFFile, error) {
 	file.Header.KVCount = binary.LittleEndian.Uint64(data[offset:])
 	offset += 8
 
-	fmt.Printf("GGUF: Version=%d, Tensors=%d, KV=%d\n", file.Header.Version, file.Header.TensorCount, file.Header.KVCount)
+	fmt.Fprintf(os.Stderr, "GGUF: Version=%d, Tensors=%d, KV=%d\n", file.Header.Version, file.Header.TensorCount, file.Header.KVCount)
 
 	// Ollama format stores KV pairs at the END of the file, not at the beginning
 	// If KVCount is 0, search for tokenizer data at the end
@@ -72,7 +73,7 @@ func LoadFile(path string) (*GGUFFile, error) {
 		// Search for "tokenizer.ggml.tokens" in the file
 		tokenizerIdx := bytes.Index(data, []byte("tokenizer.ggml.tokens"))
 		if tokenizerIdx > 0 {
-			fmt.Printf("DEBUG: Found ollama format with tokenizer at offset %d\n", tokenizerIdx)
+			fmt.Fprintf(os.Stderr, "DEBUG: Found ollama format with tokenizer at offset %d\n", tokenizerIdx)
 			// Parse KV pairs from the end of the file
 			// Search backwards from tokenizer to find the KV section
 			// The format is: [string key][uint32 type][value...] repeated
@@ -118,7 +119,7 @@ func LoadFile(path string) (*GGUFFile, error) {
 				}
 
 				file.KV[key] = val
-				fmt.Printf("DEBUG: Loaded KV: %s\n", key)
+				fmt.Fprintf(os.Stderr, "DEBUG: Loaded KV: %s\n", key)
 
 				// Move back to find more keys
 				pos = keyOff - 8
@@ -180,6 +181,7 @@ func LoadFile(path string) (*GGUFFile, error) {
 			Type:       typ,
 			Offset:     tensorOffset,
 		})
+		fmt.Fprintf(os.Stderr, "GGUF: Found tensor %s (Type: %v, Dims: %v)\n", name, typ, dimArr)
 	}
 
 	// Align to 32 bytes (GGUF alignment) before data starts
@@ -197,8 +199,8 @@ func LoadFile(path string) (*GGUFFile, error) {
 		alignment = uint64(alignVal)
 	}
 
-	fmt.Printf("DEBUG: Alignment = %d\n", alignment)
-	fmt.Printf("DEBUG: Offset BEFORE padding: %d\n", offset)
+	fmt.Fprintf(os.Stderr, "DEBUG: Alignment = %d\n", alignment)
+	fmt.Fprintf(os.Stderr, "DEBUG: Offset BEFORE padding: %d\n", offset)
 
 	// Pad offset to alignment
 	padding := alignment - (offset % alignment)
@@ -206,10 +208,11 @@ func LoadFile(path string) (*GGUFFile, error) {
 		offset += padding
 	}
 
-	fmt.Printf("DEBUG: Computed Padding Offset: %d\n", offset)
+	file.DataOffset = offset
+	fmt.Fprintf(os.Stderr, "DEBUG: Computed Padding Offset: %d\n", offset)
 
 	// Update tensor pointers
-	fmt.Printf("DEBUG: Data Start Offset: %d\n", offset)
+	fmt.Fprintf(os.Stderr, "DEBUG: Data Start Offset: %d\n", offset)
 	for _, t := range file.Tensors {
 		// Absolute offset = dataStart + t.Offset
 		absOffset := offset + t.Offset
@@ -299,4 +302,35 @@ func math_Float32frombits(b uint32) float32 {
 
 func (f *GGUFFile) Close() error {
 	return syscall.Munmap(f.Data)
+}
+
+func (f *GGUFFile) GetGapTensors() []*TensorInfo {
+	// Sort tensors by offset
+	sortedTensors := make([]*TensorInfo, len(f.Tensors))
+	copy(sortedTensors, f.Tensors)
+	sort.Slice(sortedTensors, func(i, j int) bool {
+		return sortedTensors[i].Offset < sortedTensors[j].Offset
+	})
+
+	var gaps []*TensorInfo
+	for i := 0; i < len(sortedTensors)-1; i++ {
+		curr := sortedTensors[i]
+		next := sortedTensors[i+1]
+
+		currEnd := curr.Offset + curr.SizeBytes()
+
+		if currEnd < next.Offset {
+			gapSize := next.Offset - currEnd
+			if gapSize > 1024*1024 { // Only care about large gaps (>1MB)
+				absStart := f.DataOffset + currEnd
+				absEnd := f.DataOffset + next.Offset
+				gaps = append(gaps, &TensorInfo{
+					Name:   fmt.Sprintf("gap_%d_at_%d", len(gaps), currEnd),
+					Offset: currEnd,
+					Data:   f.Data[absStart:absEnd],
+				})
+			}
+		}
+	}
+	return gaps
 }
