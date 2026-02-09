@@ -6,18 +6,11 @@ import (
 	"math"
 )
 
-// Block sizes
 const (
 	BlockSizeQ4K = 256
 	BlockSizeQ6K = 256
 )
 
-// DequantizeQ4K converts a Q4_K quantized tensor data to Float32.
-// Layout:
-// - d (f16): super-block scale
-// - dmin (f16): super-block min
-// - scales (12 bytes): 3-bit K-scales (mixed with L-scales)
-// - qs (128 bytes): 4-bit quants
 func DequantizeQ4K(data []byte, numElements int) []float32 {
 	if numElements%BlockSizeQ4K != 0 {
 		panic("DequantizeQ4K: numElements must be multiple of 256")
@@ -26,41 +19,31 @@ func DequantizeQ4K(data []byte, numElements int) []float32 {
 	numBlocks := numElements / BlockSizeQ4K
 	out := make([]float32, numElements)
 
-	// Size of one Q4_K block is 144 bytes
 	const blockSizeBytes = 144
 
 	for i := 0; i < numBlocks; i++ {
 		blockOffset := i * blockSizeBytes
-		if blockOffset+blockSizeBytes > len(data) {
-			break
-		}
 
 		blockData := data[blockOffset : blockOffset+blockSizeBytes]
 
-		// Parse header
 		d := Float16ToFloat32(binary.LittleEndian.Uint16(blockData[0:2]))
 		dmin := Float16ToFloat32(binary.LittleEndian.Uint16(blockData[2:4]))
 
-		scales := blockData[4:16] // 12 bytes
-		qs := blockData[16:144]   // 128 bytes
+		scales := blockData[4:16]
+		qs := blockData[16:144]
 
-		// Reference unpacking logic for Q4_K
-		// scales is 12 bytes. We extract 8 scales (sc) and 8 mins (m).
 		var sc [8]uint8
 		var m [8]uint8
 
-		// Extract scales and mins using llama.cpp's get_scale_min_k4 logic
 		for j := 0; j < 8; j++ {
-			if j < 4 {
-				sc[j] = scales[j] & 63
-				m[j] = scales[j+4] & 63
-			} else {
-				sc[j] = (scales[j+4] & 0xF) | ((scales[j-4] >> 6) << 4)
-				m[j] = (scales[j+4] >> 4) | ((scales[j] >> 6) << 4)
-			}
+			sc[j] = scales[j] & 63
+			m[j] = scales[j+4] & 63
+		}
+		for j := 8; j < 12; j++ {
+			sc[j-4] = (scales[j] & 0xF) | ((scales[j-8] >> 6) << 4)
+			m[j-4] = (scales[j] >> 4) | ((scales[j-4] >> 6) << 4)
 		}
 
-		// Precompute effective scales/mins
 		var D [8]float32
 		var M [8]float32
 
@@ -69,22 +52,77 @@ func DequantizeQ4K(data []byte, numElements int) []float32 {
 			M[j] = dmin * float32(m[j])
 		}
 
-		// Decode quants
+		baseIdx := i * BlockSizeQ4K
 		for j := 0; j < 8; j++ {
-			// For each sub-block j (32 weights)
-			qsOffset := j * 16 // 16 bytes
+			dj := D[j]
+			mj := M[j]
+			qsOffset := j * 16
+			idxBase := baseIdx + j*32
 			for k := 0; k < 16; k++ {
-				// Byte k contains low nibble for weight k and high nibble for weight k+16
 				b := qs[qsOffset+k]
-				v0 := b & 0xF
-				v1 := b >> 4
+				out[idxBase+k] = dj*float32(b&0xF) - mj
+				out[idxBase+k+16] = dj*float32(b>>4) - mj
+			}
+		}
+	}
 
-				// Weight indices relative to sub-block start
-				idx0 := j*32 + k
-				idx1 := idx0 + 16
+	return out
+}
 
-				out[i*BlockSizeQ4K+idx0] = D[j]*float32(v0) - M[j]
-				out[i*BlockSizeQ4K+idx1] = D[j]*float32(v1) - M[j]
+func DequantizeQ4KBranchless(data []byte, numElements int) []float32 {
+	if numElements%BlockSizeQ4K != 0 {
+		panic("DequantizeQ4KBranchless: numElements must be multiple of 256")
+	}
+
+	numBlocks := numElements / BlockSizeQ4K
+	out := make([]float32, numElements)
+
+	const blockSizeBytes = 144
+
+	for i := 0; i < numBlocks; i++ {
+		blockOffset := i * blockSizeBytes
+
+		blockData := data[blockOffset : blockOffset+blockSizeBytes]
+
+		d := Float16ToFloat32(binary.LittleEndian.Uint16(blockData[0:2]))
+		dmin := Float16ToFloat32(binary.LittleEndian.Uint16(blockData[2:4]))
+
+		scales := blockData[4:16]
+		qs := blockData[16:144]
+
+		var sc [8]uint8
+		var m [8]uint8
+
+		for j := 0; j < 4; j++ {
+			sc[j] = scales[j] & 63
+			m[j] = scales[j+4] & 63
+		}
+
+		for j := 4; j < 8; j++ {
+			sc[j] = (scales[j+4] & 0xF) | ((scales[j-4] >> 6) << 4)
+			m[j] = (scales[j+4] >> 4) | ((scales[j] >> 6) << 4)
+		}
+
+		var D [8]float32
+		var M [8]float32
+
+		for j := 0; j < 8; j++ {
+			D[j] = d * float32(sc[j])
+			M[j] = dmin * float32(m[j])
+		}
+
+		baseIdx := i * BlockSizeQ4K
+		for j := 0; j < 8; j++ {
+			dj := D[j]
+			mj := M[j]
+			qsOffset := j * 16
+			idxBase := baseIdx + j*32
+			for k := 0; k < 16; k++ {
+				b := qs[qsOffset+k]
+				v0 := float32(b & 0xF)
+				v1 := float32(b >> 4)
+				out[idxBase+k] = dj*v0 - mj
+				out[idxBase+k+16] = dj*v1 - mj
 			}
 		}
 	}

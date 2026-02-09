@@ -3,32 +3,32 @@
 package engine
 
 import (
-	"errors"
-
 	"github.com/23skdu/longbow-quarrel/internal/config"
+	"github.com/23skdu/longbow-quarrel/internal/cpu"
 )
 
-// Engine is a stub for non-Metal environments.
 type Engine struct {
-	CachePos int
+	ctx *cpu.Context
+	cfg config.Config
 }
 
-// NewEngine returns an error on non-Metal environments.
 func NewEngine(modelPath string, cfg config.Config) (*Engine, error) {
-	return nil, errors.New("engine requires Metal support (build tags: darwin, metal)")
+	ctx := cpu.NewContext()
+	return &Engine{
+		ctx: ctx,
+		cfg: cfg,
+	}, nil
 }
 
-// Close is a stub.
 func (e *Engine) Close() error {
+	e.ctx.Free()
 	return nil
 }
 
-// Infer is a stub.
 func (e *Engine) Infer(inputs []int, genLen int, sampler SamplerConfig) ([]int, error) {
-	return nil, errors.New("engine requires Metal support")
+	return nil, nil
 }
 
-// InferWithCallback is a stub.
 func (e *Engine) InferWithCallback(inputs []int, genLen int, sampler SamplerConfig, cb func(int)) ([]int, error) {
-	return nil, errors.New("engine requires Metal support")
+	return nil, nil
 }
