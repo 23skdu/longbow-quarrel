@@ -1,0 +1,196 @@
+package templates
+
+import (
+	"html/template"
+	"io"
+)
+
+var indexTemplate = `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Longbow-Quarrel WebUI</title>
+    <link rel="stylesheet" href="/static/css/main.css">
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+</head>
+<body>
+    <div id="app">
+        <header class="header">
+            <div class="header-left">
+                <h1>Longbow-Quarrel</h1>
+                <span class="version">v0.0.1</span>
+            </div>
+            <div class="header-right">
+                <div class="connection-status" id="connectionStatus">
+                    <span class="status-dot"></span>
+                    <span class="status-text">Disconnected</span>
+                </div>
+                <button class="icon-button" id="themeToggle" title="Toggle Theme">
+                    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="5"></circle>
+                        <line x1="12" y1="1" x2="12" y2="3"></line>
+                        <line x1="12" y1="21" x2="12" y2="23"></line>
+                        <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+                        <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+                        <line x1="1" y1="12" x2="3" y2="12"></line>
+                        <line x1="21" y1="12" x2="23" y2="12"></line>
+                        <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+                        <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+                    </svg>
+                </button>
+            </div>
+        </header>
+        <main class="main-container">
+            <aside class="sidebar" id="sidebar">
+                <div class="sidebar-section">
+                    <h2>Model</h2>
+                    <select id="modelSelect" class="select-input">
+                        <option value="">Select a model...</option>
+                    </select>
+                    <div class="model-info" id="modelInfo" style="display: none;">
+                        <div class="info-row">
+                            <span class="info-label">Parameters</span>
+                            <span class="info-value" id="modelParams">--</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">Quantization</span>
+                            <span class="info-value" id="modelQuant">--</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="sidebar-section">
+                    <h2>Settings</h2>
+                    <div class="setting-group">
+                        <label class="setting-label">
+                            Temperature
+                            <span class="setting-value" id="temperatureValue">0.7</span>
+                        </label>
+                        <input type="range" id="temperature" class="range-input" min="0" max="2" step="0.1" value="0.7">
+                    </div>
+                    <div class="setting-group">
+                        <label class="setting-label">Top K</label>
+                        <input type="number" id="topK" class="number-input" min="1" max="100" value="40">
+                    </div>
+                    <div class="setting-group">
+                        <label class="setting-label">
+                            Top P
+                            <span class="setting-value" id="topPValue">0.95</span>
+                        </label>
+                        <input type="range" id="topP" class="range-input" min="0" max="1" step="0.05" value="0.95">
+                    </div>
+                    <div class="setting-group">
+                        <label class="setting-label">Max Tokens</label>
+                        <input type="number" id="maxTokens" class="number-input" min="1" max="4096" value="1024">
+                    </div>
+                </div>
+                <div class="sidebar-section">
+                    <h2>Conversation</h2>
+                    <button class="button button-secondary" id="newChatBtn">
+                        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="12" y1="5" x2="12" y2="19"></line>
+                            <line x1="5" y1="12" x2="19" y2="12"></line>
+                        </svg>
+                        New Chat
+                    </button>
+                    <button class="button button-secondary" id="clearHistoryBtn">
+                        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polyline points="3 6 5 6 21 6"></polyline>
+                            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                        </svg>
+                        Clear History
+                    </button>
+                    <button class="button button-secondary" id="exportBtn">
+                        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                            <polyline points="7 10 12 15 17 10"></polyline>
+                            <line x1="12" y1="15" x2="12" y2="3"></line>
+                        </svg>
+                        Export
+                    </button>
+                </div>
+                <div class="sidebar-section">
+                    <h2>Quick Prompts</h2>
+                    <div class="quick-prompts">
+                        <button class="quick-prompt" data-prompt="Summarize this text">Summarize</button>
+                        <button class="quick-prompt" data-prompt="Explain this concept">Explain</button>
+                        <button class="quick-prompt" data-prompt="Translate to Spanish">Translate</button>
+                        <button class="quick-prompt" data-prompt="Write code for">Code</button>
+                    </div>
+                </div>
+            </aside>
+            <section class="chat-section">
+                <div class="chat-container" id="chatContainer">
+                    <div class="welcome-message">
+                        <div class="welcome-icon">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                                <path d="M12 2L2 7l10 5 10-5-10-5z"></path>
+                                <path d="M2 17l10 5 10-5"></path>
+                                <path d="M2 12l10 5 10-5"></path>
+                            </svg>
+                        </div>
+                        <h2>Welcome to Longbow-Quarrel</h2>
+                        <p>Select a model and start chatting with your AI assistant.</p>
+                        <div class="feature-list">
+                            <div class="feature">
+                                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="20 6 9 17 4 12"></polyline>
+                                </svg>
+                                <span>Streaming token generation</span>
+                            </div>
+                            <div class="feature">
+                                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="20 6 9 17 4 12"></polyline>
+                                </svg>
+                                <span>Configurable sampling</span>
+                            </div>
+                            <div class="feature">
+                                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="20 6 9 17 4 12"></polyline>
+                                </svg>
+                                <span>Dark/Light theme</span>
+                            </div>
+                            <div class="feature">
+                                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="20 6 9 17 4 12"></polyline>
+                                </svg>
+                                <span>Conversation history</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="input-area">
+                    <div class="input-wrapper">
+                        <textarea id="promptInput" class="prompt-input" placeholder="Enter your prompt..." rows="1"></textarea>
+                        <div class="input-actions">
+                            <span class="token-count" id="tokenCount">0 tokens</span>
+                            <button class="send-button" id="sendButton" disabled>
+                                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <line x1="22" y1="2" x2="11" y2="13"></line>
+                                    <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+    <script src="/static/js/websocket.js"></script>
+    <script src="/static/js/ui.js"></script>
+</body>
+</html>
+`
+
+var tmpl *template.Template
+
+func InitTemplates() error {
+	var err error
+	tmpl, err = template.New("index").Parse(indexTemplate)
+	return err
+}
+
+func RenderIndex(w io.Writer) error {
+	return tmpl.Execute(w, nil)
+}
