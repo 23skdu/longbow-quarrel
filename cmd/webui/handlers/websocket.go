@@ -1,3 +1,5 @@
+//go:build webui
+
 package handlers
 
 import (
@@ -48,7 +50,7 @@ type Connection struct {
 	send     chan []byte
 	mu       sync.Mutex
 	stopChan chan struct{}
-	adapter  *engine.EngineAdapter
+	adapter  engine.EngineAdapter
 }
 
 func WebSocketHandler(cfg config.Config) http.HandlerFunc {

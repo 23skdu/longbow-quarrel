@@ -1,0 +1,410 @@
+openapi: 3.0.3
+info:
+  title: Longbow-Quarrel WebUI API
+  description: REST API for the Longbow-Quarrel LLM inference engine web interface
+  version: 0.0.1
+  contact:
+    name: Longbow-Quarrel
+    url: https://github.com/23skdu/longbow-quarrel
+
+servers:
+  - url: http://localhost:8080
+    description: Local development server
+  - url: https://api.longbow.example.com
+    description: Production server
+
+tags:
+  - name: Models
+    description: Model management endpoints
+  - name: Inference
+    description: Text generation endpoints
+  - name: Health
+    description: Health and status endpoints
+  - name: Metrics
+    description: Observability endpoints
+
+paths:
+  /api/models:
+    get:
+      tags:
+        - Models
+      summary: List available models
+      description: Returns a list of all available models and their status
+      operationId: listModels
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ModelInfo'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/models/{modelName}:
+    get:
+      tags:
+        - Models
+      summary: Get model information
+      description: Returns detailed information about a specific model
+      operationId: getModel
+      parameters:
+        - name: modelName
+          in: path
+          required: true
+          schema:
+            type: string
+            description: Name or path of the model
+      responses:
+        '200':
+          description: Model information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/generate:
+    post:
+      tags:
+        - Inference
+      summary: Generate text (single-shot)
+      description: Generates text from a prompt without streaming
+      operationId: generate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenerateRequest'
+      responses:
+        '200':
+          description: Generated text
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenerateResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/stream:
+    post:
+      tags:
+        - Inference
+      summary: Generate text (streaming)
+      description: Generates text from a prompt with streaming token response
+      operationId: stream
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenerateRequest'
+      responses:
+        '200':
+          description: Stream of tokens
+          content:
+            text/event-stream:
+              schema:
+                $ref: '#/components/schemas/StreamResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /health:
+    get:
+      tags:
+        - Health
+      summary: Health check
+      description: Returns the health status of the service
+      operationId: health
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthStatus'
+
+  /healthz:
+    get:
+      tags:
+        - Health
+      summary: Liveness probe
+      description: Returns 200 if the service is alive
+      operationId: liveness
+      responses:
+        '200':
+          description: Service is alive
+
+  /readyz:
+    get:
+      tags:
+        - Health
+      summary: Readiness probe
+      description: Returns 200 if the service is ready to accept traffic
+      operationId: readiness
+      responses:
+        '200':
+          description: Service is ready
+        '503':
+          description: Service is not ready
+
+  /version:
+    get:
+      tags:
+        - Health
+      summary: Version information
+      description: Returns version information about the service
+      operationId: version
+      responses:
+        '200':
+          description: Version info
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VersionInfo'
+
+  /metrics:
+    get:
+      tags:
+        - Metrics
+      summary: Prometheus metrics
+      description: Returns Prometheus metrics in OpenMetrics format
+      operationId: metrics
+      responses:
+        '200':
+          description: Metrics in Prometheus format
+
+components:
+  schemas:
+    ModelInfo:
+      type: object
+      properties:
+        name:
+          type: string
+          description: Model name
+        path:
+          type: string
+          description: Model file path
+        loaded:
+          type: boolean
+          description: Whether the model is currently loaded
+
+    ModelDetail:
+      type: object
+      properties:
+        name:
+          type: string
+        path:
+          type: string
+        loaded:
+          type: boolean
+        parameters:
+          type: string
+          description: Number of parameters (e.g., "1.7B")
+        quantization:
+          type: string
+          description: Quantization method
+        context_length:
+          type: integer
+          description: Maximum context length
+        memory_usage:
+          type: number
+          description: Current memory usage in bytes
+
+    GenerateRequest:
+      type: object
+      required:
+        - prompt
+      properties:
+        prompt:
+          type: string
+          description: Input prompt for text generation
+        model:
+          type: string
+          description: Model name or path (optional, uses default if not specified)
+        temperature:
+          type: number
+          minimum: 0
+          maximum: 2
+          default: 0.7
+          description: Sampling temperature
+        top_k:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 40
+          description: Top-K sampling parameter
+        top_p:
+          type: number
+          minimum: 0
+          maximum: 1
+          default: 0.95
+          description: Top-P sampling parameter
+        max_tokens:
+          type: integer
+          minimum: 1
+          maximum: 4096
+          default: 1024
+          description: Maximum number of tokens to generate
+        stream:
+          type: boolean
+          default: false
+          description: Whether to stream the response
+
+    GenerateResponse:
+      type: object
+      properties:
+        text:
+          type: string
+          description: Generated text
+        tokens_generated:
+          type: integer
+          description: Number of tokens generated
+        tokens_per_sec:
+          type: number
+          description: Generation speed in tokens/second
+        finish_reason:
+          type: string
+          enum:
+            - stop
+            - length
+            - error
+          description: Reason for stopping generation
+
+    StreamResponse:
+      type: object
+      properties:
+        token:
+          type: string
+          description: Generated token text
+        token_id:
+          type: integer
+          description: Index of the token in the generation
+        complete:
+          type: boolean
+          description: Whether this is the last token
+        tokens_per_sec:
+          type: number
+          description: Running average of tokens/second
+
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+          enum:
+            - healthy
+            - degraded
+            - unhealthy
+        timestamp:
+          type: string
+          format: date-time
+        version:
+          type: string
+        uptime:
+          type: string
+        checks:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              status:
+                type: string
+              message:
+                type: string
+
+    VersionInfo:
+      type: object
+      properties:
+        version:
+          type: string
+        commit:
+          type: string
+        go_version:
+          type: string
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+          description: Error message
+        code:
+          type: string
+          description: Error code
+        request_id:
+          type: string
+          description: Request ID for debugging
+
+  responses:
+    Unauthorized:
+      description: Authentication failed
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: "Invalid API key"
+            code: "UNAUTHORIZED"
+
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: "Invalid request body"
+            code: "BAD_REQUEST"
+
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: "Model not found"
+            code: "NOT_FOUND"
+
+    InternalError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: "Internal server error"
+            code: "INTERNAL_ERROR"
+
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: API key authentication using the format `ApiKey YOUR_KEY`
+
+security:
+  - ApiKeyAuth: []
+
+externalDocs:
+  description: Longbow-Quarrel GitHub Repository
+  url: https://github.com/23skdu/longbow-quarrel

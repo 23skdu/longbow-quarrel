@@ -1,14 +1,18 @@
+//go:build webui
+
 package config
 
 type Config struct {
-	Port        int
-	MetricsPort int
-	Host        string
-	ModelPath   string
-	MaxTokens   int
-	Temperature float64
-	TopK        int
-	TopP        float64
+	Port           int
+	MetricsPort    int
+	Host           string
+	ModelPath      string
+	MaxTokens      int
+	Temperature    float64
+	TopK           int
+	TopP           float64
+	APIKey         string
+	AllowedOrigins []string
 }
 
 func DefaultConfig() Config {

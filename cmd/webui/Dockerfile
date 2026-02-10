@@ -1,32 +1,143 @@
-# Longbow-Quarrel WebUI Docker Image
+# syntax=docker/dockerfile:1.4
 
-FROM golang:1.25-alpine AS builder
+# =============================================================================
+# Stage 1: Builder
+# =============================================================================
+FROM --platform=$BUILDPLATFORM golang:1.21-alpine AS builder
 
-WORKDIR /app
+ARG TARGETOS
+ARG TARGETARCH
+ARG TARGETVARIANT
 
-COPY go.mod go.sum ./
+WORKDIR /src
+
+RUN apk add --no-cache ca-certificates git build-base
+
+# Copy go.mod and go.sum first for better caching
+COPY go.mod go.sum* ./
+
 RUN go mod download
 
+# Copy the rest of the source code
 COPY . .
 
-RUN CGO_ENABLED=0 GOOS=linux go build -tags webui -ldflags="-s -w" -o webui ./cmd/webui/
+# Build the webui binary with CUDA support
+RUN CGO_ENABLED=1 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+    go build -tags "webui,cuda" \
+    -ldflags="-s -w -linkmode=external -extldflags=-static" \
+    -o /out/webui ./cmd/webui
 
-FROM alpine:3.19
+# =============================================================================
+# Stage 2: Runtime
+# =============================================================================
+FROM --platform=$TARGETPLATFORM nvidia/cuda:12.2-runtime-ubuntu22.04 AS runtime
 
-RUN apk --no-cache add ca-certificates
+ARG WEBUI_VERSION=dev
 
-WORKDIR /app
+LABEL maintainer="Longbow-Quarrel <dev@longbow.example.com>"
+LABEL description="Longbow-Quarrel WebUI - LLM Inference Engine Web Interface"
+LABEL version="${WEBUI_VERSION}"
 
-COPY --from=builder /app/webui .
-COPY --from=builder /app/cmd/webui/static ./static
-COPY --from=builder /app/cmd/webui/templates ./templates
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libcudnn8 \
+    libcudnn8-dev \
+    libnccl2 \
+    libnccl-dev \
+    && rm -rf /var/lib/apt/lists/*
 
+# Create non-root user
+RUN groupadd -r quarrel && useradd -r -g quarrel quarrel && \
+    mkdir /home/quarrel && chown quarrel:quarrel /home/quarrel
+
+# Set working directory
+WORKDIR /home/quarrel
+
+# Copy binary from builder
+COPY --from=builder /out/webui /usr/local/bin/webui
+
+# Copy static assets
+COPY --from=builder --chown=quarrel:quarrel /src/cmd/webui/static ./static
+COPY --from=builder --chown=quarrel:quarrel /src/cmd/webui/templates ./templates
+
+# Create directories for models and data
+RUN mkdir -p /data/models /data/cache && \
+    chown -R quarrel:quarrel /data
+
+# Expose ports
 EXPOSE 8080 9090
 
+# Set environment variables
+ENV WEBUI_PORT=8080
+ENV WEBUI_METRICS_PORT=9090
+ENV WEBUI_HOST=0.0.0.0
+ENV WEBUI_DATA_DIR=/data
+ENV WEBUI_CACHE_DIR=/data/cache
+
+# Switch to non-root user
+USER quarrel
+
+# Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1
+    CMD curl -f http://localhost:${WEBUI_PORT}/healthz || exit 1
 
-ENV PORT=8080
-ENV METRICS_PORT=9090
+# Entrypoint
+ENTRYPOINT ["webui"]
 
-CMD ["sh", "-c", "./webui --port ${PORT} --metrics-port ${METRICS_PORT}"]
+# Default command
+CMD ["--port", "${WEBUI_PORT}", "--metrics-port", "${WEBUI_METRICS_PORT}", "--host", "${WEBUI_HOST}"]
+
+# =============================================================================
+# Stage 3: CPU-only Runtime (alternative)
+# =============================================================================
+FROM --platform=$TARGETPLATFORM alpine:3.19 AS runtime-cpu
+
+ARG WEBUI_VERSION=dev
+
+LABEL maintainer="Longbow-Quarrel <dev@longbow.example.com>"
+LABEL description="Longbow-Quarrel WebUI - LLM Inference Engine Web Interface (CPU-only)"
+LABEL version="${WEBUI_VERSION}"
+
+# Install runtime dependencies
+RUN apk add --no-cache ca-certificates curl
+
+# Create non-root user
+RUN addgroup -S quarrel && adduser -S quarrel -G quarrel && \
+    mkdir /home/quarrel && chown quarrel:quarrel /home/quarrel
+
+WORKDIR /home/quarrel
+
+# Copy binary from builder
+COPY --from=builder /out/webui /usr/local/bin/webui
+
+# Copy static assets
+COPY --from=builder --chown=quarrel:quarrel /src/cmd/webui/static ./static
+COPY --from=builder --chown=quarrel:quarrel /src/cmd/webui/templates ./templates
+
+# Create directories for models and data
+RUN mkdir -p /data/models /data/cache && \
+    chown -R quarrel:quarrel /data
+
+# Expose ports
+EXPOSE 8080 9090
+
+# Set environment variables
+ENV WEBUI_PORT=8080
+ENV WEBUI_METRICS_PORT=9090
+ENV WEBUI_HOST=0.0.0.0
+ENV WEBUI_DATA_DIR=/data
+ENV WEBUI_CACHE_DIR=/data/cache
+
+# Switch to non-root user
+USER quarrel
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:${WEBUI_PORT}/healthz || exit 1
+
+# Entrypoint
+ENTRYPOINT ["webui"]
+
+# Default command
+CMD ["--port", "${WEBUI_PORT}", "--metrics-port", "${WEBUI_METRICS_PORT}", "--host", "${WEBUI_HOST}"]

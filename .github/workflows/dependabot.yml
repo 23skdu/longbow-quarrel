@@ -1,0 +1,125 @@
+name: Dependabot Updates
+
+on:
+  schedule:
+    - cron: '0 0 * * 0'  # Weekly on Sunday at midnight
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+  pull_request:
+    paths:
+      - '.github/workflows/dependabot.yml'
+
+permissions:
+  contents: read
+  packages: read
+  security-events: write
+  pull-requests: write
+
+jobs:
+  dependabot:
+    runs-on: ubuntu-latest
+    if: ${{ github.repository_owner == '23skdu' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Fetch Dependabot updates
+        uses: dependabot/fetch-metadata@v2
+        with:
+          codestats: false
+
+  # Go Module Updates
+  go-modules:
+    runs-on: ubuntu-latest
+    if: ${{ github.repository_owner == '23skdu' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Create Go Dependabot PR
+        uses: dependabot/dependabot-core-actions@v4
+        with:
+          package-ecosystem: gomod
+          directory: /
+          vendor: false
+
+  # npm Package Updates (WebUI Tests)
+  npm-packages:
+    runs-on: ubuntu-latest
+    if: ${{ github.repository_owner == '23skdu' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: cmd/webui/tests/package.json
+          cache: 'npm'
+
+      - name: Create npm Dependabot PR
+        uses: dependabot/dependabot-core-actions@v4
+        with:
+          package-ecosystem: npm
+          directory: /cmd/webui/tests
+          vendor: false
+
+  # Docker Updates
+  docker:
+    runs-on: ubuntu-latest
+    if: ${{ github.repository_owner == '23skdu' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create Docker Dependabot PR
+        uses: dependabot/dependabot-core-actions@v4
+        with:
+          package-ecosystem: docker
+          directory: /cmd/webui
+
+  # GitHub Actions Updates
+  github-actions:
+    runs-on: ubuntu-latest
+    if: ${{ github.repository_owner == '23skdu' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create GitHub Actions Dependabot PR
+        uses: dependabot/dependabot-core-actions@v4
+        with:
+          package-ecosystem: github-actions
+          directory: /
+
+  # Security Updates Only
+  security-updates:
+    runs-on: ubuntu-latest
+    if: ${{ github.repository_owner == '23skdu' }}
+    permissions:
+      security-events: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run Dependabot Security Updates
+        uses: dependabot/dependabot-core-actions@v4
+        with:
+          package-ecosystem: gomod
+          directory: /
+          open-pull-requests-limit: 10
+          vendor: false
+
+      - name: Upload security advisory DB
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: dependabot.sarif
+          category: "/dependabot"

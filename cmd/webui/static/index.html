@@ -1,20 +1,10 @@
-//go:build webui
-
-package templates
-
-import (
-	"html/template"
-	"io"
-)
-
-var indexTemplate = `
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Longbow-Quarrel WebUI</title>
-    <link rel="stylesheet" href="/static/css/main.css">
+    <link rel="stylesheet" href="/css/main.css">
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 </head>
 <body>
@@ -166,7 +156,7 @@ var indexTemplate = `
                     <div class="input-wrapper">
                         <textarea id="promptInput" class="prompt-input" placeholder="Enter your prompt..." rows="1"></textarea>
                         <div class="input-actions">
-                            <span class="token-count" id="tokenCount">0 tokens</span>
+                            <span class="token-count" id="tokenCount">0 chars</span>
                             <button class="send-button" id="sendButton" disabled>
                                 <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                     <line x1="22" y1="2" x2="11" y2="13"></line>
@@ -179,20 +169,7 @@ var indexTemplate = `
             </section>
         </main>
     </div>
-    <script src="/static/js/websocket.js"></script>
-    <script src="/static/js/ui.js"></script>
+    <script src="/js/websocket.js"></script>
+    <script src="/js/ui.js"></script>
 </body>
 </html>
-`
-
-var tmpl *template.Template
-
-func InitTemplates() error {
-	var err error
-	tmpl, err = template.New("index").Parse(indexTemplate)
-	return err
-}
-
-func RenderIndex(w io.Writer) error {
-	return tmpl.Execute(w, nil)
-}
