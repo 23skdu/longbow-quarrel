@@ -103,9 +103,9 @@ func main() {
 		fmt.Printf("Raw characters: %v\n", tokenChars)
 	}
 
-		fmt.Printf("\n=== SUMMARY ===\n")
-		fullTokens := append(inputTokens, allGenerated...)
-		fmt.Printf("All tokens: %v\n", fullTokens)
-		fmt.Printf("Decoded: %q\n", tokenizer.Decode(fullTokens))
-		fmt.Printf("Expected (manual): The capital of France is\n")
+	fmt.Printf("\n=== SUMMARY ===\n")
+	fullTokens := append(inputTokens, allGenerated...)
+	fmt.Printf("All tokens: %v\n", fullTokens)
+	fmt.Printf("Decoded: %q\n", tokenizer.Decode(fullTokens))
+	fmt.Printf("Expected (manual): The capital of France is\n")
 }

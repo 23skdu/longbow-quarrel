@@ -1,5 +1,3 @@
-//go:build darwin && metal
-
 package tokenizer
 
 import (
