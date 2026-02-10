@@ -1,0 +1,58 @@
+version: "3.8"
+
+services:
+  quarrel-cuda:
+    build:
+      context: .
+      dockerfile: Dockerfile.cuda
+    image: longbow-quarrel:cuda
+    container_name: quarrel-cuda
+    runtime: nvidia
+    volumes:
+      - ${MODEL_PATH:-./models}:/data:ro
+      - ${QUARREL_DATA:-./data}:/app/data
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    ports:
+      - "9090:9090"
+    command: >
+      --model /data/${MODEL:-smollm2.gguf}
+      --prompt "The capital of France is"
+      --n 50
+      --metrics :9090
+
+  quarrel-cuda-interactive:
+    build:
+      context: .
+      dockerfile: Dockerfile.cuda
+    image: longbow-quarrel:cuda
+    container_name: quarrel-interactive
+    runtime: nvidia
+    stdin_open: true
+    tty: true
+    volumes:
+      - ${MODEL_PATH:-./models}:/data:ro
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command: >
+      --model /data/${MODEL:-smollm2.gguf}
+      --interactive
+      --prompt "You are a helpful AI assistant. "
+
+networks:
+  default:
+    name: quarrel-network

@@ -1,4 +1,4 @@
-//go:build linux && cuda
+//go:build darwin && metal
 
 package main
 
@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/23skdu/longbow-quarrel/internal/config"
-	"github.com/23skdu/longbow-quarrel/internal/device"
 	"github.com/23skdu/longbow-quarrel/internal/engine"
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
 	"github.com/23skdu/longbow-quarrel/internal/logger"
@@ -45,7 +44,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	fmt.Printf("=== Longbow-Quarrel CUDA ===\n")
+	fmt.Printf("=== Longbow-Quarrel Metal ===\n")
 	fmt.Printf("Model: %s\n", *modelPath)
 
 	resolvedPath, err := ollama.ResolveModelPath(*modelPath)
@@ -64,40 +63,31 @@ func main() {
 	if v, ok := f.KV["general.architecture"].(string); ok {
 		arch = v
 	}
-	fmt.Printf("Architecture: %s\n", arch)
 
-	layers := 0
+	layers := 1
 	if v, ok := f.KV["llama.block_count"].(uint32); ok {
 		layers = int(v)
 	}
-	fmt.Printf("Layers: %d\n", layers)
 
-	vocabSize := 0
+	vocabSize := 49152
 	if v, ok := f.KV["llama.vocab_size"].(uint32); ok {
 		vocabSize = int(v)
 	}
+
+	seqLen := 2048
+	if v, ok := f.KV["llama.context_length"].(uint32); ok {
+		seqLen = int(v)
+	}
+
+	fmt.Printf("Architecture: %s\n", arch)
+	fmt.Printf("Layers: %d\n", layers)
 	fmt.Printf("Vocab: %d\n", vocabSize)
-
-	fmt.Printf("\n=== Initializing CUDA Backend ===\n")
-
-	ctx, err := device.NewCUDAContext()
-	if err != nil {
-		log.Fatalf("Failed to create CUDA context: %v", err)
-	}
-	defer ctx.Free()
-
-	cudaModel, err := ctx.NewCUDAModel(f, true, *kvCacheSize)
-	if err != nil {
-		log.Fatalf("Failed to load model to GPU: %v", err)
-	}
-	defer cudaModel.Free()
-
-	fmt.Printf("GPU Memory: %.1f MB\n", float64(device.CUDAAllocatedBytes())/1e6)
-	fmt.Printf("KV Cache: %d layers\n", len(cudaModel.KCache))
 
 	go func() {
 		http.Handle("/metrics", promhttp.Handler())
+		logger.Log.Info("Metrics serving", "address", *metricsAddr+"/metrics")
 		if err := http.ListenAndServe(*metricsAddr, nil); err != nil {
+			logger.Log.Info("Metrics server error", "error", err)
 		}
 	}()
 
@@ -110,53 +100,65 @@ func main() {
 		log.Fatalf("Failed to initialize tokenizer: %v", err)
 	}
 
-	engineConfig := config.Config{
+	cfg := config.Config{
 		KVCacheSize: *kvCacheSize,
 	}
 
-	e, err := engine.NewEngine(*modelPath, engineConfig)
+	e, err := engine.NewEngine(*modelPath, cfg)
 	if err != nil {
 		log.Fatalf("Failed to initialize engine: %v", err)
 	}
 	defer e.Close()
 
-	promptTokens := tok.Encode(*prompt)
-	fmt.Printf("Prompt tokens: %d\n", len(promptTokens))
+	inputTokens := tok.Encode(*prompt)
+	inputTokens = append([]int{1}, inputTokens...)
 
-	samplerConfig := engine.SamplerConfig{
-		Temperature: *temperature,
-		TopK:        *topK,
-		TopP:        *topP,
-		RepPenalty:  *repPenalty,
-	}
+	logger.Log.Info("Starting inference", "num_tokens", *numTokens)
 
-	startTime := time.Now()
+	doneChan := make(chan struct{})
 
-	if *streamOutput {
-		fmt.Printf("\nGenerating:\n")
-		_, err := e.InferWithCallback(promptTokens, *numTokens, samplerConfig, func(token int) {
-			text := tok.Decode([]int{token})
-			fmt.Print(text)
-		})
-		fmt.Printf("\n")
+	go func() {
+		start := time.Now()
+
+		samplerConfig := engine.SamplerConfig{
+			Temperature: *temperature,
+			TopK:        *topK,
+			TopP:        *topP,
+			RepPenalty:  *repPenalty,
+			Seed:        time.Now().UnixNano(),
+		}
+
+		var result []int
+		var err error
+
+		if *streamOutput {
+			fmt.Print("Streaming output: ")
+			result, err = e.InferWithCallback(inputTokens, *numTokens, samplerConfig, func(token int) {
+				decoded := tok.Decode([]int{token})
+				fmt.Print(decoded)
+			})
+			fmt.Println(" [END]")
+		} else {
+			result, err = e.Infer(inputTokens, *numTokens, samplerConfig)
+		}
+
 		if err != nil {
-			log.Fatalf("Generation failed: %v", err)
-		}
-	} else {
-		outputTokens, err := e.Infer(promptTokens, *numTokens, samplerConfig)
-		if err != nil {
-			log.Fatalf("Generation failed: %v", err)
-		}
+			logger.Log.Info("Inference error", "error", err)
+		} else {
+			duration := time.Since(start)
+			tokensPerSec := float64(len(result)) / duration.Seconds()
+			logger.Log.Info("Inference complete", "tokens", len(result), "duration", duration, "tps", tokensPerSec)
 
-		elapsed := time.Since(startTime)
-		tokensPerSecond := float64(len(outputTokens)) / elapsed.Seconds()
-
-		fmt.Printf("\n=== Complete ===\n")
-		fmt.Printf("%d tokens in %.2fs (%.1f t/s)\n",
-			len(outputTokens), elapsed.Seconds(), tokensPerSecond)
-
-		if len(outputTokens) > 0 {
-			fmt.Printf("\n%s\n", tok.Decode(outputTokens))
+			fmt.Printf("\n=== Complete ===\n")
+			fmt.Printf("%d tokens in %v (%.1f t/s)\n\n", len(result), duration, tokensPerSec)
+			fmt.Println(tok.Decode(result))
 		}
+		close(doneChan)
+	}()
+
+	select {
+	case <-doneChan:
+	case <-sigChan:
+		log.Println("Interrupt received, shutting down...")
 	}
 }
