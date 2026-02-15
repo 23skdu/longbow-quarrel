@@ -46,13 +46,6 @@ func MetricsHandler() http.HandlerFunc {
 	}
 }
 
-func HealthHandler() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"status": "healthy"}`))
-	}
-}
-
 func RecordInference(model string, duration float64, tokens int) {
 	inferenceDuration.WithLabelValues(model).Observe(duration)
 	totalTokens.Add(float64(tokens))

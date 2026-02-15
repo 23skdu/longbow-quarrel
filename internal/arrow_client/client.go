@@ -52,6 +52,7 @@ func NewFlightClient(dataHost string, dataPort int, metaHost string, metaPort in
 
 // Connect establishes connection to Flight server
 func (fc *FlightClient) Connect(ctx context.Context) error {
+	//nolint:staticcheck // SA1019: flight.NewFlightClient is deprecated but no suitable replacement in current arrow version
 	client, err := flight.NewFlightClient(fc.dataAddr, nil, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return fmt.Errorf("failed to create Flight client: %w", err)
@@ -140,6 +141,7 @@ func (fc *FlightClient) DoPut(ctx context.Context, vectors [][]float32, ids []st
 		}
 	}
 
+	//nolint:staticcheck // SA1019: builder.NewRecord is deprecated but NewRecordBatch API not available in current arrow version
 	record := builder.NewRecord()
 	defer record.Release()
 
@@ -224,6 +226,7 @@ func (fc *FlightClient) DoGet(ctx context.Context, ids []string) (*RecordBatch, 
 	var vecDim int
 
 	for reader.Next() {
+		//nolint:staticcheck // SA1019: reader.Record is deprecated but RecordBatch API not available in current arrow version
 		record := reader.Record()
 		if record == nil {
 			break
@@ -234,9 +237,10 @@ func (fc *FlightClient) DoGet(ctx context.Context, ids []string) (*RecordBatch, 
 		idIdx := -1
 		vectorIdx := -1
 		for i, field := range schema.Fields() {
-			if field.Name == "id" {
+			switch field.Name {
+			case "id":
 				idIdx = i
-			} else if field.Name == "vector" {
+			case "vector":
 				vectorIdx = i
 			}
 		}

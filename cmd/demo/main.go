@@ -27,14 +27,14 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to open GGUF file: %v", err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	// Read GGUF file
 	ggufFile, err := gguf.LoadFile(modelPath)
 	if err != nil {
 		log.Fatalf("Failed to load GGUF file: %v", err)
 	}
-	defer ggufFile.Close()
+	defer func() { _ = ggufFile.Close() }()
 
 	tensorInfo := ggufFile.Tensors
 	metadata := ggufFile.KV

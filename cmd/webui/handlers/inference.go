@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/23skdu/longbow-quarrel/cmd/webui/config"
+	"github.com/23skdu/longbow-quarrel/cmd/webui/engine"
 )
 
 type GenerateRequest struct {
@@ -25,13 +27,6 @@ type GenerateResponse struct {
 	TokensPerSec    float64 `json:"tokens_per_sec"`
 }
 
-type ModelInfo struct {
-	Name         string `json:"name"`
-	Parameters   string `json:"parameters,omitempty"`
-	Quantization string `json:"quantization,omitempty"`
-	Loaded       bool   `json:"loaded"`
-}
-
 func ModelsHandler(cfg config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -39,14 +34,8 @@ func ModelsHandler(cfg config.Config) http.HandlerFunc {
 			return
 		}
 
-		models := []ModelInfo{
-			{
-				Name:         "smollm2",
-				Parameters:   "1.7B",
-				Quantization: "Q4_K_M",
-				Loaded:       true,
-			},
-		}
+		adapter := engine.GetAdapter()
+		models := adapter.ListModels()
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(models)
@@ -66,12 +55,70 @@ func GenerateHandler(cfg config.Config) http.HandlerFunc {
 			return
 		}
 
+		// Set defaults
+		if req.MaxTokens <= 0 {
+			req.MaxTokens = 256
+		}
+		if req.Temperature <= 0 {
+			req.Temperature = 0.7
+		}
+		if req.TopK <= 0 {
+			req.TopK = 40
+		}
+		if req.TopP <= 0 {
+			req.TopP = 0.95
+		}
+		if req.Model == "" {
+			req.Model = "default"
+		}
+
 		log.Printf("Generate request: prompt=%s, model=%s", req.Prompt, req.Model)
 
+		adapter := engine.GetAdapter()
+
+		// Create inference request
+		adapterReq := &engine.InferenceRequest{
+			Prompt:      req.Prompt,
+			Model:       req.Model,
+			Temperature: req.Temperature,
+			TopK:        req.TopK,
+			TopP:        req.TopP,
+			MaxTokens:   req.MaxTokens,
+		}
+
+		// Queue inference request
+		responseChanChan, err := adapter.Infer(r.Context(), adapterReq)
+		if err != nil {
+			log.Printf("Inference error: %v", err)
+			http.Error(w, "Inference failed", http.StatusInternalServerError)
+			return
+		}
+
+		if responseChanChan == nil {
+			http.Error(w, "Request queue full", http.StatusServiceUnavailable)
+			return
+		}
+
+		// Collect all tokens
+		responseChan := <-responseChanChan
+		var generatedText string
+		tokensGenerated := 0
+		startTime := time.Now()
+
+		for resp := range responseChan {
+			tokensGenerated++
+			generatedText += resp.Token
+			if resp.Complete {
+				break
+			}
+		}
+
+		tokensPerSec := float64(tokensGenerated) / time.Since(startTime).Seconds()
+
 		response := GenerateResponse{
-			Text:            "This is a placeholder response. The inference engine will be connected in Part 3.",
-			TokensGenerated: 10,
-			TokensPerSec:    50.0,
+			Text:            generatedText,
+			TokensGenerated: tokensGenerated,
+			TokensPerSec:    tokensPerSec,
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -102,13 +149,64 @@ func StreamHandler(cfg config.Config) http.HandlerFunc {
 			return
 		}
 
+		// Set defaults
+		if req.MaxTokens <= 0 {
+			req.MaxTokens = 256
+		}
+		if req.Temperature <= 0 {
+			req.Temperature = 0.7
+		}
+		if req.TopK <= 0 {
+			req.TopK = 40
+		}
+		if req.TopP <= 0 {
+			req.TopP = 0.95
+		}
+		if req.Model == "" {
+			req.Model = "default"
+		}
+
 		log.Printf("Stream request: prompt=%s, model=%s", req.Prompt, req.Model)
 
-		for i := 0; i < 10; i++ {
+		adapter := engine.GetAdapter()
+
+		// Create inference request
+		adapterReq := &engine.InferenceRequest{
+			Prompt:      req.Prompt,
+			Model:       req.Model,
+			Temperature: req.Temperature,
+			TopK:        req.TopK,
+			TopP:        req.TopP,
+			MaxTokens:   req.MaxTokens,
+		}
+
+		// Queue inference request
+		responseChanChan, err := adapter.Infer(r.Context(), adapterReq)
+		if err != nil {
+			log.Printf("Inference error: %v", err)
+			http.Error(w, "Inference failed", http.StatusInternalServerError)
+			return
+		}
+
+		if responseChanChan == nil {
+			http.Error(w, "Request queue full", http.StatusServiceUnavailable)
+			return
+		}
+
+		// Stream tokens as they arrive
+		responseChan := <-responseChanChan
+		startTime := time.Now()
+		tokensGenerated := 0
+
+		for resp := range responseChan {
+			tokensGenerated++
+			tokensPerSec := float64(tokensGenerated) / time.Since(startTime).Seconds()
+
 			data := map[string]interface{}{
-				"token":    "token",
-				"token_id": i,
-				"complete": i == 9,
+				"token":          resp.Token,
+				"token_id":       resp.TokenID,
+				"complete":       resp.Complete,
+				"tokens_per_sec": tokensPerSec,
 			}
 
 			jsonData, _ := json.Marshal(data)
@@ -116,6 +214,10 @@ func StreamHandler(cfg config.Config) http.HandlerFunc {
 			w.Write(jsonData)
 			w.Write([]byte("\n\n"))
 			flusher.Flush()
+
+			if resp.Complete {
+				break
+			}
 		}
 	}
 }

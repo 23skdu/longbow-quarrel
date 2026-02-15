@@ -117,19 +117,20 @@ func TestFp16ToFp32AVX2(t *testing.T) {
 				mant := bits & 0x3FF
 
 				var expected float32
-				if exp == 0 {
+				switch exp {
+				case 0:
 					if mant == 0 {
 						expected = math.Float32frombits(sign << 31)
 					} else {
 						expected = math.Float32frombits((sign << 31) | ((127 - 14 - 10 + 10) << 23) | (mant << 13))
 					}
-				} else if exp == 31 {
+				case 31:
 					if mant == 0 {
 						expected = math.Float32frombits((sign << 31) | 0x7F800000)
 					} else {
 						expected = math.Float32frombits((sign << 31) | 0x7F800000 | (mant << 13))
 					}
-				} else {
+				default:
 					newExp := exp - 15 + 127
 					expected = math.Float32frombits((sign << 31) | (newExp << 23) | (mant << 13))
 				}
@@ -177,11 +178,12 @@ func TestFp32ToFp16AVX2(t *testing.T) {
 				mant := bits & 0x7FFFFF
 
 				var expected uint16
-				if exp == 0 {
+				switch exp {
+				case 0:
 					expected = 0
-				} else if exp == 255 {
+				case 255:
 					expected = uint16(sign<<15) | 0x7C00 | uint16(mant>>9)
-				} else {
+				default:
 					newExp := int(exp) - 127 + 15
 					if newExp >= 31 {
 						expected = uint16(sign<<15) | 0x7C00

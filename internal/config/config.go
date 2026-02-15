@@ -2,50 +2,46 @@ package config
 
 import (
 	"fmt"
+	"strings"
 )
 
 type PrecisionMode int
 
 const (
-	PrecisionAuto   PrecisionMode = iota // Heuristic based on Dim
-	PrecisionFP16                        // Full FP16
-	PrecisionF32FFN                      // FP32 FFN for small models
-	PrecisionMixed                       // Mixed precision for large models
+	PrecisionAuto PrecisionMode = iota
+	PrecisionFP16
+	PrecisionF32FFN
+	PrecisionMixed
 )
 
-// Config holds all configuration for the engine
 type Config struct {
-	// Model Architecture
 	Architecture string
 	Dim          int
 	HiddenDim    int
 	Layers       int
 	Heads        int
 	KVHeads      int
-	HeadDim      int // Dim / Heads usually
+	HeadDim      int
 	VocabSize    int
 	SeqLen       int
 	Eps          float32
 	RopeTheta    float32
-	WindowSize   int // Sliding window size for attention (4096 for Mistral)
+	WindowSize   int
 
-	// Runtime Configuration
 	PrecisionMode PrecisionMode
-	KVCacheSize   int // Overrides model's default if > 0
+	KVCacheSize   int
 
-	// MOE (Mixture of Experts) Configuration
-	ExpertCount                   int     // Total number of experts (e.g., 128 for Nemotron, 8 for Mixtral)
-	ExpertUsedCount               int     // Number of experts used per token (e.g., 6 for Nemotron, 2 for Mixtral)
-	ExpertSharedCount             int     // Number of shared experts (always active)
-	ExpertFeedForwardLength       int     // Hidden dimension for expert-specific FFN
-	ExpertSharedFeedForwardLength int     // Hidden dimension for shared expert FFN
-	ExpertGroupCount              int     // Number of expert groups (for grouped MOE)
-	ExpertGroupUsedCount          int     // Number of groups used per token
-	ExpertWeightsNorm             bool    // Whether expert weights are normalized
-	ExpertWeightsScale            float32 // Scaling factor for expert weights
-	IsMOE                         bool    // Flag to indicate MOE architecture
+	ExpertCount                   int
+	ExpertUsedCount               int
+	ExpertSharedCount             int
+	ExpertFeedForwardLength       int
+	ExpertSharedFeedForwardLength int
+	ExpertGroupCount              int
+	ExpertGroupUsedCount          int
+	ExpertWeightsNorm             bool
+	ExpertWeightsScale            float32
+	IsMOE                         bool
 
-	// Feature Flags / Toggles
 	DebugDequant     bool
 	DebugActivations bool
 
@@ -58,24 +54,84 @@ type Config struct {
 	DebugMemory bool
 }
 
-// Validate ensures the configuration is sane
 func (c *Config) Validate() error {
 	if c.Dim <= 0 {
-		return fmt.Errorf("invalid dim: %d", c.Dim)
+		return fmt.Errorf("invalid dim: %d (must be positive)", c.Dim)
 	}
 	if c.Layers <= 0 {
-		return fmt.Errorf("invalid layers: %d", c.Layers)
+		return fmt.Errorf("invalid layers: %d (must be positive)", c.Layers)
 	}
 	if c.Heads <= 0 {
-		return fmt.Errorf("invalid heads: %d", c.Heads)
+		return fmt.Errorf("invalid heads: %d (must be positive)", c.Heads)
+	}
+	if c.KVHeads <= 0 {
+		return fmt.Errorf("invalid kv_heads: %d (must be positive)", c.KVHeads)
+	}
+	if c.KVHeads > c.Heads {
+		return fmt.Errorf("invalid kv_heads: %d (must be <= heads: %d)", c.KVHeads, c.Heads)
+	}
+	if c.HeadDim <= 0 {
+		return fmt.Errorf("invalid head_dim: %d (must be positive)", c.HeadDim)
+	}
+	if c.Dim != c.Heads*c.HeadDim {
+		return fmt.Errorf("dim mismatch: %d != heads(%d) * head_dim(%d)", c.Dim, c.Heads, c.HeadDim)
 	}
 	if c.VocabSize <= 0 {
-		return fmt.Errorf("invalid vocab size: %d", c.VocabSize)
+		return fmt.Errorf("invalid vocab_size: %d (must be positive)", c.VocabSize)
+	}
+	if c.SeqLen <= 0 {
+		return fmt.Errorf("invalid seq_len: %d (must be positive)", c.SeqLen)
+	}
+	if c.Eps <= 0 {
+		return fmt.Errorf("invalid eps: %f (must be positive)", c.Eps)
+	}
+	if c.RopeTheta <= 0 {
+		return fmt.Errorf("invalid rope_theta: %f (must be positive)", c.RopeTheta)
+	}
+	if c.WindowSize < 0 {
+		return fmt.Errorf("invalid window_size: %d (must be non-negative)", c.WindowSize)
+	}
+	if c.HiddenDim <= 0 {
+		return fmt.Errorf("invalid hidden_dim: %d (must be positive)", c.HiddenDim)
+	}
+
+	if c.IsMOE {
+		if err := c.validateMOE(); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (c *Config) validateMOE() error {
+	if c.ExpertCount <= 0 {
+		return fmt.Errorf("invalid expert_count: %d (must be positive for MOE)", c.ExpertCount)
+	}
+	if c.ExpertUsedCount <= 0 {
+		return fmt.Errorf("invalid expert_used_count: %d (must be positive for MOE)", c.ExpertUsedCount)
+	}
+	if c.ExpertUsedCount > c.ExpertCount {
+		return fmt.Errorf("expert_used_count (%d) > expert_count (%d)", c.ExpertUsedCount, c.ExpertCount)
+	}
+	if c.ExpertFeedForwardLength <= 0 {
+		return fmt.Errorf("invalid expert_feed_forward_length: %d (must be positive for MOE)", c.ExpertFeedForwardLength)
 	}
 	return nil
 }
 
-// Default returns a default configuration
+func (c *Config) GetArchitecture() string {
+	return strings.ToLower(c.Architecture)
+}
+
+func (c *Config) IsLargeModel() bool {
+	return c.Dim >= 4096
+}
+
+func (c *Config) NeedsPagedAttention() bool {
+	return c.WindowSize > 0
+}
+
 func Default() Config {
 	return Config{
 		SeqLen:        2048,

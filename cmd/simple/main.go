@@ -38,7 +38,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Failed to load GGUF: %v\n", err)
 		os.Exit(1)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	fmt.Printf("GGUF Version: %d\n", f.Header.Version)
 	fmt.Printf("Tensors: %d\n", len(f.Tensors))
