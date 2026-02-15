@@ -57,7 +57,7 @@ func main() {
 	mux.Handle("/healthz", handlers.HealthzHandler())
 	mux.Handle("/readyz", handlers.ReadyzHandler())
 	mux.Handle("/version", handlers.VersionHandler())
-	mux.Handle("/metrics", loggingMiddleware.Middleware(promhttp.Handler()))
+	mux.Handle("/metrics", loggingMiddleware.Middleware(http.HandlerFunc(promhttp.Handler().ServeHTTP)))
 
 	apiMux := http.NewServeMux()
 	apiMux.Handle("/models", authMiddleware.Authenticate(handlers.ModelsHandler(cfg)))

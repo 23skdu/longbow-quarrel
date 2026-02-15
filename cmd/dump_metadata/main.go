@@ -21,7 +21,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to load GGUF: %v", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	fmt.Println("=== Metadata (KV) ===")
 	keys := make([]string, 0, len(f.KV))

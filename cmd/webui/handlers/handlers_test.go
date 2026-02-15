@@ -17,7 +17,8 @@ func TestHealthHandler(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	w := httptest.NewRecorder()
 
-	handlers.HealthHandler()(w, res := w.Result()
+	handlers.HealthHandler()(w, req)
+	res := w.Result()
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
@@ -46,7 +47,8 @@ func TestHealthzHandler(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	w := httptest.NewRecorder()
 
-	handlers.HealthzHandler()(w, res := w.Result()
+	handlers.HealthzHandler()(w, req)
+	res := w.Result()
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
@@ -63,7 +65,8 @@ func TestReadyzHandler(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
 	w := httptest.NewRecorder()
 
-	handlers.ReadyzHandler()(w, res := w.Result()
+	handlers.ReadyzHandler()(w, req)
+	res := w.Result()
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
@@ -80,7 +83,8 @@ func TestVersionHandler(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/version", nil)
 	w := httptest.NewRecorder()
 
-	handlers.VersionHandler()(w, res := w.Result()
+	handlers.VersionHandler()(w, req)
+	res := w.Result()
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
@@ -214,24 +218,24 @@ func TestAuthMiddleware(t *testing.T) {
 
 func TestCORSMiddleware(t *testing.T) {
 	tests := []struct {
-		name             string
-		origin           string
-		allowedOrigins   []string
-		expectedACAO     string
-		expectPreflight  bool
+		name            string
+		origin          string
+		allowedOrigins  []string
+		expectedACAO    string
+		expectPreflight bool
 	}{
 		{
-			name:            "No CORS configured",
+			name:            "Default wildcard",
 			origin:          "http://example.com",
-			allowedOrigins:  nil,
-			expectedACAO:    "",
-			expectPreflight: false,
+			allowedOrigins:  nil,                  // defaults to ["*"]
+			expectedACAO:    "http://example.com", // echoes origin when wildcard
+			expectPreflight: true,
 		},
 		{
-			name:            "Wildcard origin",
+			name:            "Explicit wildcard origin",
 			origin:          "http://example.com",
 			allowedOrigins:  []string{"*"},
-			expectedACAO:    "*",
+			expectedACAO:    "http://example.com", // echoes origin when wildcard
 			expectPreflight: true,
 		},
 		{

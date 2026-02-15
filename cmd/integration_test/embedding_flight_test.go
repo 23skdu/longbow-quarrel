@@ -20,7 +20,7 @@ func TestEmbeddingFlightPipeline(t *testing.T) {
 	ctx := context.Background()
 
 	client := arrow_client.NewMockFlightClient()
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	if err := client.Connect(ctx); err != nil {
 		t.Fatalf("Failed to connect: %v", err)
@@ -78,9 +78,9 @@ func TestFlightClientDoPut(t *testing.T) {
 
 	ctx := context.Background()
 	client := arrow_client.NewMockFlightClient()
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
-	client.Connect(ctx)
+	_ = client.Connect(ctx)
 
 	vectors := [][]float32{
 		{1.0, 2.0, 3.0},
@@ -108,9 +108,9 @@ func TestFlightClientDoPut(t *testing.T) {
 func TestFlightClientDoGet(t *testing.T) {
 	ctx := context.Background()
 	client := arrow_client.NewMockFlightClient()
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
-	client.Connect(ctx)
+	_ = client.Connect(ctx)
 
 	vectors := [][]float32{
 		{1.0, 2.0, 3.0},
@@ -118,7 +118,7 @@ func TestFlightClientDoGet(t *testing.T) {
 	}
 	ids := []string{"doc1", "doc2"}
 
-	client.DoPut(ctx, vectors, ids, nil)
+	_ = client.DoPut(ctx, vectors, ids, nil)
 
 	result, err := client.DoGet(ctx, []string{"doc1"})
 	if err != nil {
@@ -133,9 +133,9 @@ func TestFlightClientDoGet(t *testing.T) {
 func TestFlightClientGetFlightInfo(t *testing.T) {
 	ctx := context.Background()
 	client := arrow_client.NewMockFlightClient()
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
-	client.Connect(ctx)
+	_ = client.Connect(ctx)
 
 	info, err := client.GetFlightInfo(ctx, "embeddings")
 	if err != nil {
@@ -172,9 +172,9 @@ func TestRecordBatchCreation(t *testing.T) {
 func TestEmptyVectors(t *testing.T) {
 	ctx := context.Background()
 	client := arrow_client.NewMockFlightClient()
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
-	client.Connect(ctx)
+	_ = client.Connect(ctx)
 
 	err := client.DoPut(ctx, [][]float32{}, []string{}, nil)
 	if err != nil {
@@ -188,9 +188,9 @@ func TestEmptyVectors(t *testing.T) {
 func TestVectorRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	client := arrow_client.NewMockFlightClient()
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
-	client.Connect(ctx)
+	_ = client.Connect(ctx)
 
 	original := [][]float32{
 		{0.1, 0.2, 0.3, 0.4},
@@ -198,7 +198,7 @@ func TestVectorRoundTrip(t *testing.T) {
 	}
 	ids := []string{"round_trip_test"}
 
-	client.DoPut(ctx, original, ids, nil)
+	_ = client.DoPut(ctx, original, ids, nil)
 
 	result, err := client.DoGet(ctx, ids)
 	if err != nil {
@@ -217,9 +217,9 @@ func TestVectorRoundTrip(t *testing.T) {
 func TestMetadataPreservation(t *testing.T) {
 	ctx := context.Background()
 	client := arrow_client.NewMockFlightClient()
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
-	client.Connect(ctx)
+	_ = client.Connect(ctx)
 
 	vectors := [][]float32{{1.0, 2.0}}
 	ids := []string{"meta_test"}
@@ -228,7 +228,7 @@ func TestMetadataPreservation(t *testing.T) {
 		"version": "1.0",
 	}
 
-	client.DoPut(ctx, vectors, ids, metadata)
+	_ = client.DoPut(ctx, vectors, ids, metadata)
 
 	stored := client.GetStoredData()
 	batch := stored["meta_test"]

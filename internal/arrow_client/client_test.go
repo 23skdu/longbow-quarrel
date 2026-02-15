@@ -212,7 +212,7 @@ func TestMockFlightClient(t *testing.T) {
 	}
 
 	// Test GetSchema when connected
-	mock.Connect(ctx)
+	_ = mock.Connect(ctx)
 	schema, err := mock.GetSchema(ctx)
 	if err != nil {
 		t.Errorf("GetSchema failed: %v", err)
@@ -225,10 +225,10 @@ func TestMockFlightClient(t *testing.T) {
 func TestMockFlightClientReset(t *testing.T) {
 	mock := NewMockFlightClient()
 	ctx := context.Background()
-	mock.Connect(ctx)
+	_ = mock.Connect(ctx)
 
 	// Add data
-	mock.DoPut(ctx, [][]float32{{0.1, 0.2}}, []string{"doc1"}, nil)
+	_ = mock.DoPut(ctx, [][]float32{{0.1, 0.2}}, []string{"doc1"}, nil)
 
 	// Verify data exists
 	data := mock.GetStoredData()

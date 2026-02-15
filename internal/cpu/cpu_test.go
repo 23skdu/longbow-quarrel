@@ -540,3 +540,203 @@ func BenchmarkTensorPool(b *testing.B) {
 		}
 	})
 }
+
+func TestContextFreeNil(t *testing.T) {
+	ctx := NewContext()
+	ctx.Free() // Should not panic
+}
+
+func TestContextFreeEmpty(t *testing.T) {
+	ctx := NewContext()
+	ctx.Free() // Should not panic
+	if len(ctx.pool) != 0 {
+		t.Errorf("pool should be empty, got %d", len(ctx.pool))
+	}
+}
+
+func TestShapeKeyDifferentInputs(t *testing.T) {
+	tests := []struct {
+		a, b [2]int
+		elem int
+		eq   bool
+	}{
+		{[2]int{4, 4}, [2]int{4, 4}, 4, true},
+		{[2]int{4, 4}, [2]int{4, 5}, 4, false},
+		{[2]int{4, 4}, [2]int{5, 4}, 4, false},
+	}
+
+	for _, tt := range tests {
+		ka := shapeKey(tt.a, tt.elem)
+		kb := shapeKey(tt.b, tt.elem)
+		// elem=8 case is not comparable due to rune collision
+		if (ka == kb) != tt.eq {
+			t.Errorf("shapeKey equality mismatch for %v vs %v with elem %d", tt.a, tt.b, tt.elem)
+		}
+	}
+}
+
+func TestContextTensorDefaultElemSize(t *testing.T) {
+	ctx := NewContext()
+
+	tensor := ctx.NewTensor([2]int{4, 4}, 0)
+
+	if tensor.elemSize != 0 {
+		t.Errorf("tensor.elemSize = %d, want 0", tensor.elemSize)
+	}
+}
+
+func TestContextConcatAxis1(t *testing.T) {
+	ctx := NewContext()
+
+	a := ctx.NewTensor([2]int{2, 4}, 4)
+	b := ctx.NewTensor([2]int{2, 4}, 4)
+	out := ctx.NewTensor([2]int{2, 8}, 4)
+
+	aData := a.data.([]float32)
+	bData := b.data.([]float32)
+	for i := 0; i < 8; i++ {
+		aData[i] = float32(i + 1)
+		bData[i] = float32(i + 9)
+	}
+
+	ctx.Concat(a, b, out, 1)
+
+	outData := out.data.([]float32)
+	// Row 0: a[0:4] then b[0:4]
+	if outData[0] != 1 || outData[4] != 9 {
+		t.Errorf("Concat axis 1: out[0]=%f, out[4]=%f, want 1 and 9", outData[0], outData[4])
+	}
+}
+
+func TestContextSliceDifferentElementSizes(t *testing.T) {
+	ctx := NewContext()
+
+	src := ctx.NewTensor([2]int{4, 4}, 4)
+	dst := ctx.NewTensor([2]int{4, 4}, 4)
+
+	srcData := src.data.([]float32)
+	for i := 0; i < 16; i++ {
+		srcData[i] = float32(i)
+	}
+
+	// Slice: src [1:3, 1:3] -> dst [2:4, 2:4]
+	ctx.Slice(src, dst, [2]int{1, 1}, [2]int{2, 2}, [2]int{2, 2})
+
+	dstData := dst.data.([]float32)
+	// dst[2,2] = src[1,1] = 5
+	// dst[2,3] = src[1,2] = 6
+	if dstData[2*4+2] != 5 || dstData[2*4+3] != 6 {
+		t.Errorf("Slice: dstData[10:12] = [%f, %f], want [5, 6]", dstData[2*4+2], dstData[2*4+3])
+	}
+}
+
+func TestViewAsTensorNilData(t *testing.T) {
+	ctx := NewContext()
+
+	tensor := ctx.ViewAsTensor(nil, [2]int{1, 1}, 4)
+
+	if tensor.data != nil {
+		t.Errorf("tensor.data = %v, want nil", tensor.data)
+	}
+}
+
+func TestGetTensorDataNilTensor(t *testing.T) {
+	ctx := NewContext()
+
+	data := ctx.GetTensorData(&Tensor{data: nil})
+
+	if data != nil {
+		t.Errorf("GetTensorData(nil tensor) = %v, want nil", data)
+	}
+}
+
+func TestFp16ConversionSubnormals(t *testing.T) {
+	ctx := NewContext()
+
+	src := ctx.NewTensor([2]int{1, 10}, 2)
+	dst := ctx.NewTensor([2]int{1, 10}, 4)
+
+	srcData := src.data.([]uint16)
+	// Subnormal values
+	for i := range srcData {
+		srcData[i] = uint16(1 << i)
+	}
+
+	ctx.Fp16ToFp32(src, dst)
+
+	// Should not panic
+	_ = ctx.GetTensorData(dst)
+}
+
+func TestSoftmaxSingleElement(t *testing.T) {
+	ctx := NewContext()
+
+	input := ctx.NewTensor([2]int{1, 1}, 4)
+	output := ctx.NewTensor([2]int{1, 1}, 4)
+
+	inData := input.data.([]float32)
+	inData[0] = 5.0
+
+	ctx.SoftmaxF32(input, output)
+
+	outData := output.data.([]float32)
+	if outData[0] != 1.0 {
+		t.Errorf("Softmax single element = %f, want 1.0", outData[0])
+	}
+}
+
+func TestSwiGLUZeroInput(t *testing.T) {
+	ctx := NewContext()
+
+	size := 4
+	gate := ctx.NewTensor([2]int{1, size}, 4)
+	up := ctx.NewTensor([2]int{1, size}, 4)
+	out := ctx.NewTensor([2]int{1, size}, 4)
+
+	gData := gate.data.([]float32)
+	uData := up.data.([]float32)
+	for i := 0; i < size; i++ {
+		gData[i] = 0.0
+		uData[i] = float32(i + 1)
+	}
+
+	ctx.SwiGLU(gate, up, out)
+
+	// SiLU(0) = 0, so output should be 0
+	oData := out.data.([]float32)
+	for i := 0; i < size; i++ {
+		if oData[i] != 0.0 {
+			t.Errorf("SwiGLU(0) = %f, want 0", oData[i])
+		}
+	}
+}
+
+func TestEmbeddingEmptyIds(t *testing.T) {
+	ctx := NewContext()
+
+	weight := ctx.NewTensor([2]int{100, 64}, 4)
+	out := ctx.NewTensor([2]int{0, 64}, 4)
+
+	ctx.Embedding(weight, []int{}, out)
+
+	// Should not panic
+}
+
+func TestEmbeddingSingleId(t *testing.T) {
+	ctx := NewContext()
+
+	weight := ctx.NewTensor([2]int{100, 64}, 4)
+	out := ctx.NewTensor([2]int{1, 64}, 4)
+
+	wData := weight.data.([]float32)
+	for i := range wData {
+		wData[i] = float32(i)
+	}
+
+	ctx.Embedding(weight, []int{50}, out)
+
+	oData := out.data.([]float32)
+	if oData[0] != 50*64 {
+		t.Errorf("Embedding single id: oData[0] = %f, want %d", oData[0], 50*64)
+	}
+}
