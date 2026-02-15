@@ -108,7 +108,7 @@ type CUDAEngine struct {
 	dequantizedCache map[string]*device.CUDATensor
 }
 
-func NewEngine(modelPath string, cfg config.Config) (*CUDAEngine, error) {
+func NewCUDAEngine(modelPath string, cfg config.Config) (Engine, error) {
 	f, err := gguf.LoadFile(modelPath)
 	if err != nil {
 		cudaEngineFailed.WithLabelValues("unknown", "gguf_load_failed").Inc()
@@ -223,7 +223,7 @@ func NewEngine(modelPath string, cfg config.Config) (*CUDAEngine, error) {
 	return e, nil
 }
 
-func (e *CUDAEngine) Close() error {
+func (e *CUDAEngine) Close() {
 	for _, t := range e.dequantizedCache {
 		if t != nil {
 			t.Free()
@@ -243,7 +243,6 @@ func (e *CUDAEngine) Close() error {
 	if e.Model != nil {
 		e.Model.Close()
 	}
-	return nil
 }
 
 func (e *CUDAEngine) getDequantedWeight(name string) (*device.CUDATensor, error) {
@@ -785,6 +784,7 @@ func (s *Sampler) Sample(logits []float32) int {
 func init() {
 	log.SetOutput(os.Stderr)
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+	RegisterEngine("cuda", NewCUDAEngine)
 }
 
 // =============================================================================
