@@ -13,8 +13,8 @@ const (
 	DataTypeQ3K  DataType = 5
 	DataTypeQ8_0 DataType = 6
 
-	DataTypeQ4_K   = DataTypeQ4K
-	DataTypeQ6_K   = DataTypeQ6K
+	DataTypeQ4_K            = DataTypeQ4K
+	DataTypeQ6_K            = DataTypeQ6K
 	DataTypeIQ4_NL DataType = 7
 	DataTypeMXFP4  DataType = 8
 )

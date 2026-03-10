@@ -36,7 +36,7 @@ type PagedKVCache struct {
 
 	// Block Tables: Maps seqID -> []int32 (logical to physical block mapping)
 	blockTables map[string][]int32
-	
+
 	// Device-side block tables: Maps seqID -> *device.Tensor
 	blockTablesDevice map[string]*device.Tensor
 
@@ -84,7 +84,7 @@ func (c *PagedKVCache) Init(ctx *device.Context, config config.Config) error {
 
 	c.blockTables = make(map[string][]int32)
 	c.blockTablesDevice = make(map[string]*device.Tensor)
-	
+
 	c.kPools = make([]*device.Tensor, c.layers)
 	c.vPools = make([]*device.Tensor, c.layers)
 
@@ -211,7 +211,7 @@ func (c *PagedKVCache) Update(seqID string, layer, pos int, k, v *device.Tensor)
 		table = append(table, phys)
 		c.blockTables[seqID] = table
 	}
-	
+
 	// Copy on Write if refcount > 1 and we are modifying it (Update)
 	physBlock := table[logicalBlockIdx]
 	if c.blockRefs[physBlock] > 1 {
@@ -224,7 +224,7 @@ func (c *PagedKVCache) Update(seqID string, layer, pos int, k, v *device.Tensor)
 		c.blockRefs[physBlock]--
 		table[logicalBlockIdx] = newPhys
 		physBlock = newPhys
-		
+
 		// Note: We'd normally need to copy actual physical tensor data from physBlock to newPhys here!
 		// For simplicity we skip if we assume append-only at block start, but if we modify mid-block, data needs copying.
 		// In inference, Update is mostly append-only, but we might overwrite prefix tokens?
@@ -267,7 +267,7 @@ func (c *PagedKVCache) Update(seqID string, layer, pos int, k, v *device.Tensor)
 	// Passing `physPos` works.
 	// WindowSize arg to StoreKV should be Capacity (TotalBlocks * BlockSize).
 	capacity := c.totalBlocks * c.blockSize
-	
+
 	if physPos >= capacity {
 		return fmt.Errorf("physical position %d exceeds total KV cache capacity %d", physPos, capacity)
 	}
@@ -288,7 +288,7 @@ func (c *PagedKVCache) Get(seqID string, layer int) CacheView {
 	if !c.initialized || layer < 0 || layer >= len(c.kPools) {
 		return CacheView{}
 	}
-	
+
 	metrics.KVCacheHits.Inc()
 
 	c.mu.Lock()
@@ -310,7 +310,7 @@ func (c *PagedKVCache) Get(seqID string, layer int) CacheView {
 		tableDevice = c.ctx.NewTensorFP32(1, newCap)
 		c.blockTablesDevice[seqID] = tableDevice
 	}
-	
+
 	// Convert int32 table to float32 for device loading
 	goTable := make([]float32, len(table))
 	for i, b := range table {

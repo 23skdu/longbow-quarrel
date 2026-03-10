@@ -25,7 +25,7 @@ func FuzzEngineHotSwap(f *testing.F) {
 	defer os.Remove(modelPath2)
 
 	f.Add(uint(10), uint(5)) // iterations, concurrent inferences
-	f.Add(uint(50), uint(10)) 
+	f.Add(uint(50), uint(10))
 
 	f.Fuzz(func(t *testing.T, iterations uint, concurrency uint) {
 		if iterations > 100 {
@@ -40,7 +40,7 @@ func FuzzEngineHotSwap(f *testing.F) {
 
 		conf := config.Default()
 		conf.KVCacheSize = 256
-		
+
 		e, err := NewEngine(modelPath1, conf)
 		if err != nil {
 			t.Fatalf("Failed to create engine: %v", err)
@@ -48,7 +48,7 @@ func FuzzEngineHotSwap(f *testing.F) {
 		defer e.Ctx.Free() // Assume free cleans up
 
 		var wg sync.WaitGroup
-		
+
 		for i := uint(0); i < iterations; i++ {
 			// Launch concurrent inferences
 			for c := uint(0); c < concurrency; c++ {
@@ -57,7 +57,7 @@ func FuzzEngineHotSwap(f *testing.F) {
 					defer wg.Done()
 					inputTokens := []int{1, 2, 3}
 					sampler := SamplerConfig{Temperature: 0}
-					e.Infer(inputTokens, 5, sampler) 
+					e.Infer(inputTokens, 5, sampler)
 				}()
 			}
 
@@ -66,13 +66,13 @@ func FuzzEngineHotSwap(f *testing.F) {
 			if i%2 == 0 {
 				path = modelPath2
 			}
-			
+
 			err := e.SwapModel(path, conf)
 			if err != nil {
 				t.Fatalf("SwapModel failed: %v", err)
 			}
 		}
-		
+
 		wg.Wait()
 	})
 }

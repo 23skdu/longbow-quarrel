@@ -81,7 +81,7 @@ func TestEngineHotSwap(t *testing.T) {
 	if e.Weights.TokenEmb == nil {
 		t.Fatal("Expected TokenEmb to be valid after swap")
 	}
-	
+
 	// Ensure we can run inference after swap
 	inputTokens := []int{1, 2, 3}
 	config := SamplerConfig{Temperature: 0}

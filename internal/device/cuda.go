@@ -146,8 +146,6 @@ func (c *CUDAContext) Synchronize() {
 	C.cudaStreamSynchronize(c.stream)
 }
 
-
-
 type CUDATensor struct {
 	ctx        *CUDAContext
 	rows, cols int

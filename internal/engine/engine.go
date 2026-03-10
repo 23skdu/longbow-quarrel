@@ -1936,7 +1936,6 @@ func ValidateTensorDimensions(name string, rows, cols int, ggufType gguf.GGMLTyp
 	return nil
 }
 
-
 // SwapModel safely replaces the currently loaded model with a new one
 // It blocks new inferences, waits for ongoing ones (via RWMutex), frees the old weights, and loads the new ones.
 func (e *Engine) SwapModel(newModelPath string, newConfig config.Config) error {
