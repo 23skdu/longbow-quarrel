@@ -146,24 +146,14 @@ func (c *CUDAContext) Synchronize() {
 	C.cudaStreamSynchronize(c.stream)
 }
 
-type CUDADataType int
 
-const (
-	DataTypeInvalid CUDADataType = iota
-	DataTypeF16
-	DataTypeF32
-	DataTypeQ4_0
-	DataTypeQ4_K
-	DataTypeQ6_K
-	DataTypeQ8_0
-)
 
 type CUDATensor struct {
 	ctx        *CUDAContext
 	rows, cols int
 	sizeBytes  int
 	devPtr     unsafe.Pointer
-	dataType   CUDADataType
+	dataType   DataType
 	ggmlType   gguf.GGMLType
 	HostData   []byte
 }

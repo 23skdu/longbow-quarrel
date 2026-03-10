@@ -5,11 +5,22 @@ package engine
 import (
 	"encoding/json"
 	"os"
+	"sync"
 
 	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/device"
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
 )
+
+type SamplerConfig struct {
+	Temperature      float64
+	TopK             int
+	TopP             float64
+	RepPenalty       float64
+	Seed             int64
+	DebugActivations bool
+	QualityMode      bool
+}
 
 type ActivationTrace struct {
 	LayerName string    `json:"layer_name"`
@@ -231,6 +242,9 @@ type Engine struct {
 
 	// Heuristic Global Scale (1.0 default, 100.0 if detected underscaling)
 	GlobalScale float32
+
+	// Hot-swapping
+	mu sync.RWMutex
 }
 
 func NewActivationTraceTracker(numLayers int) *ActivationTraceTracker {

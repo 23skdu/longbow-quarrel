@@ -33,18 +33,18 @@ func TestTensorKVCache_Lifecycle(t *testing.T) {
 	}
 
 	// Test Get
-	view := cache.Get(0)
+	view := cache.Get("seq-0", 0)
 	if view.K == nil || view.V == nil {
 		t.Errorf("Get(0) returned nil tensors")
 	}
 
-	view1 := cache.Get(1)
+	view1 := cache.Get("seq-0", 1)
 	if view1.K == nil || view1.V == nil {
 		t.Errorf("Get(1) returned nil tensors")
 	}
 
 	// Test Get Invalid
-	view2 := cache.Get(2)
+	view2 := cache.Get("seq-0", 2)
 	if view2.K != nil || view2.V != nil {
 		t.Errorf("Get(2) should return nil for invalid layer")
 	}
@@ -74,19 +74,19 @@ func TestTensorKVCache_Update(t *testing.T) {
 
 	// Fill with data using LoadFrom (if available on dummy tensor, or we rely on zero init/random)
 	// Here we just check the call succeeds
-	err := cache.Update(0, 5, kInput, vInput)
+	err := cache.Update("seq-0", 0, 5, kInput, vInput)
 	if err != nil {
 		t.Errorf("Update failed for valid position: %v", err)
 	}
 
 	// Test OOB Update
-	err = cache.Update(0, 10, kInput, vInput)
+	err = cache.Update("seq-0", 0, 10, kInput, vInput)
 	if err == nil {
 		t.Errorf("Expected error for OOB position 10 (size 8)")
 	}
 
 	// Test Invalid Layer
-	err = cache.Update(1, 5, kInput, vInput)
+	err = cache.Update("seq-0", 1, 5, kInput, vInput)
 	if err == nil {
 		t.Errorf("Expected error for invalid layer 1 (layers 1)")
 	}

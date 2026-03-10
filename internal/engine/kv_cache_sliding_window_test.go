@@ -30,7 +30,7 @@ func TestSlidingWindowKVCache_Lifecycle(t *testing.T) {
 		t.Errorf("Expected size 10, got %d", cache.Size())
 	}
 
-	view := cache.Get(0)
+	view := cache.Get("seq-0", 0)
 	if view.K == nil || view.V == nil {
 		t.Fatalf("Get(0) returned nil")
 	}
@@ -65,14 +65,14 @@ func TestSlidingWindowKVCache_UpdateWrapped(t *testing.T) {
 	// This should succeed.
 
 	for i := 0; i < 10; i++ {
-		err := cache.Update(0, i, kIn, vIn)
+		err := cache.Update("seq-0", 0, i, kIn, vIn)
 		if err != nil {
 			t.Errorf("Update at pos %d failed (should handle wrap): %v", i, err)
 		}
 	}
 
 	// Test negative pos (should still fail)
-	if err := cache.Update(0, -1, kIn, vIn); err == nil {
+	if err := cache.Update("seq-0", 0, -1, kIn, vIn); err == nil {
 		t.Errorf("Update at pos -1 should fail")
 	}
 }

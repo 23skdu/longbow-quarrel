@@ -1,4 +1,4 @@
-// go:build darwin && metal
+//go:build darwin && metal
 
 #import "metal_bridge.h"
 #import <Metal/Metal.h>

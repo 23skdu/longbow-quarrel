@@ -52,6 +52,24 @@ var (
 		Buckets: []float64{100, 500, 1000, 2000, 4000, 8000, 16000, 32000},
 	})
 
+	// ===== Model Hot-Swapping Metrics =====
+
+	ModelHotSwapTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "model_hot_swap_total",
+		Help: "Total number of model hot-swap operations initiated",
+	})
+
+	ModelHotSwapDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "model_hot_swap_duration_seconds",
+		Help:    "Duration of model hot-swap operations",
+		Buckets: prometheus.ExponentialBuckets(0.1, 2.0, 10), // 0.1s to ~51s
+	})
+
+	ModelHotSwapErrors = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "model_hot_swap_errors_total",
+		Help: "Total number of failed model hot-swap operations",
+	})
+
 	// ===== New Audit Metrics =====
 
 	// Logit Range Audit Metrics
@@ -541,6 +559,15 @@ func RecordValidationError(operation, errorType string) {
 
 func RecordContextLength(tokens int) {
 	ContextLengthHistogram.Observe(float64(tokens))
+}
+
+// RecordModelHotSwap records a model hot-swap operation with its duration and success status
+func RecordModelHotSwap(duration time.Duration, success bool) {
+	ModelHotSwapTotal.Inc()
+	ModelHotSwapDuration.Observe(duration.Seconds())
+	if !success {
+		ModelHotSwapErrors.Inc()
+	}
 }
 
 // ===== New Audit Recording Functions =====

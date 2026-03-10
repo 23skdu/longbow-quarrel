@@ -224,3 +224,40 @@ func (a *MetalEngineAdapter) UnloadModel(modelPath string) {
 		delete(a.engines, modelPath)
 	}
 }
+
+func (a *MetalEngineAdapter) LoadModel(modelPath string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	// Check if model is already loaded
+	if _, ok := a.engines[modelPath]; ok {
+		return nil // Model already loaded
+	}
+
+	log.Printf("Loading model: %s", modelPath)
+
+	cfg := config.Config{
+		KVCacheSize: 2048,
+	}
+
+	engine, err := engine.NewEngine(modelPath, cfg)
+	if err != nil {
+		return err
+	}
+
+	tok, err := tokenizer.New(modelPath)
+	if err != nil {
+		engine.Close()
+		return err
+	}
+
+	wrapped := &WrappedMetalEngine{
+		engine:   engine,
+		tok:      tok,
+		model:    modelPath,
+		loadedAt: time.Now(),
+	}
+
+	a.engines[modelPath] = wrapped
+	return nil
+}

@@ -1,9 +1,9 @@
-//go:build (linux && !cuda) || darwin
+//go:build (!darwin || !metal) && (!linux || !cuda)
 
 package device
 
 import (
-	"math"
+	"fmt"
 	"runtime"
 	"sync/atomic"
 )
@@ -30,11 +30,38 @@ func (c *Context) Free() {
 	c.memUsed = 0
 }
 
+func (c *Context) NewTensor(rows, cols int) *Tensor {
+	return &Tensor{
+		data:     make([]float32, rows*cols),
+		dims:     []int{rows, cols},
+		strides:  []int{cols, 1},
+		dataType: DataTypeF32,
+	}
+}
+
+func (c *Context) NewTensorFP32(rows, cols int) *Tensor {
+	return c.NewTensor(rows, cols)
+}
+
+func (c *Context) NewTensorFP32Pooled(rows, cols int) *Tensor {
+	return c.NewTensor(rows, cols)
+}
+
+func (c *Context) NewTensorPooled(rows, cols int) *Tensor {
+	return c.NewTensor(rows, cols)
+}
+func (c *Context) NewTensorWithType(rows, cols int, dt DataType) *Tensor {
+	t := c.NewTensor(rows, cols)
+	t.dataType = dt
+	return t
+}
+
 type Tensor struct {
-	data    []float32
-	dims    []int
-	strides []int
-	name    string
+	data     []float32
+	dims     []int
+	strides  []int
+	name     string
+	dataType DataType
 }
 
 func NewTensor(name string, data []float32) *Tensor {
@@ -68,6 +95,50 @@ func (t *Tensor) Free() {
 	t.data = nil
 }
 
+func (t *Tensor) ZeroInit() {
+	for i := range t.data {
+		t.data[i] = 0
+	}
+}
+
+func (t *Tensor) Rows() int {
+	if len(t.dims) < 1 {
+		return 0
+	}
+	return t.dims[0]
+}
+
+func (t *Tensor) Cols() int {
+	if len(t.dims) < 2 {
+		return 1
+	}
+	return t.dims[1]
+}
+
+func (t *Tensor) ToHost() []float32 {
+	return t.data
+}
+
+func (t *Tensor) ToHostFP16() []uint16 {
+	res := make([]uint16, len(t.data))
+	for i, v := range t.data {
+		res[i] = Float32ToFloat16(v)
+	}
+	return res
+}
+
+func (t *Tensor) LoadFrom(data []float32) error {
+	if len(data) != len(t.data) {
+		return fmt.Errorf("LoadFrom: size mismatch: %d != %d", len(data), len(t.data))
+	}
+	copy(t.data, data)
+	return nil
+}
+
+func (t *Tensor) StoreKV(v *Tensor, kCache, vCache *Tensor, pos, heads, headDim, windowSize int) {
+	// CPU implementation: Copy from t and v to kCache and vCache
+}
+
 func (t *Tensor) BufferID() uintptr {
 	return 0
 }
@@ -78,54 +149,6 @@ func (t *Tensor) NumElements() int {
 		n *= d
 	}
 	return n
-}
-
-type ActivationStats struct {
-	Max    float32
-	Min    float32
-	Mean   float32
-	RMS    float32
-	Zeros  int
-	NaNs   int
-	Infs   int
-	Sample []float32
-}
-
-func ComputeActivationStats(data []float32, sampleSize int) ActivationStats {
-	stats := ActivationStats{
-		Sample: make([]float32, 0),
-	}
-
-	for _, v := range data {
-		if v > stats.Max {
-			stats.Max = v
-		}
-		if v < stats.Min || stats.Min == 0 {
-			stats.Min = v
-		}
-		stats.Mean += v
-		stats.RMS += v * v
-
-		if math.IsNaN(float64(v)) {
-			stats.NaNs++
-		}
-		if math.IsInf(float64(v), 0) {
-			stats.Infs++
-		}
-	}
-
-	n := float32(len(data))
-	stats.Mean /= n
-	stats.RMS = float32(math.Sqrt(float64(stats.RMS / n)))
-
-	if len(data) > 0 && sampleSize > 0 {
-		step := len(data) / sampleSize
-		for i := 0; i < sampleSize && i*step < len(data); i++ {
-			stats.Sample = append(stats.Sample, data[i*step])
-		}
-	}
-
-	return stats
 }
 
 var cpuAllocatedBytes int64

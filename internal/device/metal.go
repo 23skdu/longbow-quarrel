@@ -83,9 +83,10 @@ var kernelsSource string
 
 // Context holds the Metal connection and tensor pool
 type Context struct {
-	ref  C.MetalContextRef
-	mu   sync.Mutex
-	pool map[string][]*Tensor // pool by size key "RxCxType"
+	ref    C.MetalContextRef
+	mu     sync.Mutex
+	pool   map[string][]*Tensor // pool by size key "RxCxType"
+	ExecMu sync.Mutex           // Execution lock for Metal command encoding
 }
 
 func NewContext() *Context {
@@ -98,8 +99,8 @@ func NewContext() *Context {
 	}
 
 	return &Context{
-		ref:  ref,
-		pool: make(map[string][]*Tensor),
+		ref:    ref,
+		pool:   make(map[string][]*Tensor),
 	}
 }
 
@@ -130,17 +131,6 @@ func (c *Context) ClearPool() {
 	}
 }
 
-type DataType int
-
-const (
-	DataTypeF16  DataType = 0
-	DataTypeQ4K  DataType = 1
-	DataTypeQ4_0 DataType = 2
-	DataTypeQ3K  DataType = 5
-	DataTypeF32  DataType = 3
-	DataTypeQ6K  DataType = 4
-	DataTypeQ8_0 DataType = 6
-)
 
 // Tensor wraps a Metal buffer. Always FP16 for this engine.
 type Tensor struct {
@@ -400,6 +390,8 @@ func (t *Tensor) Free() {
 	}
 	// Clear finalizer first to prevent double free
 	runtime.SetFinalizer(t, nil)
+	t.ctx.ExecMu.Lock()
+	defer t.ctx.ExecMu.Unlock()
 	C.Metal_FreeBuffer(t.ctx.ref, t.buf)
 
 	// Only track memory if it's NOT a heap-backed buffer
@@ -439,12 +431,16 @@ func (c *Context) NewTensorFP32(rows, cols int) *Tensor {
 		panic("Metal_Alloc returned nil!")
 	}
 	// Zero initialize buffer to prevent corruption from previous allocations
+	c.ExecMu.Lock()
+	defer c.ExecMu.Unlock()
 	C.Metal_ZeroBufferGPU(c.ref, buf, C.int(0), C.int(sizeBytes))
 	t := &Tensor{ctx: c, buf: buf, sizeBytes: sizeBytes, rows: rows, cols: cols, dataType: DataTypeF32}
 	traceAlloc(t, int64(sizeBytes), "NewTensorFP32")
 	metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
 	runtime.SetFinalizer(t, func(ft *Tensor) {
 		if ft.buf != nil {
+			ft.ctx.ExecMu.Lock()
+			defer ft.ctx.ExecMu.Unlock()
 			C.Metal_FreeBuffer(ft.ctx.ref, ft.buf)
 			traceAlloc(ft, -int64(ft.sizeBytes), "FinalizerFP32")
 			metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
@@ -550,6 +546,8 @@ func (t *Tensor) ReturnToPool() {
 }
 
 func (t *Tensor) LoadFrom(data []float32) error {
+	t.ctx.ExecMu.Lock()
+	defer t.ctx.ExecMu.Unlock()
 	if len(data) != t.rows*t.cols {
 		return NewValidationError("LoadFrom",
 			fmt.Sprintf("data size %d does not match tensor size %d",
@@ -579,6 +577,8 @@ func (t *Tensor) LoadFrom(data []float32) error {
 }
 
 func (t *Tensor) LoadRaw(data []byte) error {
+	t.ctx.ExecMu.Lock()
+	defer t.ctx.ExecMu.Unlock()
 	if len(data) > t.sizeBytes {
 		return NewValidationError("LoadRaw",
 			fmt.Sprintf("raw data size %d exceeds tensor buffer size %d", len(data), t.sizeBytes),
@@ -795,7 +795,9 @@ func (t *Tensor) ToHostBytes() []byte {
 
 // ZeroInit initializes tensor buffer with zeros
 func (t *Tensor) ZeroInit() {
-	C.Metal_ZeroBuffer(t.buf, C.int(t.Offset), C.int(t.sizeBytes))
+	t.ctx.ExecMu.Lock()
+	defer t.ctx.ExecMu.Unlock()
+	C.Metal_ZeroBufferGPU(t.ctx.ref, t.buf, C.int(t.Offset), C.int(t.sizeBytes))
 }
 
 func (c *Context) Synchronize() {
@@ -887,6 +889,8 @@ func (t *Tensor) Linear(weight *Tensor) (*Tensor, error) {
 	if err := ValidateLinearDimensions(t.cols, weight.cols); err != nil {
 		return nil, err
 	}
+	t.ctx.ExecMu.Lock()
+	defer t.ctx.ExecMu.Unlock()
 	t0 := time.Now()
 	res := t.ctx.NewTensorPooled(t.rows, weight.rows) // [M, N]
 
@@ -936,6 +940,9 @@ func (t *Tensor) LinearInto(weight *Tensor, out *Tensor, scale float32) error {
 		t.LinearF32_Into(weight, out, scale)
 		return nil
 	}
+
+	t.ctx.ExecMu.Lock()
+	defer t.ctx.ExecMu.Unlock()
 
 	// Use MatMul Kernel
 	if weight.dataType == DataTypeQ3K {
@@ -1526,6 +1533,8 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 	}
 }
 func (t *Tensor) RoPE(posOffset, headDim, numHeads, seqLen int, ropeTheta float32) {
+	t.ctx.ExecMu.Lock()
+	defer t.ctx.ExecMu.Unlock()
 	C.Metal_RoPE_F16(t.ctx.ref, t.buf, C.int(t.Offset), 1, C.int(seqLen), C.int(numHeads), C.int(headDim), C.int(posOffset), C.float(ropeTheta))
 }
 
@@ -1540,10 +1549,14 @@ func (t *Tensor) SwiGLU(gate *Tensor) (*Tensor, error) {
 	res := t.ctx.NewTensorPooled(t.rows, interSize)
 
 	C.Metal_SwiGLU_F16(t.ctx.ref, t.buf, C.int(t.Offset), gate.buf, C.int(gate.Offset), res.buf, C.int(res.Offset), C.int(t.rows), C.int(interSize))
+	t.ctx.ExecMu.Lock()
+	defer t.ctx.ExecMu.Unlock()
 	return res, nil
 }
 
 func (t *Tensor) Softmax() {
+	t.ctx.ExecMu.Lock()
+	defer t.ctx.ExecMu.Unlock()
 	C.Metal_Softmax_F16(t.ctx.ref, t.buf, C.int(t.Offset), t.buf, C.int(t.Offset), C.int(t.rows), C.int(t.cols))
 }
 
@@ -1552,6 +1565,8 @@ func (t *Tensor) Softmax() {
 // LinearToFP32 performs weight × FP16 input → FP32 output
 // Used for output head (Q6K * F16 -> F32) or small models
 func (t *Tensor) LinearToFP32_Into(weight *Tensor, out *Tensor) {
+	t.ctx.ExecMu.Lock()
+	defer t.ctx.ExecMu.Unlock()
 	if weight.dataType == DataTypeQ6K {
 		// Output head logic: F16 input * Q6K weight -> F32 output
 		// weight shape: [vocabSize, dim], input shape: [batch, dim], output shape: [batch, vocabSize]
@@ -1585,10 +1600,14 @@ func (t *Tensor) LinearToFP32(weight *Tensor) *Tensor {
 // RMSNormFP32_Into performs RMSNorm (FP32 -> FP32)
 // SiLUInPlace performs in-place element-wise SiLU activation
 func (t *Tensor) SiLUInPlace() {
+	t.ctx.ExecMu.Lock()
+	defer t.ctx.ExecMu.Unlock()
 	C.Metal_SiLU_F16(t.ctx.ref, t.buf, C.int(t.Offset), t.buf, C.int(t.Offset), C.int(t.rows*t.cols))
 }
 
 func (t *Tensor) RMSNormFP32_Into(weight *Tensor, eps float32, out *Tensor) {
+	t.ctx.ExecMu.Lock()
+	defer t.ctx.ExecMu.Unlock()
 	C.Metal_RMSNorm_F32(t.ctx.ref, t.buf, C.int(t.Offset), weight.buf, C.int(weight.Offset), out.buf, C.int(out.Offset),
 		C.int(t.rows), C.int(t.cols), C.float(eps))
 }
@@ -1596,6 +1615,8 @@ func (t *Tensor) RMSNormFP32_Into(weight *Tensor, eps float32, out *Tensor) {
 // LinearF32_Into performs Linear into F32 output
 // Used for Output Layer (Logits)
 func (t *Tensor) LinearF32_Into(weight *Tensor, out *Tensor, scale float32) {
+	t.ctx.ExecMu.Lock()
+	defer t.ctx.ExecMu.Unlock()
 	if weight.dataType == DataTypeQ4K {
 		if out.dataType == DataTypeF16 {
 			// Swap N, K for Q4K Logic
@@ -1690,6 +1711,8 @@ func (t *Tensor) Add(other *Tensor) (*Tensor, error) {
 	if err := ValidateAddDimensions(t.rows, t.cols, other.rows, other.cols); err != nil {
 		return nil, err
 	}
+	t.ctx.ExecMu.Lock()
+	defer t.ctx.ExecMu.Unlock()
 	res := t.ctx.NewTensorPooled(t.rows, t.cols)
 	C.Metal_Add_F16(t.ctx.ref, t.buf, C.int(t.Offset), other.buf, C.int(other.Offset), res.buf, C.int(res.Offset), C.int(t.rows*t.cols))
 	return res, nil
@@ -1710,6 +1733,8 @@ func (t *Tensor) AddInPlace(other *Tensor) error {
 }
 
 func (t *Tensor) EmbeddingLookup(row int, scale float32) *Tensor {
+	t.ctx.ExecMu.Lock()
+	defer t.ctx.ExecMu.Unlock()
 	res := t.ctx.NewTensorPooled(1, t.cols)
 	if t.dataType == DataTypeQ4K {
 		// Use optimized Q4K embedding kernel for better performance
@@ -1723,10 +1748,14 @@ func (t *Tensor) EmbeddingLookup(row int, scale float32) *Tensor {
 }
 
 func (t *Tensor) StoreKV(v *Tensor, kCache, vCache *Tensor, pos, heads, headDim, windowSize int) {
+	t.ctx.ExecMu.Lock()
+	defer t.ctx.ExecMu.Unlock()
 	C.Metal_StoreKV_F16(t.ctx.ref, t.buf, C.int(t.Offset), v.buf, C.int(v.Offset), kCache.buf, C.int(kCache.Offset), vCache.buf, C.int(vCache.Offset), C.int(pos), C.int(heads), C.int(headDim), C.int(windowSize))
 }
 
 func (t *Tensor) Attention(kCache, vCache *Tensor, pos, numHeads, kvHeads, headDim, ctxLen, windowSize int) *Tensor {
+	t.ctx.ExecMu.Lock()
+	defer t.ctx.ExecMu.Unlock()
 	res := t.ctx.NewTensorPooled(1, numHeads*headDim)
 	scoresDim := numHeads * ctxLen
 	if scoresDim < 32768 {
@@ -1771,6 +1800,8 @@ func (t *Tensor) AttFused(kCache, vCache *Tensor, out *Tensor, pos, numHeads, kv
 		maxCtxLen = pos + 1
 	}
 
+	t.ctx.ExecMu.Lock()
+	defer t.ctx.ExecMu.Unlock()
 	C.Metal_AttFused_F16(t.ctx.ref, t.buf, C.int(t.Offset),
 		kCache.buf, C.int(kCache.Offset),
 		vCache.buf, C.int(vCache.Offset),
@@ -1812,6 +1843,8 @@ func (t *Tensor) AddMixedInPlace(other *Tensor) error {
 	if err := ValidateAddDimensions(t.rows, t.cols, other.rows, other.cols); err != nil {
 		return err
 	}
+	t.ctx.ExecMu.Lock()
+	defer t.ctx.ExecMu.Unlock()
 	// t (F32) += other (F16)
 	C.Metal_Add_F32_F16(t.ctx.ref, t.buf, C.int(t.Offset), other.buf, C.int(other.Offset), t.buf, C.int(t.Offset), C.int(t.rows*t.cols))
 	return nil
@@ -1989,6 +2022,8 @@ func (t *Tensor) Slice(startCol, numCols int) *Tensor {
 
 // MambaScan executes a single SSM scan step
 func (t *Tensor) MambaScan(h, A, B, ssmC, D, dt *Tensor, dState int) *Tensor {
+	t.ctx.ExecMu.Lock()
+	defer t.ctx.ExecMu.Unlock()
 	res := t.ctx.NewTensorPooled(t.rows, t.cols)
 	C.Metal_MambaScan_F16(t.ctx.ref,
 		t.buf, C.int(t.Offset),
@@ -2004,6 +2039,8 @@ func (t *Tensor) MambaScan(h, A, B, ssmC, D, dt *Tensor, dState int) *Tensor {
 }
 
 func (t *Tensor) Mul(other *Tensor) *Tensor {
+	t.ctx.ExecMu.Lock()
+	defer t.ctx.ExecMu.Unlock()
 	res := t.ctx.NewTensorPooled(t.rows, t.cols)
 	C.Metal_Mul_F16(t.ctx.ref, t.buf, C.int(t.Offset), other.buf, C.int(other.Offset), res.buf, C.int(res.Offset), C.int(t.rows*t.cols))
 	return res
@@ -2022,6 +2059,8 @@ func (ctx *Context) MOERouterLogits(input, gateWeight *Tensor) *Tensor {
 	dim := input.Cols()
 	numExperts := gateWeight.Rows()
 
+	ctx.ExecMu.Lock()
+	defer ctx.ExecMu.Unlock()
 	logits := ctx.NewTensorFP32(batchSize, numExperts)
 	C.Metal_MOE_RouterLogits(ctx.ref,
 		input.buf, C.int(input.Offset),

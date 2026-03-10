@@ -32,6 +32,12 @@ type ModelInfo struct {
 type EngineAdapter interface {
 	Infer(ctx context.Context, req *InferenceRequest) (<-chan chan InferenceResponse, error)
 	ListModels() []ModelInfo
+	LoadModel(modelPath string) error
+	UnloadModel(modelPath string)
+	Close()
+}
+	Infer(ctx context.Context, req *InferenceRequest) (<-chan chan InferenceResponse, error)
+	ListModels() []ModelInfo
 	Close()
 }
 

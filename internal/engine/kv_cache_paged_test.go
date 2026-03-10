@@ -40,37 +40,37 @@ func TestPagedKVCache_Lifecycle(t *testing.T) {
 	k.ZeroInit()
 	v.ZeroInit()
 
-	// Update pos 0 -> Should alloc block 0
-	err = cache.Update(0, 0, k, v)
+	// Update pos 0 -> Should alloc block
+	err = cache.Update("seq-0", 0, 0, k, v)
 	if err != nil {
 		t.Errorf("Update failed: %v", err)
 	}
 
 	// Check block table
-	if len(cache.blockTableHost) != 1 {
-		t.Errorf("Expected 1 block allocated, got %d", len(cache.blockTableHost))
+	if len(cache.blockTables["seq-0"]) != 1 {
+		t.Errorf("Expected 1 block allocated, got %d", len(cache.blockTables["seq-0"]))
 	}
 
 	// Update pos 15 -> Same block
-	err = cache.Update(0, 15, k, v)
+	err = cache.Update("seq-0", 0, 15, k, v)
 	if err != nil {
 		t.Errorf("Update failed: %v", err)
 	}
-	if len(cache.blockTableHost) != 1 {
-		t.Errorf("Expected 1 block allocated, got %d", len(cache.blockTableHost))
+	if len(cache.blockTables["seq-0"]) != 1 {
+		t.Errorf("Expected 1 block allocated, got %d", len(cache.blockTables["seq-0"]))
 	}
 
 	// Update pos 16 -> New block
-	err = cache.Update(0, 16, k, v)
+	err = cache.Update("seq-0", 0, 16, k, v)
 	if err != nil {
 		t.Errorf("Update failed: %v", err)
 	}
-	if len(cache.blockTableHost) != 2 {
-		t.Errorf("Expected 2 blocks allocated, got %d", len(cache.blockTableHost))
+	if len(cache.blockTables["seq-0"]) != 2 {
+		t.Errorf("Expected 2 blocks allocated, got %d", len(cache.blockTables["seq-0"]))
 	}
 
 	// Verify Get returns BlockTable
-	view := cache.Get(0)
+	view := cache.Get("seq-0", 0)
 	if view.BlockTable == nil {
 		t.Error("Get returned nil BlockTable")
 	}

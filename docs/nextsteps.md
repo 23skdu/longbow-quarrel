@@ -23,20 +23,20 @@
 **Objective:** Complete engine.go integration and prepare for production deployment
 
 #### Engine Integration
-- [ ] Connect `cmd/webui/engine/adapter.go` to real `internal/engine/engine.go`
-- [ ] Add model hot-swapping support
-- [ ] Implement KV cache sharing between requests
+- [x] Connect `cmd/webui/engine/adapter.go` to real `internal/engine/engine.go`
+- [ ] Add model hot-swapping support (UnloadModel exists, but no hot-swap logic for active requests)
+- [ ] Implement KV cache sharing between requests (current: sequential processing, single CachePos)
 
 #### Production Readiness
-- [ ] Add API key authentication
-- [ ] Implement rate limiting
-- [ ] Add OpenAPI documentation
-- [ ] Configure CORS for cross-origin requests
+- [x] Add API key authentication
+- [x] Implement rate limiting
+- [x] Add OpenAPI documentation (docs/openapi.yaml created)
+- [x] Configure CORS for cross-origin requests
 
 #### Load Testing
-- [ ] Create load test script (100+ concurrent connections)
-- [ ] Benchmark throughput (tokens/second)
-- [ ] Measure latency percentiles (p50, p95, p99)
+- [x] Create load test script (100+ concurrent connections) (scripts/load_test.py created)
+- [x] Benchmark throughput (tokens/second)
+- [x] Measure latency percentiles (p50, p95, p99) — P50, P95, P99 all implemented
 
 ---
 

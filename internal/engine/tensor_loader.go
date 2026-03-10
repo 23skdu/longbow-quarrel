@@ -1,4 +1,4 @@
-//go:build darwin && metal
+//go:build ignore
 
 package engine
 

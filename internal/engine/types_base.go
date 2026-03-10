@@ -1,3 +1,7 @@
+//go:build (linux && !cuda) || (linux && cuda)
+// +build linux,!cuda linux,cuda
+
+
 package engine
 
 import (

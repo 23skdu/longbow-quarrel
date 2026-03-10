@@ -1,5 +1,3 @@
-//go:build darwin && metal
-
 package engine
 
 import (
@@ -22,8 +20,8 @@ type CacheView struct {
 // KVCache abstraction allows switching between different caching strategies
 type KVCache interface {
 	Init(ctx *device.Context, config config.Config) error
-	Update(layer, pos int, k, v *device.Tensor) error
-	Get(layer int) CacheView
+	Update(seqID string, layer, pos int, k, v *device.Tensor) error
+	Get(seqID string, layer int) CacheView
 	Size() int
 	Free()
 }
@@ -111,7 +109,7 @@ func (c *TensorKVCache) Init(ctx *device.Context, config config.Config) error {
 }
 
 // Update stores new K/V pairs at the specified position
-func (c *TensorKVCache) Update(layer, pos int, k, v *device.Tensor) error {
+func (c *TensorKVCache) Update(seqID string, layer, pos int, k, v *device.Tensor) error {
 	if !c.initialized {
 		return fmt.Errorf("cache not initialized")
 	}
@@ -140,7 +138,7 @@ func (c *TensorKVCache) Update(layer, pos int, k, v *device.Tensor) error {
 }
 
 // Get returns the K and V cache tensors for a layer
-func (c *TensorKVCache) Get(layer int) CacheView {
+func (c *TensorKVCache) Get(seqID string, layer int) CacheView {
 	if !c.initialized || layer < 0 || layer >= len(c.kCache) {
 		return CacheView{}
 	}

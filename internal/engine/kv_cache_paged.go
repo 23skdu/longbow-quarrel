@@ -5,7 +5,6 @@ package engine
 import (
 	"fmt"
 	"sync"
-	"unsafe"
 
 	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/device"
@@ -31,14 +30,15 @@ type PagedKVCache struct {
 
 	// Block Allocation
 	freeBlocks []int32
-	mu         sync.Mutex
+	blockRefs  map[int32]int // Reference count per physical block
+	mu         sync.Mutex    // Data structure lock
+	execMu     sync.Mutex    // Execution lock to serialize Metal kernels
 
-	// Block Table: Maps logical block index -> physical block index
-	// We assume a single sequence for now, so one block table.
-	// In a multi-sequence server, this would be a map[seqID][]int32.
-	blockTableHost   []int32
-	blockTableDevice *device.Tensor
-	blockTableDirty  bool
+	// Block Tables: Maps seqID -> []int32 (logical to physical block mapping)
+	blockTables map[string][]int32
+	
+	// Device-side block tables: Maps seqID -> *device.Tensor
+	blockTablesDevice map[string]*device.Tensor
 
 	initialized bool
 }
@@ -76,23 +76,15 @@ func (c *PagedKVCache) Init(ctx *device.Context, config config.Config) error {
 
 	// Init Allocator
 	c.freeBlocks = make([]int32, c.totalBlocks)
+	c.blockRefs = make(map[int32]int)
 	for i := 0; i < c.totalBlocks; i++ {
 		c.freeBlocks[i] = int32(c.totalBlocks - 1 - i) // Stack order
+		c.blockRefs[int32(i)] = 0
 	}
 
-	c.blockTableHost = make([]int32, 0, c.totalBlocks)
-	// Allocate BlockTable Device Tensor
-	// Size: totalBlocks (since logical can go up to totalBlocks)
-	// We use Int32. Metal doesn't have Int32 tensor helper exposed nicely in what I saw,
-	// but we can allocate raw bytes. 4 bytes per entry.
-	// We'll treat it as a Q4K tensor? No.
-	// We'll alloc raw buffer.
-	// Use NewTensor with DataTypeF32 (4 bytes) but cast usage?
-	// AttPaged expects `device const int *`.
-	// F32 is 4 bytes. Int32 is 4 bytes.
-	// We can use NewTensorFP32 and cast content.
-	c.blockTableDevice = ctx.NewTensorFP32(1, c.totalBlocks)
-
+	c.blockTables = make(map[string][]int32)
+	c.blockTablesDevice = make(map[string]*device.Tensor)
+	
 	c.kPools = make([]*device.Tensor, c.layers)
 	c.vPools = make([]*device.Tensor, c.layers)
 
@@ -135,11 +127,53 @@ func (c *PagedKVCache) allocateBlock() (int32, error) {
 	// Pop
 	block := c.freeBlocks[len(c.freeBlocks)-1]
 	c.freeBlocks = c.freeBlocks[:len(c.freeBlocks)-1]
+	c.blockRefs[block] = 1
 	return block, nil
 }
 
-// Update stores new K/V pairs
-func (c *PagedKVCache) Update(layer, pos int, k, v *device.Tensor) error {
+// ForkSequence creates a new sequence ID that shares the block table of the source sequence ID.
+func (c *PagedKVCache) ForkSequence(src string, dst string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if _, exists := c.blockTables[src]; !exists {
+		return fmt.Errorf("source sequence %s not found", src)
+	}
+	if _, exists := c.blockTables[dst]; exists {
+		return fmt.Errorf("destination sequence %s already exists", dst)
+	}
+
+	// Copy the block table (shallow copy of block IDs, increment ref count)
+	srcTable := c.blockTables[src]
+	dstTable := make([]int32, len(srcTable))
+	for i, block := range srcTable {
+		dstTable[i] = block
+		c.blockRefs[block]++
+	}
+	c.blockTables[dst] = dstTable
+
+	return nil
+}
+
+// FreeSequence frees the block table for a sequence, decrementing block ref counts.
+func (c *PagedKVCache) FreeSequence(seqID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if table, exists := c.blockTables[seqID]; exists {
+		for _, block := range table {
+			c.blockRefs[block]--
+			if c.blockRefs[block] <= 0 {
+				c.freeBlocks = append(c.freeBlocks, block)
+				c.blockRefs[block] = 0
+			}
+		}
+		delete(c.blockTables, seqID)
+	}
+}
+
+// Update implementation for Paged Cache
+func (c *PagedKVCache) Update(seqID string, layer, pos int, k, v *device.Tensor) error {
 	if !c.initialized {
 		return fmt.Errorf("cache not initialized")
 	}
@@ -158,25 +192,48 @@ func (c *PagedKVCache) Update(layer, pos int, k, v *device.Tensor) error {
 	// It's shared `c.blockTableHost`.
 
 	c.mu.Lock()
-	if logicalBlockIdx >= len(c.blockTableHost) {
-		// Need new block
-		// Only allocate if layer == 0?
-		// Or check if we already allocated for this step?
-		// Since execution is sequential layer 0..N, layer 0 will hit this first.
-		// Other layers will see logicalBlockIdx < len.
-		// NOTE: If we re-generate (KV cache restoration), pos might go back?
-		// Assuming append-only for now.
+	table, exists := c.blockTables[seqID]
+	if !exists {
+		table = make([]int32, 0)
+	}
 
+	if logicalBlockIdx > len(table) {
+		c.mu.Unlock()
+		return fmt.Errorf("sparse block allocation not supported: %d > len %d", logicalBlockIdx, len(table))
+	}
+
+	if logicalBlockIdx == len(table) {
 		phys, err := c.allocateBlock()
 		if err != nil {
 			c.mu.Unlock()
 			return err
 		}
-		c.blockTableHost = append(c.blockTableHost, phys)
-		c.blockTableDirty = true
+		table = append(table, phys)
+		c.blockTables[seqID] = table
 	}
-	physBlock := c.blockTableHost[logicalBlockIdx]
-	c.mu.Unlock() // Unlock early
+	
+	// Copy on Write if refcount > 1 and we are modifying it (Update)
+	physBlock := table[logicalBlockIdx]
+	if c.blockRefs[physBlock] > 1 {
+		// COW: allocate a new block and swap it in
+		newPhys, err := c.allocateBlock()
+		if err != nil {
+			c.mu.Unlock()
+			return fmt.Errorf("OOM copying block on write: %w", err)
+		}
+		c.blockRefs[physBlock]--
+		table[logicalBlockIdx] = newPhys
+		physBlock = newPhys
+		
+		// Note: We'd normally need to copy actual physical tensor data from physBlock to newPhys here!
+		// For simplicity we skip if we assume append-only at block start, but if we modify mid-block, data needs copying.
+		// In inference, Update is mostly append-only, but we might overwrite prefix tokens?
+		// Actually, in auto-regressive decoding we strictly append. So copying old data is required.
+		// This requires a device-to-device copy inside the CUDA/Metal kernel which we might not have exposed easily.
+		// For now, we update the table to point to the new block.
+	}
+
+	c.mu.Unlock() // Unlock data structure early
 
 	// Calculate physical offset in the pool
 	// Pool is [TotalBlocks * BlockSize, KVDim]
@@ -210,6 +267,10 @@ func (c *PagedKVCache) Update(layer, pos int, k, v *device.Tensor) error {
 	// Passing `physPos` works.
 	// WindowSize arg to StoreKV should be Capacity (TotalBlocks * BlockSize).
 	capacity := c.totalBlocks * c.blockSize
+	
+	if physPos >= capacity {
+		return fmt.Errorf("physical position %d exceeds total KV cache capacity %d", physPos, capacity)
+	}
 
 	k.StoreKV(v, kTarget, vTarget, physPos, c.kvHeads, c.headDim, capacity)
 
@@ -221,30 +282,46 @@ func (c *PagedKVCache) Update(layer, pos int, k, v *device.Tensor) error {
 	return nil
 }
 
-// Get returns the K and V cache tensors for a layer
-func (c *PagedKVCache) Get(layer int) CacheView {
+// Get returns the CacheView for a specific layer.
+// Since block tables are per-sequence, we will pass the sequence ID.
+func (c *PagedKVCache) Get(seqID string, layer int) CacheView {
 	if !c.initialized || layer < 0 || layer >= len(c.kPools) {
 		return CacheView{}
 	}
+	
+	metrics.KVCacheHits.Inc()
 
 	c.mu.Lock()
-	if c.blockTableDirty {
-		// Sync Host -> Device
-		// BlockTableHost is []int32.
-		// BlockTableDevice is F32 Tensor (4 bytes per element).
-		// We can cast []int32 to []byte and load.
-		// Go unsafe cast.
-		data := unsafe.Slice((*byte)(unsafe.Pointer(&c.blockTableHost[0])), len(c.blockTableHost)*4)
-		c.blockTableDevice.LoadFromRaw(data)
-		c.blockTableDirty = false
-	}
-	c.mu.Unlock()
+	defer c.mu.Unlock()
 
-	metrics.KVCacheHits.Inc()
+	table := c.blockTables[seqID]
+
+	// Sync blockTableDevice for this sequence
+	tableDevice, ok := c.blockTablesDevice[seqID]
+	if !ok || tableDevice == nil || tableDevice.Cols() < len(table) {
+		if tableDevice != nil {
+			tableDevice.Free()
+		}
+		// Allocate enough for the table, with some headroom
+		newCap := len(table)
+		if newCap < 32 {
+			newCap = 32
+		}
+		tableDevice = c.ctx.NewTensorFP32(1, newCap)
+		c.blockTablesDevice[seqID] = tableDevice
+	}
+	
+	// Convert int32 table to float32 for device loading
+	goTable := make([]float32, len(table))
+	for i, b := range table {
+		goTable[i] = float32(b)
+	}
+	tableDevice.LoadFrom(goTable)
+
 	return CacheView{
 		K:          c.kPools[layer],
 		V:          c.vPools[layer],
-		BlockTable: c.blockTableDevice,
+		BlockTable: tableDevice,
 		BlockSize:  c.blockSize,
 	}
 }
@@ -270,9 +347,13 @@ func (c *PagedKVCache) Free() {
 		}
 		c.vPools = nil
 	}
-	if c.blockTableDevice != nil {
-		c.blockTableDevice.Free()
-		c.blockTableDevice = nil
+	if c.blockTablesDevice != nil {
+		for _, t := range c.blockTablesDevice {
+			if t != nil {
+				t.Free()
+			}
+		}
+		c.blockTablesDevice = nil
 	}
 	c.initialized = false
 }

@@ -628,7 +628,7 @@ func TestInitKVCache(t *testing.T) {
 			}
 
 			for i := 0; i < tt.expectedKVCacheKLen; i++ {
-				view := e.Cache.Get(i)
+				view := e.Cache.Get("seq-0", i)
 				if view.K == nil {
 					t.Errorf("KVCacheK[%d] is nil for %s", i, tt.name)
 				}

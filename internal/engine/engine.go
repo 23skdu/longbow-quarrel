@@ -1296,6 +1296,9 @@ func (e *Engine) InferWithCallback(inputTokens []int, tokensToGenerate int, samp
 }
 
 func (e *Engine) inferInternal(inputTokens []int, tokensToGenerate int, samplerConfig SamplerConfig, tokenCallback func(int), logitsCallback func([]float32)) ([]int, error) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
 	// Validation
 	if len(inputTokens) == 0 {
 		return nil, errors.New("empty input tokens")
@@ -1406,7 +1409,7 @@ func (e *Engine) inferInternal(inputTokens []int, tokensToGenerate int, samplerC
 			ffnGate := e.Weights.FfnGate[l]
 			ffnUp := e.Weights.FfnUp[l]
 			ffnDown := e.Weights.FfnDown[l]
-			view := e.Cache.Get(l)
+			view := e.Cache.Get("seq-0", l)
 			kCache := view.K
 			vCache := view.V
 
@@ -1443,7 +1446,7 @@ func (e *Engine) inferInternal(inputTokens []int, tokensToGenerate int, samplerC
 					e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen, e.Config.WindowSize, e.GlobalScale, samplerConfig.DebugActivations, int(e.Config.PrecisionMode),
 					view.BlockTable, view.BlockSize,
 					func(k *device.Tensor, v *device.Tensor) {
-						if err := e.Cache.Update(l, e.CachePos, k, v); err != nil {
+						if err := e.Cache.Update("seq-0", l, e.CachePos, k, v); err != nil {
 							panic(err)
 						}
 					})
@@ -1466,7 +1469,7 @@ func (e *Engine) inferInternal(inputTokens []int, tokensToGenerate int, samplerC
 					e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen, e.Config.WindowSize, e.GlobalScale, samplerConfig.DebugActivations, int(e.Config.PrecisionMode),
 					view.BlockTable, view.BlockSize,
 					func(k *device.Tensor, v *device.Tensor) {
-						if err := e.Cache.Update(l, e.CachePos, k, v); err != nil {
+						if err := e.Cache.Update("seq-0", l, e.CachePos, k, v); err != nil {
 							panic(err)
 						}
 					})
@@ -1638,7 +1641,7 @@ func (e *Engine) inferInternal(inputTokens []int, tokensToGenerate int, samplerC
 			ffnUp := e.Weights.FfnUp[l]
 			ffnDown := e.Weights.FfnDown[l]
 
-			view := e.Cache.Get(l)
+			view := e.Cache.Get("seq-0", l)
 			kCache := view.K
 			vCache := view.V
 
@@ -1679,7 +1682,7 @@ func (e *Engine) inferInternal(inputTokens []int, tokensToGenerate int, samplerC
 					e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen, e.Config.WindowSize, e.GlobalScale, samplerConfig.DebugActivations, int(e.Config.PrecisionMode),
 					view.BlockTable, view.BlockSize,
 					func(k *device.Tensor, v *device.Tensor) {
-						if err := e.Cache.Update(l, e.CachePos, k, v); err != nil {
+						if err := e.Cache.Update("seq-0", l, e.CachePos, k, v); err != nil {
 							panic(err)
 						}
 					})
@@ -1930,5 +1933,43 @@ func ValidateTensorDimensions(name string, rows, cols int, ggufType gguf.GGMLTyp
 			return fmt.Errorf("invalid Q6_K dimensions: rows=%d, cols=%d", rows, cols)
 		}
 	}
+	return nil
+}
+
+
+// SwapModel safely replaces the currently loaded model with a new one
+// It blocks new inferences, waits for ongoing ones (via RWMutex), frees the old weights, and loads the new ones.
+func (e *Engine) SwapModel(newModelPath string, newConfig config.Config) error {
+	startTime := time.Now()
+	success := false
+
+	defer func() {
+		metrics.RecordModelHotSwap(time.Since(startTime), success)
+	}()
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	// Free existing cache and weights
+	if e.Cache != nil {
+		e.Cache.Free()
+	}
+	if e.Weights != nil {
+		e.Weights.Free()
+	}
+
+	// Create new fresh weights struct
+	e.Weights = &LlamaWeights{}
+
+	// Update config
+	e.Config = newConfig
+	e.Config.KVCacheSize = newConfig.KVCacheSize
+
+	// Load the new model
+	if err := e.loadModel(newModelPath); err != nil {
+		return err
+	}
+
+	success = true
 	return nil
 }

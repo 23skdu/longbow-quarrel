@@ -57,7 +57,10 @@ type EngineInfo struct {
 type PerformanceInfo struct {
 	TokensPerSecond float64   `json:"tokens_per_second"`
 	AvgLatencyMs    float64   `json:"avg_latency_ms"`
+	P50LatencyMs    float64   `json:"p50_latency_ms"`
 	P95LatencyMs    float64   `json:"p95_latency_ms"`
+	P99LatencyMs    float64   `json:"p99_latency_ms"`
+
 	ErrorRate       float64   `json:"error_rate"`
 	NanCount        int       `json:"nan_count"`
 	LastInference   time.Time `json:"last_inference"`
@@ -349,10 +352,25 @@ func (hm *HealthMonitor) calculatePerformanceInfo() PerformanceInfo {
 			}
 		}
 
+		p50Index := int(float64(len(latencies)) * 0.50)
+		if p50Index >= len(latencies) {
+			p50Index = len(latencies) - 1
+		}
+
 		p95Index := int(float64(len(latencies)) * 0.95)
 		if p95Index >= len(latencies) {
 			p95Index = len(latencies) - 1
 		}
+
+		p99Index := int(float64(len(latencies)) * 0.99)
+		if p99Index >= len(latencies) {
+			p99Index = len(latencies) - 1
+		}
+
+
+
+
+
 
 		avgLatencyMs := float64(totalDuration.Nanoseconds()) / float64(len(hm.perfHistory)) / 1e6
 		tokensPerSecond := float64(totalTokens) / totalDuration.Seconds()
@@ -360,16 +378,30 @@ func (hm *HealthMonitor) calculatePerformanceInfo() PerformanceInfo {
 		return PerformanceInfo{
 			TokensPerSecond: tokensPerSecond,
 			AvgLatencyMs:    avgLatencyMs,
+			P50LatencyMs:    latencies[p50Index],
 			P95LatencyMs:    latencies[p95Index],
+			P99LatencyMs:    latencies[p99Index],
 			ErrorRate:       float64(errorCount) / float64(len(hm.perfHistory)),
 			NanCount:        0, // Would be calculated from NaN detection
 			LastInference:   hm.lastInference,
 		}
+
+
+
+
+
+
+
 	}
 
 	return PerformanceInfo{
 		LastInference: hm.lastInference,
+		P50LatencyMs:  0,
+		P95LatencyMs:  0,
+		P99LatencyMs:  0,
 	}
+
+
 }
 
 // Alert checking functions

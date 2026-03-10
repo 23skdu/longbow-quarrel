@@ -1,3 +1,6 @@
+//go:build amd64 && cgo
+
+#pragma GCC target("avx2,f16c")
 #include <immintrin.h>
 #include <math.h>
 #include <stdint.h>

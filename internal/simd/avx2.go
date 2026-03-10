@@ -1,9 +1,9 @@
-//go:build (amd64 || arm64) && cgo
+//go:build amd64 && cgo
 
 package simd
 
 /*
-#cgo CFLAGS: -mavx2 -mf16c
+#cgo CFLAGS: -mavx2
 #include <stdint.h>
 
 void softmax_avx2(float* x, int n);
@@ -13,7 +13,6 @@ void fp32_to_fp16_avx2(const float* src, uint16_t* dst, int n);
 */
 import "C"
 import (
-	"math"
 	"unsafe"
 )
 

@@ -105,7 +105,7 @@ func (c *SlidingWindowKVCache) Init(ctx *device.Context, config config.Config) e
 // Update stores new K/V pairs at the specified position.
 // For SlidingWindow, pos can be > windowSize.
 // Detailed mapping is handled by the metal kernel using modulo logic.
-func (c *SlidingWindowKVCache) Update(layer, pos int, k, v *device.Tensor) error {
+func (c *SlidingWindowKVCache) Update(seqID string, layer, pos int, k, v *device.Tensor) error {
 	if !c.initialized {
 		return fmt.Errorf("cache not initialized")
 	}
@@ -147,7 +147,7 @@ func (c *SlidingWindowKVCache) Update(layer, pos int, k, v *device.Tensor) error
 }
 
 // Get returns the K and V cache tensors for a layer
-func (c *SlidingWindowKVCache) Get(layer int) CacheView {
+func (c *SlidingWindowKVCache) Get(seqID string, layer int) CacheView {
 	if !c.initialized || layer < 0 || layer >= len(c.kCache) {
 		return CacheView{}
 	}

@@ -48,7 +48,7 @@ func FuzzKVCacheUpdate(f *testing.F) {
 		kIn.LoadFrom(data)
 		vIn.LoadFrom(data)
 
-		err := cache.Update(layer, pos, kIn, vIn)
+		err := cache.Update("seq-0", layer, pos, kIn, vIn)
 
 		// Basic invariant check
 		if layer < 0 || layer >= config.Layers {

@@ -1,8 +1,23 @@
-//go:build darwin && metal
-
 package device
 
 import "math"
+
+type DataType int
+
+const (
+	DataTypeF16  DataType = 0
+	DataTypeQ4K  DataType = 1
+	DataTypeQ4_0 DataType = 2
+	DataTypeF32  DataType = 3
+	DataTypeQ6K  DataType = 4
+	DataTypeQ3K  DataType = 5
+	DataTypeQ8_0 DataType = 6
+
+	DataTypeQ4_K   = DataTypeQ4K
+	DataTypeQ6_K   = DataTypeQ6K
+	DataTypeIQ4_NL DataType = 7
+	DataTypeMXFP4  DataType = 8
+)
 
 // Reference implementation of Float32 <-> Float16
 // Real implementation should handle exponents properly or use a library,

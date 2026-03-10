@@ -1,12 +1,9 @@
-//go:build darwin && metal
-
 package device
 
 import (
 	"errors"
 	"fmt"
 	"math"
-	"sync/atomic"
 )
 
 type ModelConfig struct {
@@ -72,7 +69,7 @@ func GetKernelDurationSum() float64 {
 }
 
 func GetGPUMemoryAllocated() int64 {
-	return atomic.LoadInt64(&allocatedBytes)
+	return 0
 }
 
 func ValidateTensorDimensions(aRows, aCols, bRows, bCols int) error {

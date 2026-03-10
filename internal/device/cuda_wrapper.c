@@ -1,5 +1,4 @@
-// CUDA C wrapper for Go CGO
-// This file provides C bindings for the CUDA kernels
+//go:build linux && cuda
 
 #include <cuda_runtime.h>
 #include <stdio.h>
