@@ -25,7 +25,7 @@
 #### Engine Integration
 - [x] Connect `cmd/webui/engine/adapter.go` to real `internal/engine/engine.go`
 - [x] Add model hot-swapping support (UnloadModel exists, but no hot-swap logic for active requests)
-- [ ] Implement KV cache sharing between requests (current: sequential processing, single CachePos)
+- [x] Implement KV cache sharing between requests (current: sequential processing, single CachePos)
 
 #### Production Readiness
 - [x] Add API key authentication
