@@ -95,6 +95,11 @@ func (a *CPUEngineAdapter) UnloadModel(modelPath string) {
 	// No-op for CPU adapter
 }
 
+func (a *CPUEngineAdapter) LoadModel(modelPath string) error {
+	// No-op for CPU adapter - no GPU available
+	return nil
+}
+
 // CPUEngineError indicates that no GPU acceleration is available
 type CPUEngineError struct {
 	Message string

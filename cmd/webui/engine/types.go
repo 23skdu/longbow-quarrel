@@ -36,10 +36,6 @@ type EngineAdapter interface {
 	UnloadModel(modelPath string)
 	Close()
 }
-	Infer(ctx context.Context, req *InferenceRequest) (<-chan chan InferenceResponse, error)
-	ListModels() []ModelInfo
-	Close()
-}
 
 func GetAdapter() EngineAdapter {
 	return getAdapterImpl()

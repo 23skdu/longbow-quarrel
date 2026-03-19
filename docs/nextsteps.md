@@ -141,3 +141,87 @@ go test ./internal/metrics/...
 # Metal-specific tests (macOS)
 go test -tags=metal ./internal/device/...
 ```
+
+---
+
+## Incomplete Features & Code TODOs
+
+### High Priority (Blocking Functionality)
+
+#### Model Hot-Swapping (cmd/webui/engine/adapter_*.go)
+- **Status:** INCOMPLETE
+- **Issue:** `UnloadModel()` exists but no hot-swap logic for active requests
+- **Impact:** Cannot switch models while requests are in-flight
+- **Location:** `cmd/webui/engine/types.go:35-36`
+
+#### KV Cache Sharing Between Requests (internal/engine/engine.go)
+- **Status:** INCOMPLETE
+- **Issue:** Current sequential processing, single CachePos
+- **Impact:** Cannot batch multiple requests efficiently
+- **Location:** `cmd/webui/handlers/inference.go`
+
+#### Mamba Layer Detection (internal/engine/mamba.go:91)
+- **Status:** TODO
+- **Issue:** `IsMambaLayer()` relies on nil check - needs proper config-based detection
+- **Details:** `// TODO: Implement logic based on model config. For Nemotron-3-Nano, pattern detection needed`
+
+#### Tensor Zero() Method (internal/engine/engine.go:1191)
+- **Status:** TODO
+- **Issue:** `// TODO: Add Zero() to tensor` - SSM state initialization incomplete
+- **Impact:** SSM states may contain dirty data between inference runs
+
+#### Quantization Support (internal/gguf/quantize.go:6)
+- **Status:** NOT IMPLEMENTED
+- **Issue:** `QuantizeWeightsToQ4K()` returns "not implemented"
+- **Impact:** Cannot quantize models to Q4_K format at runtime
+- **Related:** Tests in `internal/gguf/quantization_q4k_test.go` skip due to missing implementation
+
+### Medium Priority (Quality/Performance)
+
+#### RoPE Attention Causal Mask Test (internal/device/rope_attention_test.go:122)
+- **Status:** TODO (Test Incomplete)
+- **Issue:** `// TODO: Call attention kernel with causal mask`
+- **Details:** Test documents expected behavior but kernel not called
+
+#### Perplexity Calculation (internal/engine/engine.go:113)
+- **Status:** PLACEHOLDER
+- **Issue:** Simplified implementation - `// This is just a placeholder - real perplexity requires model probabilities`
+- **Impact:** Quality metrics not accurate without proper token probability computation
+
+#### Quality Evaluator Tests (internal/engine/smollm2_zero_logits_test.go:17,23)
+- **Status:** TODO
+- **Issues:**
+  - `// TODO: Implement with full engine + tokenizer setup`
+  - `// TODO: Implement by comparing tokenizer vocab with model expectations`
+
+### Low Priority (Future/Backlog)
+
+#### CUDA Coherence Tests (cmd/smoke_test/cuda_coherence_test.go:94,102,110)
+- **Status:** SKIPPED (Placeholder tests)
+- **Issue:** `t.Skip("CUDA engine not implemented - this is a placeholder for CUDA coherence tests")`
+- **Impact:** No CUDA coherence validation
+
+#### Inference String Method (internal/engine/engine.go:1260)
+- **Status:** PLACEHOLDER
+- **Issue:** Uses `inputTokens := []int{1, 2, 3} // Placeholder tokenization`
+- **Impact:** Cannot properly test string-based inference
+
+#### IQ1_M Quantization (internal/gguf/gguf_test.go:149)
+- **Status:** NOT IMPLEMENTED
+- **Issue:** `t.Errorf("IQ1_M SizeBytes() = %d, want 0 (not implemented)", got)`
+
+---
+
+## API Endpoints Summary
+
+| Endpoint | Method | Description | Status |
+|----------|--------|-------------|--------|
+| `/health` | GET | Health check | ✅ Complete |
+| `/healthz` | GET | Simple liveness | ✅ Complete |
+| `/readyz` | GET | Readiness probe | ✅ Complete |
+| `/version` | GET | Version info | ✅ Complete |
+| `/metrics` | GET | Prometheus metrics | ✅ Complete |
+| `/api/models` | GET | List models | ✅ Complete |
+| `/api/generate` | POST | Generate text (sync) | ✅ Complete |
+| `/api/stream` | POST | Stream text (SSE) | ✅ Complete |
+| `/ws` | WebSocket | Real-time inference | ✅ Complete |

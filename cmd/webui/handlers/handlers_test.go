@@ -392,3 +392,153 @@ func TestInferenceResponseJSON(t *testing.T) {
 		t.Errorf("Expected complete %v, got %v", resp.Complete, decoded.Complete)
 	}
 }
+
+func TestLoggingMiddleware(t *testing.T) {
+	middleware := handlers.NewLoggingMiddleware()
+
+	handler := middleware.Middleware(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", w.Code)
+	}
+}
+
+func TestLoggingMiddlewareLogsRequest(t *testing.T) {
+	middleware := handlers.NewLoggingMiddleware()
+
+	var logged bool
+	handler := middleware.Middleware(func(w http.ResponseWriter, r *http.Request) {
+		logged = true
+		w.WriteHeader(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/test?key=value", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	if !logged {
+		t.Error("Handler was not called")
+	}
+}
+
+func TestGenerateResponseJSON(t *testing.T) {
+	resp := handlers.GenerateResponse{
+		Text:            "Generated text",
+		TokensGenerated: 42,
+		TokensPerSec:    15.5,
+	}
+
+	data, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("Failed to marshal: %v", err)
+	}
+
+	var decoded handlers.GenerateResponse
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("Failed to unmarshal: %v", err)
+	}
+
+	if decoded.Text != resp.Text {
+		t.Errorf("Expected text '%s', got '%s'", resp.Text, decoded.Text)
+	}
+
+	if decoded.TokensGenerated != resp.TokensGenerated {
+		t.Errorf("Expected tokens %d, got %d", resp.TokensGenerated, decoded.TokensGenerated)
+	}
+}
+
+func TestGenerateRequestDefaults(t *testing.T) {
+	req := handlers.GenerateRequest{
+		Prompt:      "test",
+		MaxTokens:   0,
+		Temperature: 0,
+		TopK:        0,
+		TopP:        0,
+	}
+
+	if req.MaxTokens <= 0 {
+		req.MaxTokens = 256
+	}
+	if req.Temperature <= 0 {
+		req.Temperature = 0.7
+	}
+	if req.TopK <= 0 {
+		req.TopK = 40
+	}
+	if req.TopP <= 0 {
+		req.TopP = 0.95
+	}
+
+	if req.MaxTokens != 256 {
+		t.Errorf("Expected default max_tokens 256, got %d", req.MaxTokens)
+	}
+	if req.Temperature != 0.7 {
+		t.Errorf("Expected default temperature 0.7, got %f", req.Temperature)
+	}
+	if req.TopK != 40 {
+		t.Errorf("Expected default topk 40, got %d", req.TopK)
+	}
+	if req.TopP != 0.95 {
+		t.Errorf("Expected default topp 0.95, got %f", req.TopP)
+	}
+}
+
+func TestCORSMultipleOrigins(t *testing.T) {
+	allowedOrigins := []string{"http://localhost:3000", "http://localhost:8080"}
+	middleware := handlers.NewCORSMiddleware(allowedOrigins)
+
+	handler := middleware.Middleware(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	testOrigins := []struct {
+		origin         string
+		expectedStatus int
+		expectedACAO   string
+	}{
+		{"http://localhost:3000", http.StatusOK, "http://localhost:3000"},
+		{"http://localhost:8080", http.StatusOK, "http://localhost:8080"},
+		{"http://evil.com", http.StatusOK, ""},
+	}
+
+	for _, tt := range testOrigins {
+		req := httptest.NewRequest(http.MethodGet, "/api/models", nil)
+		req.Header.Set("Origin", tt.origin)
+
+		w := httptest.NewRecorder()
+		handler(w, req)
+
+		acao := w.Header().Get("Access-Control-Allow-Origin")
+		if acao != tt.expectedACAO {
+			t.Errorf("For origin %s, expected ACAO '%s', got '%s'", tt.origin, tt.expectedACAO, acao)
+		}
+	}
+}
+
+func TestAPIKeyQueryParam(t *testing.T) {
+	manager := handlers.GetAPIKeyManager()
+	key, _ := handlers.GenerateAPIKey()
+	_ = manager.AddKey(key, "test", time.Hour, 100)
+
+	middleware := handlers.NewAuthMiddleware(key)
+
+	handler := middleware.Authenticate(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/models?api_key="+key, nil)
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", w.Code)
+	}
+}
