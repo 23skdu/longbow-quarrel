@@ -88,9 +88,9 @@
 - [ ] Support grouped convolutions for MOE models
 
 #### FP8 Support (H100)
-- Implement FP8 E4M3/E5M2 quantization
-- Tensor Core FP8 support on Hopper architecture
-- FP8 dequantization kernels
+- [x] Implement FP8 E4M3/E5M2 quantization
+- [x] Tensor Core FP8 support on Hopper architecture
+- [x] FP8 dequantization kernels
 
 ### Low Priority
 
