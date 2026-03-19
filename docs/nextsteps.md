@@ -83,9 +83,9 @@
 ### Medium Priority
 
 #### cuDNN Integration
-- Add cuDNN for additional optimization on NVIDIA GPUs
-- Leverage cuDNN's optimized attention kernels
-- Support grouped convolutions for MOE models
+- [x] Add cuDNN for additional optimization on NVIDIA GPUs
+- [x] Leverage cuDNN's optimized attention kernels
+- [ ] Support grouped convolutions for MOE models
 
 #### FP8 Support (H100)
 - Implement FP8 E4M3/E5M2 quantization
