@@ -100,6 +100,11 @@ func (a *CPUEngineAdapter) LoadModel(modelPath string) error {
 	return nil
 }
 
+func (a *CPUEngineAdapter) HotSwapModel(oldModelPath, newModelPath string) error {
+	// No-op for CPU adapter - no GPU available
+	return nil
+}
+
 // CPUEngineError indicates that no GPU acceleration is available
 type CPUEngineError struct {
 	Message string

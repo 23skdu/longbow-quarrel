@@ -63,6 +63,7 @@ func main() {
 	apiMux.Handle("/models", authMiddleware.Authenticate(handlers.ModelsHandler(cfg)))
 	apiMux.Handle("/generate", authMiddleware.Authenticate(handlers.GenerateHandler(cfg)))
 	apiMux.Handle("/stream", authMiddleware.Authenticate(handlers.StreamHandler(cfg)))
+	apiMux.Handle("/hotswap", authMiddleware.Authenticate(handlers.HotSwapHandler(cfg)))
 	mux.Handle("/api/", loggingMiddleware.Middleware(corsMiddleware.Middleware(apiMux.ServeHTTP)))
 
 	mux.Handle("/", handlers.IndexHandler())

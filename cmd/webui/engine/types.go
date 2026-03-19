@@ -34,6 +34,7 @@ type EngineAdapter interface {
 	ListModels() []ModelInfo
 	LoadModel(modelPath string) error
 	UnloadModel(modelPath string)
+	HotSwapModel(oldModelPath, newModelPath string) error
 	Close()
 }
 

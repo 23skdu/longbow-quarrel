@@ -5,6 +5,7 @@ package engine
 import (
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/23skdu/longbow-quarrel/internal/config"
@@ -13,17 +14,21 @@ import (
 )
 
 type WrappedMetalEngine struct {
-	engine   *engine.Engine
-	tok      *tokenizer.Tokenizer
-	model    string
-	loadedAt time.Time
+	engine     *engine.Engine
+	tok        *tokenizer.Tokenizer
+	model      string
+	loadedAt   time.Time
+	activeReqs int32
+	shutdown   chan struct{}
+	mu         sync.RWMutex
 }
 
 type MetalEngineAdapter struct {
-	mu       sync.RWMutex
-	engines  map[string]*WrappedMetalEngine
-	requests chan *InferenceRequest
-	done     chan struct{}
+	mu           sync.RWMutex
+	engines      map[string]*WrappedMetalEngine
+	requests     chan *InferenceRequest
+	done         chan struct{}
+	currentModel string
 }
 
 var (
@@ -60,6 +65,18 @@ func (a *MetalEngineAdapter) handleRequest(req *InferenceRequest) {
 		log.Printf("Failed to get engine for model %s: %v", req.Model, err)
 		a.sendError(req.ResponseChan, "ENGINE_ERROR", err.Error())
 		return
+	}
+
+	// Track active request
+	atomic.AddInt32(&e.activeReqs, 1)
+	defer atomic.AddInt32(&e.activeReqs, -1)
+
+	// Check if model is shutting down
+	select {
+	case <-e.shutdown:
+		a.sendError(req.ResponseChan, "MODEL_SHUTDOWN", "Model is being replaced")
+		return
+	default:
 	}
 
 	tokens := e.tok.Encode(req.Prompt)
@@ -175,6 +192,7 @@ func (a *MetalEngineAdapter) GetEngine(modelPath string) (*WrappedEngine, error)
 		tok:      tok,
 		model:    modelPath,
 		loadedAt: time.Now(),
+		shutdown: make(chan struct{}),
 	}
 
 	a.engines[modelPath] = wrapped
@@ -256,8 +274,77 @@ func (a *MetalEngineAdapter) LoadModel(modelPath string) error {
 		tok:      tok,
 		model:    modelPath,
 		loadedAt: time.Now(),
+		shutdown: make(chan struct{}),
 	}
 
 	a.engines[modelPath] = wrapped
+	return nil
+}
+
+func (a *MetalEngineAdapter) HotSwapModel(oldModelPath, newModelPath string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	oldEngine, exists := a.engines[oldModelPath]
+	if !exists {
+		return nil
+	}
+
+	// Signal shutdown to stop new requests (but allow existing to complete)
+	close(oldEngine.shutdown)
+
+	// Wait for active requests to complete (max 30 seconds)
+	timeout := time.After(30 * time.Second)
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-timeout:
+			log.Printf("Hot-swap timeout: force removing model %s with %d active requests",
+				oldModelPath, atomic.LoadInt32(&oldEngine.activeReqs))
+			break
+		case <-ticker.C:
+			if atomic.LoadInt32(&oldEngine.activeReqs) == 0 {
+				goto requestsComplete
+			}
+		}
+	}
+
+requestsComplete:
+	// Close old engine
+	oldEngine.engine.Close()
+	delete(a.engines, oldModelPath)
+
+	// Load new model
+	log.Printf("Hot-swapping to model: %s", newModelPath)
+
+	cfg := config.Config{
+		KVCacheSize: 2048,
+	}
+
+	newEngine, err := engine.NewEngine(newModelPath, cfg)
+	if err != nil {
+		return err
+	}
+
+	tok, err := tokenizer.New(newModelPath)
+	if err != nil {
+		newEngine.Close()
+		return err
+	}
+
+	wrapped := &WrappedMetalEngine{
+		engine:   newEngine,
+		tok:      tok,
+		model:    newModelPath,
+		loadedAt: time.Now(),
+		shutdown: make(chan struct{}),
+	}
+
+	a.engines[newModelPath] = wrapped
+	a.currentModel = newModelPath
+
+	log.Printf("Hot-swap complete: %s -> %s", oldModelPath, newModelPath)
 	return nil
 }

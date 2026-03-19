@@ -221,3 +221,49 @@ func StreamHandler(cfg config.Config) http.HandlerFunc {
 		}
 	}
 }
+
+type HotSwapRequest struct {
+	OldModel string `json:"old_model"`
+	NewModel string `json:"new_model"`
+}
+
+type HotSwapResponse struct {
+	Success bool   `json:"success"`
+	Message string `json:"message,omitempty"`
+}
+
+func HotSwapHandler(cfg config.Config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req HotSwapRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		if req.OldModel == "" || req.NewModel == "" {
+			http.Error(w, "old_model and new_model are required", http.StatusBadRequest)
+			return
+		}
+
+		log.Printf("Hot-swap request: %s -> %s", req.OldModel, req.NewModel)
+
+		adapter := engine.GetAdapter()
+		err := adapter.HotSwapModel(req.OldModel, req.NewModel)
+		if err != nil {
+			log.Printf("Hot-swap error: %v", err)
+			http.Error(w, "Hot-swap failed", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(HotSwapResponse{
+			Success: true,
+			Message: "Model hot-swapped successfully",
+		})
+	}
+}
