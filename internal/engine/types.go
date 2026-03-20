@@ -4,6 +4,7 @@ package engine
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"sync"
 
@@ -20,6 +21,71 @@ type SamplerConfig struct {
 	Seed             int64
 	DebugActivations bool
 	QualityMode      bool
+	SequenceID       uint64
+}
+
+type SequenceStatus int
+
+const (
+	SequenceStatusPending SequenceStatus = iota
+	SequenceStatusRunning
+	SequenceStatusComplete
+	SequenceStatusCancelled
+)
+
+type Sequence struct {
+	ID        uint64
+	PromptLen int
+	Pos       int
+	Status    SequenceStatus
+	mu        sync.RWMutex
+}
+
+type SequenceManager struct {
+	sequences map[uint64]*Sequence
+	mu        sync.RWMutex
+	counter   uint64
+}
+
+func NewSequenceManager() *SequenceManager {
+	return &SequenceManager{
+		sequences: make(map[uint64]*Sequence),
+	}
+}
+
+func (sm *SequenceManager) NewSequence(promptLen int) *Sequence {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.counter++
+	seq := &Sequence{
+		ID:        sm.counter,
+		PromptLen: promptLen,
+		Pos:       0,
+		Status:    SequenceStatusRunning,
+	}
+	sm.sequences[sm.counter] = seq
+	return seq
+}
+
+func (sm *SequenceManager) GetSequence(id uint64) (*Sequence, bool) {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	seq, ok := sm.sequences[id]
+	return seq, ok
+}
+
+func (sm *SequenceManager) FreeSequence(id uint64) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	delete(sm.sequences, id)
+}
+
+func (sm *SequenceManager) SetStatus(id uint64, status SequenceStatus) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if seq, ok := sm.sequences[id]; ok {
+		seq.Status = status
+	}
 }
 
 type ActivationTrace struct {
@@ -225,8 +291,8 @@ type Engine struct {
 	SSMCache    []*MambaState
 	MambaLayers []*MambaLayer
 
-	// Cache State
-	CachePos int
+	// Sequence Management for concurrent requests
+	SeqMgr *SequenceManager
 
 	// Tokenizer
 	Tokenizer interface {
@@ -245,6 +311,27 @@ type Engine struct {
 
 	// Hot-swapping
 	mu sync.RWMutex
+}
+
+func (e *Engine) GetSeqCachePos(seqID uint64) int {
+	if seq, ok := e.SeqMgr.GetSequence(seqID); ok {
+		seq.mu.RLock()
+		defer seq.mu.RUnlock()
+		return seq.Pos
+	}
+	return 0
+}
+
+func (e *Engine) IncSeqCachePos(seqID uint64) {
+	if seq, ok := e.SeqMgr.GetSequence(seqID); ok {
+		seq.mu.Lock()
+		defer seq.mu.Unlock()
+		seq.Pos++
+	}
+}
+
+func (e *Engine) SeqIDStr(seqID uint64) string {
+	return fmt.Sprintf("seq-%d", seqID)
 }
 
 func NewActivationTraceTracker(numLayers int) *ActivationTraceTracker {

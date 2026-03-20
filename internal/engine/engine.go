@@ -384,6 +384,7 @@ func NewEngine(modelPath string, config config.Config) (*Engine, error) {
 		Ctx:       ctx,
 		Weights:   &LlamaWeights{},
 		ActLogger: NewActivationLogger(),
+		SeqMgr:    NewSequenceManager(),
 	}
 	e.Config.KVCacheSize = config.KVCacheSize
 
@@ -1298,6 +1299,20 @@ func (e *Engine) inferInternal(inputTokens []int, tokensToGenerate int, samplerC
 		return nil, errors.New("empty input tokens")
 	}
 
+	// Sequence management
+	var seq *Sequence
+	if samplerConfig.SequenceID != 0 {
+		// Use existing sequence
+		var ok bool
+		seq, ok = e.SeqMgr.GetSequence(samplerConfig.SequenceID)
+		if !ok {
+			return nil, errors.New("invalid sequence ID")
+		}
+	} else {
+		// Create new sequence
+		seq = e.SeqMgr.NewSequence(len(inputTokens))
+	}
+
 	// Enable activation logging if requested
 	if samplerConfig.DebugActivations {
 		promptText := fmt.Sprintf("tokens:%v", inputTokens) // Simple representation for now
@@ -1314,10 +1329,10 @@ func (e *Engine) inferInternal(inputTokens []int, tokensToGenerate int, samplerC
 		return nil, errors.New("token embedding weights not loaded")
 	}
 	if e.Weights.OutputNorm == nil {
-		return nil, errors.New("output norm weights not loaded")
+		return nil, errors.New("token embedding weights not loaded")
 	}
 	if e.Weights.Output == nil {
-		return nil, errors.New("output weights not loaded")
+		return nil, errors.New("token embedding weights not loaded")
 	}
 
 	// Validate input tokens are within vocab range
@@ -1329,9 +1344,6 @@ func (e *Engine) inferInternal(inputTokens []int, tokensToGenerate int, samplerC
 
 	// tStart := time.Now()
 	result := make([]int, 0, tokensToGenerate)
-
-	// Reset KV cache position
-	e.CachePos = 0
 
 	// Lock OS thread for AutoreleasePool consistency
 	runtime.LockOSThread()
@@ -1351,17 +1363,19 @@ func (e *Engine) inferInternal(inputTokens []int, tokensToGenerate int, samplerC
 	logits := scratch.Logits
 
 	// Phase 1: Prefill all input tokens
-	logger.Log.Debug("Start Inference", "cache_pos", e.CachePos)
+	cachePos := e.GetSeqCachePos(seq.ID)
+	logger.Log.Debug("Start Inference", "seq_id", seq.ID, "cache_pos", cachePos)
 	for i := 0; i < len(inputTokens); i++ {
 		// Autorelease Pool for this iteration
 		pool := e.Ctx.AutoreleasePoolPush()
 
 		tToken := time.Now()
 		lastToken := inputTokens[i]
+		cachePos := e.GetSeqCachePos(seq.ID)
 
 		current := e.Weights.TokenEmb.EmbeddingLookup(lastToken, e.GlobalScale)
 		if samplerConfig.DebugActivations || (i < 10) {
-			current.ScanMax(fmt.Sprintf("[Pos %d] Token %d Embedding", e.CachePos, lastToken))
+			current.ScanMax(fmt.Sprintf("[Pos %d] Token %d Embedding", cachePos, lastToken))
 		}
 
 		// DEBUG: Print first 4 elements of embedding
@@ -1387,7 +1401,7 @@ func (e *Engine) inferInternal(inputTokens []int, tokensToGenerate int, samplerC
 		// DEBUG: Log embedding values
 		if e.Config.DebugEmbedding {
 			embData := current.ToHost()
-			fmt.Printf("DEBUG: [%d] Embedding values: %v\n", e.CachePos, embData[:4])
+			fmt.Printf("DEBUG: [%d] Embedding values: %v\n", cachePos, embData[:4])
 			current.ReturnToPool()
 		}
 
@@ -1403,7 +1417,7 @@ func (e *Engine) inferInternal(inputTokens []int, tokensToGenerate int, samplerC
 			ffnGate := e.Weights.FfnGate[l]
 			ffnUp := e.Weights.FfnUp[l]
 			ffnDown := e.Weights.FfnDown[l]
-			view := e.Cache.Get("seq-0", l)
+			view := e.Cache.Get(e.SeqIDStr(seq.ID), l)
 			kCache := view.K
 			vCache := view.V
 
@@ -1437,10 +1451,10 @@ func (e *Engine) inferInternal(inputTokens []int, tokensToGenerate int, samplerC
 				currentF32.Layer(l, attnNorm, q, k, v, o, ffnNorm, ffnGate, nil, ffnDown, kCache, vCache,
 					scratch, // Pass scratch
 					e.TraceTracker,
-					e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen, e.Config.WindowSize, e.GlobalScale, samplerConfig.DebugActivations, int(e.Config.PrecisionMode),
+					cachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen, e.Config.WindowSize, e.GlobalScale, samplerConfig.DebugActivations, int(e.Config.PrecisionMode),
 					view.BlockTable, view.BlockSize,
 					func(k *device.Tensor, v *device.Tensor) {
-						if err := e.Cache.Update("seq-0", l, e.CachePos, k, v); err != nil {
+						if err := e.Cache.Update(e.SeqIDStr(seq.ID), l, cachePos, k, v); err != nil {
 							panic(err)
 						}
 					})
@@ -1460,10 +1474,10 @@ func (e *Engine) inferInternal(inputTokens []int, tokensToGenerate int, samplerC
 				currentF32.Layer(l, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, kCache, vCache,
 					scratch, // Pass scratch
 					e.TraceTracker,
-					e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen, e.Config.WindowSize, e.GlobalScale, samplerConfig.DebugActivations, int(e.Config.PrecisionMode),
+					cachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen, e.Config.WindowSize, e.GlobalScale, samplerConfig.DebugActivations, int(e.Config.PrecisionMode),
 					view.BlockTable, view.BlockSize,
 					func(k *device.Tensor, v *device.Tensor) {
-						if err := e.Cache.Update("seq-0", l, e.CachePos, k, v); err != nil {
+						if err := e.Cache.Update(e.SeqIDStr(seq.ID), l, cachePos, k, v); err != nil {
 							panic(err)
 						}
 					})
@@ -1472,23 +1486,23 @@ func (e *Engine) inferInternal(inputTokens []int, tokensToGenerate int, samplerC
 			// Log layer activation details if enabled
 			if e.ActLogger.IsEnabled() {
 				if e.Config.DebugAttention {
-					scratch.QPart.ScanMax(fmt.Sprintf("[%d] Q", e.CachePos))
-					scratch.KPart.ScanMax(fmt.Sprintf("[%d] K", e.CachePos))
-					scratch.VPart.ScanMax(fmt.Sprintf("[%d] V", e.CachePos))
-					scratch.AttOut.ScanMax(fmt.Sprintf("[%d] Attention", e.CachePos))
-					scratch.AttOut.ScanMax(fmt.Sprintf("[%d] FFN", e.CachePos))
+					scratch.QPart.ScanMax(fmt.Sprintf("[%d] Q", cachePos))
+					scratch.KPart.ScanMax(fmt.Sprintf("[%d] K", cachePos))
+					scratch.VPart.ScanMax(fmt.Sprintf("[%d] V", cachePos))
+					scratch.AttOut.ScanMax(fmt.Sprintf("[%d] Attention", cachePos))
+					scratch.AttOut.ScanMax(fmt.Sprintf("[%d] FFN", cachePos))
 				}
 				if e.Config.DebugFFN {
-					scratch.QPart.ScanMax(fmt.Sprintf("[%d] Q", e.CachePos))
-					scratch.KPart.ScanMax(fmt.Sprintf("[%d] K", e.CachePos))
-					scratch.VPart.ScanMax(fmt.Sprintf("[%d] V", e.CachePos))
-					scratch.AttOut.ScanMax(fmt.Sprintf("[%d] FFN", e.CachePos))
+					scratch.QPart.ScanMax(fmt.Sprintf("[%d] Q", cachePos))
+					scratch.KPart.ScanMax(fmt.Sprintf("[%d] K", cachePos))
+					scratch.VPart.ScanMax(fmt.Sprintf("[%d] V", cachePos))
+					scratch.AttOut.ScanMax(fmt.Sprintf("[%d] FFN", cachePos))
 				}
 			}
 
 			// Log layer output if enabled OR if first token (for recovery analysis)
 			if samplerConfig.DebugActivations || (i == 0) {
-				currentF32.ScanMax(fmt.Sprintf("[Pos %d] Layer %d Output", e.CachePos, l))
+				currentF32.ScanMax(fmt.Sprintf("[Pos %d] Layer %d Output", cachePos, l))
 
 				// Track layer stats for first token
 				if i == 0 {
@@ -1599,7 +1613,7 @@ func (e *Engine) inferInternal(inputTokens []int, tokensToGenerate int, samplerC
 		currentF32.ReturnToPool()
 
 		// Increment CachePos after processing the token
-		e.CachePos++
+		e.IncSeqCachePos(seq.ID)
 		metrics.RecordInference(1, time.Since(tToken))
 		e.Ctx.AutoreleasePoolPop(pool)
 	}
@@ -1615,6 +1629,8 @@ func (e *Engine) inferInternal(inputTokens []int, tokensToGenerate int, samplerC
 		if lastToken < 0 || lastToken >= e.Weights.TokenEmb.Rows() {
 			return nil, fmt.Errorf("token %d is out of vocab range", lastToken)
 		}
+
+		cachePos := e.GetSeqCachePos(seq.ID)
 
 		current := e.Weights.TokenEmb.EmbeddingLookup(lastToken, e.GlobalScale)
 
@@ -1635,7 +1651,7 @@ func (e *Engine) inferInternal(inputTokens []int, tokensToGenerate int, samplerC
 			ffnUp := e.Weights.FfnUp[l]
 			ffnDown := e.Weights.FfnDown[l]
 
-			view := e.Cache.Get("seq-0", l)
+			view := e.Cache.Get(e.SeqIDStr(seq.ID), l)
 			kCache := view.K
 			vCache := view.V
 
@@ -1673,10 +1689,10 @@ func (e *Engine) inferInternal(inputTokens []int, tokensToGenerate int, samplerC
 				currentF32.Layer(l, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, kCache, vCache,
 					scratch, // Pass scratch
 					e.TraceTracker,
-					e.CachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen, e.Config.WindowSize, e.GlobalScale, samplerConfig.DebugActivations, int(e.Config.PrecisionMode),
+					cachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen, e.Config.WindowSize, e.GlobalScale, samplerConfig.DebugActivations, int(e.Config.PrecisionMode),
 					view.BlockTable, view.BlockSize,
 					func(k *device.Tensor, v *device.Tensor) {
-						if err := e.Cache.Update("seq-0", l, e.CachePos, k, v); err != nil {
+						if err := e.Cache.Update(e.SeqIDStr(seq.ID), l, cachePos, k, v); err != nil {
 							panic(err)
 						}
 					})
@@ -1701,7 +1717,7 @@ func (e *Engine) inferInternal(inputTokens []int, tokensToGenerate int, samplerC
 			}
 
 			if samplerConfig.DebugActivations {
-				currentF32.ScanMax(fmt.Sprintf("[Pos %d] Layer %d Output", e.CachePos, l))
+				currentF32.ScanMax(fmt.Sprintf("[Pos %d] Layer %d Output", cachePos, l))
 			}
 		}
 
@@ -1753,7 +1769,7 @@ func (e *Engine) inferInternal(inputTokens []int, tokensToGenerate int, samplerC
 		if tokenCallback != nil {
 			tokenCallback(maxIdx)
 		}
-		e.CachePos++
+		e.IncSeqCachePos(seq.ID)
 		metrics.RecordInference(1, time.Since(tToken))
 		e.Ctx.AutoreleasePoolPop(pool)
 	}
