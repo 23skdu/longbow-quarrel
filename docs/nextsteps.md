@@ -101,9 +101,22 @@
   - Pipeline send/receive kernels
 
 #### vLLM Integration
-- Export operators for vLLM compatibility
-- Paged Attention API alignment
-- Batch scheduler integration
+- **Status:** PARTIAL (Export operators implemented, Paged Attention alignment, Batch scheduler pending)
+- **Files:** `cmd/vllm_export/`
+- **Export Operators:**
+  - `Init()` - CUDA context initialization
+  - `GetDeviceCount()` - Query available CUDA devices
+  - `GetDeviceName()` - Get device name
+  - `GetMemoryInfo()` - Query GPU memory
+  - `DequantizeQ8_0/4_K/6_K()` - Weight dequantization
+  - `RMSNorm()` - RMS normalization
+  - `SwiGLU()` - SwiGLU activation
+  - `RoPE()` - Rotary positional encoding
+  - `Attention()` - Multi-head attention with KV cache
+  - `MatMul()` - Matrix multiplication
+  - `Synchronize()` - Stream synchronization
+- **Export Package:** `internal/device/cuda_export.go` - Exported CUDA functions
+- **Note:** Full vLLM integration requires PyTorch custom op registration and NCCL for multi-GPU
 
 ---
 
