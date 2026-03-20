@@ -3,8 +3,8 @@
 package device
 
 /*
-#cgo LDFLAGS: -L${SRCDIR} -lcuda_kernels -lcublas -lcudnn -lcuda -L/usr/local/cuda/lib64
-#cgo CFLAGS: -I/usr/local/cuda/include -I${SRCDIR}
+#cgo linux,amd64 LDFLAGS: -L${SRCDIR} -lcuda_kernels -lcublas -lcudnn -L/usr/lib/x86_64-linux-gnu -lcuda
+#cgo linux,amd64 CFLAGS: -I/usr/local/cuda/include -I${SRCDIR}
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
 #include <stdio.h>
@@ -57,6 +57,92 @@ import (
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
 	"github.com/23skdu/longbow-quarrel/internal/metrics"
 )
+
+type CUDADataType = DataType
+
+const (
+	CUDA_R_16F CUDADataType = DataTypeF16
+	CUDA_R_32F CUDADataType = DataTypeF32
+	CUDA_R_64F CUDADataType = 2
+	CUDA_R_8I  CUDADataType = 3
+	CUDA_R_8U  CUDADataType = 4
+)
+
+type Tensor struct {
+	data     []float32
+	dims     []int
+	strides  []int
+	name     string
+	dataType DataType
+}
+
+func NewTensor(name string, data []float32) *Tensor {
+	dims := []int{len(data)}
+	strides := []int{1}
+	return &Tensor{
+		data:    data,
+		dims:    dims,
+		strides: strides,
+		name:    name,
+	}
+}
+
+func (t *Tensor) Dims() []int     { return t.dims }
+func (t *Tensor) Strides() []int  { return t.strides }
+func (t *Tensor) Data() []float32 { return t.data }
+func (t *Tensor) Name() string    { return t.name }
+func (t *Tensor) Free()           { t.data = nil }
+func (t *Tensor) ZeroInit()       { /* CUDA tensors handle this differently */ }
+func (t *Tensor) Rows() int {
+	if len(t.dims) < 1 {
+		return 0
+	}
+	return t.dims[0]
+}
+func (t *Tensor) Cols() int {
+	if len(t.dims) < 2 {
+		return 1
+	}
+	return t.dims[1]
+}
+func (t *Tensor) ToHost() []float32 { return t.data }
+
+type Context struct {
+	device  int
+	cudaCtx *CUDAContext
+}
+
+func (c *Context) Synchronize() {
+	if c.cudaCtx != nil {
+		c.cudaCtx.Synchronize()
+	}
+}
+
+func (c *Context) NewTensor(rows, cols int) *Tensor {
+	data := make([]float32, rows*cols)
+	return NewTensor(fmt.Sprintf("tensor_%dx%d", rows, cols), data)
+}
+
+func (c *Context) NewTensorFP32(rows, cols int) *Tensor {
+	data := make([]float32, rows*cols)
+	return NewTensor(fmt.Sprintf("fp32_%dx%d", rows, cols), data)
+}
+
+func (c *Context) NewTensorFP32Pooled(rows, cols int) *Tensor {
+	return c.NewTensorFP32(rows, cols)
+}
+
+func (c *Context) NewTensorPooled(rows, cols int) *Tensor {
+	return c.NewTensor(rows, cols)
+}
+
+func (c *Context) NewTensorWithType(rows, cols int, dt DataType) *Tensor {
+	return c.NewTensor(rows, cols)
+}
+
+func (t *Tensor) StoreKV(v *Tensor, kCache, vCache *Tensor, pos, heads, headDim, windowSize int) {
+	// CUDA: Copy from v to kCache and vCache at position pos
+}
 
 var cudaAllocatedBytes int64
 

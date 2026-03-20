@@ -260,10 +260,10 @@ func (c *CUDNNContext) FlashAttention(
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	qData := (*C.float)(unsafe.Pointer(q.data))
-	kData := (*C.float)(unsafe.Pointer(k.data))
-	vData := (*C.float)(unsafe.Pointer(v.data))
-	outData := (*C.float)(unsafe.Pointer(output.data))
+	qData := (*C.float)(unsafe.Pointer(q.devPtr))
+	kData := (*C.float)(unsafe.Pointer(k.devPtr))
+	vData := (*C.float)(unsafe.Pointer(v.devPtr))
+	outData := (*C.float)(unsafe.Pointer(output.devPtr))
 
 	result := C.cudnnFlashAttention(
 		c.handle,
@@ -292,9 +292,9 @@ func (c *CUDNNContext) GroupedConv(
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	inputData := (*C.float)(unsafe.Pointer(input.data))
-	weightData := (*C.float)(unsafe.Pointer(weight.data))
-	outData := (*C.float)(unsafe.Pointer(output.data))
+	inputData := (*C.float)(unsafe.Pointer(input.devPtr))
+	weightData := (*C.float)(unsafe.Pointer(weight.devPtr))
+	outData := (*C.float)(unsafe.Pointer(output.devPtr))
 
 	result := C.cudnnGroupedConv(
 		c.handle,
@@ -324,10 +324,10 @@ func (c *CUDNNContext) LayerNorm(
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	inputData := (*C.float)(unsafe.Pointer(input.data))
-	gammaData := (*C.float)(unsafe.Pointer(gamma.data))
-	betaData := (*C.float)(unsafe.Pointer(beta.data))
-	outData := (*C.float)(unsafe.Pointer(output.data))
+	inputData := (*C.float)(unsafe.Pointer(input.devPtr))
+	gammaData := (*C.float)(unsafe.Pointer(gamma.devPtr))
+	betaData := (*C.float)(unsafe.Pointer(beta.devPtr))
+	outData := (*C.float)(unsafe.Pointer(output.devPtr))
 
 	result := C.cudnnLayerNorm(
 		c.handle,

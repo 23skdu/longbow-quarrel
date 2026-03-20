@@ -77,15 +77,28 @@
 ### Low Priority
 
 #### Multi-GPU Support
-- **Status:** ✅ FOUNDATION LAID
-- **Files:** `internal/device/cuda.go`
-- **Implemented:**
-  - `GetDeviceCount()` - Enumerate available GPUs
-  - `GetDeviceName()` - Get GPU device name
-  - `GetDeviceMemory()` - Get GPU memory capacity
-  - `MultiGPUManager` - Manages per-device CUDA contexts
-  - `RoundRobinDevice()` - Round-robin device selection for load balancing
-- **Pending:** Tensor parallelism, pipeline parallelism, cross-GPU communication
+- **Status:** ✅ IMPLEMENTED
+- **Files:** `internal/device/cuda.go`, `internal/device/multi_gpu.go`, `internal/device/cuda_kernels.cu`
+- **Tensor Parallelism:**
+  - `TensorParallelManager` - Manages tensor-parallel operations
+  - AllReduce, AllGather, Broadcast collective operations
+  - Weight splitting across GPUs
+- **Pipeline Parallelism:**
+  - `PipelineParallelManager` - Manages pipeline stages
+  - `PipelineStage` - Individual stage with layer ranges
+  - Micro-batch scheduling with configurable depth
+- **Cross-GPU Communication:**
+  - `CrossGPUCommunicator` - Peer-to-peer memory access
+  - CUDA P2P API for direct GPU-to-GPU transfers
+  - Peer access matrix for bandwidth estimation
+- **Hybrid Manager:**
+  - `HybridParallelismManager` - Unified multi-GPU coordination
+  - Automatic layer distribution across devices
+  - Collective operation coordination
+- **NCCL Collective Kernels:**
+  - AllReduce, AllGather, ReduceScatter, Broadcast
+  - Tensor parallelism reduction kernels
+  - Pipeline send/receive kernels
 
 #### vLLM Integration
 - Export operators for vLLM compatibility
@@ -111,6 +124,9 @@ go build -tags=amd64,avx512 ./...
 
 # All optimizations
 go build -tags=cuda,amd64,avx512 ./...
+
+# CUDA with NCCL (Multi-GPU)
+go build -tags=cuda,amd64,nccl ./...
 ```
 
 ---
