@@ -1,5 +1,5 @@
 # Build stage for Linux (no Metal support)
-FROM golang:1.23-alpine AS linux-builder
+FROM golang:1.25-alpine AS linux-builder
 
 # Install build dependencies
 RUN apk add --no-cache build-base
@@ -43,7 +43,7 @@ RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -tags cuda \
     -o quarrel-cuda ./cmd/cuda
 
 # Build stage for macOS (with Metal/CGO support)
-FROM --platform=linux/amd64 golang:1.23-alpine AS darwin-builder
+FROM --platform=linux/amd64 golang:1.25-alpine AS darwin-builder
 
 WORKDIR /app
 

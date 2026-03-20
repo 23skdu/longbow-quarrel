@@ -1,26 +1,80 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: { { include "quarrel.fullname" . } }
-  labels: { { - include "quarrel.labels" . | nindent 4 } }
+  name: {{ include "quarrel.fullname" . }}
+  labels:
+    {{- include "quarrel.labels" . | nindent 4 }}
 spec:
-  replicas: { { .Values.replicaCount } }
+  replicas: {{ .Values.replicaCount }}
   selector:
-    matchLabels: { { - include "quarrel.selectorLabels" . | nindent 6 } }
+    matchLabels:
+      {{- include "quarrel.selectorLabels" . | nindent 6 }}
   template:
     metadata:
-      labels: { { - include "quarrel.selectorLabels" . | nindent 8 } }
+      labels:
+        {{- include "quarrel.selectorLabels" . | nindent 8 }}
+      annotations:
+        {{- toYaml .Values.podAnnotations | nindent 8 }}
     spec:
+      {{- if .Values.persistence.enabled }}
+      volumes:
+        - name: model-storage
+          persistentVolumeClaim:
+            claimName: {{ include "quarrel.fullname" . }}-pvc
+      {{- end }}
       containers:
-        - name: { { .Chart.Name } }
+        - name: {{ .Chart.Name }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
-          imagePullPolicy: { { .Values.image.pullPolicy } }
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["./quarrel"]
           args:
+            {{- if .Values.model.path }}
+            - "-model"
+            - "{{ .Values.model.path }}"
+            {{- else }}
             - "-model"
             - "{{ .Values.model.name }}"
+            {{- end }}
           ports:
             - name: http
-              containerPort: 8080
+              containerPort: {{ .Values.service.port }}
               protocol: TCP
-          resources: { { - toYaml .Values.resources | nindent 12 } }
+          {{- if .Values.probe.enabled }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.probe.livenessPath }}
+              port: http
+            initialDelaySeconds: {{ .Values.probe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probe.periodSeconds }}
+            timeoutSeconds: {{ .Values.probe.timeoutSeconds }}
+            failureThreshold: {{ .Values.probe.failureThreshold }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.probe.readinessPath }}
+              port: http
+            initialDelaySeconds: {{ .Values.probe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probe.periodSeconds }}
+            timeoutSeconds: {{ .Values.probe.timeoutSeconds }}
+            failureThreshold: {{ .Values.probe.failureThreshold }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          {{- if .Values.persistence.enabled }}
+          volumeMounts:
+            - name: model-storage
+              mountPath: {{ .Values.persistence.mountPath }}
+          {{- end }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
