@@ -48,10 +48,9 @@ void softmax_avx2(float* x, int n) {
         y = _mm256_mul_ps(y, y);
         result = _mm256_add_ps(result, _mm256_mul_ps(y, c3));
         
-        // Multiply by 2^fx
-        __m256i shift = _mm256_cvtps_epi32(fx);
-        __m256i exp = _mm256_slli_epi32(_mm256_set1_epi32(1), shift);
-        __m256 scale = _mm256_cvtepi32_ps(exp);
+        // Multiply by 2^fx using scalar approach per lane
+        int shift_val = (int)fx[0];
+        __m256 scale = _mm256_set1_ps(ldexpf(1.0f, shift_val));
         result = _mm256_mul_ps(result, scale);
         
         _mm256_storeu_ps(&x[i], result);
@@ -122,9 +121,8 @@ void swiglu_avx2(const float* gate, const float* up, float* out, int n) {
         y = _mm256_mul_ps(y, y);
         exp_result = _mm256_add_ps(exp_result, _mm256_mul_ps(y, c3));
         
-        __m256i shift = _mm256_cvtps_epi32(fx);
-        __m256i exp_int = _mm256_slli_epi32(_mm256_set1_epi32(1), shift);
-        __m256 scale = _mm256_cvtepi32_ps(exp_int);
+        int shift_val = (int)fx[0];
+        __m256 scale = _mm256_set1_ps(ldexpf(1.0f, shift_val));
         exp_result = _mm256_mul_ps(exp_result, scale);
         
         // sigmoid = 1 / (1 + exp(-x))

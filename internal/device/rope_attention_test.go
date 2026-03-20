@@ -97,20 +97,23 @@ func TestAttention_CausalMask(t *testing.T) {
 	// Simple test: 3 tokens, 1 head, head_dim=4
 	seqLen := 3
 	heads := 1
+	kvHeads := 1
 	headDim := 4
 
-	// Create Q, K, V
+	// Create Q, K, V tensors
 	q := ctx.NewTensorPooled(seqLen, heads*headDim)
-	k := ctx.NewTensorPooled(seqLen, heads*headDim)
-	v := ctx.NewTensorPooled(seqLen, heads*headDim)
+	k := ctx.NewTensorPooled(seqLen, kvHeads*headDim)
+	v := ctx.NewTensorPooled(seqLen, kvHeads*headDim)
 
 	// Fill with simple patterns
 	qData := make([]float32, seqLen*heads*headDim)
-	kData := make([]float32, seqLen*heads*headDim)
-	vData := make([]float32, seqLen*heads*headDim)
+	kData := make([]float32, seqLen*kvHeads*headDim)
+	vData := make([]float32, seqLen*kvHeads*headDim)
 
 	for i := 0; i < seqLen*heads*headDim; i++ {
 		qData[i] = 1.0
+	}
+	for i := 0; i < seqLen*kvHeads*headDim; i++ {
 		kData[i] = 1.0
 		vData[i] = float32(i % seqLen) // Different value per position
 	}
@@ -118,13 +121,29 @@ func TestAttention_CausalMask(t *testing.T) {
 	q.LoadFrom(qData)
 	k.LoadFrom(kData)
 	v.LoadFrom(vData)
+	ctx.Synchronize()
 
-	// TODO: Call attention kernel with causal mask
-	// For now, this test documents the expected behavior
+	// Call attention kernel - the kernel internally applies causal masking
+	// based on the position and context length
+	result := q.Attention(k, v, seqLen-1, heads, kvHeads, headDim, seqLen, seqLen)
+	ctx.Synchronize()
 
+	// Read back result
+	resultData := result.ToHost()
+	t.Logf("Attention result shape: [%d, %d]", result.Rows(), result.Cols())
+	t.Logf("Result values: %v", resultData[:min(len(resultData), 16)])
+
+	// Causal mask test: token at position i should only attend to positions 0..i
 	t.Log("Causal mask test: Token at position i should only attend to positions 0..i")
 	t.Log("Expected attention pattern:")
 	t.Log("  Token 0: attends to [0]")
 	t.Log("  Token 1: attends to [0, 1]")
 	t.Log("  Token 2: attends to [0, 1, 2]")
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

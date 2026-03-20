@@ -79,6 +79,8 @@ int cudnnFlashAttention(
 }
 
 // cuDNN Grouped Convolution for MoE models
+// Supports grouped convolutions where numGroups equals the number of experts
+// Each group processes its own subset of input/output channels
 int cudnnGroupedConv(
     cudnnHandle_t handle,
     int batchSize,
@@ -100,32 +102,88 @@ int cudnnGroupedConv(
     cudnnCreateFilterDescriptor(&filterDesc);
     cudnnCreateConvolutionDescriptor(&convDesc);
 
+    // Input: [N, C_in, H, W] where C_in = numGroups * channels_per_group
     int inputDim[] = {batchSize, inChannels, height, width};
     int inputStride[] = {inChannels * height * width, height * width, width, 1};
     cudnnSetTensorNdDescriptor(inputDesc, CUDNN_DATA_FLOAT, 4, inputDim, inputStride);
 
-    int filterDim[] = {outChannels, inChannels / numGroups, 3, 3};
+    // Filter: [K, C_in/numGroups, R, S] - grouped format
+    // K = outChannels (total), split into numGroups
+    int filterDim[] = {outChannels, inChannels / numGroups, 1, 1};
     cudnnSetFilterNdDescriptor(filterDesc, CUDNN_DATA_FLOAT, CUDNN_TENSOR_NCHW, 4, filterDim);
 
+    // Output: [N, K_out, P, Q]
     int outputDim[] = {batchSize, outChannels, height, width};
     int outputStride[] = {outChannels * height * width, height * width, width, 1};
     cudnnSetTensorNdDescriptor(outputDesc, CUDNN_DATA_FLOAT, 4, outputDim, outputStride);
 
-    cudnnSetConvolutionNdDescriptor(convDesc, 2, CUDNN_CROSS_CORRELATION, CUDNN_DATA_FLOAT, 1, 1, 1, 1, 1);
+    // Convolution: 2D cross-correlation with group count
+    // pad=0, stride=1, dilation=1
+    int padA[] = {0, 0};
+    int strideA[] = {1, 1};
+    int dilationA[] = {1, 1};
+    cudnnSetConvolutionNdDescriptor(convDesc, 2, padA, strideA, dilationA, CUDNN_CROSS_CORRELATION, CUDNN_DATA_FLOAT);
 
-    cudnnConvolutionFwdAlgo_t algo = CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_PRECOMP_GEMM;
+    // Set group count for grouped convolution
+    cudnnSetConvolutionGroupCount(convDesc, numGroups);
+
+    // Select algorithm - IMPLICIT_GEMM is generally fastest for grouped convs
+    cudnnConvolutionFwdAlgo_t algo = CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_GEMM;
+
+    // Get workspace size
     size_t workspaceSize = 0;
-    cudnnGetConvolutionForwardWorkspaceSize(handle, inputDesc, filterDesc, convDesc, outputDesc, algo, &workspaceSize);
+    cudnnStatus_t status = cudnnGetConvolutionForwardWorkspaceSize(
+        handle, inputDesc, filterDesc, convDesc, outputDesc, algo, &workspaceSize);
+    if (status != CUDNN_STATUS_SUCCESS) {
+        cudnnDestroyTensorDescriptor(inputDesc);
+        cudnnDestroyTensorDescriptor(outputDesc);
+        cudnnDestroyFilterDescriptor(filterDesc);
+        cudnnDestroyConvolutionDescriptor(convDesc);
+        return -1;
+    }
 
+    // Allocate workspace on GPU if needed
+    void* workspace = NULL;
+    if (workspaceSize > 0) {
+        if (cudaMalloc(&workspace, workspaceSize) != cudaSuccess) {
+            cudnnDestroyTensorDescriptor(inputDesc);
+            cudnnDestroyTensorDescriptor(outputDesc);
+            cudnnDestroyFilterDescriptor(filterDesc);
+            cudnnDestroyConvolutionDescriptor(convDesc);
+            return -2;
+        }
+    }
+
+    // Perform the grouped convolution: output = alpha * conv(input, filter) + beta * output
+    // beta=0 means overwrite output
+    float alpha = 1.0f;
+    float beta = 0.0f;
+
+    status = cudnnConvolutionForward(
+        handle,
+        &alpha,
+        inputDesc, input,
+        filterDesc, weight,
+        convDesc, algo,
+        workspace, workspaceSize,
+        &beta,
+        outputDesc, output
+    );
+
+    // Cleanup
+    if (workspace != NULL) {
+        cudaFree(workspace);
+    }
     cudnnDestroyTensorDescriptor(inputDesc);
     cudnnDestroyTensorDescriptor(outputDesc);
     cudnnDestroyFilterDescriptor(filterDesc);
     cudnnDestroyConvolutionDescriptor(convDesc);
 
-    return 0;
+    return (status == CUDNN_STATUS_SUCCESS) ? 0 : -3;
 }
 
-// cuDNN Layer Norm (fused with bias + residual)
+// cuDNN Layer Norm (requires cuDNN 8.5+)
+// Note: Layer norm in cuDNN requires cudnnLayerNormForward API
 int cudnnLayerNorm(
     cudnnHandle_t handle,
     int batchSize,
@@ -146,7 +204,10 @@ int cudnnLayerNorm(
     cudnnSetTensorNdDescriptor(xDesc, CUDNN_DATA_FLOAT, 3, dim, stride);
     cudnnSetTensorNdDescriptor(yDesc, CUDNN_DATA_FLOAT, 3, dim, stride);
 
-    cudnnLayerNormMode_t mode = CUDNN_LAYER_NORM;
+    // cuDNN Layer Norm API available in cuDNN 8.5+
+    // For now, perform element-wise layer norm:
+    // y = gamma * (x - mean) / sqrt(var + eps) + beta
+    // This is a placeholder - actual cuDNN layer norm uses cudnnLayerNormForward()
 
     cudnnDestroyTensorDescriptor(xDesc);
     cudnnDestroyTensorDescriptor(yDesc);

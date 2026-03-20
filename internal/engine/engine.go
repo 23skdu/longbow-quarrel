@@ -1187,8 +1187,8 @@ func (e *Engine) loadModel(path string) error {
 			convState := e.Ctx.NewTensorPooled(dConv, kernelSize)
 			ssmState := e.Ctx.NewTensorPooled(dInner, dState)
 
-			// Zero states (Manual for now, assuming pooled memory might be dirty)
-			// TODO: Add Zero() to tensor
+			convState.ZeroInit()
+			ssmState.ZeroInit()
 
 			e.SSMCache[i] = &MambaState{
 				ConvState: convState,
@@ -1243,7 +1243,6 @@ func toFloat64(v interface{}) float64 {
 
 // InferString is a convenience method that takes a string prompt and returns generated text
 func (e *Engine) InferString(prompt string, tokensToGenerate int) (string, error) {
-	// Use default sampler config
 	samplerConfig := SamplerConfig{
 		Temperature:      0.7,
 		TopK:             40,
@@ -1254,19 +1253,14 @@ func (e *Engine) InferString(prompt string, tokensToGenerate int) (string, error
 		QualityMode:      false,
 	}
 
-	// For now, we need to tokenize the prompt.
-	// In a real implementation, this would use the engine's tokenizer
-	// For this test, we'll use a simple tokenization approach
-	inputTokens := []int{1, 2, 3} // Placeholder tokenization
+	inputTokens := e.Tokenizer.Encode(prompt)
 
 	tokens, err := e.Infer(inputTokens, tokensToGenerate, samplerConfig)
 	if err != nil {
 		return "", err
 	}
 
-	// For now, return a simple string representation
-	// In a real implementation, this would decode tokens back to text
-	return fmt.Sprintf("Generated %d tokens", len(tokens)), nil
+	return e.Tokenizer.Decode(tokens), nil
 }
 
 // Infer generates tokens and returns them all at once

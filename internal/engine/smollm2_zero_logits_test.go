@@ -12,15 +12,20 @@ import (
 // we catch it early and report a clear error
 
 func TestSmollm2ZeroLogits(t *testing.T) {
-	// This should fail if Smollm2 generates normal embeddings (non-zero logits)
 	t.Skip("Skipping - Requires loaded model and tokenizer for comprehensive test")
-	// TODO: Implement with full engine + tokenizer setup
+	// To implement:
+	// 1. Load Smollm2 135M model and tokenizer
+	// 2. Run inference with known prompt
+	// 3. Use InferWithLogits to get logits
+	// 4. Verify logits are non-zero (except for padding/特殊 tokens)
 }
 
 func TestSmollm2TokenizerMismatch(t *testing.T) {
-	// This test verifies tokenizer correctly handles Smollm2's vocabulary
 	t.Skip("Skipping - Requires tokenizer comparison logic")
-	// TODO: Implement by comparing tokenizer vocab with model expectations
+	// To implement:
+	// 1. Load model vocab from GGUF metadata
+	// 2. Load tokenizer vocab
+	// 3. Compare token IDs to verify alignment
 }
 
 // Helper to check if array contains only the given value

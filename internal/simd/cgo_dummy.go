@@ -2,4 +2,5 @@
 
 package simd
 
+//#cgo LDFLAGS: -lm
 import "C"
