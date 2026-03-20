@@ -660,6 +660,9 @@ func (e *Engine) loadModel(path string) error {
 		logger.Log.Debug("Architecture detected as MOE (llama.expert_count)", "count", val)
 	}
 
+	// Mamba layer detection for hybrid models
+	e.detectMambaLayers(f, logger.Log)
+
 	if val, ok := f.KV["llama.attention.precision"]; ok {
 		if prec, ok := val.(string); ok {
 			switch prec {

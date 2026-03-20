@@ -3,7 +3,7 @@
 package device
 
 /*
-#cgo linux,amd64 LDFLAGS: -L${SRCDIR} -lcuda_kernels -lcublas -lcudnn -lcuda -L/usr/local/cuda/lib64
+#cgo linux,amd64 LDFLAGS: -L${SRCDIR} -lcuda_kernels -lcublas -lcudnn -lcudart -L/usr/lib/x86_64-linux-gnu -l:libcuda.so.1
 #cgo linux,amd64 CFLAGS: -I/usr/local/cuda/include -I${SRCDIR}
 // NCCL support - uncomment if NCCL is available
 // #cgo LDFLAGS: -lnccl

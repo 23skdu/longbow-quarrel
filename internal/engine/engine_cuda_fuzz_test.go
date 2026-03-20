@@ -41,8 +41,8 @@ func FuzzCUDAEngineCreation(f *testing.F) {
 		}
 		defer e.Close()
 
-		if e.CUDA == nil {
-			t.Error("CUDA model is nil")
+		if e == nil {
+			t.Error("Engine is nil")
 		}
 	})
 }

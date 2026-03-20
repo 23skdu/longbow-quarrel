@@ -13,6 +13,7 @@ void fp32_to_fp16_avx2(const float* src, uint16_t* dst, int n);
 */
 import "C"
 import (
+	"math"
 	"unsafe"
 )
 
@@ -140,15 +141,7 @@ func fp32ToFp16Scalar(src []float32, dst []uint16) {
 
 // Fast approximate exp for scalar fallback
 func fastExp(x float32) float32 {
-	if x < -10.0 {
-		return 0.0
-	}
-	if x > 10.0 {
-		return 22026.465
-	}
-	x64 := float64(x)
-	result := 1.0 + x64 + x64*x64/2.0 + x64*x64*x64/6.0 + x64*x64*x64*x64/24.0
-	return float32(result)
+	return float32(math.Exp(float64(x)))
 }
 
 // FP16 to FP32 conversion

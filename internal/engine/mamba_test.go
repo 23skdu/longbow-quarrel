@@ -5,11 +5,11 @@ package engine
 import (
 	"testing"
 
+	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/device"
 )
 
 func TestMambaWeightsStructure(t *testing.T) {
-	// Verify MambaWeights struct exists and fields are accessible
 	mw := &MambaWeights{
 		A:            &device.Tensor{},
 		D:            &device.Tensor{},
@@ -22,26 +22,179 @@ func TestMambaWeightsStructure(t *testing.T) {
 }
 
 func TestIsMambaLayer(t *testing.T) {
-	// Mock Engine with populated Mamba weights
-	e := &Engine{
-		Weights: &LlamaWeights{
-			Mamba: make([]*MambaWeights, 10),
+	tests := []struct {
+		name     string
+		layers   int
+		pattern  string
+		isHybrid bool
+		mambaIdx []int
+		layer    int
+		want     bool
+	}{
+		{
+			name:    "pure mamba - all layers",
+			layers:  10,
+			pattern: "all",
+			layer:   5,
+			want:    true,
+		},
+		{
+			name:    "pure transformer - no mamba",
+			layers:  10,
+			pattern: "none",
+			layer:   5,
+			want:    false,
+		},
+		{
+			name:    "hybrid even pattern - mamba layer",
+			layers:  10,
+			pattern: "even",
+			layer:   0,
+			want:    true,
+		},
+		{
+			name:    "hybrid even pattern - transformer layer",
+			layers:  10,
+			pattern: "even",
+			layer:   1,
+			want:    false,
+		},
+		{
+			name:    "hybrid odd pattern - mamba layer",
+			layers:  10,
+			pattern: "odd",
+			layer:   1,
+			want:    true,
+		},
+		{
+			name:    "hybrid odd pattern - transformer layer",
+			layers:  10,
+			pattern: "odd",
+			layer:   0,
+			want:    false,
+		},
+		{
+			name:     "weight-based detection - mamba weight exists",
+			layers:   10,
+			mambaIdx: []int{2, 5, 8},
+			layer:    2,
+			want:     true,
+		},
+		{
+			name:     "weight-based detection - no mamba weight",
+			layers:   10,
+			mambaIdx: []int{2, 5, 8},
+			layer:    3,
+			want:     false,
+		},
+		{
+			name:    "out of bounds",
+			layers:  10,
+			pattern: "all",
+			layer:   99,
+			want:    false,
+		},
+		{
+			name:    "negative index",
+			layers:  10,
+			pattern: "all",
+			layer:   -1,
+			want:    false,
 		},
 	}
 
-	// Case 1: Nil weight (standard Transformer layer in hybrid model)
-	if e.IsMambaLayer(0) {
-		t.Error("Layer 0 should not be Mamba (nil weights)")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := &Engine{
+				Config: config.Config{
+					Layers:            tt.layers,
+					MambaLayerPattern: tt.pattern,
+					IsHybrid:          tt.isHybrid,
+				},
+				Weights: &LlamaWeights{
+					Mamba: make([]*MambaWeights, tt.layers),
+				},
+			}
+
+			// Set up Mamba weights for weight-based tests
+			for _, idx := range tt.mambaIdx {
+				if idx < tt.layers {
+					e.Weights.Mamba[idx] = &MambaWeights{}
+				}
+			}
+
+			got := e.IsMambaLayer(tt.layer)
+			if got != tt.want {
+				t.Errorf("IsMambaLayer(%d) = %v, want %v", tt.layer, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCountMambaLayers(t *testing.T) {
+	tests := []struct {
+		name     string
+		layers   int
+		pattern  string
+		isHybrid bool
+		mambaIdx []int
+		want     int
+	}{
+		{
+			name:    "pure mamba",
+			layers:  10,
+			pattern: "all",
+			want:    10,
+		},
+		{
+			name:    "pure transformer",
+			layers:  10,
+			pattern: "none",
+			want:    0,
+		},
+		{
+			name:    "hybrid even pattern",
+			layers:  10,
+			pattern: "even",
+			want:    5,
+		},
+		{
+			name:    "hybrid odd pattern",
+			layers:  10,
+			pattern: "odd",
+			want:    5,
+		},
+		{
+			name:     "weight-based - specific layers",
+			layers:   10,
+			mambaIdx: []int{0, 2, 4, 6, 8},
+			want:     5,
+		},
 	}
 
-	// Case 2: Populated weight (Mamba layer)
-	e.Weights.Mamba[1] = &MambaWeights{}
-	if !e.IsMambaLayer(1) {
-		t.Error("Layer 1 should be detected as Mamba")
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := &Engine{
+				Config: config.Config{
+					Layers:            tt.layers,
+					MambaLayerPattern: tt.pattern,
+					IsHybrid:          tt.isHybrid,
+				},
+				Weights: &LlamaWeights{
+					Mamba: make([]*MambaWeights, tt.layers),
+				},
+			}
 
-	// Case 3: Out of bounds
-	if e.IsMambaLayer(99) {
-		t.Error("Layer 99 should not be Mamba (out of bounds)")
+			for _, idx := range tt.mambaIdx {
+				if idx < tt.layers {
+					e.Weights.Mamba[idx] = &MambaWeights{}
+				}
+			}
+
+			got := e.CountMambaLayers()
+			if got != tt.want {
+				t.Errorf("CountMambaLayers() = %d, want %d", got, tt.want)
+			}
+		})
 	}
 }

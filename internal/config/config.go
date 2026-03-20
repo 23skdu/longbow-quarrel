@@ -41,6 +41,8 @@ type Config struct {
 	ExpertWeightsNorm             bool
 	ExpertWeightsScale            float32
 	IsMOE                         bool
+	IsHybrid                      bool
+	MambaLayerPattern             string
 
 	DebugDequant     bool
 	DebugActivations bool

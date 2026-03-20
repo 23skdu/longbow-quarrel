@@ -170,9 +170,20 @@ go test -tags=metal ./internal/device/...
 - **Location:** `internal/engine/types.go`, `internal/engine/engine.go`
 
 #### Mamba Layer Detection (internal/engine/mamba.go:91)
-- **Status:** ✅ FUNCTIONAL
-- **Issue:** `IsMambaLayer()` relies on nil check - needs proper config-based detection
-- **Details:** Current implementation checks if Mamba weights exist for the layer - this is a valid approach since weights are loaded based on model architecture
+- **Status:** ✅ FIXED
+- **Issue:** `IsMambaLayer()` relied on weight-based nil check - needed proper config-based detection
+- **Fix:** Implemented config-based detection with multiple patterns:
+  - `"all"` - Pure Mamba model (all layers are Mamba)
+  - `"none"` - Pure Transformer (no Mamba layers)
+  - `"even"` - Hybrid model with Mamba on even layers (0, 2, 4, ...)
+  - `"odd"` - Hybrid model with Mamba on odd layers (1, 3, 5, ...)
+  - Weight-based fallback for custom patterns
+- **Changes:**
+  - Added `IsHybrid` and `MambaLayerPattern` fields to Config
+  - Added `detectMambaLayers()` method to detect pattern from GGUF metadata
+  - Added `CountMambaLayers()` helper method
+  - Updated `IsMambaLayer()` with config-based detection priority
+- **Location:** `internal/engine/mamba.go`, `internal/config/config.go`
 
 #### Tensor Zero() Method (internal/engine/engine.go:1191)
 - **Status:** ✅ FIXED

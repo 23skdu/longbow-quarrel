@@ -7,7 +7,6 @@ import (
 	"os"
 	"testing"
 
-	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
 )
 
