@@ -77,9 +77,15 @@
 ### Low Priority
 
 #### Multi-GPU Support
-- Model parallelism across multiple GPUs
-- Tensor parallelism for large models (>70B)
-- Pipeline parallelism support
+- **Status:** ✅ FOUNDATION LAID
+- **Files:** `internal/device/cuda.go`
+- **Implemented:**
+  - `GetDeviceCount()` - Enumerate available GPUs
+  - `GetDeviceName()` - Get GPU device name
+  - `GetDeviceMemory()` - Get GPU memory capacity
+  - `MultiGPUManager` - Manages per-device CUDA contexts
+  - `RoundRobinDevice()` - Round-robin device selection for load balancing
+- **Pending:** Tensor parallelism, pipeline parallelism, cross-GPU communication
 
 #### vLLM Integration
 - Export operators for vLLM compatibility

@@ -24,6 +24,26 @@ extern void cudaFusedRoPE(cudaStream_t stream, void* tensor, const int* posIds, 
 extern void cudaFusedSwiGLU(cudaStream_t stream, const void* input, const void* gateWeight, const void* upWeight, const void* downWeight, void* output, int batch, int dim, int hiddenDim);
 extern void cudaFusedMLP(cudaStream_t stream, const void* input, const void* gateWeight, const void* upWeight, const void* downWeight, void* output, int batch, int dim, int hiddenDim);
 extern void cudaFusedRMSNormAdd(cudaStream_t stream, const void* input, const void* hidden, const void* weight, void* output, int batch, int dim, float eps);
+
+// Device properties structure for multi-GPU support
+typedef struct {
+    char name[256];
+    int totalGlobalMem;
+    int sharedMemPerBlock;
+    int regsPerBlock;
+    int warpSize;
+    int memPitch;
+    int maxThreadsPerBlock;
+    int maxThreadsDim[3];
+    int maxGridSize[3];
+    int clockRate;
+    int totalConstMem;
+    int major;
+    int minor;
+    int multiGpuBoard;
+    int memoryClockRate;
+    int memoryBusWidth;
+} cudaDevicePropFull;
 */
 import "C"
 import (
@@ -144,6 +164,128 @@ func (c *CUDAContext) Free() {
 
 func (c *CUDAContext) Synchronize() {
 	C.cudaStreamSynchronize(c.stream)
+}
+
+func GetDeviceCount() (int, error) {
+	var count C.int
+	result := C.cudaGetDeviceCount(&count)
+	if result != C.cudaSuccess {
+		return 0, fmt.Errorf("cudaGetDeviceCount failed: %v", result)
+	}
+	return int(count), nil
+}
+
+func GetDeviceName(device int) string {
+	return fmt.Sprintf("GPU-%d", device)
+}
+
+func GetDeviceMemory(device int) (int64, error) {
+	C.cudaSetDevice(C.int(device))
+	var free, total C.size_t
+	result := C.cudaMemGetInfo(&free, &total)
+	if result != C.cudaSuccess {
+		return 0, fmt.Errorf("cudaMemGetInfo failed: %v", result)
+	}
+	return int64(total), nil
+}
+
+type MultiGPUManager struct {
+	devices    []int
+	contexts   map[int]*CUDAContext
+	currentIdx int
+	mu         sync.Mutex
+}
+
+type DeviceInfo struct {
+	ID       int
+	Name     string
+	MemoryMB int64
+}
+
+var multiGPU *MultiGPUManager
+
+func GetMultiGPUManager() (*MultiGPUManager, error) {
+	if multiGPU != nil {
+		return multiGPU, nil
+	}
+
+	count, err := GetDeviceCount()
+	if err != nil {
+		return nil, err
+	}
+
+	if count <= 1 {
+		return nil, fmt.Errorf("need multiple GPUs for multi-GPU support, found %d", count)
+	}
+
+	multiGPU = &MultiGPUManager{
+		devices:  make([]int, count),
+		contexts: make(map[int]*CUDAContext),
+	}
+	for i := 0; i < count; i++ {
+		multiGPU.devices[i] = i
+	}
+
+	return multiGPU, nil
+}
+
+func (m *MultiGPUManager) GetContext(device int) (*CUDAContext, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if ctx, ok := m.contexts[device]; ok {
+		return ctx, nil
+	}
+
+	if device >= len(m.devices) {
+		return nil, fmt.Errorf("invalid device index: %d", device)
+	}
+
+	C.cudaSetDevice(C.int(device))
+
+	ctx := &CUDAContext{
+		device:        device,
+		stream:        nil,
+		handle:        nil,
+		pool:          make(map[string][]*CUDATensor),
+		useTensorCore: true,
+	}
+
+	var cuDevice C.int
+	C.cudaGetDevice(&cuDevice)
+	ctx.device = int(cuDevice)
+
+	C.cudaStreamCreate(&ctx.stream)
+	if ctx.stream == nil {
+		return nil, fmt.Errorf("cudaStreamCreate failed for device %d", device)
+	}
+
+	status := C.cublasCreate(&ctx.handle)
+	if status != 0 {
+		C.cudaStreamDestroy(ctx.stream)
+		return nil, fmt.Errorf("cublasCreate failed for device %d: %d", device, status)
+	}
+
+	C.cublasSetStream(ctx.handle, ctx.stream)
+	m.contexts[device] = ctx
+
+	return ctx, nil
+}
+
+func (m *MultiGPUManager) RoundRobinDevice() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	device := m.devices[m.currentIdx]
+	m.currentIdx = (m.currentIdx + 1) % len(m.devices)
+	return device
+}
+
+func (m *MultiGPUManager) GetDeviceInfo(device int) (*DeviceInfo, error) {
+	return &DeviceInfo{
+		ID:       device,
+		Name:     GetDeviceName(device),
+		MemoryMB: 0,
+	}, nil
 }
 
 type CUDATensor struct {
