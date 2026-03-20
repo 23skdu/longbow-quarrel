@@ -87,6 +87,8 @@ func (t *TensorInfo) SizeBytes() uint64 {
 		return (numElements / 256) * 110
 	case GGMLTypeIQ1_S:
 		return (numElements / 256) * 48
+	case GGMLTypeIQ1_M:
+		return (numElements / 256) * 56
 	case GGMLTypeIQ2_XXS:
 		return (numElements / 256) * 66
 	case GGMLTypeIQ2_XS:

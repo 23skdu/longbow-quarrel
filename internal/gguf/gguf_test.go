@@ -145,8 +145,8 @@ func TestTensorInfoSizeBytesIQ1M(t *testing.T) {
 		Dimensions: []uint64{256},
 		Type:       GGMLTypeIQ1_M,
 	}
-	if got := info.SizeBytes(); got != 0 {
-		t.Errorf("IQ1_M SizeBytes() = %d, want 0 (not implemented)", got)
+	if got := info.SizeBytes(); got != 56 {
+		t.Errorf("IQ1_M SizeBytes() = %d, want 56", got)
 	}
 }
 
