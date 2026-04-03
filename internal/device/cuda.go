@@ -25,6 +25,12 @@ extern void cudaFusedSwiGLU(cudaStream_t stream, const void* input, const void* 
 extern void cudaFusedMLP(cudaStream_t stream, const void* input, const void* gateWeight, const void* upWeight, const void* downWeight, void* output, int batch, int dim, int hiddenDim);
 extern void cudaFusedRMSNormAdd(cudaStream_t stream, const void* input, const void* hidden, const void* weight, void* output, int batch, int dim, float eps);
 
+// TurboQuant kernel exports
+extern void cudaTurboQuantPolarQuant(cudaStream_t stream, const float* input, const float* rotationMatrix, int8_t* quantized, float* scaleOut, float* residual, int n, int bits);
+extern void cudaTurboQuantQJLTransform(cudaStream_t stream, const float* residual, const float* signMatrix, int8_t* quantized, float* scaleOut, int rows, int cols);
+extern void cudaTurboQuantEncode(cudaStream_t stream, const float* input, const float* rotationMatrix, const float* qjlMatrix, int8_t* output, float* scaleOut, float* qjlScaleOut, int blockSize, int qjlRows, int bits);
+extern void cudaTurboQuantDecode(cudaStream_t stream, const int8_t* input, const float* rotationMatrix, float* output, const float* scaleIn, int blockSize, int qjlRows);
+
 // Device properties structure for multi-GPU support
 typedef struct {
     char name[256];
@@ -879,4 +885,34 @@ func (m *CUDAModel) GetVCache(layer int) *CUDATensor {
 		return nil
 	}
 	return m.VCache[layer]
+}
+
+func (ctx *CUDAContainer) TurboQuantPolarQuant(input, rotationMatrix []float32, n, bits int) (quantized []int8, scale float32, residual []float32) {
+	quantized = make([]int8, n)
+	residual = make([]float32, n)
+	scaleOut := make([]float32, 1)
+	C.cudaTurboQuantPolarQuant(ctx.stream, (*C.float)(&input[0]), (*C.float)(&rotationMatrix[0]), (*C.int8_t)(&quantized[0]), (*C.float)(&scaleOut[0]), (*C.float)(&residual[0]), C.int(n), C.int(bits))
+	return quantized, scaleOut[0], residual
+}
+
+func (ctx *CUDAContainer) TurboQuantQJLTransform(residual, signMatrix []float32, rows, cols int) (quantized []int8, scale float32) {
+	quantized = make([]int8, rows)
+	scaleOut := make([]float32, 1)
+	C.cudaTurboQuantQJLTransform(ctx.stream, (*C.float)(&residual[0]), (*C.float)(&signMatrix[0]), (*C.int8_t)(&quantized[0]), (*C.float)(&scaleOut[0]), C.int(rows), C.int(cols))
+	return quantized, scaleOut[0]
+}
+
+func (ctx *CUDAContainer) TurboQuantEncode(input, rotationMatrix, qjlMatrix []float32, blockSize, qjlRows, bits int) (output []int8, scale, qjlScale float32) {
+	outputSize := blockSize + qjlRows
+	output = make([]int8, outputSize)
+	scaleOut := make([]float32, 1)
+	qjlScaleOut := make([]float32, 1)
+	C.cudaTurboQuantEncode(ctx.stream, (*C.float)(&input[0]), (*C.float)(&rotationMatrix[0]), (*C.float)(&qjlMatrix[0]), (*C.int8_t)(&output[0]), (*C.float)(&scaleOut[0]), (*C.float)(&qjlScaleOut[0]), C.int(blockSize), C.int(qjlRows), C.int(bits))
+	return output, scaleOut[0], qjlScaleOut[0]
+}
+
+func (ctx *CUDAContainer) TurboQuantDecode(input []int8, rotationMatrix, scaleIn []float32, blockSize, qjlRows int) []float32 {
+	output := make([]float32, blockSize)
+	C.cudaTurboQuantDecode(ctx.stream, (*C.int8_t)(&input[0]), (*C.float)(&rotationMatrix[0]), (*C.float)(&output[0]), (*C.float)(&scaleIn[0]), C.int(blockSize), C.int(qjlRows))
+	return output
 }

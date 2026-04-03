@@ -1262,3 +1262,162 @@ __global__ void pipeline_recv_kernel(float* data, int size, int stage) {
         (void)val;
     }
 }
+
+// =============================================================================
+// TurboQuant Kernels (PolarQuant + QJLTransform)
+// =============================================================================
+
+__global__ void turboquant_polar_quant_kernel(const float* input, const float* rotationMatrix,
+                                               int8_t* quantized, float* scaleOut, float* residual,
+                                               int n, int bits) {
+    int gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= n) return;
+
+    float rotated = 0.0f;
+    for (int j = 0; j < n; j++) {
+        rotated += rotationMatrix[gid * n + j] * input[j];
+    }
+
+    float maxQuantVal = float((1 << (bits - 1)) - 1);
+    float scale = scaleOut[0];
+    float invScale = 1.0f / scale;
+
+    float qf = roundf(rotated * invScale);
+    qf = fminf(fmaxf(qf, -maxQuantVal), maxQuantVal);
+    quantized[gid] = (int8_t)qf;
+
+    float resRotated = rotated - qf * scale;
+    float finalRes = 0.0f;
+    for (int j = 0; j < n; j++) {
+        finalRes += rotationMatrix[j * n + gid] * resRotated;
+    }
+    residual[gid] = finalRes;
+}
+
+__global__ void turboquant_qjl_transform_kernel(const float* residual, const float* signMatrix,
+                                                 int8_t* quantized, float* scaleOut,
+                                                 int rows, int cols) {
+    int gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= rows) return;
+
+    float sum = 0.0f;
+    for (int j = 0; j < cols; j++) {
+        sum += signMatrix[gid * cols + j] * residual[j];
+    }
+
+    quantized[gid] = (sum >= 0.0f) ? (int8_t)1 : (int8_t)-1;
+}
+
+__global__ void turboquant_encode_kernel(const float* input, const float* rotationMatrix,
+                                          const float* qjlMatrix, int8_t* output,
+                                          float* scaleOut, float* qjlScaleOut,
+                                          int blockSize, int qjlRows, int bits) {
+    int gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= qjlRows) return;
+
+    int n = blockSize;
+    float maxAbs = 0.0f;
+    float rotated[256];
+    for (int i = 0; i < n; i++) {
+        rotated[i] = 0.0f;
+        for (int k = 0; k < n; k++) {
+            rotated[i] += rotationMatrix[i * n + k] * input[k];
+        }
+        maxAbs = fmaxf(maxAbs, fabsf(rotated[i]));
+    }
+
+    float maxQuantVal = float((1 << (bits - 1)) - 1);
+    float scale = (maxAbs > 0.0f) ? maxAbs / maxQuantVal : 1.0f;
+    float invScale = 1.0f / scale;
+
+    for (int i = 0; i < n; i++) {
+        float qf = roundf(rotated[i] * invScale);
+        qf = fminf(fmaxf(qf, -maxQuantVal), maxQuantVal);
+        output[i] = (int8_t)qf;
+    }
+
+    float resRotated[256];
+    for (int i = 0; i < n; i++) {
+        resRotated[i] = rotated[i] - float(output[i]) * scale;
+    }
+
+    float residual[256];
+    for (int i = 0; i < n; i++) {
+        residual[i] = 0.0f;
+        for (int j = 0; j < n; j++) {
+            residual[i] += rotationMatrix[j * n + i] * resRotated[j];
+        }
+    }
+
+    float projSum = 0.0f;
+    for (int j = 0; j < n; j++) {
+        projSum += qjlMatrix[gid * n + j] * residual[j];
+    }
+    output[n + gid] = (projSum >= 0.0f) ? (int8_t)1 : (int8_t)-1;
+
+    if (gid == 0) {
+        scaleOut[0] = scale;
+        qjlScaleOut[0] = 1.0f;
+    }
+}
+
+__global__ void turboquant_decode_kernel(const int8_t* input, const float* rotationMatrix,
+                                         float* output, const float* scaleIn,
+                                         int blockSize, int qjlRows) {
+    int gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= blockSize) return;
+
+    int n = blockSize;
+    float scale = scaleIn[0];
+
+    float dequant = float(input[gid]) * scale;
+
+    float result = 0.0f;
+    for (int j = 0; j < n; j++) {
+        result += rotationMatrix[j * n + gid] * dequant;
+    }
+
+    output[gid] = result;
+}
+
+extern "C" {
+
+void cudaTurboQuantPolarQuant(cudaStream_t stream, const float* input,
+                                const float* rotationMatrix, int8_t* quantized,
+                                float* scaleOut, float* residual, int n, int bits) {
+    int blockSize = 256;
+    int gridSize = (n + blockSize - 1) / blockSize;
+    turboquant_polar_quant_kernel<<<gridSize, blockSize, 0, stream>>>(
+        input, rotationMatrix, quantized, scaleOut, residual, n, bits);
+}
+
+void cudaTurboQuantQJLTransform(cudaStream_t stream, const float* residual,
+                                const float* signMatrix, int8_t* quantized,
+                                float* scaleOut, int rows, int cols) {
+    int blockSize = 256;
+    int gridSize = (rows + blockSize - 1) / blockSize;
+    turboquant_qjl_transform_kernel<<<gridSize, blockSize, 0, stream>>>(
+        residual, signMatrix, quantized, scaleOut, rows, cols);
+}
+
+void cudaTurboQuantEncode(cudaStream_t stream, const float* input,
+                          const float* rotationMatrix, const float* qjlMatrix,
+                          int8_t* output, float* scaleOut, float* qjlScaleOut,
+                          int blockSize, int qjlRows, int bits) {
+    int blockSize_k = 256;
+    int gridSize = (qjlRows + blockSize_k - 1) / blockSize_k;
+    turboquant_encode_kernel<<<gridSize, blockSize_k, 0, stream>>>(
+        input, rotationMatrix, qjlMatrix, output, scaleOut, qjlScaleOut,
+        blockSize, qjlRows, bits);
+}
+
+void cudaTurboQuantDecode(cudaStream_t stream, const int8_t* input,
+                          const float* rotationMatrix, float* output,
+                          const float* scaleIn, int blockSize, int qjlRows) {
+    int blockSize_k = 256;
+    int gridSize = (blockSize + blockSize_k - 1) / blockSize_k;
+    turboquant_decode_kernel<<<gridSize, blockSize_k, 0, stream>>>(
+        input, rotationMatrix, output, scaleIn, blockSize, qjlRows);
+}
+
+}

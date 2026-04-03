@@ -7,16 +7,6 @@ import (
 	"github.com/23skdu/longbow-quarrel/internal/config"
 )
 
-type SamplerConfig struct {
-	Temperature      float64
-	TopK             int
-	TopP             float64
-	RepPenalty       float64
-	Seed             int64
-	DebugActivations bool
-	QualityMode      bool
-}
-
 type Engine interface {
 	Infer(tokens []int, count int, cfg SamplerConfig) ([]int, error)
 	InferWithCallback(tokens []int, count int, cfg SamplerConfig, callback func(token int)) ([]int, error)
