@@ -21,6 +21,7 @@ go.work.sum
 # Local binaries and test executables
 /quarrel
 /quarrel_bin
+/quarrel-metal
 /capture_activations
 /dump_gguf
 /inspect_gguf
@@ -36,6 +37,10 @@ go.work.sum
 *.bin
 *.json
 test.gguf
+
+# Model files (GGUF)
+*.gguf
+models/*.gguf
 
 # Python artifacts
 venv/
