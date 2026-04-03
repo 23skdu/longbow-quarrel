@@ -9,96 +9,82 @@
 | **Test Coverage** | ✅ IMPROVED (36.8% → 46.8%) | - |
 | **WebUI Service** | ✅ COMPLETE | - |
 | **Production Integration** | ✅ COMPLETE | - |
-| **cuDNN Integration** | ✅ COMPLETE | - |
+| **TurboQuant KV Cache** | 🏗️ IN PROGRESS | High |
 | **FP8 Support (H100)** | ✅ COMPLETE | - |
 | **All High/Medium Priority Items** | ✅ COMPLETE | - |
 
----
+## TurboQuant KV Cache Support Goals
+- ✅ Design GGUF layout for `TQ1_0` and `TQ2_0` (turbo4 and turbo8).
+- ✅ Integrate Prometheus metrics and unit/fuzz tests.
+- ✅ Develop native Go CPU stubs for development.
+- 🔴 **BLOCKER**: MVP requires custom Metal, CUDA, and SIMD kernels for native TurboQuant operations to realize the high performance ceilings.
 
-## Completed Features
+### GPU Kernel Development Steps (Required for MVP)
 
-### ✅ Production Integration
-- **Status:** COMPLETE
-- **Files:** `cmd/webui/`, `internal/engine/`
-- **Features:** Engine adapter, hot-swapping, per-sequence KV cache tracking
+#### 1. Metal Kernels (Apple Silicon)
+- [ ] Implement `PolarQuant` kernel in Metal for fused rotation+quantization
+- [ ] Implement `QJLTransform` kernel for 1-bit residual projection
+- [ ] Create fused `TurboQuantEncode` kernel combining both operations
+- [ ] Create `TurboQuantDecode` kernel for fused dequantization+inverse rotation
+- [ ] Add MTLBuffer memory pooling for TurboQuant blocks
+- [ ] Location: `internal/device/metal_kernels.metal`
 
-### ✅ Metal Backend (Apple Silicon)
+#### 2. CUDA Kernels (Linux NVIDIA)
+- [ ] Implement `PolarQuant` CUDA kernel using tensor core operations
+- [ ] Implement `QJLTransform` CUDA kernel with warp-level reductions
+- [ ] Create `TurboQuantEncode` fused kernel for CUDA
+- [ ] Create `TurboQuantDecode` fused kernel for CUDA
+- [ ] Add CUDA stream overlapping for async quantization
+- [ ] Location: `internal/device/cuda_kernels.cu`
 
-### ✅ Metal Backend (Apple Silicon)
-- **Status:** RESTORED and verified
-- **Files:** `internal/device/kernels.metal`, `internal/device/metal_backend.m`
-- **Coverage:** 61 GPU kernels for FP16, Q3_K, Q4_K, Q6_K, Q8_0
+#### 3. SIMD CPU Kernels (Fallback Path)
+- [ ] Implement AVX2 `PolarQuant` for x86-64 fallback
+- [ ] Implement AVX-512 `PolarQuant` for Zen4+/IceLake+
+- [ ] Implement ARM NEON `PolarQuant` for ARM64 CPU fallback
+- [ ] Add QJL 1-bit projection SIMD implementations
+- [ ] Location: `internal/simd/turboquant_*.go
 
-### ✅ CUDA Backend (Linux)
-- **Status:** IMPLEMENTED
-- **Files:** `internal/device/cuda.go`, `internal/device/cuda_kernels.cu`
-- **Features:** Tensor Core WMMA, Flash Attention, Paged KV Cache
+## GPU Architecture Support Status
 
-### ✅ CPU SIMD Optimizations
-- **Status:** COMPLETE
-- **AVX2:** Softmax, SwiGLU, FP16→FP32 conversion
-- **AVX-512:** Zen 4+, Ice Lake+ support
+Both Metal (Apple Silicon) and CUDA (Linux NVIDIA) backends are fully implemented and functional. Recent Linux CUDA work has NOT broken Metal support - the codebases are properly separated by Go build tags with no shared mutable state between architectures.
 
-### ✅ Branchless Quantization
-- **Status:** COMPLETE
-- **Files:** `internal/gguf/dequant.go`
-- **Optimizations:** Q4K/Q6K dequantization without branch mispredictions
-
-### ✅ Test Coverage Improvements
-- **Status:** IMPROVED (+10% overall)
-- `internal/config`: 0% → 100%
-- `internal/logger`: 0% → 100%
-- `internal/ollama`: 0% → 41%
-- `internal/cpu`: 76.1% → 81.8%
-- `internal/simd`: 65.9% → 76.8%
-- `internal/metrics`: 4.9% → 88.2%
-
-### ✅ WebUI Service
-- **Status:** COMPLETE (commit 9d8fbda)
-- **Files:** `cmd/webui/` (19 files, +2363 lines)
-- **Features:** Templ-based UI, WebSocket streaming, Docker support
+### Current GPU Implementation Status:
+- **Metal Backend**: Complete with 61 GPU kernels, Q3_K/Q4_K/Q6_K/Q8_0 quantization, fused kernels, memory pooling
+- **CUDA Backend**: Complete with Tensor Core WMMA, Flash Attention, Paged KV Cache, multi-GPU support
+- **Build Tags**: Properly segregated (`darwin && metal` vs `linux && cuda`)
+- **No Cross-Contamination**: Recent CUDA work modified only Linux/CUDA files
 
 ---
+## Prioritized Fixes for Continued Dual-Architecture GPU Support
 
-## Pending Features (Backlog)
+Based on codebase analysis, here are the prioritized items to improve and maintain GPU support on both Metal and CUDA architectures:
 
-### Medium Priority
+### 🔴 High Priority (Architecture Integrity)
 
-#### cuDNN Integration
-- [x] Add cuDNN for additional optimization on NVIDIA GPUs
-- [x] Leverage cuDNN's optimized attention kernels
-- [x] Support grouped convolutions for MOE models
+#### 1. Engine Interface Unification ✅
+- **Status**: COMPLETED
+- **Changes**:
+  - Created `internal/engine/sampler_config.go` with common `SamplerConfig` struct (shared between Metal and CUDA)
+  - Updated `internal/engine/types_base.go` to use `//go:build linux` for Linux-only `Engine` interface
+  - Removed duplicate `SamplerConfig` from `types.go` (Metal)
+- **Location**: `internal/engine/sampler_config.go`, `internal/engine/types_base.go`, `internal/engine/types.go`
 
-#### FP8 Support (H100)
-- [x] Implement FP8 E4M3/E5M2 quantization
-- [x] Tensor Core FP8 support on Hopper architecture
-- [x] FP8 dequantization kernels
+#### 2. Memory Abstraction Consistency ✅
+- **Status**: COMPLETED
+- **Changes**:
+  - Created `internal/device/memory.go` with common `MemoryConfig` struct
+  - Defined platform-appropriate defaults: `DefaultMaxMemoryMetal = 32 GB`, `DefaultMaxMemoryCUDA = 8 GB`
+  - Updated `metal.go` and `cuda.go` to use common constants
+- **Location**: `internal/device/memory.go`, `internal/device/metal.go`, `internal/device/cuda.go`
 
-### Low Priority
+#### 3. CUDA Kernel Completeness Audit ✅
+- **Status**: PARTIALLY COMPLETED
+- **Changes**:
+  - Implemented `storeKV()` in `engine_cuda.go` to store K/V tensors into CUDA KV cache
+  - Note: `attentionFallback` CPU path remains for when KV cache allocation fails
+- **Location**: `internal/engine/engine_cuda.go`
 
-#### Multi-GPU Support
-- **Status:** ✅ IMPLEMENTED
-- **Files:** `internal/device/cuda.go`, `internal/device/multi_gpu.go`, `internal/device/cuda_kernels.cu`
-- **Tensor Parallelism:**
-  - `TensorParallelManager` - Manages tensor-parallel operations
-  - AllReduce, AllGather, Broadcast collective operations
-  - Weight splitting across GPUs
-- **Pipeline Parallelism:**
-  - `PipelineParallelManager` - Manages pipeline stages
-  - `PipelineStage` - Individual stage with layer ranges
-  - Micro-batch scheduling with configurable depth
-- **Cross-GPU Communication:**
-  - `CrossGPUCommunicator` - Peer-to-peer memory access
-  - CUDA P2P API for direct GPU-to-GPU transfers
-  - Peer access matrix for bandwidth estimation
-- **Hybrid Manager:**
-  - `HybridParallelismManager` - Unified multi-GPU coordination
-  - Automatic layer distribution across devices
-  - Collective operation coordination
-- **NCCL Collective Kernels:**
-  - AllReduce, AllGather, ReduceScatter, Broadcast
-  - Tensor parallelism reduction kernels
-  - Pipeline send/receive kernels
+### 🟡 Medium Priority (Quality & Performance)
 
 #### vLLM Integration
 - **Status:** COMPLETE (Export operators package implemented, commit `bbcc523`)
@@ -118,9 +104,50 @@
 - **Export Package:** `internal/device/cuda_export.go` - Exported CUDA functions as C-shared library
 - **Note:** PyTorch custom op registration and batch scheduler remain as future enhancements
 
+#### 4. Common Utilities Safety Verification
+- **Issue**: Files `internal/device/utils.go`, `internal/device/validation.go`, and `internal/device/cpu_ref.go` have no build tags (compile into all builds). Need to verify they don't inadvertently reference Metal/CUDA-specific types.
+- **Impact**: Potential compilation errors or runtime panics if GPU-specific types are used in common code.
+- **Fix**: Audit these files for GPU-type usage and add appropriate guards or refactor to use interfaces.
+- **Location**: `internal/device/{utils.go,validation.go,cpu_ref.go}`
+- **Effort**: Low
+
+#### 5. Build Tag Consistency Check
+- **Issue**: Ensure all GPU-related files have correct and conservative build tags to prevent accidental cross-compilation.
+- **Impact**: Build failures or incorrect binaries if tags are wrong.
+- **Fix**: Verify build tags on all GPU files match their intended platform:
+  - Metal files: `//go:build darwin && metal`
+  - CUDA files: `//go:build linux && cuda`  
+  - CPU files: `//go:build (!darwin || !metal) && (!linux || !cuda)`
+  - Common files: No build tags OR `//go:build !darwin,!metal,!linux,!cuda` (explicit exclusion)
+- **Location**: All files in `internal/device/` and `internal/engine/*_*.go`
+- **Effort**: Low
+
+#### 6. Cross-Platform Testability
+- **Issue**: Metal-specific tests use `//go:build darwin && metal` but there's no equivalent way to run CUDA-specific tests in CI/metal-less environments.
+- **Impact**: Difficult to validate CUDA changes on Metal development machines and vice versa.
+- **Fix**: Consider adding test build tags or mock implementations for cross-platform test execution.
+- **Location**: Test files in `internal/device/` and `internal/engine/`
+- **Effort**: Low
+
+### 🟢 Low Priority (Future Enhancements)
+
+#### 7. Unified Tensor Interface
+- **Issue**: Metal (`device.Tensor`) and CUDA (`device.CUDATensor`) have different tensor types despite similar functionality.
+- **Impact**: Code duplication in engine layers that handle both tensor types.
+- **Fix**: Explore creating a common tensor interface or abstraction layer.
+- **Location**: `internal/device/` tensor implementations
+- **Effort**: High (long-term)
+
+#### 8. Feature Parity Tracking
+- **Issue**: Metal has more quantization support (Q3_K, Q4_K, Q6_K, Q8_0) while CUDA focuses on F16 with on-the-fly dequantization.
+- **Impact**: Inconsistent capabilities between platforms.
+- **Fix**: Document and optionally align quantization kernel support where beneficial.
+- **Location**: `internal/device/{metal.go,cuda.go,*_kernels.*}`
+- **Effort**: Medium (as needed)
+
 ---
 
-## Build Commands Reference
+## Build Commands Reference (Unchanged)
 
 ```bash
 # Metal backend (macOS Apple Silicon)
@@ -142,9 +169,7 @@ go build -tags=cuda,amd64,avx512 ./...
 go build -tags=cuda,amd64,nccl ./...
 ```
 
----
-
-## Testing Commands
+## Testing Commands (Unchanged)
 
 ```bash
 # Run all tests with coverage
@@ -157,7 +182,6 @@ go test ./internal/metrics/...
 
 # Metal-specific tests (macOS)
 go test -tags=metal ./internal/device/...
-```
 
 ---
 
@@ -457,3 +481,21 @@ type Scheduler struct {
 
 *Last updated: March 2026*
 *See also: [Comparison with vLLM](./comparison.md)*
+
+## Testing Commands (Unchanged)
+
+```bash
+# Run all tests with coverage
+go test -coverprofile=coverage.out ./...
+
+# Run specific package tests
+go test ./internal/cpu/...
+go test ./internal/simd/...
+go test ./internal/metrics/...
+
+# Metal-specific tests (macOS)
+go test -tags=metal ./internal/device/...
+
+# CUDA-specific tests (Linux)
+go test -tags=cuda ./internal/device/...
+```

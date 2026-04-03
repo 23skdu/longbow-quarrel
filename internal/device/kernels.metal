@@ -79,7 +79,7 @@ kernel void rmsnorm_f16(device const half *x [[ buffer(0) ]],
     threadgroup float shared_rms[1];
     float sum_sq = 0.0f;
     int row_offset = qid.y * cols;
-    for (int i = tid; i < cols; i += 1024) {
+    for (int i = tid; i < cols; i += 32) {
         float val = (float)x[row_offset + i];
         sum_sq += val * val;
     }
@@ -90,13 +90,13 @@ kernel void rmsnorm_f16(device const half *x [[ buffer(0) ]],
     threadgroup_barrier(mem_flags::mem_threadgroup);
     
     if (tid < 32) {
-        float t = (tid < 32) ? s[tid] : 0.0f;
+        float t = ((tid < (cols + 31) / 32) ? s[tid] : 0.0f);
         t = simd_sum(t);
         if (tid == 0) shared_rms[0] = 1.0f / sqrt(t / (float)cols + eps);
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     float rms = shared_rms[0];
-    for (int i = tid; i < cols; i += 1024) {
+    for (int i = tid; i < cols; i += 32) {
         int idx = row_offset + i;
         out[idx] = safe_half((float)x[idx] * rms * w[i]);
     }
@@ -128,7 +128,7 @@ kernel void linear_f16(device const half *weight [[ buffer(0) ]],
     }
 
     sum = simd_sum(sum); 
-    if (lane_id == 0) output[batch * dim_out + row] = (half)sum;
+    if (lane_id == 0) output[batch * dim_out + row] = safe_half(sum);
 }
 
 kernel void linear_q6k_f16(device const uchar *weight [[ buffer(0) ]],
@@ -882,7 +882,7 @@ kernel void rmsnorm_f32(device const float *x [[ buffer(0) ]],
     threadgroup float s[1024]; 
     float sum = 0.0f;
     int row_offset = qid.y * cols;
-    for (int i = tid; i < cols; i += 1024) {
+    for (int i = tid; i < cols; i += 32) {
         float val = x[row_offset + i];
         sum += val * val;
     }
@@ -1316,13 +1316,13 @@ kernel void rmsnorm_linear_q6k_f16(device const half *input [[ buffer(0) ]],
                                     uint3 tid [[ thread_position_in_threadgroup ]],
                                     uint3 qid [[ thread_position_in_grid ]]) {
     uint row = qid.y; uint batch = qid.z;
-    if (batch >= (uint)batchSize) return;
-    if (row >= (uint)dim_out) return; uint lane_id = tid.x;
+    if (batch >= (uint)batchSize)  { output[batch * dim_out + row] = (half)99.0f; return; }
+    if (row >= (uint)dim_out)  { output[batch * dim_out + row] = (half)88.0f; return; } uint lane_id = tid.x;
 
     // 1. Threadgroup-wide RMSNorm
     threadgroup float s[32];
     float sum_sq = 0.0f;
-    for (int i = (int)lane_id; i < dim_in; i += 1024) {
+    for (int i = (int)lane_id; i < dim_in; i += 32) {
         float val = (float)input[batch * dim_in + i];
         sum_sq += val * val;
     }
@@ -1331,7 +1331,7 @@ kernel void rmsnorm_linear_q6k_f16(device const half *input [[ buffer(0) ]],
     threadgroup_barrier(mem_flags::mem_threadgroup);
     
     if (lane_id < 32) {
-        float t = s[lane_id];
+        float t = (lane_id < 1) ? ((lane_id < 1) ? s[lane_id] : 0.0f) : 0.0f;
         t = simd_sum(t);
         if (lane_id == 0) s[0] = t;
     }
@@ -1339,7 +1339,7 @@ kernel void rmsnorm_linear_q6k_f16(device const half *input [[ buffer(0) ]],
     float rms = 1.0f / sqrt(s[0] / (float)dim_in + eps);
 
     // 2. Linear Q6K
-    int num_blocks = dim_in / 256;
+    int num_blocks = (dim_in + 255) / 256;
     device const uchar *row_ptr = weight + row * num_blocks * 210;
     float sum = 0;
     
@@ -1363,8 +1363,8 @@ kernel void rmsnorm_linear_q6k_f16(device const half *input [[ buffer(0) ]],
                     int g_idx0 = i * 256 + idx;
                     int g_idx1 = i * 256 + idx + 1;
 
-                    sum += s_val * (float)((int8_t)((h0 << 4) | (b & 0xF)) - 32) * (float)input[batch * dim_in + g_idx0] * rms * (float)norm_weight[g_idx0];
-                    sum += s_val * (float)((int8_t)((h1 << 4) | (b >> 4)) - 32) * (float)input[batch * dim_in + g_idx1] * rms * (float)norm_weight[g_idx1];
+                    if (g_idx0 < dim_in) sum += s_val * (float)((int8_t)((h0 << 4) | (b & 0xF)) - 32) * (float)input[batch * dim_in + g_idx0] * rms * (float)norm_weight[g_idx0];
+                    if (g_idx1 < dim_in) sum += s_val * (float)((int8_t)((h1 << 4) | (b >> 4)) - 32) * (float)input[batch * dim_in + g_idx1] * rms * (float)norm_weight[g_idx1];
                 }
             }
         }
@@ -1556,13 +1556,13 @@ kernel void swiglu_linear_q6k_f16(device const half *gate [[ buffer(0) ]],
                                    device half *output [[ buffer(3) ]],
                                    constant int &dim_in [[ buffer(4) ]],
                                    constant int &dim_out [[ buffer(5) ]],
-                                   constant float &scale [[ buffer(6) ]],
+                                   constant float &scale [[ buffer(6) ]], constant int &batchSize [[ buffer(7) ]],
                                    uint3 tid [[ thread_position_in_threadgroup ]],
                                    uint3 qid [[ thread_position_in_grid ]]) {
-    uint row = qid.y; uint batch = qid.z;
-    if (row >= (uint)dim_out) return; uint lane_id = tid.x;
+    uint row = qid.y; uint batch = qid.z; if (batch >= (uint)batchSize)  { output[batch * dim_out + row] = (half)77.0f; return; }
+    if (row >= (uint)dim_out)  { output[batch * dim_out + row] = (half)66.0f; return; } uint lane_id = tid.x;
 
-    int num_blocks = dim_in / 256;
+    int num_blocks = (dim_in + 255) / 256;
     device const uchar *row_ptr = weight + row * num_blocks * 210;
     float sum = 0;
 
@@ -1588,13 +1588,13 @@ kernel void swiglu_linear_q6k_f16(device const half *gate [[ buffer(0) ]],
                 int g_idx0 = i * 256 + idx;
                 int g_idx1 = i * 256 + idx + 1;
 
-                float g0 = (float)gate_row[g_idx0];
-                float u0 = (float)up_row[g_idx0];
+                float g0 = (g_idx0 < dim_in) ? (float)gate_row[g_idx0] : 0.0f;
+                float u0 = (g_idx0 < dim_in) ? (float)up_row[g_idx0] : 0.0f;
                 float swish0 = u0 * (g0 / (1.0f + exp(-clamp(g0, -10.0f, 10.0f))));
                 sum += s_val * (float)((int8_t)((h0 << 4) | (b & 0xF)) - 32) * swish0;
 
-                float g1 = (float)gate_row[g_idx1];
-                float u1 = (float)up_row[g_idx1];
+                float g1 = (g_idx1 < dim_in) ? (float)gate_row[g_idx1] : 0.0f;
+                float u1 = (g_idx1 < dim_in) ? (float)up_row[g_idx1] : 0.0f;
                 float swish1 = u1 * (g1 / (1.0f + exp(-clamp(g1, -10.0f, 10.0f))));
                 sum += s_val * (float)((int8_t)((h1 << 4) | (b >> 4)) - 32) * swish1;
             }
@@ -2180,7 +2180,7 @@ kernel void mamba_conv1d_f16(
     // Project -> Conv1d -> Silu -> SSM.
     // So this kernel just does Conv1d + Bias.
     
-    output[tid] = (half)sum;
+    output[tid] = safe_half(sum);
 }
 
 
@@ -2496,4 +2496,181 @@ kernel void moe_expert_gate_up_swiglu_f16(
     if (tid == 0) {
         output[batch_idx * hidden_dim + out_idx] = safe_half(sum_activated);
     }
+}
+
+// ============================================================================
+// TurboQuant Kernels: PolarQuant and QJLTransform
+// ============================================================================
+
+// PolarQuant: Apply random orthogonal rotation, then scalar quantization
+// Input: [n] float32, RotationMatrix: [n*n] float32
+// Output: Quantized: [n] int8, Scale: float32, Residual: [n] float32
+kernel void turboquant_polar_quant(device const float *input [[ buffer(0) ]],
+                                    device const float *rotation_matrix [[ buffer(1) ]],
+                                    device int8_t *quantized [[ buffer(2) ]],
+                                    device float *scale_out [[ buffer(3) ]],
+                                    device float *residual [[ buffer(4) ]],
+                                    constant int &n [[ buffer(5) ]],
+                                    constant int &bits [[ buffer(6) ]],
+                                    uint gid [[ thread_position_in_grid ]]) {
+    if (gid >= (uint)n) return;
+    
+    // 1. Rotation: y = R * x
+    float rotated = 0.0f;
+    for (int j = 0; j < n; j++) {
+        rotated += rotation_matrix[gid * n + j] * input[j];
+    }
+    
+    // Find max absolute for scale computation (parallel reduction)
+    // Simple approach: each thread computes its own, we'll reduce later
+    // For now, compute scale in first thread
+    float max_abs = abs(rotated);
+    if (gid == 0) {
+        for (int i = 1; i < n; i++) {
+            // Recompute each rotated value for scale
+        }
+    }
+    
+    // For block-level processing, each thread handles one element
+    // Scale computation done separately
+    float scale = scale_out[0]; // Passed from host
+    float max_quant_val = float((1 << (bits - 1)) - 1);
+    float inv_scale = 1.0f / scale;
+    
+    // Scalar quantization
+    float qf = round(rotated * inv_scale);
+    qf = clamp(qf, -max_quant_val, max_quant_val);
+    quantized[gid] = int8_t(qf);
+    
+    // Residual in rotated space
+    float res_rotated = rotated - qf * scale;
+    
+    // Inverse rotation of residual: R^T * res_rotated
+    float final_res = 0.0f;
+    for (int j = 0; j < n; j++) {
+        final_res += rotation_matrix[j * n + gid] * res_rotated;
+    }
+    residual[gid] = final_res;
+}
+
+// QJLTransform: 1-bit quantization of residual using random sign matrix
+// Input: Residual: [cols] float32, SignMatrix: [rows*cols] float32
+// Output: Quantized: [rows] int8, Scale: float32
+kernel void turboquant_qjl_transform(device const float *residual [[ buffer(0) ]],
+                                       device const float *sign_matrix [[ buffer(1) ]],
+                                       device int8_t *quantized [[ buffer(2) ]],
+                                       device float *scale_out [[ buffer(3) ]],
+                                       constant int &rows [[ buffer(4) ]],
+                                       constant int &cols [[ buffer(5) ]],
+                                       uint gid [[ thread_position_in_grid ]]) {
+    if (gid >= (uint)rows) return;
+    
+    // z = P * e (projection)
+    float sum = 0.0f;
+    for (int j = 0; j < cols; j++) {
+        sum += sign_matrix[gid * cols + j] * residual[j];
+    }
+    
+    // 1-bit quantization: sign(sum)
+    quantized[gid] = (sum >= 0.0f) ? int8_t(1) : int8_t(-1);
+    
+    // Scale for norm preservation (computed separately)
+    // Placeholder - actual norm computation requires reduction
+}
+
+// TurboQuant Encode: Fused PolarQuant + QJLTransform for KV cache compression
+// Compresses [blockSize] values into [blockSize/8 + qjlRows/8] bytes
+kernel void turboquant_encode(device const float *input [[ buffer(0) ]],
+                               device const float *rotation_matrix [[ buffer(1) ]],
+                               device const float *qjl_matrix [[ buffer(2) ]],
+                               device int8_t *output [[ buffer(3) ]],
+                               device float *scale_out [[ buffer(4) ]],
+                               device float *qjl_scale_out [[ buffer(5) ]],
+                               constant int &block_size [[ buffer(6) ]],
+                               constant int &qjl_rows [[ buffer(7) ]],
+                               constant int &bits [[ buffer(8) ]],
+                               uint gid [[ thread_position_in_grid ]]) {
+    // Simplified: process one block per thread group
+    // Full implementation would handle multiple blocks
+    
+    int n = block_size;
+    int rows = qjl_rows;
+    
+    // Step 1: PolarQuant
+    float rotated[256]; // Max block size
+    float max_abs = 0.0f;
+    
+    for (int j = 0; j < n; j++) {
+        rotated[j] = 0.0f;
+        for (int k = 0; k < n; k++) {
+            rotated[j] += rotation_matrix[j * n + k] * input[k];
+        }
+        max_abs = max(max_abs, abs(rotated[j]));
+    }
+    
+    float max_quant_val = float((1 << (bits - 1)) - 1);
+    float scale = (max_abs > 0.0f) ? max_abs / max_quant_val : 1.0f;
+    float inv_scale = 1.0f / scale;
+    
+    // Quantize and compute residual
+    float res_rotated[256];
+    for (int i = 0; i < n; i++) {
+        float qf = round(rotated[i] * inv_scale);
+        qf = clamp(qf, -max_quant_val, max_quant_val);
+        output[i] = int8_t(qf);
+        res_rotated[i] = rotated[i] - qf * scale;
+    }
+    
+    // Inverse rotate residual
+    float residual[256];
+    for (int i = 0; i < n; i++) {
+        residual[i] = 0.0f;
+        for (int j = 0; j < n; j++) {
+            residual[i] += rotation_matrix[j * n + i] * res_rotated[j];
+        }
+    }
+    
+    // Step 2: QJL Transform
+    float proj_sum = 0.0f;
+    for (int j = 0; j < n; j++) {
+        proj_sum += qjl_matrix[gid * n + j] * residual[j];
+    }
+    
+    // 1-bit quantization of residual
+    int8_t qjl_bit = (proj_sum >= 0.0f) ? int8_t(1) : int8_t(-1);
+    output[n + gid] = qjl_bit;
+    
+    // Output scales
+    if (gid == 0) {
+        scale_out[0] = scale;
+        qjl_scale_out[0] = 1.0f; // Placeholder
+    }
+}
+
+// TurboQuant Decode: Fused dequantization + inverse rotation
+kernel void turboquant_decode(device const int8_t *input [[ buffer(0) ]],
+                               device const float *rotation_matrix [[ buffer(1) ]],
+                               device float *output [[ buffer(2) ]],
+                               device const float *scale_in [[ buffer(3) ]],
+                               constant int &block_size [[ buffer(4) ]],
+                               constant int &qjl_rows [[ buffer(5) ]],
+                               uint gid [[ thread_position_in_grid ]]) {
+    if (gid >= (uint)block_size) return;
+    
+    int n = block_size;
+    float scale = scale_in[0];
+    
+    // Dequantize primary quantization
+    float dequant = float(input[gid]) * scale;
+    
+    // Inverse rotation
+    float result = 0.0f;
+    for (int j = 0; j < n; j++) {
+        result += rotation_matrix[j * n + gid] * dequant;
+    }
+    
+    // Add QJL residual (simplified - actual implementation needs full inverse)
+    // This is a placeholder for the complete decode path
+    
+    output[gid] = result;
 }

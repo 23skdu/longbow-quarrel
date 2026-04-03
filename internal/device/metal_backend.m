@@ -77,6 +77,11 @@
 @property(strong) id<MTLComputePipelineState> pipelineMOETopKSelection;
 @property(strong) id<MTLComputePipelineState> pipelineMOEExpertForward;
 @property(strong) id<MTLComputePipelineState> pipelineMOEExpertGateUpSwiGLU;
+// TurboQuant Kernels
+@property(strong) id<MTLComputePipelineState> pipelineTurboQuantPolarQuant;
+@property(strong) id<MTLComputePipelineState> pipelineTurboQuantQJLTransform;
+@property(strong) id<MTLComputePipelineState> pipelineTurboQuantEncode;
+@property(strong) id<MTLComputePipelineState> pipelineTurboQuantDecode;
 @property(strong) id<MTLCommandBuffer> currentCommandBuffer;
 @property(strong) id<MTLComputeCommandEncoder> currentEncoder;
 @property(strong) id<MTLCommandBuffer> lastCommandBuffer;
@@ -264,6 +269,11 @@ MetalContextRef Metal_Init(const char *libSource) {
   ctx.pipelineMOEExpertForward = loadPipeline(ctx, @"moe_expert_forward_f16");
   ctx.pipelineMOEExpertGateUpSwiGLU =
       loadPipeline(ctx, @"moe_expert_gate_up_swiglu_f16");
+  // TurboQuant Pipelines
+  ctx.pipelineTurboQuantPolarQuant = loadPipeline(ctx, @"turboquant_polar_quant");
+  ctx.pipelineTurboQuantQJLTransform = loadPipeline(ctx, @"turboquant_qjl_transform");
+  ctx.pipelineTurboQuantEncode = loadPipeline(ctx, @"turboquant_encode");
+  ctx.pipelineTurboQuantDecode = loadPipeline(ctx, @"turboquant_decode");
 
 #if __has_feature(objc_arc)
   return (__bridge_retained MetalContextRef)ctx;
@@ -796,7 +806,7 @@ void Metal_RMSNormLinear_F16(MetalContextRef ctx, MetalBufferRef i, int oI,
   [enc setBytes:&oD length:4 atIndex:6];
   [enc setBytes:&batchSize length:4 atIndex:7];
   [enc dispatchThreads:MTLSizeMake(32, oD, batchSize)
-      threadsPerThreadgroup:MTLSizeMake(32, 4, 1)];
+      threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
   [mc barrier];
 }
 
@@ -822,7 +832,7 @@ void Metal_RMSNormLinear_Q4K_F16(MetalContextRef ctx, MetalBufferRef input,
   [enc setBytes:&batchSize length:4 atIndex:8];
 
   [enc dispatchThreads:MTLSizeMake(32, N, batchSize)
-      threadsPerThreadgroup:MTLSizeMake(32, 4, 1)];
+      threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
   [mc barrier];
 }
 
@@ -843,7 +853,7 @@ void Metal_SwiGLULinear_Q4K_F16(MetalContextRef ctx, MetalBufferRef gateIn,
   [enc setBytes:&scale length:4 atIndex:6];
 
   [enc dispatchThreads:MTLSizeMake(32, N, M)
-      threadsPerThreadgroup:MTLSizeMake(32, 4, 1)];
+      threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
   [mc barrier];
 }
 
@@ -853,6 +863,7 @@ void Metal_RMSNormLinear_Q6K_F16(MetalContextRef ctx, MetalBufferRef input,
                                  int offWeight, MetalBufferRef result,
                                  int offRes, int M, int N, int K, float eps,
                                  float scale, int batchSize) {
+  NSLog(@"Metal_RMSNormLinear_Q6K_F16: M=%d N=%d K=%d batchSize=%d scale=%f", M, N, K, batchSize, scale);
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
   id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
   [enc setComputePipelineState:mc.pipelineRMSNormLinear_Q6K_F16];
@@ -869,7 +880,7 @@ void Metal_RMSNormLinear_Q6K_F16(MetalContextRef ctx, MetalBufferRef input,
   [enc setBytes:&batchSize length:4 atIndex:8];
 
   [enc dispatchThreads:MTLSizeMake(32, N, batchSize)
-      threadsPerThreadgroup:MTLSizeMake(32, 4, 1)];
+      threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
   [mc barrier];
 }
 
@@ -877,7 +888,8 @@ void Metal_SwiGLULinear_Q6K_F16(MetalContextRef ctx, MetalBufferRef gateIn,
                                 int offGate, MetalBufferRef upIn, int offUp,
                                 MetalBufferRef weight, int offWeight,
                                 MetalBufferRef result, int offRes, int M, int N,
-                                int K, float scale) {
+                                int K, float scale, int batchSize) {
+  NSLog(@"Metal_SwiGLULinear_Q6K_F16: M=%d N=%d K=%d batchSize=%d scale=%f", M, N, K, batchSize, scale);
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
   id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
   [enc setComputePipelineState:mc.pipelineSwiGLULinear_Q6K_F16];
@@ -888,9 +900,10 @@ void Metal_SwiGLULinear_Q6K_F16(MetalContextRef ctx, MetalBufferRef gateIn,
   [enc setBytes:&K length:4 atIndex:4];
   [enc setBytes:&N length:4 atIndex:5];
   [enc setBytes:&scale length:4 atIndex:6];
+  [enc setBytes:&batchSize length:4 atIndex:7];
 
-  [enc dispatchThreads:MTLSizeMake(32, N, M)
-      threadsPerThreadgroup:MTLSizeMake(32, 4, 1)];
+  [enc dispatchThreads:MTLSizeMake(32, N, batchSize)
+      threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
   [mc barrier];
 }
 
@@ -923,7 +936,7 @@ void Metal_RMSNormQKV_Q6K_F16(
 
   [enc dispatchThreads:MTLSizeMake(1024, (qDim > kvDim ? qDim : kvDim),
                                    batchSize)
-      threadsPerThreadgroup:MTLSizeMake(32, 4, 1)];
+      threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
   [mc barrier];
 }
 
@@ -1780,6 +1793,109 @@ void Metal_MOE_ExpertGateUpSwiGLU(MetalContextRef ctx_ref, MetalBufferRef input,
 
     MTLSize gridSize = MTLSizeMake(batchSize * 32, hiddenDim, 1);
     MTLSize threadGroupSize = MTLSizeMake(32, 1, 1);
+    [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadGroupSize];
+    [wrapper barrier];
+  }
+}
+
+void Metal_TurboQuant_PolarQuant(MetalContextRef ctx_ref, MetalBufferRef input,
+                                  int offInput, MetalBufferRef rotationMatrix,
+                                  int offRot, MetalBufferRef quantized,
+                                  int offQuant, MetalBufferRef scaleOut,
+                                  int offScale, MetalBufferRef residual,
+                                  int offRes, int n, int bits) {
+  @autoreleasepool {
+    MetalWrapper *wrapper = (__bridge MetalWrapper *)ctx_ref;
+    id<MTLComputeCommandEncoder> encoder = [wrapper ensureEncoder];
+    [encoder setComputePipelineState:wrapper.pipelineTurboQuantPolarQuant];
+
+    [encoder setBuffer:(__bridge id<MTLBuffer>)input offset:offInput atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)rotationMatrix offset:offRot atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)quantized offset:offQuant atIndex:2];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)scaleOut offset:offScale atIndex:3];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)residual offset:offRes atIndex:4];
+    [encoder setBytes:&n length:sizeof(int) atIndex:5];
+    [encoder setBytes:&bits length:sizeof(int) atIndex:6];
+
+    MTLSize gridSize = MTLSizeMake(n, 1, 1);
+    MTLSize threadGroupSize = MTLSizeMake(min(n, 256), 1, 1);
+    [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadGroupSize];
+    [wrapper barrier];
+  }
+}
+
+void Metal_TurboQuant_QJLTransform(MetalContextRef ctx_ref, MetalBufferRef residual,
+                                    int offRes, MetalBufferRef signMatrix,
+                                    int offSign, MetalBufferRef quantized,
+                                    int offQuant, MetalBufferRef scaleOut,
+                                    int offScale, int rows, int cols) {
+  @autoreleasepool {
+    MetalWrapper *wrapper = (__bridge MetalWrapper *)ctx_ref;
+    id<MTLComputeCommandEncoder> encoder = [wrapper ensureEncoder];
+    [encoder setComputePipelineState:wrapper.pipelineTurboQuantQJLTransform];
+
+    [encoder setBuffer:(__bridge id<MTLBuffer>)residual offset:offRes atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)signMatrix offset:offSign atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)quantized offset:offQuant atIndex:2];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)scaleOut offset:offScale atIndex:3];
+    [encoder setBytes:&rows length:sizeof(int) atIndex:4];
+    [encoder setBytes:&cols length:sizeof(int) atIndex:5];
+
+    MTLSize gridSize = MTLSizeMake(rows, 1, 1);
+    MTLSize threadGroupSize = MTLSizeMake(min(rows, 256), 1, 1);
+    [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadGroupSize];
+    [wrapper barrier];
+  }
+}
+
+void Metal_TurboQuant_Encode(MetalContextRef ctx_ref, MetalBufferRef input,
+                              int offInput, MetalBufferRef rotationMatrix,
+                              int offRot, MetalBufferRef qjlMatrix,
+                              int offQJL, MetalBufferRef output,
+                              int offOut, MetalBufferRef scaleOut,
+                              int offScale, MetalBufferRef qjlScaleOut,
+                              int offQJLScale, int blockSize, int qjlRows, int bits) {
+  @autoreleasepool {
+    MetalWrapper *wrapper = (__bridge MetalWrapper *)ctx_ref;
+    id<MTLComputeCommandEncoder> encoder = [wrapper ensureEncoder];
+    [encoder setComputePipelineState:wrapper.pipelineTurboQuantEncode];
+
+    [encoder setBuffer:(__bridge id<MTLBuffer>)input offset:offInput atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)rotationMatrix offset:offRot atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)qjlMatrix offset:offQJL atIndex:2];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)output offset:offOut atIndex:3];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)scaleOut offset:offScale atIndex:4];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)qjlScaleOut offset:offQJLScale atIndex:5];
+    [encoder setBytes:&blockSize length:sizeof(int) atIndex:6];
+    [encoder setBytes:&qjlRows length:sizeof(int) atIndex:7];
+    [encoder setBytes:&bits length:sizeof(int) atIndex:8];
+
+    MTLSize gridSize = MTLSizeMake(qjlRows, 1, 1);
+    MTLSize threadGroupSize = MTLSizeMake(min(qjlRows, 256), 1, 1);
+    [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadGroupSize];
+    [wrapper barrier];
+  }
+}
+
+void Metal_TurboQuant_Decode(MetalContextRef ctx_ref, MetalBufferRef input,
+                              int offInput, MetalBufferRef rotationMatrix,
+                              int offRot, MetalBufferRef output,
+                              int offOut, MetalBufferRef scaleIn,
+                              int offScale, int blockSize, int qjlRows) {
+  @autoreleasepool {
+    MetalWrapper *wrapper = (__bridge MetalWrapper *)ctx_ref;
+    id<MTLComputeCommandEncoder> encoder = [wrapper ensureEncoder];
+    [encoder setComputePipelineState:wrapper.pipelineTurboQuantDecode];
+
+    [encoder setBuffer:(__bridge id<MTLBuffer>)input offset:offInput atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)rotationMatrix offset:offRot atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)output offset:offOut atIndex:2];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)scaleIn offset:offScale atIndex:3];
+    [encoder setBytes:&blockSize length:sizeof(int) atIndex:4];
+    [encoder setBytes:&qjlRows length:sizeof(int) atIndex:5];
+
+    MTLSize gridSize = MTLSizeMake(blockSize, 1, 1);
+    MTLSize threadGroupSize = MTLSizeMake(min(blockSize, 256), 1, 1);
     [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadGroupSize];
     [wrapper barrier];
   }

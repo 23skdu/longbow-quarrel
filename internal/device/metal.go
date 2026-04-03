@@ -29,7 +29,7 @@ void Metal_SwiGLULinear_Q6K_F16(MetalContextRef ctx, MetalBufferRef gateIn,
                                 int offGate, MetalBufferRef upIn, int offUp,
                                 MetalBufferRef weight, int offWeight,
                                 MetalBufferRef result, int offRes, int M, int N,
-                                int K, float scale);
+                                int K, float scale, int batchSize);
 void Metal_RMSNormQKV_Q6K_F16(MetalContextRef ctx, MetalBufferRef input,
                               int offIn, MetalBufferRef normWeight,
                               int offNormWeight, MetalBufferRef qWeight,
@@ -48,6 +48,29 @@ void Metal_MOE_ExpertGateUpSwiGLU(MetalContextRef ctx, MetalBufferRef input,
                                   int offWeights, MetalBufferRef output,
                                   int offOutput, int batchSize, int dim,
                                   int hiddenDim, int topK);
+void Metal_TurboQuant_PolarQuant(MetalContextRef ctx, MetalBufferRef input,
+                                  int offInput, MetalBufferRef rotationMatrix,
+                                  int offRot, MetalBufferRef quantized,
+                                  int offQuant, MetalBufferRef scaleOut,
+                                  int offScale, MetalBufferRef residual,
+                                  int offRes, int n, int bits);
+void Metal_TurboQuant_QJLTransform(MetalContextRef ctx, MetalBufferRef residual,
+                                    int offRes, MetalBufferRef signMatrix,
+                                    int offSign, MetalBufferRef quantized,
+                                    int offQuant, MetalBufferRef scaleOut,
+                                    int offScale, int rows, int cols);
+void Metal_TurboQuant_Encode(MetalContextRef ctx, MetalBufferRef input,
+                              int offInput, MetalBufferRef rotationMatrix,
+                              int offRot, MetalBufferRef qjlMatrix,
+                              int offQJL, MetalBufferRef output,
+                              int offOut, MetalBufferRef scaleOut,
+                              int offScale, MetalBufferRef qjlScaleOut,
+                              int offQJLScale, int blockSize, int qjlRows, int bits);
+void Metal_TurboQuant_Decode(MetalContextRef ctx, MetalBufferRef input,
+                              int offInput, MetalBufferRef rotationMatrix,
+                              int offRot, MetalBufferRef output,
+                              int offOut, MetalBufferRef scaleIn,
+                              int offScale, int blockSize, int qjlRows);
 */
 import "C"
 import (
@@ -75,8 +98,7 @@ func AllocatedBytes() int64 {
 	return atomic.LoadInt64(&allocatedBytes)
 }
 
-// MaxGPUMemory is a soft limit for total allocations (default: 32GB)
-var MaxGPUMemory int64 = 32 * 1024 * 1024 * 1024
+var MaxGPUMemory int64 = DefaultMaxMemoryMetal
 
 //go:embed kernels.metal
 var kernelsSource string
@@ -105,18 +127,19 @@ func NewContext() *Context {
 }
 
 func (c *Context) Free() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.ref != nil {
-		c.ClearPool()
+		c.ClearPoolInternal() // Internal version without lock
 		C.Metal_Free(c.ref)
 		c.ref = nil
 	}
 }
 
-// ClearPool releases all pooled tensors to free up GPU memory.
-func (c *Context) ClearPool() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
+func (c *Context) ClearPoolInternal() {
+	if c.ref == nil {
+		return
+	}
 	for key, tensors := range c.pool {
 		for _, t := range tensors {
 			if t.buf != nil {
@@ -129,6 +152,13 @@ func (c *Context) ClearPool() {
 		}
 		delete(c.pool, key)
 	}
+}
+
+// ClearPool releases all pooled tensors to free up GPU memory.
+func (c *Context) ClearPool() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.ClearPoolInternal()
 }
 
 // Tensor wraps a Metal buffer. Always FP16 for this engine.
@@ -228,10 +258,14 @@ func (c *Context) NewQ4KTensor(rows, cols int) (*Tensor, error) {
 	metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
 
 	runtime.SetFinalizer(t, func(ft *Tensor) {
-		if ft.buf != nil {
-			C.Metal_FreeBuffer(ft.ctx.ref, ft.buf)
-			traceAlloc(ft, -int64(ft.sizeBytes), "FinalizerQ4K")
-			metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
+		if ft.buf != nil && ft.ctx != nil {
+			ft.ctx.mu.Lock()
+			defer ft.ctx.mu.Unlock()
+			if ft.ctx.ref != nil {
+				C.Metal_FreeBuffer(ft.ctx.ref, ft.buf)
+				traceAlloc(ft, -int64(ft.sizeBytes), "FinalizerQ4K")
+				metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
+			}
 		}
 	})
 
@@ -273,10 +307,14 @@ func (c *Context) NewQ8_0Tensor(rows, cols int) (*Tensor, error) {
 	metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
 
 	runtime.SetFinalizer(t, func(ft *Tensor) {
-		if ft.buf != nil {
-			C.Metal_FreeBuffer(ft.ctx.ref, ft.buf)
-			traceAlloc(ft, -int64(ft.sizeBytes), "FinalizerQ8_0")
-			metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
+		if ft.buf != nil && ft.ctx != nil {
+			ft.ctx.mu.Lock()
+			defer ft.ctx.mu.Unlock()
+			if ft.ctx.ref != nil {
+				C.Metal_FreeBuffer(ft.ctx.ref, ft.buf)
+				traceAlloc(ft, -int64(ft.sizeBytes), "FinalizerQ8_0")
+				metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
+			}
 		}
 	})
 
@@ -319,10 +357,14 @@ func (c *Context) NewQ6KTensor(rows, cols int) (*Tensor, error) {
 	metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
 
 	runtime.SetFinalizer(t, func(ft *Tensor) {
-		if ft.buf != nil {
-			C.Metal_FreeBuffer(ft.ctx.ref, ft.buf)
-			traceAlloc(ft, -int64(ft.sizeBytes), "FinalizerQ6K")
-			metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
+		if ft.buf != nil && ft.ctx != nil {
+			ft.ctx.mu.Lock()
+			defer ft.ctx.mu.Unlock()
+			if ft.ctx.ref != nil {
+				C.Metal_FreeBuffer(ft.ctx.ref, ft.buf)
+				traceAlloc(ft, -int64(ft.sizeBytes), "FinalizerQ6K")
+				metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
+			}
 		}
 	})
 
@@ -353,12 +395,14 @@ func (c *Context) newTensorInternal(rows, cols int) *Tensor {
 	traceAlloc(t, int64(sizeBytes), "NewTensor")
 	metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
 	runtime.SetFinalizer(t, func(ft *Tensor) {
-		if ft.buf != nil {
-			ft.ctx.ExecMu.Lock()
-			defer ft.ctx.ExecMu.Unlock()
-			C.Metal_FreeBuffer(ft.ctx.ref, ft.buf)
-			traceAlloc(ft, -int64(ft.sizeBytes), "Finalizer")
-			metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
+		if ft.buf != nil && ft.ctx != nil {
+			ft.ctx.mu.Lock()
+			defer ft.ctx.mu.Unlock()
+			if ft.ctx.ref != nil {
+				C.Metal_FreeBuffer(ft.ctx.ref, ft.buf)
+				traceAlloc(ft, -int64(ft.sizeBytes), "Finalizer")
+				metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
+			}
 		}
 	})
 	return t
@@ -432,12 +476,14 @@ func (c *Context) newTensorFP32Internal(rows, cols int) *Tensor {
 	traceAlloc(t, int64(sizeBytes), "NewTensorFP32")
 	metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
 	runtime.SetFinalizer(t, func(ft *Tensor) {
-		if ft.buf != nil {
-			ft.ctx.ExecMu.Lock()
-			defer ft.ctx.ExecMu.Unlock()
-			C.Metal_FreeBuffer(ft.ctx.ref, ft.buf)
-			traceAlloc(ft, -int64(ft.sizeBytes), "FinalizerFP32")
-			metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
+		if ft.buf != nil && ft.ctx != nil {
+			ft.ctx.mu.Lock()
+			defer ft.ctx.mu.Unlock()
+			if ft.ctx.ref != nil {
+				C.Metal_FreeBuffer(ft.ctx.ref, ft.buf)
+				traceAlloc(ft, -int64(ft.sizeBytes), "FinalizerFP32")
+				metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
+			}
 		}
 	})
 	return t
@@ -464,24 +510,25 @@ func (c *Context) NewTensorFromData(rows, cols int, dt DataType, data []byte) (*
 
 func (c *Context) NewTensorWithType(rows, cols int, dt DataType) *Tensor {
 	sb := rows * cols * 2
-	if dt == DataTypeF32 {
+	switch dt {
+	case DataTypeF32:
 		sb = rows * cols * 4
-	} else if dt == DataTypeQ6K {
+	case DataTypeQ6K:
 		numElements := rows * cols
 		numBlocks := numElements / 256
 		sb = numBlocks * 210
-	} else if dt == DataTypeQ4K {
+	case DataTypeQ4K:
 		numElements := rows * cols
 		numBlocks := numElements / 256
 		sb = numBlocks * 144
-	} else if dt == DataTypeQ8_0 {
+	case DataTypeQ8_0:
 		numElements := rows * cols
 		if numElements%32 != 0 {
 			panic(fmt.Sprintf("Q8_0 tensor size %d not divisible by 32", numElements))
 		}
 		numBlocks := numElements / 32
 		sb = numBlocks * 34
-	} else if dt == DataTypeQ4_0 {
+	case DataTypeQ4_0:
 		numElements := rows * cols
 		if numElements%32 != 0 {
 			panic(fmt.Sprintf("Q4_0 tensor size %d not divisible by 32", numElements))
@@ -557,8 +604,13 @@ func (t *Tensor) LoadFrom(data []float32) error {
 	}
 
 	if t.dataType == DataTypeF32 {
-		// Copy directly as F32
 		C.Metal_CopyToDevice(t.buf, C.int(t.Offset), unsafe.Pointer(&data[0]), C.int(len(data)*4))
+		return nil
+	}
+
+	if t.dataType == DataTypeQ6K {
+		q6k := quantizeQ6K(data)
+		C.Metal_CopyToDevice(t.buf, C.int(t.Offset), unsafe.Pointer(&q6k[0]), C.int(len(q6k)))
 		return nil
 	}
 
@@ -582,6 +634,63 @@ func (t *Tensor) LoadRaw(data []byte) error {
 	}
 	C.Metal_CopyToDevice(t.buf, C.int(t.Offset), unsafe.Pointer(&data[0]), C.int(len(data)))
 	return nil
+}
+
+func quantizeQ6K(data []float32) []byte {
+	numBlocks := len(data) / 256
+	out := make([]byte, numBlocks*210)
+	for b := 0; b < numBlocks; b++ {
+		blockData := data[b*256 : (b+1)*256]
+		off := b * 210
+		maxAbs := float32(0)
+		for _, v := range blockData {
+			if a := float32(math.Abs(float64(v))); a > maxAbs {
+				maxAbs = a
+			}
+		}
+		d := maxAbs / 31.0
+		if d == 0 {
+			d = 1.0
+		}
+		// Write d (F16)
+		d16 := Float32ToFloat16(d)
+		out[off+208] = byte(d16 & 0xFF)
+		out[off+209] = byte(d16 >> 8)
+		// Write scales (all 1)
+		for i := 0; i < 16; i++ {
+			out[off+192+i] = 1
+		}
+		// Write quants
+		for i := 0; i < 128; i++ {
+			v0 := blockData[i*2]
+			v1 := blockData[i*2+1]
+			q0 := int(math.Round(float64(v0/d))) + 32
+			q1 := int(math.Round(float64(v1/d))) + 32
+			if q0 < 0 {
+				q0 = 0
+			} else if q0 > 63 {
+				q0 = 63
+			}
+			if q1 < 0 {
+				q1 = 0
+			} else if q1 > 63 {
+				q1 = 63
+			}
+			out[off+i] = byte(q0&0xF) | byte((q1&0xF)<<4)
+		}
+		// Final qh packing (2 bits each, 4 elements per byte)
+		for i := 0; i < 256; i++ {
+			v := blockData[i]
+			q := int(math.Round(float64(v/d))) + 32
+			if q < 0 {
+				q = 0
+			} else if q > 63 {
+				q = 63
+			}
+			out[off+128+i/4] |= byte((q >> 4) << ((i % 4) * 2))
+		}
+	}
+	return out
 }
 
 // LoadFromBytes copies raw bytes to the buffer (for Q4K data, etc.)
@@ -831,19 +940,20 @@ func (t *Tensor) matMulInternal(b *Tensor) *Tensor {
 	N := t.rows
 	K := t.cols
 	t0 := time.Now()
-	if t.dataType == DataTypeQ4K {
+	switch t.dataType {
+	case DataTypeQ4K:
 		c := t.ctx.newTensorInternal(N, M)
 		C.Metal_ZeroBufferGPU(t.ctx.ref, c.buf, C.int(0), C.int(c.sizeBytes))
 		C.Metal_MatMul_Q4K_F16(t.ctx.ref, t.buf, C.int(t.Offset), C.bool(false), b.buf, C.int(b.Offset), C.bool(false), c.buf, C.int(c.Offset), C.int(M), C.int(N), C.int(K), C.float(1.0))
 		metrics.RecordKernelDuration("MatMul", time.Since(t0))
 		return c
-	} else if t.dataType == DataTypeQ3K {
+	case DataTypeQ3K:
 		c := t.ctx.newTensorInternal(N, M)
 		C.Metal_ZeroBufferGPU(t.ctx.ref, c.buf, C.int(0), C.int(c.sizeBytes))
 		C.Metal_MatMul_Q3K_F16(t.ctx.ref, t.buf, C.int(t.Offset), C.bool(false), b.buf, C.int(b.Offset), C.bool(false), c.buf, C.int(c.Offset), C.int(M), C.int(N), C.int(K), C.float(1.0))
 		metrics.RecordKernelDuration("MatMul", time.Since(t0))
 		return c
-	} else if t.dataType == DataTypeQ6K {
+	case DataTypeQ6K:
 		c := t.ctx.newTensorInternal(N, M)
 		C.Metal_ZeroBufferGPU(t.ctx.ref, c.buf, C.int(0), C.int(c.sizeBytes))
 		C.Metal_MatMul_Q6K_F16(t.ctx.ref, t.buf, C.int(t.Offset), C.bool(false), b.buf, C.int(b.Offset), C.bool(false), c.buf, C.int(c.Offset), C.int(M), C.int(N), C.int(K), C.float(1.0))
@@ -878,7 +988,7 @@ func (t *Tensor) Linear(weight *Tensor) (*Tensor, error) {
 			C.int(t.rows), C.int(weight.rows), C.int(weight.cols), C.float(1.0))
 	} else {
 		C.Metal_BatchedMatMul_F16(t.ctx.ref,
-			t.buf, C.int(t.Offset), C.int(t.rows*2), false,
+			t.buf, C.int(t.Offset), C.int(t.cols*2), false,
 			weight.buf, C.int(weight.Offset), C.int(weight.cols*2), true,
 			res.buf, C.int(res.Offset), C.int(weight.rows*2),
 			C.int(t.rows), C.int(weight.rows), C.int(weight.cols), 1)
@@ -894,17 +1004,18 @@ func (t *Tensor) linearIntoInternal(weight *Tensor, out *Tensor, scale float32) 
 		t.linearF32IntoInternal(weight, out, scale)
 		return
 	}
-	if weight.dataType == DataTypeQ3K {
+	switch weight.dataType {
+	case DataTypeQ3K:
 		C.Metal_MatMul_Q3K_F16(t.ctx.ref, weight.buf, C.int(weight.Offset), C.bool(false), t.buf, C.int(t.Offset), C.bool(false), out.buf, C.int(out.Offset), C.int(t.rows), C.int(weight.rows), C.int(weight.cols), C.float(scale))
-	} else if weight.dataType == DataTypeQ4K {
+	case DataTypeQ4K:
 		C.Metal_MatMul_Q4K_F16(t.ctx.ref, weight.buf, C.int(weight.Offset), C.bool(false), t.buf, C.int(t.Offset), C.bool(false), out.buf, C.int(out.Offset), C.int(t.rows), C.int(weight.rows), C.int(weight.cols), C.float(scale))
-	} else if weight.dataType == DataTypeQ6K {
+	case DataTypeQ6K:
 		C.Metal_MatMul_Q6K_F16(t.ctx.ref, weight.buf, C.int(weight.Offset), C.bool(false), t.buf, C.int(t.Offset), C.bool(false), out.buf, C.int(out.Offset), C.int(t.rows), C.int(weight.rows), C.int(weight.cols), C.float(scale))
-	} else if weight.dataType == DataTypeQ4_0 {
-		C.Metal_LinearQ4_0_F16(t.ctx.ref, weight.buf, C.int(weight.Offset), t.buf, C.int(t.Offset), out.buf, C.int(out.Offset), C.int(t.rows), C.int(weight.rows), C.int(weight.cols), C.float(scale))
-	} else if weight.dataType == DataTypeQ8_0 {
-		C.Metal_LinearQ8_0_F16(t.ctx.ref, weight.buf, C.int(weight.Offset), t.buf, C.int(t.Offset), out.buf, C.int(out.Offset), C.int(t.rows), C.int(weight.rows), C.int(weight.cols), C.float(scale))
-	} else {
+	case DataTypeQ4_0:
+		C.Metal_LinearQ4_0_F16(t.ctx.ref, weight.buf, C.int(weight.Offset), t.buf, C.int(t.Offset), out.buf, C.int(out.Offset), C.int(t.rows), C.int(weight.cols), C.int(weight.rows), C.float(scale))
+	case DataTypeQ8_0:
+		C.Metal_LinearQ8_0_F16(t.ctx.ref, weight.buf, C.int(weight.Offset), t.buf, C.int(t.Offset), out.buf, C.int(out.Offset), C.int(t.rows), C.int(weight.cols), C.int(weight.rows), C.float(scale))
+	default:
 		C.Metal_MatMul_F16(t.ctx.ref, weight.buf, C.int(weight.Offset), C.bool(false), t.buf, C.int(t.Offset), C.bool(false), out.buf, C.int(out.Offset), C.int(t.rows), C.int(weight.rows), C.int(weight.cols))
 	}
 }
@@ -1021,7 +1132,7 @@ func (t *Tensor) SwiGLULinearQ6K(up, weight *Tensor, scale float32) *Tensor {
 
 // SwiGLULinearIntoQ6K performs fused SwiGLU + Linear (Q6_K) into existing destination
 func (t *Tensor) swiGLULinearIntoQ6KInternal(up, weight, out *Tensor, scale float32) {
-	C.Metal_SwiGLULinear_Q6K_F16(t.ctx.ref, t.buf, C.int(t.Offset), up.buf, C.int(up.Offset), weight.buf, C.int(weight.Offset), out.buf, C.int(out.Offset), C.int(t.rows), C.int(weight.rows), C.int(weight.cols), C.float(scale))
+	C.Metal_SwiGLULinear_Q6K_F16(t.ctx.ref, t.buf, C.int(t.Offset), up.buf, C.int(up.Offset), weight.buf, C.int(weight.Offset), out.buf, C.int(out.Offset), C.int(t.rows), C.int(weight.rows), C.int(weight.cols), C.float(scale), C.int(t.rows))
 }
 
 func (t *Tensor) SwiGLULinearIntoQ6K(up, weight, out *Tensor, scale float32) {
@@ -1218,15 +1329,7 @@ func (c *Context) NewLayerScratch(batch, dim, hiddenDim, heads, kvHeads, headDim
 // Free releases all buffers
 func (s *LayerScratch) Free() {
 	if s.heap != nil {
-		// All tensors (except maybe Scores?) are backed by this heap.
-		// Releasing the Heap invalidates them.
-		// However, we manually retained buffers?
-		// Metal_NewBufferFromHeap retains the buffer.
-		// So buffers are valid until we release them.
-		// If we release Heap, do buffers die?
-		// "Buffers maintain a strong reference to the Heap".
-		// So we must release Buffers FIRST.
-		// Then Heap.
+		// Heap memory is managed by the device allocator; tensors are freed individually below.
 	}
 	if s.QPart != nil {
 		s.QPart.Free()
@@ -1452,11 +1555,12 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 
 		resFFN := scratch.ResFFN
 		if ffnGate != nil {
-			if ffnDown.dataType == DataTypeQ4K {
+			switch ffnDown.dataType {
+			case DataTypeQ4K:
 				gatePart.SwiGLULinearIntoQ4K(upPart, ffnDown, resFFN, globalScale)
-			} else if ffnDown.dataType == DataTypeQ6K {
+			case DataTypeQ6K:
 				gatePart.SwiGLULinearIntoQ6K(upPart, ffnDown, resFFN, globalScale)
-			} else {
+			default:
 				swiOut, _ := upPart.SwiGLU(gatePart)
 				swiOut.LinearInto(ffnDown, resFFN, globalScale)
 				swiOut.ReturnToPool()
@@ -1516,21 +1620,18 @@ func (t *Tensor) Softmax() {
 func (t *Tensor) LinearToFP32_Into(weight *Tensor, out *Tensor) {
 	t.ctx.ExecMu.Lock()
 	defer t.ctx.ExecMu.Unlock()
-	if weight.dataType == DataTypeQ6K {
+	switch weight.dataType {
+	case DataTypeQ6K:
 		// Output head logic: F16 input * Q6K weight -> F32 output
-		// weight shape: [vocabSize, dim], input shape: [batch, dim], output shape: [batch, vocabSize]
-		// dimIn = weight.cols (input dimension), dimOut = weight.rows (vocab size)
 		C.Metal_LinearQ6K_F16_F32(t.ctx.ref, weight.buf, C.int(weight.Offset),
 			t.buf, C.int(t.Offset), out.buf, C.int(out.Offset),
 			C.int(t.rows), C.int(weight.cols), C.int(weight.rows), 1.0)
-	} else if weight.dataType == DataTypeQ4_0 {
+	case DataTypeQ4_0:
 		// Q4_0 -> F32 (Output Head)
-		// weight shape: [vocabSize, dim], input shape: [batch, dim], output shape: [batch, vocabSize]
-		// dimIn = weight.cols (input dimension), dimOut = weight.rows (vocab size)
 		C.Metal_LinearQ4_0_F32(t.ctx.ref, weight.buf, C.int(weight.Offset),
 			t.buf, C.int(t.Offset), out.buf, C.int(out.Offset),
 			C.int(t.rows), C.int(weight.cols), C.int(weight.rows), 1.0)
-	} else {
+	default:
 		// Default: F16 weight * F16 input -> F32 output
 		C.Metal_LinearF16ToF32(t.ctx.ref, weight.buf, C.int(weight.Offset), t.buf, C.int(t.Offset), out.buf, C.int(out.Offset),
 			C.int(t.rows), C.int(t.cols), C.int(weight.rows))
@@ -1566,33 +1667,33 @@ func (t *Tensor) RMSNormFP32_Into(weight *Tensor, eps float32, out *Tensor) {
 // LinearF32_Into performs Linear into F32 output
 // Used for Output Layer (Logits)
 func (t *Tensor) linearF32IntoInternal(weight *Tensor, out *Tensor, scale float32) {
-	if weight.dataType == DataTypeQ4K {
+	switch weight.dataType {
+	case DataTypeQ4K:
 		if out.dataType == DataTypeF16 {
-			C.Metal_MatMul_Q4K_F32_F16(t.ctx.ref, weight.buf, C.int(weight.Offset), t.buf, C.int(t.Offset), out.buf, C.int(out.Offset), C.int(t.rows), C.int(weight.cols), C.int(weight.rows), C.float(scale))
+			C.Metal_MatMul_Q4K_F32_F16(t.ctx.ref, weight.buf, C.int(weight.Offset), t.buf, C.int(t.Offset), out.buf, C.int(out.Offset), C.int(t.rows), C.int(weight.rows), C.int(weight.cols), C.float(scale))
 		} else {
-			C.Metal_MatMul_Q4K_F32(t.ctx.ref, weight.buf, C.int(weight.Offset), 0, t.buf, C.int(t.Offset), 0, out.buf, C.int(out.Offset), C.int(t.rows), C.int(weight.cols), C.int(weight.rows), C.float(scale))
+			C.Metal_MatMul_Q4K_F32(t.ctx.ref, weight.buf, C.int(weight.Offset), 0, t.buf, C.int(t.Offset), 0, out.buf, C.int(out.Offset), C.int(t.rows), C.int(weight.rows), C.int(weight.cols), C.float(scale))
 		}
-	} else if weight.dataType == DataTypeQ6K {
+	case DataTypeQ6K:
 		if out.dataType == DataTypeF16 {
-			C.Metal_MatMul_Q6K_F16(t.ctx.ref, weight.buf, C.int(weight.Offset), false, t.buf, C.int(t.Offset), false, out.buf, C.int(out.Offset), C.int(t.rows), C.int(weight.cols), C.int(weight.rows), C.float(scale))
+			C.Metal_MatMul_Q6K_F16(t.ctx.ref, weight.buf, C.int(weight.Offset), false, t.buf, C.int(t.Offset), false, out.buf, C.int(out.Offset), C.int(t.rows), C.int(weight.rows), C.int(weight.cols), C.float(scale))
 		} else {
 			C.Metal_MatMul_Q6K_F32(t.ctx.ref, weight.buf, C.int(weight.Offset), 0, t.buf, C.int(t.Offset), 0, out.buf, C.int(out.Offset), C.int(t.rows), C.int(weight.rows), C.int(weight.cols), C.float(scale))
 		}
-	} else if weight.dataType == DataTypeQ4_0 {
-		// Q4_0 Support
-		// Q4_0 Linear Kernel expects: dim_in (K), dim_out (N)
-		// weight.rows is N (Output), weight.cols is K (Input)
-		// So pass K, N
+	case DataTypeQ4_0:
 		if out.dataType == DataTypeF16 {
 			C.Metal_LinearQ4_0_F16(t.ctx.ref, weight.buf, C.int(weight.Offset),
 				t.buf, C.int(t.Offset), out.buf, C.int(out.Offset),
 				C.int(t.rows), C.int(weight.cols), C.int(weight.rows), C.float(scale))
 		} else {
-			// FP32 output
 			C.Metal_LinearQ4_0_F32(t.ctx.ref, weight.buf, C.int(weight.Offset),
 				t.buf, C.int(t.Offset), out.buf, C.int(out.Offset),
 				C.int(t.rows), C.int(weight.cols), C.int(weight.rows), C.float(scale))
 		}
+	case DataTypeF16:
+		C.Metal_MatMul_F16_F32_F32(t.ctx.ref, weight.buf, C.int(weight.Offset), t.buf, C.int(t.Offset), out.buf, C.int(out.Offset), C.int(t.rows), C.int(weight.rows), C.int(weight.cols))
+	case DataTypeQ8_0:
+		C.Metal_LinearQ8_0_F32(t.ctx.ref, weight.buf, C.int(weight.Offset), t.buf, C.int(t.Offset), out.buf, C.int(out.Offset), C.int(t.rows), C.int(weight.cols), C.int(weight.rows), C.float(scale))
 	}
 }
 
@@ -1666,12 +1767,13 @@ func (t *Tensor) EmbeddingLookup(row int, scale float32) *Tensor {
 	t.ctx.ExecMu.Lock()
 	defer t.ctx.ExecMu.Unlock()
 	res := t.ctx.newTensorPooledInternal(1, t.cols)
-	if t.dataType == DataTypeQ4K {
+	switch t.dataType {
+	case DataTypeQ4K:
 		// Use optimized Q4K embedding kernel for better performance
 		C.Metal_Embedding_Q4K_Optimized(t.ctx.ref, t.buf, C.int(t.Offset), res.buf, C.int(res.Offset), C.int(row), C.int(t.cols), C.float(scale))
-	} else if t.dataType == DataTypeQ4_0 {
+	case DataTypeQ4_0:
 		C.Metal_EmbeddingQ4_0_F16(t.ctx.ref, t.buf, C.int(t.Offset), res.buf, C.int(res.Offset), C.int(row), C.int(t.cols))
-	} else {
+	default:
 		C.Metal_Embedding_F16(t.ctx.ref, t.buf, C.int(t.Offset), res.buf, C.int(res.Offset), C.int(row), C.int(t.cols))
 	}
 	return res
@@ -2069,5 +2171,72 @@ func (ctx *Context) MOEExpertGateUpSwiGLU(input, gateWeight, upWeight, expertInd
 	defer ctx.ExecMu.Unlock()
 	output := ctx.newTensorPooledInternal(batchSize, hiddenDim)
 	C.Metal_MOE_ExpertGateUpSwiGLU(ctx.ref, input.buf, C.int(input.Offset), gateWeight.buf, C.int(gateWeight.Offset), upWeight.buf, C.int(upWeight.Offset), expertIndices.buf, C.int(expertIndices.Offset), expertWeights.buf, C.int(expertWeights.Offset), output.buf, C.int(output.Offset), C.int(batchSize), C.int(dim), C.int(hiddenDim), C.int(topK))
+	return output
+}
+
+// ============================================================================
+// TurboQuant Operations (GPU Accelerated)
+// ============================================================================
+
+// TurboQuantPolarQuant applies orthogonal rotation and scalar quantization
+// input: [n] float32, rotationMatrix: [n*n] float32
+// Returns: quantized [n] int8, scale float32, residual [n] float32
+func (ctx *Context) TurboQuantPolarQuant(input, rotationMatrix *Tensor, n, bits int) (quantized *Tensor, scale float32, residual *Tensor) {
+	ctx.ExecMu.Lock()
+	defer ctx.ExecMu.Unlock()
+	quantized = ctx.newTensorInt8Internal(n, 1)
+	scaleTensor := ctx.newTensorFP32Internal(1, 1)
+	residual = ctx.newTensorFP32Internal(n, 1)
+	C.Metal_TurboQuant_PolarQuant(ctx.ref, input.buf, C.int(input.Offset), rotationMatrix.buf, C.int(rotationMatrix.Offset), quantized.buf, C.int(quantized.Offset), scaleTensor.buf, C.int(scaleTensor.Offset), residual.buf, C.int(residual.Offset), C.int(n), C.int(bits))
+	// Get scale value (first element)
+	scaleData := scaleTensor.Data()
+	if len(scaleData) > 0 {
+		scale = scaleData[0]
+	}
+	return quantized, scale, residual
+}
+
+// TurboQuantQJLTransform applies 1-bit quantization to residual
+// residual: [cols] float32, signMatrix: [rows*cols] float32
+// Returns: quantized [rows] int8, scale float32
+func (ctx *Context) TurboQuantQJLTransform(residual, signMatrix *Tensor, rows, cols int) (quantized *Tensor, scale float32) {
+	ctx.ExecMu.Lock()
+	defer ctx.ExecMu.Unlock()
+	quantized = ctx.newTensorInt8Internal(rows, 1)
+	scaleTensor := ctx.newTensorFP32Internal(1, 1)
+	C.Metal_TurboQuant_QJLTransform(ctx.ref, residual.buf, C.int(residual.Offset), signMatrix.buf, C.int(signMatrix.Offset), quantized.buf, C.int(quantized.Offset), scaleTensor.buf, C.int(scaleTensor.Offset), C.int(rows), C.int(cols))
+	scaleData := scaleTensor.Data()
+	if len(scaleData) > 0 {
+		scale = scaleData[0]
+	}
+	return quantized, scale
+}
+
+// TurboQuantEncode fused PolarQuant + QJLTransform for KV cache compression
+func (ctx *Context) TurboQuantEncode(input, rotationMatrix, qjlMatrix *Tensor, blockSize, qjlRows, bits int) (output *Tensor, scale, qjlScale float32) {
+	ctx.ExecMu.Lock()
+	defer ctx.ExecMu.Unlock()
+	outputSize := blockSize + qjlRows
+	output = ctx.newTensorInt8Internal(outputSize, 1)
+	scaleTensor := ctx.newTensorFP32Internal(1, 1)
+	qjlScaleTensor := ctx.newTensorFP32Internal(1, 1)
+	C.Metal_TurboQuant_Encode(ctx.ref, input.buf, C.int(input.Offset), rotationMatrix.buf, C.int(rotationMatrix.Offset), qjlMatrix.buf, C.int(qjlMatrix.Offset), output.buf, C.int(output.Offset), scaleTensor.buf, C.int(scaleTensor.Offset), qjlScaleTensor.buf, C.int(qjlScaleTensor.Offset), C.int(blockSize), C.int(qjlRows), C.int(bits))
+	scaleData := scaleTensor.Data()
+	qjlScaleData := qjlScaleTensor.Data()
+	if len(scaleData) > 0 {
+		scale = scaleData[0]
+	}
+	if len(qjlScaleData) > 0 {
+		qjlScale = qjlScaleData[0]
+	}
+	return output, scale, qjlScale
+}
+
+// TurboQuantDecode fused dequantization + inverse rotation
+func (ctx *Context) TurboQuantDecode(input, rotationMatrix, scaleIn *Tensor, blockSize, qjlRows int) *Tensor {
+	ctx.ExecMu.Lock()
+	defer ctx.ExecMu.Unlock()
+	output := ctx.newTensorFP32Internal(blockSize, 1)
+	C.Metal_TurboQuant_Decode(ctx.ref, input.buf, C.int(input.Offset), rotationMatrix.buf, C.int(rotationMatrix.Offset), output.buf, C.int(output.Offset), scaleIn.buf, C.int(scaleIn.Offset), C.int(blockSize), C.int(qjlRows))
 	return output
 }
