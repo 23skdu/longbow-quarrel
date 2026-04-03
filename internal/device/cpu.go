@@ -137,6 +137,9 @@ func (t *Tensor) LoadFrom(data []float32) error {
 
 func (t *Tensor) StoreKV(v *Tensor, kCache, vCache *Tensor, pos, heads, headDim, windowSize int) {
 	// CPU implementation: Copy from t and v to kCache and vCache
+	if kCache.dataType == DataType(40) { // DataTypeTQ1_0 stub 
+		// TODO: Call gguf.PolarQuant + gguf.QJLTransform
+	}
 }
 
 func (t *Tensor) BufferID() uintptr {

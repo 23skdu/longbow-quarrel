@@ -141,7 +141,6 @@ func (c *Context) NewTensorWithType(rows, cols int, dt DataType) *Tensor {
 }
 
 func (t *Tensor) StoreKV(v *Tensor, kCache, vCache *Tensor, pos, heads, headDim, windowSize int) {
-	// CUDA: Copy from v to kCache and vCache at position pos
 }
 
 var cudaAllocatedBytes int64
@@ -155,7 +154,7 @@ func CUDAAllocatedBytes() int64 {
 	return atomic.LoadInt64(&cudaAllocatedBytes)
 }
 
-var MaxCUDAMemory int64 = 8 * 1024 * 1024 * 1024
+var MaxCUDAMemory int64 = DefaultMaxMemoryCUDA
 
 type CUDAContext struct {
 	device        int
