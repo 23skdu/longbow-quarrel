@@ -142,3 +142,42 @@ func TestTotalTokensAtomic(t *testing.T) {
 		t.Errorf("Expected totalTokens to increment by 1, got %d -> %d", initial, after)
 	}
 }
+
+func TestRecordGemma4SlidingWindowLayer(t *testing.T) {
+	RecordGemma4SlidingWindowLayer(512, 10*time.Millisecond)
+	RecordGemma4SlidingWindowLayer(4096, 15*time.Millisecond)
+}
+
+func TestRecordGemma4FullAttentionLayer(t *testing.T) {
+	RecordGemma4FullAttentionLayer(0.25, 1000000.0, 20*time.Millisecond)
+	RecordGemma4FullAttentionLayer(0.25, 1000000.0, 25*time.Millisecond)
+}
+
+func TestRecordGemma4QKNorm(t *testing.T) {
+	RecordGemma4QKNorm(true, false)
+	RecordGemma4QKNorm(false, true)
+	RecordGemma4QKNorm(true, true)
+}
+
+func TestRecordGemma4VNorm(t *testing.T) {
+	RecordGemma4VNorm()
+	RecordGemma4VNorm()
+}
+
+func TestRecordGemma4LayerPattern(t *testing.T) {
+	RecordGemma4LayerPattern(5, 1)
+	RecordGemma4LayerPattern(10, 2)
+	RecordGemma4LayerPattern(20, 4)
+}
+
+func TestRecordGemma4HeadDims(t *testing.T) {
+	RecordGemma4HeadDims(256, 512)
+	RecordGemma4HeadDims(128, 256)
+}
+
+func TestRecordGemma4Context(t *testing.T) {
+	RecordGemma4Context(512)
+	RecordGemma4Context(4096)
+	RecordGemma4Context(32768)
+	RecordGemma4Context(131072)
+}

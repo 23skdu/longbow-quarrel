@@ -62,7 +62,7 @@ func getKV(f *gguf.GGUFFile, llamaKey, qwenKey string) (interface{}, bool) {
 		}
 
 		// Also try some variations if arch is like "llama" but keys are different
-		for _, alt := range []string{"mistral", "qwen2", "phi3", "starcoder2"} {
+		for _, alt := range []string{"mistral", "qwen2", "phi3", "starcoder2", "gemma"} {
 			altKey := strings.Replace(llamaKey, "llama.", alt+".", 1)
 			if val, ok := f.KV[altKey]; ok {
 				return val, true
@@ -661,7 +661,7 @@ func (e *Engine) loadModel(path string) error {
 	}
 
 	// Mamba layer detection for hybrid models
-	e.detectMambaLayers(f, logger.Log)
+	e.detectMambaLayers(f, *logger.Log)
 
 	if val, ok := f.KV["llama.attention.precision"]; ok {
 		if prec, ok := val.(string); ok {
@@ -933,12 +933,29 @@ func (e *Engine) loadModel(path string) error {
 				e.Weights.AttnO[layerIdx] = mt
 			case "attn_norm.weight":
 				e.Weights.AttnNorm[layerIdx] = mt
+
+			// Gemma-specific: attn_q_norm, attn_k_norm (RMSNorm before Q/K)
+			case "attn_q_norm.weight":
+				e.Weights.AttnNorm[layerIdx] = mt
+			case "attn_k_norm.weight":
+				// Store in AttnK for now, or create new field if needed
+				e.Weights.AttnK[layerIdx] = mt
+
 			case "ffn_gate.weight":
 				e.Weights.FfnGate[layerIdx] = mt
 				if layerIdx == 0 {
 					e.Config.HiddenDim = rows
 				}
 				continue
+
+			// Gemma-specific: inp_gate (input gating)
+			case "inp_gate.weight":
+				e.Weights.FfnGate[layerIdx] = mt
+
+			// Gemma-specific: proj (output projection)
+			case "proj.weight":
+				e.Weights.AttnO[layerIdx] = mt
+
 			case "ffn_down.weight":
 				e.Weights.FfnDown[layerIdx] = mt
 				if layerIdx <= 5 {
@@ -952,6 +969,14 @@ func (e *Engine) loadModel(path string) error {
 			case "ffn_up.weight":
 				e.Weights.FfnUp[layerIdx] = mt
 			case "ffn_norm.weight":
+				e.Weights.FfnNorm[layerIdx] = mt
+
+			// Gemma-specific: post_*_norm weights
+			case "post_attention_norm.weight":
+				e.Weights.AttnNorm[layerIdx] = mt
+			case "post_ffw_norm.weight":
+				e.Weights.FfnNorm[layerIdx] = mt
+			case "post_norm.weight":
 				e.Weights.FfnNorm[layerIdx] = mt
 
 			// Mamba/SSM Tensors

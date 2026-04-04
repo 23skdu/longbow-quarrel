@@ -42,7 +42,7 @@ ENV CGO_CFLAGS="-I/usr/local/cuda/include"
 
 RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -tags cuda \
     -ldflags "-linkmode=external -extldflags=-static" \
-    -o quarrel-cuda ./cmd/cuda
+    -o quarrel-cuda ./cmd/quarrel
 
 # -----------------------------------------------------------------------------
 # Runtime Stage: Minimal CUDA Runtime

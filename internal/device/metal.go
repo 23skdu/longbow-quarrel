@@ -29,7 +29,7 @@ void Metal_SwiGLULinear_Q6K_F16(MetalContextRef ctx, MetalBufferRef gateIn,
                                 int offGate, MetalBufferRef upIn, int offUp,
                                 MetalBufferRef weight, int offWeight,
                                 MetalBufferRef result, int offRes, int M, int N,
-                                int K, float scale, int batchSize);
+                                int K, float scale);
 void Metal_RMSNormQKV_Q6K_F16(MetalContextRef ctx, MetalBufferRef input,
                               int offIn, MetalBufferRef normWeight,
                               int offNormWeight, MetalBufferRef qWeight,
@@ -535,6 +535,10 @@ func (c *Context) NewTensorWithType(rows, cols int, dt DataType) *Tensor {
 		}
 		numBlocks := numElements / 32
 		sb = numBlocks * 18
+	case DataTypeIQ4_NL, DataTypeMXFP4:
+		numElements := rows * cols
+		numBlocks := numElements / 32
+		sb = numBlocks * 18
 	}
 
 	if atomic.LoadInt64(&allocatedBytes)+int64(sb) > MaxGPUMemory {
@@ -652,15 +656,12 @@ func quantizeQ6K(data []float32) []byte {
 		if d == 0 {
 			d = 1.0
 		}
-		// Write d (F16)
 		d16 := Float32ToFloat16(d)
 		out[off+208] = byte(d16 & 0xFF)
 		out[off+209] = byte(d16 >> 8)
-		// Write scales (all 1)
 		for i := 0; i < 16; i++ {
 			out[off+192+i] = 1
 		}
-		// Write quants
 		for i := 0; i < 128; i++ {
 			v0 := blockData[i*2]
 			v1 := blockData[i*2+1]
@@ -678,7 +679,6 @@ func quantizeQ6K(data []float32) []byte {
 			}
 			out[off+i] = byte(q0&0xF) | byte((q1&0xF)<<4)
 		}
-		// Final qh packing (2 bits each, 4 elements per byte)
 		for i := 0; i < 256; i++ {
 			v := blockData[i]
 			q := int(math.Round(float64(v/d))) + 32
@@ -687,7 +687,7 @@ func quantizeQ6K(data []float32) []byte {
 			} else if q > 63 {
 				q = 63
 			}
-			out[off+128+i/4] |= byte((q >> 4) << ((i % 4) * 2))
+			out[off+128+i/4] |= byte(((q >> 4) & 3) << ((i % 4) * 2))
 		}
 	}
 	return out
@@ -1132,7 +1132,7 @@ func (t *Tensor) SwiGLULinearQ6K(up, weight *Tensor, scale float32) *Tensor {
 
 // SwiGLULinearIntoQ6K performs fused SwiGLU + Linear (Q6_K) into existing destination
 func (t *Tensor) swiGLULinearIntoQ6KInternal(up, weight, out *Tensor, scale float32) {
-	C.Metal_SwiGLULinear_Q6K_F16(t.ctx.ref, t.buf, C.int(t.Offset), up.buf, C.int(up.Offset), weight.buf, C.int(weight.Offset), out.buf, C.int(out.Offset), C.int(t.rows), C.int(weight.rows), C.int(weight.cols), C.float(scale), C.int(t.rows))
+	C.Metal_SwiGLULinear_Q6K_F16(t.ctx.ref, t.buf, C.int(t.Offset), up.buf, C.int(up.Offset), weight.buf, C.int(weight.Offset), out.buf, C.int(out.Offset), C.int(t.rows), C.int(weight.rows), C.int(weight.cols), C.float(scale))
 }
 
 func (t *Tensor) SwiGLULinearIntoQ6K(up, weight, out *Tensor, scale float32) {
@@ -2175,30 +2175,10 @@ func (ctx *Context) MOEExpertGateUpSwiGLU(input, gateWeight, upWeight, expertInd
 }
 
 // ============================================================================
-// TurboQuant Operations (GPU Accelerated)
+// TurboQuant Operations (GPU Accelerated) - Requires additional CGO bindings
 // ============================================================================
 
-// TurboQuantPolarQuant applies orthogonal rotation and scalar quantization
-// input: [n] float32, rotationMatrix: [n*n] float32
-// Returns: quantized [n] int8, scale float32, residual [n] float32
-func (ctx *Context) TurboQuantPolarQuant(input, rotationMatrix *Tensor, n, bits int) (quantized *Tensor, scale float32, residual *Tensor) {
-	ctx.ExecMu.Lock()
-	defer ctx.ExecMu.Unlock()
-	quantized = ctx.newTensorInt8Internal(n, 1)
-	scaleTensor := ctx.newTensorFP32Internal(1, 1)
-	residual = ctx.newTensorFP32Internal(n, 1)
-	C.Metal_TurboQuant_PolarQuant(ctx.ref, input.buf, C.int(input.Offset), rotationMatrix.buf, C.int(rotationMatrix.Offset), quantized.buf, C.int(quantized.Offset), scaleTensor.buf, C.int(scaleTensor.Offset), residual.buf, C.int(residual.Offset), C.int(n), C.int(bits))
-	// Get scale value (first element)
-	scaleData := scaleTensor.Data()
-	if len(scaleData) > 0 {
-		scale = scaleData[0]
-	}
-	return quantized, scale, residual
-}
-
-// TurboQuantQJLTransform applies 1-bit quantization to residual
-// residual: [cols] float32, signMatrix: [rows*cols] float32
-// Returns: quantized [rows] int8, scale float32
+/*
 func (ctx *Context) TurboQuantQJLTransform(residual, signMatrix *Tensor, rows, cols int) (quantized *Tensor, scale float32) {
 	ctx.ExecMu.Lock()
 	defer ctx.ExecMu.Unlock()
@@ -2212,7 +2192,6 @@ func (ctx *Context) TurboQuantQJLTransform(residual, signMatrix *Tensor, rows, c
 	return quantized, scale
 }
 
-// TurboQuantEncode fused PolarQuant + QJLTransform for KV cache compression
 func (ctx *Context) TurboQuantEncode(input, rotationMatrix, qjlMatrix *Tensor, blockSize, qjlRows, bits int) (output *Tensor, scale, qjlScale float32) {
 	ctx.ExecMu.Lock()
 	defer ctx.ExecMu.Unlock()
@@ -2232,7 +2211,6 @@ func (ctx *Context) TurboQuantEncode(input, rotationMatrix, qjlMatrix *Tensor, b
 	return output, scale, qjlScale
 }
 
-// TurboQuantDecode fused dequantization + inverse rotation
 func (ctx *Context) TurboQuantDecode(input, rotationMatrix, scaleIn *Tensor, blockSize, qjlRows int) *Tensor {
 	ctx.ExecMu.Lock()
 	defer ctx.ExecMu.Unlock()
@@ -2240,3 +2218,4 @@ func (ctx *Context) TurboQuantDecode(input, rotationMatrix, scaleIn *Tensor, blo
 	C.Metal_TurboQuant_Decode(ctx.ref, input.buf, C.int(input.Offset), rotationMatrix.buf, C.int(rotationMatrix.Offset), output.buf, C.int(output.Offset), scaleIn.buf, C.int(scaleIn.Offset), C.int(blockSize), C.int(qjlRows))
 	return output
 }
+*/

@@ -5,15 +5,24 @@ package main
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/engine"
+	"github.com/23skdu/longbow-quarrel/internal/ollama"
 )
 
 func main() {
-	home, _ := os.UserHomeDir()
-	modelPath := filepath.Join(home, ".ollama/models/blobs/sha256-a70437c41b3b0b768c48737e15f8160c90f13dc963f5226aabb3a160f708d1ce")
+	if len(os.Args) < 2 {
+		fmt.Println("Usage: dump_tensors <model-name>")
+		os.Exit(1)
+	}
+
+	modelName := os.Args[1]
+	modelPath, err := ollama.ResolveModelPath(modelName)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		os.Exit(1)
+	}
 
 	fmt.Printf("Loading model: %s\n", modelPath)
 

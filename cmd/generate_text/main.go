@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/23skdu/longbow-quarrel/internal/config"
@@ -34,9 +35,13 @@ func main() {
 	}
 
 	resolvedPath := *modelPath
-	if *modelPath == "mistral" {
+	// Resolve Ollama model names
+	if *modelPath != "" && !strings.HasPrefix(*modelPath, "/") {
 		home, _ := os.UserHomeDir()
-		resolvedPath = home + "/.ollama/models/blobs/sha256-f5074b1221da0f5a2910d33b642efa5b9eb58cfdddca1c79e16d7ad28aa2b31f"
+		blobPath := home + "/.ollama/models/blobs/sha256-4c27e0f5b5adf02ac956c7322bd2ee7636fe3f45a8512c9aba5385242cb6e09a"
+		if _, err := os.Stat(blobPath); err == nil {
+			resolvedPath = blobPath
+		}
 	}
 
 	if *verbose {

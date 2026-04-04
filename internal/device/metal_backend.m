@@ -1,6 +1,7 @@
 //go:build darwin && metal
 
 #import "metal_bridge.h"
+#import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #import <MetalPerformanceShaders/MetalPerformanceShaders.h>
 
@@ -888,8 +889,8 @@ void Metal_SwiGLULinear_Q6K_F16(MetalContextRef ctx, MetalBufferRef gateIn,
                                 int offGate, MetalBufferRef upIn, int offUp,
                                 MetalBufferRef weight, int offWeight,
                                 MetalBufferRef result, int offRes, int M, int N,
-                                int K, float scale, int batchSize) {
-  NSLog(@"Metal_SwiGLULinear_Q6K_F16: M=%d N=%d K=%d batchSize=%d scale=%f", M, N, K, batchSize, scale);
+                                int K, float scale) {
+  NSLog(@"Metal_SwiGLULinear_Q6K_F16: M=%d N=%d K=%d scale=%f", M, N, K, scale);
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
   id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
   [enc setComputePipelineState:mc.pipelineSwiGLULinear_Q6K_F16];
@@ -900,9 +901,8 @@ void Metal_SwiGLULinear_Q6K_F16(MetalContextRef ctx, MetalBufferRef gateIn,
   [enc setBytes:&K length:4 atIndex:4];
   [enc setBytes:&N length:4 atIndex:5];
   [enc setBytes:&scale length:4 atIndex:6];
-  [enc setBytes:&batchSize length:4 atIndex:7];
 
-  [enc dispatchThreads:MTLSizeMake(32, N, batchSize)
+  [enc dispatchThreads:MTLSizeMake(32, N, M)
       threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
   [mc barrier];
 }
@@ -1818,7 +1818,7 @@ void Metal_TurboQuant_PolarQuant(MetalContextRef ctx_ref, MetalBufferRef input,
     [encoder setBytes:&bits length:sizeof(int) atIndex:6];
 
     MTLSize gridSize = MTLSizeMake(n, 1, 1);
-    MTLSize threadGroupSize = MTLSizeMake(min(n, 256), 1, 1);
+    MTLSize threadGroupSize = MTLSizeMake((n < 256) ? n : 256, 1, 1);
     [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadGroupSize];
     [wrapper barrier];
   }
@@ -1842,7 +1842,7 @@ void Metal_TurboQuant_QJLTransform(MetalContextRef ctx_ref, MetalBufferRef resid
     [encoder setBytes:&cols length:sizeof(int) atIndex:5];
 
     MTLSize gridSize = MTLSizeMake(rows, 1, 1);
-    MTLSize threadGroupSize = MTLSizeMake(min(rows, 256), 1, 1);
+    MTLSize threadGroupSize = MTLSizeMake((rows < 256) ? rows : 256, 1, 1);
     [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadGroupSize];
     [wrapper barrier];
   }
@@ -1871,7 +1871,7 @@ void Metal_TurboQuant_Encode(MetalContextRef ctx_ref, MetalBufferRef input,
     [encoder setBytes:&bits length:sizeof(int) atIndex:8];
 
     MTLSize gridSize = MTLSizeMake(qjlRows, 1, 1);
-    MTLSize threadGroupSize = MTLSizeMake(min(qjlRows, 256), 1, 1);
+    MTLSize threadGroupSize = MTLSizeMake((qjlRows < 256) ? qjlRows : 256, 1, 1);
     [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadGroupSize];
     [wrapper barrier];
   }
@@ -1895,7 +1895,7 @@ void Metal_TurboQuant_Decode(MetalContextRef ctx_ref, MetalBufferRef input,
     [encoder setBytes:&qjlRows length:sizeof(int) atIndex:5];
 
     MTLSize gridSize = MTLSizeMake(blockSize, 1, 1);
-    MTLSize threadGroupSize = MTLSizeMake(min(blockSize, 256), 1, 1);
+    MTLSize threadGroupSize = MTLSizeMake((blockSize < 256) ? blockSize : 256, 1, 1);
     [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadGroupSize];
     [wrapper barrier];
   }
