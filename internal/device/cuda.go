@@ -607,7 +607,7 @@ type LayerScratch struct {
 	KVAllocated bool
 }
 
-func (c *CUDAContext) NewLayerScratch(maxTokens, dim, hiddenDim, heads, kvHeads, headDim, seqLen, vocabSize int) *LayerScratch {
+func (c *CUDAContext) NewLayerScratch(maxTokens, dim, hiddenDim, heads, kvHeads, headDim, seqLen, vocabSize, qNormDim, kNormDim int) *LayerScratch {
 	scratch := &LayerScratch{}
 
 	scratch.Q, _ = c.NewTensor(maxTokens, dim, DataTypeF16)

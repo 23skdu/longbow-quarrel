@@ -1199,6 +1199,10 @@ type LayerScratch struct {
 	NormedFFN, GatePart, UpPart, SwiOut, ResFFN *Tensor // NormedFFN is F16.
 	NormedFFN_F32, ResFFN_F32                   *Tensor // [Batch, Dim] FP32 (New)
 
+	// Gemma4 Q/K Normalization buffers
+	QNormed *Tensor // [Batch, QDim] - for normalized Q after q_norm
+	KNormed *Tensor // [Batch, KDim] - for normalized K after k_norm
+
 	// Logits (FP32)
 	Logits *Tensor // [1, VocabSize]
 
@@ -1257,7 +1261,7 @@ func (c *Context) NewBufferFromHeap(heap unsafe.Pointer, size, rows, cols int, d
 	}
 }
 
-func (c *Context) NewLayerScratch(batch, dim, hiddenDim, heads, kvHeads, headDim, seqLen, vocabSize int) *LayerScratch {
+func (c *Context) NewLayerScratch(batch, dim, hiddenDim, heads, kvHeads, headDim, seqLen, vocabSize, qNormDim, kNormDim int) *LayerScratch {
 	s := &LayerScratch{}
 
 	// Align to 4096
@@ -1277,6 +1281,10 @@ func (c *Context) NewLayerScratch(batch, dim, hiddenDim, heads, kvHeads, headDim
 	szResFFN := align(batch * dim * 2)
 	szResFFN_F32 := align(batch * dim * 4) // FP32
 
+	// Gemma4 Q/K norm buffers (max dimensions: 512 for full attention)
+	szQNormed := align(batch * qNormDim * 2)
+	szKNormed := align(batch * kNormDim * 2)
+
 	szScores := align(heads * seqLen * 4)
 	if szScores < align(32768*4) {
 		szScores = align(32768 * 4)
@@ -1289,7 +1297,8 @@ func (c *Context) NewLayerScratch(batch, dim, hiddenDim, heads, kvHeads, headDim
 	szLogits := align(1 * vocabSize * 4) // F32 Logits
 
 	total := szNormed + szQPart + szKPart + szVPart + szAttOut + szResAtt +
-		szNormedFFN + szNormedFFN_F32 + szResFFN + szResFFN_F32 + szScores + szGate + szUp + szSwiOut + szLogits
+		szNormedFFN + szNormedFFN_F32 + szResFFN + szResFFN_F32 + szScores + szGate + szUp + szSwiOut + szLogits +
+		szQNormed + szKNormed
 
 	heap := c.NewHeap(total)
 	if heap == nil {
@@ -1321,6 +1330,10 @@ func (c *Context) NewLayerScratch(batch, dim, hiddenDim, heads, kvHeads, headDim
 	s.GatePart = newT(szGate, batch, hiddenDim, DataTypeF32)
 	s.UpPart = newT(szUp, batch, hiddenDim, DataTypeF32)
 	s.SwiOut = newT(szSwiOut, batch, hiddenDim, DataTypeF32)
+
+	// Gemma4 Q/K norm buffers
+	s.QNormed = newT(szQNormed, batch, qNormDim, DataTypeF16)
+	s.KNormed = newT(szKNormed, batch, kNormDim, DataTypeF16)
 
 	// Logits must be F32 to preserve precision during accumulation and sampling
 	s.Logits = newT(szLogits, 1, vocabSize, DataTypeF32)
@@ -1378,6 +1391,12 @@ func (s *LayerScratch) Free() {
 	if s.Logits != nil {
 		s.Logits.Free()
 	}
+	if s.QNormed != nil {
+		s.QNormed.Free()
+	}
+	if s.KNormed != nil {
+		s.KNormed.Free()
+	}
 
 	if s.heap != nil {
 		traceAlloc(nil, -int64(s.size), "FreeLayerScratchHeap")
@@ -1426,15 +1445,14 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		fmt.Printf("DEBUG_LAYER: After RMSNorm1, layer %d\n", layerIdx)
 	}
 
-	// Gemma4 Q/K normalization - DISABLED due to dimension mismatch issues
-	// The q_norm (256/512) and k_norm (256/512) are smaller than the hidden dim (2560),
-	// causing buffer overflows when applied to the full hidden state.
-	// TODO: Implement proper Q/K norm using separate output buffers
+	// Gemma4 Q/K normalization - DISABLED for testing
+	// The q_norm/k_norm normalization is complex - it should normalize specific dimensions
+	// before Q/K projection but the dimension handling needs more work
 	if gemma4Config.IsGemma4 && gemma4QNorm != nil && gemma4KNorm != nil {
 		qNormLen := gemma4QNorm.cols
 		kNormLen := gemma4KNorm.cols
 		if debugLayer {
-			fmt.Printf("DEBUG_LAYER: Gemma4 Q/K norm available but disabled, q_norm=%d, k_norm=%d\n",
+			fmt.Printf("DEBUG_LAYER: Gemma4 Q/K norm available but disabled for test, q_norm=%d, k_norm=%d\n",
 				qNormLen, kNormLen)
 		}
 	}
@@ -1443,9 +1461,6 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 	qPart := scratch.QPart
 	kPart := scratch.KPart
 	vPart := scratch.VPart
-
-	fmt.Fprintf(os.Stderr, "DEBUG_LAYER: After QPart/KPart/VPart setup, layer %d, QPart=[%d,%d], KPart=[%d,%d], VPart=[%d,%d], Q=[%d,%d], K=[%d,%d], V=[%d,%d]\n",
-		layerIdx, qPart.rows, qPart.cols, kPart.rows, kPart.cols, vPart.rows, vPart.cols, q.rows, q.cols, k.rows, k.cols, v.rows, v.cols)
 
 	// Guard against nil weights
 	if q == nil || k == nil || v == nil || attnNorm == nil {
@@ -1478,6 +1493,29 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		fmt.Printf("DEBUG_LAYER: After QKV, layer %d\n", layerIdx)
 	}
 
+	// Gemma4 Q/K normalization - apply AFTER Q/K projections
+	// Currently disabled - need to verify dimension handling
+	/*
+		if gemma4Config.IsGemma4 && gemma4QNorm != nil && gemma4KNorm != nil {
+			qNormLen := gemma4QNorm.cols
+			kNormLen := gemma4KNorm.cols
+
+			qNormed := scratch.QNormed
+			kNormed := scratch.KNormed
+
+			C.Metal_RMSNorm_F16(t.ctx.ref, qPart.buf, C.int(qPart.Offset),
+				gemma4QNorm.buf, C.int(gemma4QNorm.Offset),
+				qNormed.buf, C.int(qNormed.Offset), C.int(t.rows), C.int(qNormLen), C.float(eps))
+
+			C.Metal_RMSNorm_F16(t.ctx.ref, kPart.buf, C.int(kPart.Offset),
+				gemma4KNorm.buf, C.int(gemma4KNorm.Offset),
+				kNormed.buf, C.int(kNormed.Offset), C.int(t.rows), C.int(kNormLen), C.float(eps))
+
+			qPart = qNormed
+			kPart = kNormed
+		}
+	*/
+
 	// 3. RoPE (Batched)
 	t0_rope := time.Now()
 	qPart.ropeInternal(pos, heads, headDim, t.rows, ropeTheta)
@@ -1497,6 +1535,21 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 	attOut := scratch.AttOut
 	qStride := heads * headDim * 2
 	t0_attn := time.Now()
+
+	// Gemma4 hybrid attention: use sliding window (512) for most layers, full context for layer 5, 11, etc.
+	attnWindowSize := windowSize
+	if gemma4Config.IsGemma4 {
+		if gemma4Config.IsSlidingWindowLayer {
+			attnWindowSize = 512 // Sliding window for layers 0-4, 6-10, etc.
+		} else {
+			attnWindowSize = 65536 // Full attention for layers 5, 11, 17, etc. (use large value)
+		}
+		if debugLayer {
+			fmt.Printf("DEBUG_LAYER: Attention for layer %d, windowSize=%d, IsSliding=%v\n",
+				layerIdx, attnWindowSize, gemma4Config.IsSlidingWindowLayer)
+		}
+	}
+
 	for i := 0; i < t.rows; i++ {
 		p := pos + i
 		offQ := i * qStride
@@ -1511,12 +1564,12 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 				kCache.buf, C.int(kCache.Offset), vCache.buf, C.int(vCache.Offset),
 				attOut.buf, C.int(attOut.Offset+offAtt),
 				blockTable.buf, C.int(blockTable.Offset),
-				C.int(p), C.int(heads), C.int(kvHeads), C.int(headDim), C.int(blockSize), C.int(4096))
+				C.int(p), C.int(heads), C.int(kvHeads), C.int(headDim), C.int(blockSize), C.int(attnWindowSize))
 		} else {
 			C.Metal_AttFused_F16(t.ctx.ref, qPart.buf, C.int(qPart.Offset+offQ),
 				kCache.buf, C.int(kCache.Offset), vCache.buf, C.int(vCache.Offset),
 				attOut.buf, C.int(attOut.Offset+offAtt),
-				C.int(p), C.int(heads), C.int(kvHeads), C.int(headDim), C.int(windowSize), C.int(maxCtxLen))
+				C.int(p), C.int(heads), C.int(kvHeads), C.int(headDim), C.int(attnWindowSize), C.int(maxCtxLen))
 		}
 	}
 	metrics.RecordKernelDuration("Layer_Attention", time.Since(t0_attn))

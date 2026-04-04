@@ -1415,8 +1415,10 @@ func (e *Engine) inferInternal(inputTokens []int, tokensToGenerate int, samplerC
 
 	// Create scratch buffers for the layer fusion
 	// New Scratch Buffer for Zero-Alloc	// Initialize scratch buffers (Heap backed, includes Logits)
+	qNormDim := 512 // Gemma4 full attention uses 512, sliding uses 256
+	kNormDim := 512
 	scratch := e.Ctx.NewLayerScratch(len(inputTokens), e.Config.Dim, e.Config.HiddenDim,
-		e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.SeqLen, e.Config.VocabSize)
+		e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.SeqLen, e.Config.VocabSize, qNormDim, kNormDim)
 	defer scratch.Free()
 
 	// Logits are in scratch.Logits
@@ -1476,7 +1478,7 @@ func (e *Engine) inferInternal(inputTokens []int, tokensToGenerate int, samplerC
 				gemma4QNorm = e.Weights.AttnQNorm[l]
 				gemma4KNorm = e.Weights.AttnKNorm[l]
 				gemma4Config.IsGemma4 = true
-				gemma4Config.IsSlidingWindowLayer = (l % 6) != 0
+				gemma4Config.IsSlidingWindowLayer = (l % 6) != 5
 				gemma4Config.SlidingWindowSize = e.Config.Gemma4SlidingWindowSize
 				gemma4Config.SlidingRoPETheta = e.Config.Gemma4SlidingRoPETheta
 				gemma4Config.FullRoPETheta = e.Config.Gemma4FullRoPETheta
@@ -1725,7 +1727,7 @@ func (e *Engine) inferInternal(inputTokens []int, tokensToGenerate int, samplerC
 				gemma4QNorm = e.Weights.AttnQNorm[l]
 				gemma4KNorm = e.Weights.AttnKNorm[l]
 				gemma4ConfigGen.IsGemma4 = true
-				gemma4ConfigGen.IsSlidingWindowLayer = (l % 6) != 0
+				gemma4ConfigGen.IsSlidingWindowLayer = (l % 6) != 5
 				gemma4ConfigGen.SlidingWindowSize = e.Config.Gemma4SlidingWindowSize
 				gemma4ConfigGen.SlidingRoPETheta = e.Config.Gemma4SlidingRoPETheta
 				gemma4ConfigGen.FullRoPETheta = e.Config.Gemma4FullRoPETheta
