@@ -44,6 +44,15 @@ type Config struct {
 	IsHybrid                      bool
 	MambaLayerPattern             string
 
+	// Gemma4-specific configuration
+	IsGemma4                bool
+	Gemma4SlidingWindowSize int     // Default 512 for sliding window layers
+	Gemma4SlidingRoPETheta  float32 // Default 10000 for sliding window layers
+	Gemma4FullRoPETheta     float32 // Default 1000000 for full attention layers
+	Gemma4PartialRoPEFactor float32 // Default 0.25 for full attention layers
+	Gemma4SlidingHeadDim    int     // Default 256 for sliding window layers
+	Gemma4FullHeadDim       int     // Default 512 for full attention layers
+
 	DebugDequant     bool
 	DebugActivations bool
 
@@ -54,6 +63,17 @@ type Config struct {
 	DebugLogits      bool
 
 	DebugMemory bool
+}
+
+type Gemma4Config struct {
+	IsGemma4             bool
+	IsSlidingWindowLayer bool
+	SlidingWindowSize    int
+	SlidingRoPETheta     float32
+	FullRoPETheta        float32
+	PartialRoPEFactor    float32
+	SlidingHeadDim       int
+	FullHeadDim          int
 }
 
 func (c *Config) Validate() error {

@@ -113,6 +113,10 @@ type LlamaWeights struct {
 	// AttnNorm   []*device.Tensor
 	AttnNorm []*device.Tensor // Re-added just in case
 
+	// Gemma4-specific Q/K normalization (applied before Q/K projections)
+	AttnQNorm []*device.Tensor
+	AttnKNorm []*device.Tensor
+
 	FfnGate []*device.Tensor
 	FfnDown []*device.Tensor
 	FfnUp   []*device.Tensor
@@ -156,7 +160,7 @@ func (w *LlamaWeights) Free() {
 	freeTensor(w.Output)
 	freeTensor(w.OutputNorm)
 
-	freeSlices(w.AttnQ, w.AttnK, w.AttnV, w.AttnO, w.AttnNorm)
+	freeSlices(w.AttnQ, w.AttnK, w.AttnV, w.AttnO, w.AttnNorm, w.AttnQNorm, w.AttnKNorm)
 	freeSlices(w.FfnGate, w.FfnDown, w.FfnUp, w.FfnNorm)
 
 	for _, m := range w.Mamba {

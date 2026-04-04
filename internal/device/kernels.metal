@@ -1168,6 +1168,48 @@ kernel void linear_q6k_f16_f32(device const uchar *weight [[ buffer(0) ]],
     if (lane_id == 0) output[batch * dim_out + row] = sum;
 }
 
+kernel void linear_q4k_f16_f32(device const uchar *weight [[ buffer(0) ]],
+                          device const half *input [[ buffer(1) ]],
+                          device float *output [[ buffer(2) ]],
+                          constant int &dim_in [[ buffer(3) ]],
+                          constant int &dim_out [[ buffer(4) ]],
+                          constant float &scale [[ buffer(5) ]],
+                          uint3 tid [[ thread_position_in_threadgroup ]],
+                          uint3 qid [[ thread_position_in_grid ]]) {
+    uint row = qid.y; uint batch = qid.z;
+    if (row >= (uint)dim_out) return; uint lane_id = tid.x;
+    int num_blocks = (dim_in + 255) / 256;
+    device const uchar *row_ptr = weight + row * num_blocks * 144;
+    device const half *in_ptr = input + batch * dim_in;
+    float sum = 0;
+    for (int i = (int)lane_id; i < num_blocks; i += 32) {
+        device const uchar *block = row_ptr + i * 144;
+        float d = fp16_to_fp32(*(device const ushort*)(block));
+        float dmin = fp16_to_fp32(*(device const ushort*)(block + 2));
+
+        device const uchar *scales = block + 4;
+        device const uchar *qs = block + 16;
+        for (int j = 0; j < 8; j++) {
+            uchar sc, m;
+            if (j < 4) { sc = scales[j] & 63; m = scales[j + 4] & 63; }
+            else { sc = (scales[j+4] & 0xF) | ((scales[j-4] >> 6) << 4); m = (scales[j+4] >> 4) | ((scales[j] >> 6) << 4); }
+            float d_val = d * scale * (float)sc;
+            float m_val = dmin * scale * (float)m;
+            int sub_offset = j * 32, qs_offset = j * 16;
+            for (int k = 0; k < 16; k++) {
+                uchar b = qs[qs_offset + k];
+                float w0 = d_val * (float)(b & 0xF) - m_val;
+                float w1 = d_val * (float)(b >> 4) - m_val;
+                int idx0 = i * 256 + sub_offset + k;
+                int idx1 = idx0 + 16;
+                sum += w0 * (float)in_ptr[idx0] + w1 * (float)in_ptr[idx1];
+            }
+        }
+    }
+    sum = simd_sum(sum);
+    if (lane_id == 0) output[batch * dim_out + row] = sum;
+}
+
 // Linear: FP16 weights, FP16 input → FP32 output (for Gate/Up projections)
 kernel void linear_f16_to_f32(device const half *weight [[ buffer(0) ]],
                               device const half *input [[ buffer(1) ]],

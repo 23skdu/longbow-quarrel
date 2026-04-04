@@ -17,6 +17,11 @@ void Metal_LinearQ6K_F16_F32(MetalContextRef ctx, MetalBufferRef weight,
                              MetalBufferRef output, int offOutput, int rows,
                              int dimIn, int dimOut, float scale);
 
+void Metal_LinearQ4K_F16_F32(MetalContextRef ctx, MetalBufferRef weight,
+                              int offWeight, MetalBufferRef input, int offInput,
+                              MetalBufferRef output, int offOutput, int rows,
+                              int dimIn, int dimOut, float scale);
+
 void Metal_LinearQ4_0_F16(MetalContextRef ctx, MetalBufferRef weight,
                           int offWeight, MetalBufferRef input, int offInput,
                           MetalBufferRef output, int offOutput, int rows,

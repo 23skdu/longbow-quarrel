@@ -9,7 +9,6 @@ import (
 	"math"
 	"os"
 	"runtime"
-	"sort"
 	"strings"
 	"time"
 
@@ -416,6 +415,7 @@ func isNeededTensor(name string) bool {
 	if strings.Contains(lowerName, "blk.") {
 		suffixes := []string{
 			"attn_q.weight", "attn_k.weight", "attn_v.weight", "attn_output.weight", "attn_norm.weight",
+			"attn_q_norm.weight", "attn_k_norm.weight", // Gemma4 Q/K normalization
 			"ffn_gate.weight", "ffn_up.weight", "ffn_down.weight", "ffn_norm.weight",
 			"ssm_a", "ssm_d", "ssm_conv1d.weight", "ssm_conv1d.bias", "ssm_dt.weight", "ssm_dt.bias",
 			"ssm_norm.weight", "ssm_norm.bias", "ssm_out.weight", "ssm_in.weight",
@@ -651,6 +651,17 @@ func (e *Engine) loadModel(path string) error {
 			e.Config.IsMOE = true
 			logger.Log.Debug("Architecture detected as MOE (Nemotron)", "arch", arch)
 		}
+		// Gemma4 detection
+		if arch == "gemma4" {
+			e.Config.IsGemma4 = true
+			e.Config.Gemma4SlidingWindowSize = 512
+			e.Config.Gemma4SlidingRoPETheta = 10000.0
+			e.Config.Gemma4FullRoPETheta = 1000000.0
+			e.Config.Gemma4PartialRoPEFactor = 0.25
+			e.Config.Gemma4SlidingHeadDim = 256
+			e.Config.Gemma4FullHeadDim = 512
+			logger.Log.Info("Gemma4 architecture detected", "arch", arch)
+		}
 		logger.Log.Info("Model architecture confirmed", "arch", arch)
 	}
 	// MOE-specific metadata
@@ -852,7 +863,12 @@ func (e *Engine) loadModel(path string) error {
 
 			} else if t.Type == gguf.GGMLTypeQ6_K {
 				// Type 14 (Q6_K).
-				if t.Name == "output.weight" || e.Config.Dim >= 1024 {
+				if t.Name == "token_embd.weight" {
+					fmt.Fprintf(os.Stderr, "DEBUG: token_embd.weight - dequantizing to FP16\n")
+					f32Data := gguf.DequantizeQ6K(t.Data, numElements)
+					mt = e.Ctx.NewTensorWithType(rows, cols, device.DataTypeF16)
+					mt.LoadFrom(f32Data)
+				} else if t.Name == "output.weight" || e.Config.Dim >= 1024 {
 					// Use Native Q6K
 					mt = e.Ctx.NewTensorWithType(rows, cols, device.DataTypeQ6K)
 					dataBytes := (numElements / 256) * 210
@@ -885,6 +901,11 @@ func (e *Engine) loadModel(path string) error {
 		// Mapping Logic
 		name := t.Name
 		fmt.Fprintf(os.Stderr, "Loading Tensor %s Dims: %v Type: %vOffset: %d\n", name, t.Dimensions, t.Type, t.Offset)
+
+		// DEBUG: Check if this is a Gemma4 norm tensor
+		if strings.Contains(name, "attn_q_norm") || strings.Contains(name, "attn_k_norm") {
+			fmt.Fprintf(os.Stderr, "DEBUG_GEMMA4: Found Q/K norm tensor: %s, layerIdx will be: ", name)
+		}
 
 		// 1. Global weights (supporting prefixes like nemotron., model., etc.)
 		// Strict check to avoid matching blk.N.attn_output.weight to global output.weight
@@ -936,10 +957,21 @@ func (e *Engine) loadModel(path string) error {
 
 			// Gemma-specific: attn_q_norm, attn_k_norm (RMSNorm before Q/K)
 			case "attn_q_norm.weight":
-				e.Weights.AttnNorm[layerIdx] = mt
+				fmt.Fprintf(os.Stderr, "DEBUG_LOAD: Setting AttnQNorm[%d] = %s\n", layerIdx, name)
+				if e.Weights.AttnQNorm == nil || len(e.Weights.AttnQNorm) <= layerIdx {
+					newSlice := make([]*device.Tensor, layerIdx+1)
+					copy(newSlice, e.Weights.AttnQNorm)
+					e.Weights.AttnQNorm = newSlice
+				}
+				e.Weights.AttnQNorm[layerIdx] = mt
 			case "attn_k_norm.weight":
-				// Store in AttnK for now, or create new field if needed
-				e.Weights.AttnK[layerIdx] = mt
+				fmt.Fprintf(os.Stderr, "DEBUG_LOAD: Setting AttnKNorm[%d] = %s\n", layerIdx, name)
+				if e.Weights.AttnKNorm == nil || len(e.Weights.AttnKNorm) <= layerIdx {
+					newSlice := make([]*device.Tensor, layerIdx+1)
+					copy(newSlice, e.Weights.AttnKNorm)
+					e.Weights.AttnKNorm = newSlice
+				}
+				e.Weights.AttnKNorm[layerIdx] = mt
 
 			case "ffn_gate.weight":
 				e.Weights.FfnGate[layerIdx] = mt
@@ -1393,6 +1425,7 @@ func (e *Engine) inferInternal(inputTokens []int, tokensToGenerate int, samplerC
 	// Phase 1: Prefill all input tokens
 	cachePos := e.GetSeqCachePos(seq.ID)
 	logger.Log.Debug("Start Inference", "seq_id", seq.ID, "cache_pos", cachePos)
+	fmt.Fprintf(os.Stderr, "DEBUG: Starting prefill phase with %d tokens, IsGemma4=%v, Layers=%d\n", len(inputTokens), e.Config.IsGemma4, e.Config.Layers)
 	for i := 0; i < len(inputTokens); i++ {
 		// Autorelease Pool for this iteration
 		pool := e.Ctx.AutoreleasePoolPush()
@@ -1414,28 +1447,15 @@ func (e *Engine) inferInternal(inputTokens []int, tokensToGenerate int, samplerC
 		currentF32 := current.ToF32()
 		current.ReturnToPool() // Release F16
 
-		// Log embedding if first token
-		if i == 0 && e.ActLogger.IsEnabled() {
-			embData := currentF32.ToHost()
-			e.ActLogger.LogEmbedding(embData)
-		}
-
-		// Track embedding stats for first token
-		if samplerConfig.DebugActivations || (i == 0) {
-			stats := currentF32.GetStats(16)
-			e.TraceTracker.RecordLayer("embedding", -1, stats)
-		}
-
-		// DEBUG: Log embedding values
-		if e.Config.DebugEmbedding {
-			embData := current.ToHost()
-			fmt.Printf("DEBUG: [%d] Embedding values: %v\n", cachePos, embData[:4])
-			current.ReturnToPool()
-		}
-
 		// Layers (Attention + FFN)
 		for l := 0; l < e.Config.Layers; l++ {
-			// log.Printf("DEBUG_PRECISION: Layer %d, Dim=%d, PrecisionMode=%d (0=Auto, 1=FP16, 2=F32FFN, 3=Mixed)", l, e.Config.Dim, e.Config.PrecisionMode)
+			if l == 0 && i == 0 {
+				fmt.Fprintf(os.Stderr, "DEBUG: Layer 0, IsGemma4=%v, HasQNorm=%v, HasKNorm=%v\n",
+					e.Config.IsGemma4,
+					e.Weights.AttnQNorm != nil && len(e.Weights.AttnQNorm) > l && e.Weights.AttnQNorm[l] != nil,
+					e.Weights.AttnKNorm != nil && len(e.Weights.AttnKNorm) > l && e.Weights.AttnKNorm[l] != nil)
+			}
+
 			attnNorm := e.Weights.AttnNorm[l]
 			q := e.Weights.AttnQ[l]
 			k := e.Weights.AttnK[l]
@@ -1448,6 +1468,22 @@ func (e *Engine) inferInternal(inputTokens []int, tokensToGenerate int, samplerC
 			view := e.Cache.Get(e.SeqIDStr(seq.ID), l)
 			kCache := view.K
 			vCache := view.V
+
+			// Gemma4 Q/K normalization weights
+			var gemma4QNorm, gemma4KNorm *device.Tensor
+			var gemma4Config config.Gemma4Config
+			if e.Config.IsGemma4 && e.Weights.AttnQNorm != nil && len(e.Weights.AttnQNorm) > l && e.Weights.AttnQNorm[l] != nil && e.Weights.AttnKNorm != nil && len(e.Weights.AttnKNorm) > l && e.Weights.AttnKNorm[l] != nil {
+				gemma4QNorm = e.Weights.AttnQNorm[l]
+				gemma4KNorm = e.Weights.AttnKNorm[l]
+				gemma4Config.IsGemma4 = true
+				gemma4Config.IsSlidingWindowLayer = (l % 6) != 0
+				gemma4Config.SlidingWindowSize = e.Config.Gemma4SlidingWindowSize
+				gemma4Config.SlidingRoPETheta = e.Config.Gemma4SlidingRoPETheta
+				gemma4Config.FullRoPETheta = e.Config.Gemma4FullRoPETheta
+				gemma4Config.PartialRoPEFactor = e.Config.Gemma4PartialRoPEFactor
+				gemma4Config.SlidingHeadDim = e.Config.Gemma4SlidingHeadDim
+				gemma4Config.FullHeadDim = e.Config.Gemma4FullHeadDim
+			}
 
 			if e.IsMambaLayer(l) {
 				mambaLayer := e.MambaLayers[l]
@@ -1485,7 +1521,8 @@ func (e *Engine) inferInternal(inputTokens []int, tokensToGenerate int, samplerC
 						if err := e.Cache.Update(e.SeqIDStr(seq.ID), l, cachePos, k, v); err != nil {
 							panic(err)
 						}
-					})
+					},
+					gemma4QNorm, gemma4KNorm, gemma4Config)
 
 				// 2. MOE Part
 				// Need to apply FFN Norm first
@@ -1508,7 +1545,8 @@ func (e *Engine) inferInternal(inputTokens []int, tokensToGenerate int, samplerC
 						if err := e.Cache.Update(e.SeqIDStr(seq.ID), l, cachePos, k, v); err != nil {
 							panic(err)
 						}
-					})
+					},
+					gemma4QNorm, gemma4KNorm, gemma4Config)
 			}
 
 			// Log layer activation details if enabled
@@ -1540,8 +1578,11 @@ func (e *Engine) inferInternal(inputTokens []int, tokensToGenerate int, samplerC
 			}
 		}
 
+		fmt.Fprintf(os.Stderr, "DEBUG: Finished all %d layers\n", e.Config.Layers)
+
 		// If this is the LAST prompt token, sample the first next token
 		if i == len(inputTokens)-1 {
+			fmt.Fprintf(os.Stderr, "DEBUG: Starting final norm\n")
 			// Final Norm (F32 -> F16)
 			// Debug Output Norm Weights
 			if i == 0 {
@@ -1555,6 +1596,7 @@ func (e *Engine) inferInternal(inputTokens []int, tokensToGenerate int, samplerC
 			// Check for and handle Inf/NaN values before final norm
 			if infInfo := currentF32.ScanForNaN(fmt.Sprintf("Layer %d Pre-Final Norm", i), 5); infInfo.HasInf || infInfo.HasNaN() {
 				logger.Log.Warn("NaN detected in pre-final norm, clamping", "count", infInfo.Count, "inf_count", infInfo.InfCount)
+				fmt.Fprintf(os.Stderr, "DEBUG: NaN detected, clamping %d values\n", infInfo.Count)
 				// Clamp extreme values to prevent RMSNorm issues
 				hostData := currentF32.ToHost()
 				for j := range hostData {
@@ -1575,12 +1617,16 @@ func (e *Engine) inferInternal(inputTokens []int, tokensToGenerate int, samplerC
 						hostData[j] = -1e6
 					}
 				}
+				fmt.Fprintf(os.Stderr, "DEBUG: Creating cleanTensor\n")
 				// Load cleaned data back
 				cleanTensor := e.Ctx.NewTensorFP32(currentF32.Rows(), currentF32.Cols())
 				cleanTensor.LoadFromF32(hostData)
+				fmt.Fprintf(os.Stderr, "DEBUG: Running RMSNorm on cleanTensor\n")
 				// Use cleaned tensor for RMSNorm
 				cleanTensor.RMSNormFP32_ToF16_Into(e.Weights.OutputNorm, e.Config.Eps, scratch.Normed)
+				fmt.Fprintf(os.Stderr, "DEBUG: RMSNorm complete, synchronizing\n")
 				e.Ctx.Synchronize()
+				fmt.Fprintf(os.Stderr, "DEBUG: Synchronize complete\n")
 				cleanTensor.ReturnToPool()
 			} else {
 				currentF32.RMSNormFP32_ToF16_Into(e.Weights.OutputNorm, e.Config.Eps, scratch.Normed)
@@ -1597,26 +1643,15 @@ func (e *Engine) inferInternal(inputTokens []int, tokensToGenerate int, samplerC
 
 			// Output Head (F16 -> F32 Logits)
 			// scratch.Normed contains result. Use it.
+			fmt.Fprintf(os.Stderr, "DEBUG_OUTPUT_HEAD: before LinearToFP32_Into, Normed=[%d,%d], Output=[%d,%d]\n",
+				scratch.Normed.Rows(), scratch.Normed.Cols(), e.Weights.Output.Rows(), e.Weights.Output.Cols())
 			scratch.Normed.LinearToFP32_Into(e.Weights.Output, logits)
+			fmt.Fprintf(os.Stderr, "DEBUG_OUTPUT_HEAD: after LinearToFP32_Into\n")
+			e.Ctx.Synchronize()
+			fmt.Fprintf(os.Stderr, "DEBUG_OUTPUT_HEAD: after synchronize\n")
 			e.Ctx.Synchronize()
 
-			logits.ScanMax(fmt.Sprintf("Layer %d Final Logits", i))
-
-			// ADDED: Debug Scores and Normed
-			scratch.Scores.ScanMax(fmt.Sprintf("Layer %d Attention Scores", i))
-			scratch.Normed.ScanMax(fmt.Sprintf("Layer %d RMSNorm Output", i))
-
 			logitsData := logits.ToHost()
-
-			params := make([]struct {
-				idx int
-				v   float32
-			}, len(logitsData))
-			for idx, v := range logitsData {
-				params[idx].idx = idx
-				params[idx].v = v
-			}
-			sort.Slice(params, func(i, j int) bool { return params[i].v > params[j].v })
 
 			nextToken := sampler.Sample(logitsData, inputTokens, e.Config.VocabSize)
 
@@ -1683,6 +1718,22 @@ func (e *Engine) inferInternal(inputTokens []int, tokensToGenerate int, samplerC
 			kCache := view.K
 			vCache := view.V
 
+			// Gemma4 Q/K normalization weights (generation phase)
+			var gemma4QNorm, gemma4KNorm *device.Tensor
+			var gemma4ConfigGen config.Gemma4Config
+			if e.Config.IsGemma4 && e.Weights.AttnQNorm != nil && len(e.Weights.AttnQNorm) > l && e.Weights.AttnQNorm[l] != nil {
+				gemma4QNorm = e.Weights.AttnQNorm[l]
+				gemma4KNorm = e.Weights.AttnKNorm[l]
+				gemma4ConfigGen.IsGemma4 = true
+				gemma4ConfigGen.IsSlidingWindowLayer = (l % 6) != 0
+				gemma4ConfigGen.SlidingWindowSize = e.Config.Gemma4SlidingWindowSize
+				gemma4ConfigGen.SlidingRoPETheta = e.Config.Gemma4SlidingRoPETheta
+				gemma4ConfigGen.FullRoPETheta = e.Config.Gemma4FullRoPETheta
+				gemma4ConfigGen.PartialRoPEFactor = e.Config.Gemma4PartialRoPEFactor
+				gemma4ConfigGen.SlidingHeadDim = e.Config.Gemma4SlidingHeadDim
+				gemma4ConfigGen.FullHeadDim = e.Config.Gemma4FullHeadDim
+			}
+
 			if l == e.Config.Layers-1 && i == 0 {
 				// ffnDown.ScanMax("Last Layer FFN Down Weight")
 				// fmt.Printf("DEBUG: Eps: %e\n", e.Config.Eps)
@@ -1713,6 +1764,18 @@ func (e *Engine) inferInternal(inputTokens []int, tokensToGenerate int, samplerC
 						panic(fmt.Errorf("layer %d residual add failed: %v", l, err))
 					}
 				}
+			} else if e.IsMOELayer(l) {
+				currentF32.Layer(l, attnNorm, q, k, v, o, ffnNorm, ffnGate, nil, ffnDown, kCache, vCache,
+					scratch,
+					e.TraceTracker,
+					cachePos, e.Config.Heads, e.Config.KVHeads, e.Config.HeadDim, e.Config.RopeTheta, e.Config.Eps, e.Config.HiddenDim, e.Config.SeqLen, e.Config.WindowSize, e.GlobalScale, samplerConfig.DebugActivations, int(e.Config.PrecisionMode),
+					view.BlockTable, view.BlockSize,
+					func(k *device.Tensor, v *device.Tensor) {
+						if err := e.Cache.Update(e.SeqIDStr(seq.ID), l, cachePos, k, v); err != nil {
+							panic(err)
+						}
+					},
+					gemma4QNorm, gemma4KNorm, gemma4ConfigGen)
 			} else {
 				currentF32.Layer(l, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, kCache, vCache,
 					scratch, // Pass scratch
@@ -1723,7 +1786,8 @@ func (e *Engine) inferInternal(inputTokens []int, tokensToGenerate int, samplerC
 						if err := e.Cache.Update(e.SeqIDStr(seq.ID), l, cachePos, k, v); err != nil {
 							panic(err)
 						}
-					})
+					},
+					gemma4QNorm, gemma4KNorm, gemma4ConfigGen)
 			}
 
 			// Log layer activation details if enabled (generation phase)
@@ -1996,7 +2060,10 @@ func (e *Engine) SwapModel(newModelPath string, newConfig config.Config) error {
 	}
 
 	// Create new fresh weights struct
-	e.Weights = &LlamaWeights{}
+	e.Weights = &LlamaWeights{
+		AttnQNorm: make([]*device.Tensor, e.Config.Layers),
+		AttnKNorm: make([]*device.Tensor, e.Config.Layers),
+	}
 
 	// Update config
 	e.Config = newConfig

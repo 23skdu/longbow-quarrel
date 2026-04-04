@@ -3,20 +3,7 @@
 
 # longbow-quarrel
 
-High-performance LLM inference engine written in Go with Metal GPU acceleration for Apple Silicon. Integrates with the Longbow ecosystem via Apache Arrow Flight gRPC for zero-copy tensor transfer between services.
-
-## Architecture Integration
-
-```
-longbow-fletcher (embeddings)  -->  Apache Arrow Flight  -->  longbow-quarrel (inference)
-                                           gRPC                          |
-                                           (tensor transfer)              v
-                                    zero-copy serialization         Text Output
-```
-
-- **Input**: Accepts pre-computed embeddings via Arrow Flight gRPC or direct GGUF loading
-- **Output**: Returns logits or generated text via gRPC streaming or HTTP/WebSocket
-- **Protocol**: Apache Arrow Flight for efficient tensor transfer, HTTP/REST for client integration
+High-performance LLM inference engine written in Go with Metal GPU acceleration for Apple Silicon, with optional CUDA support for Linux.
 
 ## Supported Models
 
@@ -44,6 +31,7 @@ longbow-fletcher (embeddings)  -->  Apache Arrow Flight  -->  longbow-quarrel (i
 ## Performance
 
 - Custom Metal compute kernels (MatMul, RMSNorm, RoPE, SwiGLU, Attention, KV cache)
+- CUDA kernels for Linux deployment
 - Fused kernel optimizations (RMSNorm+Linear, attention scaling)
 - Sliding window attention for Mistral/Gemma4 architectures
 - Grouped Query Attention (GQA) support
@@ -51,15 +39,15 @@ longbow-fletcher (embeddings)  -->  Apache Arrow Flight  -->  longbow-quarrel (i
 
 ## Technical Stack
 
-- **Language**: Go with CGO for Metal interop
-- **GPU**: Metal framework (macOS/Apple Silicon)
-- **Protocol**: Apache Arrow Flight gRPC, HTTP/1.1, WebSocket
+- **Language**: Go with CGO
+- **GPU**: Metal (macOS/Apple Silicon), CUDA (Linux/NVIDIA)
+- **Protocol**: HTTP/REST, WebSocket
 - **Metrics**: Prometheus export at `/metrics`
 
 ## Quick Start
 
 ```bash
-# Run with Ollama model
+# Run with Ollama model (macOS/Metal)
 go run -tags darwin,metal ./cmd/generate_text/main.go -model gemma4:e4b -prompt "Hello"
 
 # Or with GGUF file
@@ -75,14 +63,6 @@ go test -tags darwin,metal ./internal/device/...
 # Model loading tests
 go test -tags darwin,metal ./internal/engine/...
 ```
-
-## Ecosystem
-
-Part of the Longbow LLM infrastructure:
-- `longbow-fletcher`: Embedding generation
-- `longbow-quarrel`: Text generation inference
-
-See `docs/` for detailed API reference, metrics, and deployment guides.
 
 ## Gemma4 Inference (In Progress)
 

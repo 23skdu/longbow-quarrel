@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"time"
 
 	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/engine"
@@ -33,11 +34,13 @@ func main() {
 	conf := config.Default()
 	conf.KVCacheSize = 1024
 
+	start := time.Now()
 	e, err := engine.NewEngine(*modelPath, conf)
 	if err != nil {
 		log.Fatalf("Failed to load engine: %v", err)
 	}
 	defer e.Close()
+	fmt.Printf("Engine loaded in %.2fs\n", time.Since(start).Seconds())
 
 	tok, err := tokenizer.New(*modelPath)
 	if err != nil {
@@ -54,10 +57,15 @@ func main() {
 		TopP:        0.95,
 	}
 
+	fmt.Printf("Starting inference (prompt=%q, tokens=%d)...\n", *prompt, *tokens)
+	fmt.Printf("DEBUG: About to call Infer...\n")
+	inferStart := time.Now()
 	result, err := e.Infer(inputTokens, *tokens, sampler)
+	fmt.Printf("DEBUG: Infer returned\n")
 	if err != nil {
 		log.Fatalf("Inference failed: %v", err)
 	}
+	fmt.Printf("Inference completed in %.2fs\n", time.Since(inferStart).Seconds())
 
 	generated := tok.Decode(result)
 	fmt.Printf("Generated (%d tokens): %s\n", len(result), generated)

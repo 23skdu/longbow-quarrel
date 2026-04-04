@@ -34,6 +34,7 @@
 @property(strong) id<MTLComputePipelineState> pipelineMatMul_Q4K_F32;
 @property(strong) id<MTLComputePipelineState> pipelineMatMul_Q6K_F32;
 @property(strong) id<MTLComputePipelineState> pipelineLinearQ6K_F16_F32;
+@property(strong) id<MTLComputePipelineState> pipelineLinearQ4K_F16_F32;
 @property(strong) id<MTLComputePipelineState> pipelineMatMul_Q4K_F32_F16;
 @property(strong) id<MTLComputePipelineState> pipelineMatMul_Q6K_F32_F16;
 @property(strong) id<MTLComputePipelineState> pipelineAdd_F32;
@@ -222,6 +223,7 @@ MetalContextRef Metal_Init(const char *libSource) {
   ctx.pipelineMatMul_Q4K_F32 = loadPipeline(ctx, @"linear_q4k_f32");
   ctx.pipelineMatMul_Q6K_F32 = loadPipeline(ctx, @"linear_q6k_f32");
   ctx.pipelineLinearQ6K_F16_F32 = loadPipeline(ctx, @"linear_q6k_f16_f32");
+  ctx.pipelineLinearQ4K_F16_F32 = loadPipeline(ctx, @"linear_q4k_f16_f32");
   ctx.pipelineMatMul_Q4K_F32_F16 = loadPipeline(ctx, @"linear_q4k_f32_f16");
   ctx.pipelineMatMul_Q6K_F32_F16 = loadPipeline(ctx, @"linear_q6k_f32_f16");
   ctx.pipelineAdd_F32 = loadPipeline(ctx, @"add_f32");
@@ -1413,6 +1415,24 @@ void Metal_LinearQ6K_F16_F32(MetalContextRef ctx, MetalBufferRef weight,
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
   id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
   [enc setComputePipelineState:mc.pipelineLinearQ6K_F16_F32];
+  [enc setBuffer:(__bridge id<MTLBuffer>)weight offset:offWeight atIndex:0];
+  [enc setBuffer:(__bridge id<MTLBuffer>)input offset:offInput atIndex:1];
+  [enc setBuffer:(__bridge id<MTLBuffer>)output offset:offOutput atIndex:2];
+  [enc setBytes:&dimIn length:4 atIndex:3];
+  [enc setBytes:&dimOut length:4 atIndex:4];
+  [enc setBytes:&scale length:4 atIndex:5];
+  [enc dispatchThreadgroups:MTLSizeMake(1, dimOut, rows)
+      threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+  [mc barrier];
+}
+
+void Metal_LinearQ4K_F16_F32(MetalContextRef ctx, MetalBufferRef weight,
+                              int offWeight, MetalBufferRef input, int offInput,
+                              MetalBufferRef output, int offOutput, int rows,
+                              int dimIn, int dimOut, float scale) {
+  MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
+  id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
+  [enc setComputePipelineState:mc.pipelineLinearQ4K_F16_F32];
   [enc setBuffer:(__bridge id<MTLBuffer>)weight offset:offWeight atIndex:0];
   [enc setBuffer:(__bridge id<MTLBuffer>)input offset:offInput atIndex:1];
   [enc setBuffer:(__bridge id<MTLBuffer>)output offset:offOutput atIndex:2];

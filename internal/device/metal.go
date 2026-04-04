@@ -77,12 +77,14 @@ import (
 	_ "embed"
 	"fmt"
 	"math"
+	"os"
 	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
 	"unsafe"
 
+	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
 	"github.com/23skdu/longbow-quarrel/internal/metrics"
 )
@@ -1391,10 +1393,20 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		IsEnabled() bool
 	},
 	pos, heads, kvHeads, headDim int, ropeTheta, eps float32, hiddenDim, ctxLen, windowSize int, globalScale float32, debug bool, precisionMode int,
-	blockTable *Tensor, blockSize int, kvStore func(k, v *Tensor)) {
+	blockTable *Tensor, blockSize int, kvStore func(k, v *Tensor),
+	gemma4QNorm, gemma4KNorm *Tensor,
+	gemma4Config config.Gemma4Config) {
 
-	t.ctx.ExecMu.Lock()
-	defer t.ctx.ExecMu.Unlock()
+	// DEBUG: Add per-layer debug output for Gemma4
+	debugLayer := false
+	if gemma4Config.IsGemma4 {
+		debugLayer = true
+		fmt.Fprintf(os.Stderr, "DEBUG_LAYER: IsGemma4=true, layer %d, IsSliding=%v\n", layerIdx, gemma4Config.IsSlidingWindowLayer)
+	}
+
+	if debugLayer {
+		fmt.Fprintf(os.Stderr, "DEBUG_LAYER: Starting layer %d\n", layerIdx)
+	}
 
 	// probe("Input", t) // Disabled due to potential deadlock with ScanMax
 
@@ -1410,20 +1422,44 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 			normed.buf, C.int(normed.Offset), C.int(t.rows), C.int(t.cols), C.float(eps))
 	}
 	metrics.RecordKernelDuration("Layer_RMSNorm1", time.Since(t0_rmsnorm1))
+	if debugLayer {
+		fmt.Printf("DEBUG_LAYER: After RMSNorm1, layer %d\n", layerIdx)
+	}
+
+	// Gemma4 Q/K normalization - DISABLED due to dimension mismatch issues
+	// The q_norm (256/512) and k_norm (256/512) are smaller than the hidden dim (2560),
+	// causing buffer overflows when applied to the full hidden state.
+	// TODO: Implement proper Q/K norm using separate output buffers
+	if gemma4Config.IsGemma4 && gemma4QNorm != nil && gemma4KNorm != nil {
+		qNormLen := gemma4QNorm.cols
+		kNormLen := gemma4KNorm.cols
+		if debugLayer {
+			fmt.Printf("DEBUG_LAYER: Gemma4 Q/K norm available but disabled, q_norm=%d, k_norm=%d\n",
+				qNormLen, kNormLen)
+		}
+	}
 
 	// 2. QKV Projections (Batched)
 	qPart := scratch.QPart
 	kPart := scratch.KPart
 	vPart := scratch.VPart
 
-	if q.dataType == DataTypeQ4K && k.dataType == DataTypeQ4K && v.dataType == DataTypeQ4K {
+	fmt.Fprintf(os.Stderr, "DEBUG_LAYER: After QPart/KPart/VPart setup, layer %d, QPart=[%d,%d], KPart=[%d,%d], VPart=[%d,%d], Q=[%d,%d], K=[%d,%d], V=[%d,%d]\n",
+		layerIdx, qPart.rows, qPart.cols, kPart.rows, kPart.cols, vPart.rows, vPart.cols, q.rows, q.cols, k.rows, k.cols, v.rows, v.cols)
+
+	// Guard against nil weights
+	if q == nil || k == nil || v == nil || attnNorm == nil {
+		return
+	}
+
+	if q.dataType == DataTypeQ4K && k.dataType == DataTypeQ4K && v.dataType == DataTypeQ4K && attnNorm.buf != nil {
 		t0_qkv := time.Now()
 		C.Metal_RMSNormQKV_Q4K_F16(t.ctx.ref, t.buf, C.int(t.Offset), attnNorm.buf, C.int(attnNorm.Offset),
 			q.buf, C.int(q.Offset), k.buf, C.int(k.Offset), v.buf, C.int(v.Offset),
 			qPart.buf, C.int(qPart.Offset), kPart.buf, C.int(kPart.Offset), vPart.buf, C.int(vPart.Offset),
 			C.int(t.cols), C.int(q.rows), C.int(k.rows), C.float(eps), C.float(globalScale), C.int(t.rows))
 		metrics.RecordKernelDuration("Layer_QKV_Fused_Q4K", time.Since(t0_qkv))
-	} else if q.dataType == DataTypeQ6K && k.dataType == DataTypeQ6K && v.dataType == DataTypeQ6K {
+	} else if q.dataType == DataTypeQ6K && k.dataType == DataTypeQ6K && v.dataType == DataTypeQ6K && attnNorm.buf != nil {
 		t0_qkv := time.Now()
 		C.Metal_RMSNormQKV_Q6K_F16(t.ctx.ref, t.buf, C.int(t.Offset), attnNorm.buf, C.int(attnNorm.Offset),
 			q.buf, C.int(q.Offset), k.buf, C.int(k.Offset), v.buf, C.int(v.Offset),
@@ -1431,9 +1467,15 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 			C.int(t.cols), C.int(q.rows), C.int(k.rows), C.float(eps), C.float(globalScale), C.int(t.rows))
 		metrics.RecordKernelDuration("Layer_QKV_Fused_Q6K", time.Since(t0_qkv))
 	} else {
-		normed.linearIntoInternal(q, qPart, globalScale)
-		normed.linearIntoInternal(k, kPart, globalScale)
+		qInput := normed
+		kInput := normed
+		qInput.linearIntoInternal(q, qPart, globalScale)
+		kInput.linearIntoInternal(k, kPart, globalScale)
 		normed.linearIntoInternal(v, vPart, globalScale)
+	}
+
+	if debugLayer {
+		fmt.Printf("DEBUG_LAYER: After QKV, layer %d\n", layerIdx)
 	}
 
 	// 3. RoPE (Batched)
@@ -1478,6 +1520,9 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		}
 	}
 	metrics.RecordKernelDuration("Layer_Attention", time.Since(t0_attn))
+	if debugLayer {
+		fmt.Printf("DEBUG_LAYER: After Attention, layer %d\n", layerIdx)
+	}
 
 	// 6. Attention Output Projection
 	resAtt := scratch.ResAtt
@@ -1580,6 +1625,10 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 			C.Metal_Add_F16(t.ctx.ref, t.buf, C.int(t.Offset), resFFN.buf, C.int(resFFN.Offset), t.buf, C.int(t.Offset), C.int(t.rows*t.cols))
 		}
 	}
+
+	if debugLayer {
+		fmt.Fprintf(os.Stderr, "DEBUG_LAYER: Completed layer %d\n", layerIdx)
+	}
 }
 func (t *Tensor) ropeInternal(posOffset, heads, headDim, seqLen int, ropeTheta float32) {
 	C.Metal_RoPE_F16(t.ctx.ref, t.buf, C.int(t.Offset), 1, C.int(seqLen), C.int(heads), C.int(headDim), C.int(posOffset), C.float(ropeTheta))
@@ -1620,10 +1669,17 @@ func (t *Tensor) Softmax() {
 func (t *Tensor) LinearToFP32_Into(weight *Tensor, out *Tensor) {
 	t.ctx.ExecMu.Lock()
 	defer t.ctx.ExecMu.Unlock()
+	fmt.Fprintf(os.Stderr, "DEBUG_OUTPUT: LinearToFP32_Into: t=[%d,%d] type=%v, weight=[%d,%d] type=%v, out=[%d,%d] type=%v\n",
+		t.rows, t.cols, t.dataType, weight.rows, weight.cols, weight.dataType, out.rows, out.cols, out.dataType)
 	switch weight.dataType {
 	case DataTypeQ6K:
 		// Output head logic: F16 input * Q6K weight -> F32 output
 		C.Metal_LinearQ6K_F16_F32(t.ctx.ref, weight.buf, C.int(weight.Offset),
+			t.buf, C.int(t.Offset), out.buf, C.int(out.Offset),
+			C.int(t.rows), C.int(weight.cols), C.int(weight.rows), 1.0)
+	case DataTypeQ4K:
+		// Q4K -> F32 (Output Head)
+		C.Metal_LinearQ4K_F16_F32(t.ctx.ref, weight.buf, C.int(weight.Offset),
 			t.buf, C.int(t.Offset), out.buf, C.int(out.Offset),
 			C.int(t.rows), C.int(weight.cols), C.int(weight.rows), 1.0)
 	case DataTypeQ4_0:
@@ -1771,6 +1827,9 @@ func (t *Tensor) EmbeddingLookup(row int, scale float32) *Tensor {
 	case DataTypeQ4K:
 		// Use optimized Q4K embedding kernel for better performance
 		C.Metal_Embedding_Q4K_Optimized(t.ctx.ref, t.buf, C.int(t.Offset), res.buf, C.int(res.Offset), C.int(row), C.int(t.cols), C.float(scale))
+	case DataTypeQ6K:
+		// Q6K embedding - use FP16 kernel after dequantization
+		C.Metal_Embedding_F16(t.ctx.ref, t.buf, C.int(t.Offset), res.buf, C.int(res.Offset), C.int(row), C.int(t.cols))
 	case DataTypeQ4_0:
 		C.Metal_EmbeddingQ4_0_F16(t.ctx.ref, t.buf, C.int(t.Offset), res.buf, C.int(res.Offset), C.int(row), C.int(t.cols))
 	default:

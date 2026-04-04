@@ -2,7 +2,7 @@
 
 ## Overview
 
-Longbow-Quarrel provides high-performance LLM inference via Metal GPU acceleration. Supports direct GGUF loading, Ollama model integration, and Apache Arrow Flight gRPC for embedding services.
+Longbow-Quarrel provides high-performance LLM inference via Metal GPU acceleration (macOS) or CUDA (Linux/NVIDIA). Supports direct GGUF loading and Ollama model integration.
 
 ## Supported Models & Quantization
 

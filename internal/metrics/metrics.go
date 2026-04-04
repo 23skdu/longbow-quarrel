@@ -908,3 +908,11 @@ func RecordGemma4HeadDims(slidingHeadDim, fullHeadDim int) {
 func RecordGemma4Context(length int) {
 	Gemma4ContextLength.Observe(float64(length))
 }
+
+func RecordGemma4QNormApplied() {
+	Gemma4QNormApplied.Inc()
+}
+
+func RecordGemma4KNormApplied() {
+	Gemma4KNormApplied.Inc()
+}
