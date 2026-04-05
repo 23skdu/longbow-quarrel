@@ -28,8 +28,8 @@ extern void cudaFusedRMSNormAdd(cudaStream_t stream, const void* input, const vo
 // TurboQuant kernel exports
 extern void cudaTurboQuantPolarQuant(cudaStream_t stream, const float* input, const float* rotationMatrix, int8_t* quantized, float* scaleOut, float* residual, int n, int bits);
 extern void cudaTurboQuantQJLTransform(cudaStream_t stream, const float* residual, const float* signMatrix, int8_t* quantized, float* scaleOut, int rows, int cols);
-extern void cudaTurboQuantEncode(cudaStream_t stream, const float* input, const float* rotationMatrix, const float* qjlMatrix, int8_t* output, float* scaleOut, float* qjlScaleOut, int blockSize, int qjlRows, int bits);
-extern void cudaTurboQuantDecode(cudaStream_t stream, const int8_t* input, const float* rotationMatrix, float* output, const float* scaleIn, int blockSize, int qjlRows);
+extern void cudaTurboQuantEncode(cudaStream_t stream, const float* input, const float* rotationMatrix, const float* qjlMatrix, int8_t* output, float* scaleOut, float* qjlScaleOut, int blockSize, int qjlRows, int numBlocks, int bits);
+extern void cudaTurboQuantDecode(cudaStream_t stream, const int8_t* input, const float* rotationMatrix, float* output, int blockSize, int qjlRows, int numBlocks);
 
 // Device properties structure for multi-GPU support
 typedef struct {
@@ -75,11 +75,13 @@ const (
 )
 
 type Tensor struct {
-	data     []float32
-	dims     []int
-	strides  []int
-	name     string
-	dataType DataType
+	ctx       *Context
+	rows      int
+	cols      int
+	sizeBytes int
+	cudaPtr   *CUDATensor // The underlying GPU tensor
+	name      string
+	dataType  DataType
 }
 
 func NewTensor(name string, data []float32) *Tensor {
@@ -93,29 +95,39 @@ func NewTensor(name string, data []float32) *Tensor {
 	}
 }
 
-func (t *Tensor) Dims() []int     { return t.dims }
-func (t *Tensor) Strides() []int  { return t.strides }
-func (t *Tensor) Data() []float32 { return t.data }
-func (t *Tensor) Name() string    { return t.name }
-func (t *Tensor) Free()           { t.data = nil }
-func (t *Tensor) ZeroInit()       { /* CUDA tensors handle this differently */ }
-func (t *Tensor) Rows() int {
-	if len(t.dims) < 1 {
-		return 0
+func (t *Tensor) Rows() int { return t.rows }
+func (t *Tensor) Cols() int { return t.cols }
+func (t *Tensor) Free() {
+	if t.cudaPtr != nil {
+		t.cudaPtr.Free()
+		t.cudaPtr = nil
 	}
-	return t.dims[0]
 }
-func (t *Tensor) Cols() int {
-	if len(t.dims) < 2 {
-		return 1
+func (t *Tensor) Data() []float32 {
+	if t.cudaPtr == nil {
+		return nil
 	}
-	return t.dims[1]
+	return t.cudaPtr.ToHostF32()
 }
+func (t *Tensor) Name() string { return t.name }
+func (t *Tensor) ZeroInit() {
+	if t.cudaPtr != nil {
+		t.ctx.cudaCtx.ZeroF16(t.cudaPtr)
+	}
+}
+func (t *Tensor) Dims() []int    { return []int{t.rows, t.cols} }
+func (t *Tensor) Strides() []int { return []int{t.cols, 1} }
 func (t *Tensor) ToHost() []float32 { return t.data }
 
 type Context struct {
 	device  int
 	cudaCtx *CUDAContext
+	mu      sync.Mutex
+	pool    map[string][]*Tensor
+
+	// TurboQuant Global Matrices
+	TQRotation *Tensor
+	TQQJL      *Tensor
 }
 
 func (c *Context) Synchronize() {
@@ -125,8 +137,60 @@ func (c *Context) Synchronize() {
 }
 
 func (c *Context) NewTensor(rows, cols int) *Tensor {
-	data := make([]float32, rows*cols)
-	return NewTensor(fmt.Sprintf("tensor_%dx%d", rows, cols), data)
+	return c.NewTensorWithType(rows, cols, DataTypeF16)
+}
+
+func (c *Context) NewTensorFP32(rows, cols int) *Tensor {
+	ct, err := c.cudaCtx.NewTensorFP32(rows, cols)
+	if err != nil {
+		panic(err)
+	}
+	return &Tensor{
+		ctx:       c,
+		rows:      rows,
+		cols:      cols,
+		cudaPtr:   ct,
+		dataType:  DataTypeF32,
+		sizeBytes: rows * cols * 4,
+	}
+}
+
+func (c *Context) NewTensorFromData(rows, cols int, dt DataType, data []byte) (*Tensor, error) {
+	// Map DataType to CUDADataType
+	var cdt C.CUDADataType
+	switch dt {
+	case DataTypeF16:
+		cdt = C.CUDA_DTYPE_F16
+	case DataTypeQ8_0:
+		cdt = C.CUDA_DTYPE_Q8_0
+	default:
+		cdt = C.CUDA_DTYPE_F16
+	}
+
+	ct, err := c.cudaCtx.NewTensorFromData(rows, cols, cdt, data)
+	if err != nil {
+		return nil, err
+	}
+	return &Tensor{
+		ctx:       c,
+		rows:      rows,
+		cols:      cols,
+		cudaPtr:   ct,
+		dataType:  dt,
+		sizeBytes: len(data),
+	}, nil
+}
+
+func (c *Context) NewTensorPooled(rows, cols int) *Tensor {
+	ct := c.cudaCtx.NewTensorPooled(rows, cols)
+	return &Tensor{
+		ctx:       c,
+		rows:      rows,
+		cols:      cols,
+		cudaPtr:   ct,
+		dataType:  DataTypeF16,
+		sizeBytes: rows * cols * 2,
+	}
 }
 
 func (c *Context) NewTensorFP32(rows, cols int) *Tensor {
@@ -142,11 +206,132 @@ func (c *Context) NewTensorPooled(rows, cols int) *Tensor {
 	return c.NewTensor(rows, cols)
 }
 
+func (c *Context) NewTurboTensor(rows, cols int, dt DataType, blockSize, qjlRows int) *Tensor {
+	numElements := rows * cols
+	numBlocks := numElements / blockSize
+	if numElements%blockSize != 0 {
+		numBlocks++
+	}
+	// Block format: [Polar(blockSize) + QJL(qjlRows) + Scale(4) + QJLScale(4)]
+	bytesPerBlock := blockSize + qjlRows + 8
+	sizeBytes := numBlocks * bytesPerBlock
+
+	ct, err := c.cudaCtx.NewTensorRaw(sizeBytes)
+	if err != nil {
+		panic(fmt.Sprintf("Failed to allocate CUDA TurboTensor: %v", err))
+	}
+
+	return &Tensor{
+		ctx:       c,
+		rows:      rows,
+		cols:      cols,
+		sizeBytes: sizeBytes,
+		cudaPtr:   ct,
+		dataType:  dt,
+	}
+}
+
 func (c *Context) NewTensorWithType(rows, cols int, dt DataType) *Tensor {
-	return c.NewTensor(rows, cols)
+	if dt == DataTypeTQ1_0 || dt == DataTypeTQ2_0 {
+		return c.NewTurboTensor(rows, cols, dt, 256, 64)
+	}
+
+	sizeBytes := rows * cols * 2 // FP16
+	ct, err := c.cudaCtx.NewTensor(rows, cols, C.CUDA_DTYPE_F16)
+	if err != nil {
+		panic(fmt.Sprintf("Failed to allocate CUDA Tensor: %v", err))
+	}
+
+	return &Tensor{
+		ctx:       c,
+		rows:      rows,
+		cols:      cols,
+		sizeBytes: sizeBytes,
+		cudaPtr:   ct,
+		dataType:  dt,
+	}
 }
 
 func (t *Tensor) StoreKV(v *Tensor, kCache, vCache *Tensor, pos, heads, headDim, windowSize int) {
+	if kCache.dataType == DataTypeTQ1_0 || kCache.dataType == DataTypeTQ2_0 {
+		t.storeKVTurbo(v, kCache, vCache, pos, heads, headDim, windowSize)
+		return
+	}
+
+	// Standard F16 StoreKV
+	C.cudaFusedAttention(t.ctx.cudaCtx.stream,
+		nil, nil, nil, nil, // Q, K, V, output not used for pure store
+		kCache.cudaPtr.devPtr, vCache.cudaPtr.devPtr,
+		1, C.int(heads), 1, C.int(pos+1), C.int(headDim),
+		1.0, 1) // useCache=1 signals store
+}
+
+func (t *Tensor) storeKVTurbo(v *Tensor, kCache, vCache *Tensor, pos, heads, headDim, windowSize int) {
+	ctx := t.ctx
+	if ctx.TQRotation == nil || ctx.TQQJL == nil {
+		panic("TurboQuant global matrices not initialized")
+	}
+
+	blockSize := 256
+	qjlRows := 64
+	numBlocks := (heads * headDim) / blockSize
+
+	// We assume t contains [K; V] or similar for the current step
+	// and we compress and store them at 'pos' in the cache.
+	
+	// Each block in cache: [Polar(256), QJL(64), Scale(4), QJLScale(4)]
+	// Cache offset for pos: pos * heads * headDim / blockSize * bytesPerBlock
+	bytesPerBlock := blockSize + qjlRows + 8
+	numBlocksPerRow := (heads * headDim) / blockSize
+	rowOffsetBytes := pos * numBlocksPerRow * bytesPerBlock
+
+    C.cudaTurboQuantEncode(ctx.cudaCtx.stream,
+        t.cudaPtr.devPtr, // Current step K
+        ctx.TQRotation.cudaPtr.devPtr,
+        ctx.TQQJL.cudaPtr.devPtr,
+        (*C.int8_t)(unsafe.Pointer(uintptr(kCache.cudaPtr.devPtr) + uintptr(rowOffsetBytes))),
+        nil, nil, // Scales are now handled in-kernel
+        C.int(blockSize), C.int(qjlRows), C.int(numBlocksPerRow), 4)
+
+    C.cudaTurboQuantEncode(ctx.cudaCtx.stream,
+        unsafe.Pointer(uintptr(t.cudaPtr.devPtr) + uintptr(vOffset)),
+        ctx.TQRotation.cudaPtr.devPtr,
+        ctx.TQQJL.cudaPtr.devPtr,
+        (*C.int8_t)(unsafe.Pointer(uintptr(vCache.cudaPtr.devPtr) + uintptr(rowOffsetBytes))),
+        nil, nil,
+        C.int(blockSize), C.int(qjlRows), C.int(numBlocksPerRow), 4)
+}
+
+func (t *Tensor) FetchKV(kCache, vCache *Tensor, seqLen, heads, headDim int) {
+	if kCache.dataType == DataTypeTQ1_0 || kCache.dataType == DataTypeTQ2_0 {
+		t.fetchKVTurbo(kCache, vCache, seqLen, heads, headDim)
+		return
+	}
+	// F16 Fetch (copy cache to t)
+	// Implementation depends on t's layout, usually used before attention.
+}
+
+func (t *Tensor) fetchKVTurbo(kCache, vCache *Tensor, seqLen, heads, headDim int) {
+	ctx := t.ctx
+	blockSize := 256
+	qjlRows := 64
+	bytesPerBlock := blockSize + qjlRows + 8
+	numBlocksPerRow := (heads * headDim) / blockSize
+
+	// Decompress all blocks for the sequence
+	totalBlocks := seqLen * numBlocksPerRow
+	
+	C.cudaTurboQuantDecode(ctx.cudaCtx.stream,
+		(*C.int8_t)(kCache.cudaPtr.devPtr),
+		ctx.TQRotation.cudaPtr.devPtr,
+		(*C.float)(t.cudaPtr.devPtr),
+		C.int(blockSize), C.int(qjlRows), C.int(totalBlocks))
+		
+	C.cudaTurboQuantDecode(ctx.cudaCtx.stream,
+		(*C.int8_t)(vCache.cudaPtr.devPtr),
+		ctx.TQRotation.cudaPtr.devPtr,
+		(*C.float)(unsafe.Pointer(uintptr(t.cudaPtr.devPtr) + uintptr(vOffset))),
+		C.int(blockSize), C.int(qjlRows), C.int(totalBlocks))
 }
 
 var cudaAllocatedBytes int64
