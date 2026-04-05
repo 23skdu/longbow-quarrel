@@ -287,6 +287,7 @@ func (t *Tensor) storeKVTurbo(v *Tensor, kCache, vCache *Tensor, pos, heads, hea
 	numBlocksPerRow := (heads * headDim) / blockSize
 	bytesPerBlock := blockSize + qjlRows + 8
 	rowOffsetBytes := uintptr((pos % windowSize) * numBlocksPerRow * bytesPerBlock)
+    fmt.Printf("DEBUG: StoreKV pos=%d, rowOffsetBytes=%d\n", pos, rowOffsetBytes)
 
     C.cudaTurboQuantEncode(ctx.cudaCtx.stream,
         (*C.float)(t.cudaPtr.devPtr),
