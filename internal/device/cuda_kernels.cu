@@ -1389,10 +1389,6 @@ __global__ void turboquant_encode_kernel(const float* __restrict__ input,
             *blockQJLScale = 1.0f; // QJL scale fixed at 1.0 for now
         }
     }
-    // Debug: print scale
-    if (tid == 0 && bid < 4) {
-        printf("Kernel Encode Block %d: val0=%f, maxAbs=%f, scale=%f\n", bid, blockInput[0], maxAbs, *blockScale);
-    }
 }
 
 __global__ void turboquant_decode_kernel(const int8_t* __restrict__ input,
@@ -1416,10 +1412,6 @@ __global__ void turboquant_decode_kernel(const int8_t* __restrict__ input,
     // Dequantize and store in shared memory for inverse rotation
     sdata_decode[tid] = (float)(blockInput[tid]) * scale;
     __syncthreads();
-
-    if (tid == 0 && bid < 8) {
-        printf("Kernel Decode Block %d: scale=%f, in0=%d, sdata0=%f\n", bid, scale, (int)blockInput[0], sdata_decode[0]);
-    }
 
     // Inverse Rotation: y = R^T * x
     float result = 0.0f;

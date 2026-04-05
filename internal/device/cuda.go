@@ -288,7 +288,6 @@ func (t *Tensor) storeKVTurbo(v *Tensor, kCache, vCache *Tensor, pos, heads, hea
 	numBlocksPerRow := (heads * headDim) / blockSize
 	bytesPerBlock := blockSize + qjlRows + 8
 	rowOffsetBytes := uintptr((pos % windowSize) * numBlocksPerRow * bytesPerBlock)
-    fmt.Printf("DEBUG: StoreKV pos=%d, rowOffsetBytes=%d\n", pos, rowOffsetBytes)
 
     C.cudaTurboQuantEncode(ctx.cudaCtx.stream,
         (*C.float)(t.cudaPtr.devPtr),
@@ -309,7 +308,6 @@ func (t *Tensor) storeKVTurbo(v *Tensor, kCache, vCache *Tensor, pos, heads, hea
 }
 
 func (t *Tensor) FetchKV(kCache, vCache *Tensor, seqLen, heads, headDim int) {
-    fmt.Printf("DEBUG: FetchKV called, seqLen=%d, heads=%d, headDim=%d, dt=%v\n", seqLen, heads, headDim, kCache.dataType)
 	if kCache.dataType == DataTypeTQ1_0 || kCache.dataType == DataTypeTQ2_0 {
 		t.fetchKVTurbo(kCache, vCache, seqLen, heads, headDim)
 		return
