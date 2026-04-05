@@ -678,11 +678,9 @@ func (t *CUDATensor) ReturnToPool() {
 }
 
 func (t *CUDATensor) ToHostF16AsF32() []float32 {
-	// Allocate []uint16 for host
-    n := t.rows * t.cols
-    if t.sizeBytes/2 < n {
-        n = t.sizeBytes / 2
-    }
+	if n == 0 {
+		return nil
+	}
 	hostData := make([]uint16, n)
 	C.cudaMemcpy(unsafe.Pointer(&hostData[0]), t.devPtr, C.size_t(n*2), C.cudaMemcpyDeviceToHost)
 	

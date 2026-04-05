@@ -77,8 +77,10 @@ func TestCUDA_StoreKV_TurboQuant(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+    kOutRT.rows = (pos + 1) * 2
+    kOutRT.cols = heads * headDim
     // Set dataType to F16 so FetchKV logic stays consistent
-    kOut := &Tensor{ctx: c, cudaPtr: kOutRT, rows: (pos + 1) * 2, cols: heads * headDim, dataType: DataTypeF16}
+    kOut := &Tensor{ctx: c, cudaPtr: kOutRT, rows: kOutRT.rows, cols: kOutRT.cols, dataType: DataTypeF16}
 
 	kOut.FetchKV(kCache, vCache, pos+1, heads, headDim)
     ctx.Synchronize()
