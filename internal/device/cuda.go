@@ -297,10 +297,9 @@ func (t *Tensor) storeKVTurbo(v *Tensor, kCache, vCache *Tensor, pos, heads, hea
         nil, nil, // Scales are now handled in-kernel
         C.int(blockSize), C.int(qjlRows), C.int(numBlocksPerRow), 4)
 
-	// V Encode (assuming V is offset by heads*headDim*2 bytes in t)
-	vOffset := heads * headDim * 2
+	// V Encode
     C.cudaTurboQuantEncode(ctx.cudaCtx.stream,
-        (*C.float)(unsafe.Pointer(uintptr(t.cudaPtr.devPtr) + uintptr(vOffset))),
+        (*C.float)(v.cudaPtr.devPtr),
         (*C.float)(ctx.TQRotation.cudaPtr.devPtr),
         (*C.float)(ctx.TQQJL.cudaPtr.devPtr),
         (*C.int8_t)(unsafe.Pointer(uintptr(vCache.cudaPtr.devPtr) + uintptr(rowOffsetBytes))),
