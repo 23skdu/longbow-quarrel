@@ -103,8 +103,8 @@ func TestCPU_StoreKV_TurboQuant(t *testing.T) {
 	ctx.TQRotation = rot
 	ctx.TQQJL = qjl
 
-	kCache := ctx.NewTurboTensor(windowSize, heads*headDim, DataTypeTQ1_0, headDim, qjlRows)
-	vCache := ctx.NewTurboTensor(windowSize, heads*headDim, DataTypeTQ1_0, headDim, qjlRows)
+	kCache := ctx.NewTurboTensor(windowSize, heads*headDim, DataTypeTQ2_0, headDim, qjlRows)
+	vCache := ctx.NewTurboTensor(windowSize, heads*headDim, DataTypeTQ2_0, headDim, qjlRows)
 
 	k := ctx.NewTensor(1, heads*headDim)
 	v := ctx.NewTensor(1, heads*headDim)

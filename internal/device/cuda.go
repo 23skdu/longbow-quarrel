@@ -288,6 +288,11 @@ func (t *Tensor) storeKVTurbo(v *Tensor, kCache, vCache *Tensor, pos, heads, hea
 	numBlocksPerRow := (heads * headDim) / blockSize
 	bytesPerBlock := blockSize + qjlRows + 8
 	rowOffsetBytes := uintptr((pos % windowSize) * numBlocksPerRow * bytesPerBlock)
+    
+    bits := 2
+    if kCache.dataType == DataTypeTQ2_0 {
+        bits = 4
+    }
 
     C.cudaTurboQuantEncode(ctx.cudaCtx.stream,
         (*C.float)(t.cudaPtr.devPtr),
@@ -295,7 +300,7 @@ func (t *Tensor) storeKVTurbo(v *Tensor, kCache, vCache *Tensor, pos, heads, hea
         (*C.float)(ctx.TQQJL.cudaPtr.devPtr),
         (*C.int8_t)(unsafe.Add(kCache.cudaPtr.devPtr, rowOffsetBytes)),
         nil, nil,
-        C.int(blockSize), C.int(qjlRows), C.int(numBlocksPerRow), 4)
+        C.int(blockSize), C.int(qjlRows), C.int(numBlocksPerRow), C.int(bits))
 
 	// V Encode
     C.cudaTurboQuantEncode(ctx.cudaCtx.stream,
@@ -304,7 +309,7 @@ func (t *Tensor) storeKVTurbo(v *Tensor, kCache, vCache *Tensor, pos, heads, hea
         (*C.float)(ctx.TQQJL.cudaPtr.devPtr),
         (*C.int8_t)(unsafe.Add(vCache.cudaPtr.devPtr, rowOffsetBytes)),
         nil, nil,
-        C.int(blockSize), C.int(qjlRows), C.int(numBlocksPerRow), 4)
+        C.int(blockSize), C.int(qjlRows), C.int(numBlocksPerRow), C.int(bits))
 }
 
 func (t *Tensor) FetchKV(kCache, vCache *Tensor, seqLen, heads, headDim int) {

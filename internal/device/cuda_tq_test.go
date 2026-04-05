@@ -42,8 +42,8 @@ func TestCUDA_StoreKV_TurboQuant(t *testing.T) {
     c.TQRotation = &Tensor{ctx: c, cudaPtr: rot, rows: headDim, cols: headDim, dataType: DataTypeF32}
     c.TQQJL = &Tensor{ctx: c, cudaPtr: qjl, rows: qjlRows, cols: headDim, dataType: DataTypeF32}
 
-	kCache := c.NewTurboTensor(windowSize, heads*headDim, DataTypeTQ1_0, headDim, qjlRows)
-	vCache := c.NewTurboTensor(windowSize, heads*headDim, DataTypeTQ1_0, headDim, qjlRows)
+	kCache := c.NewTurboTensor(windowSize, heads*headDim, DataTypeTQ2_0, headDim, qjlRows)
+	vCache := c.NewTurboTensor(windowSize, heads*headDim, DataTypeTQ2_0, headDim, qjlRows)
 
 	kHost := make([]float32, heads*headDim)
 	vHost := make([]float32, heads*headDim)
