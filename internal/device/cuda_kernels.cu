@@ -1405,7 +1405,7 @@ __global__ void turboquant_decode_kernel(const int8_t* __restrict__ input,
     int bytesPerBlock = blockSize + qjlRows + 8;
     const int8_t* blockInput = input + bid * bytesPerBlock;
     const float* blockScale = (const float*)((const char*)blockInput + blockSize + qjlRows);
-    float* blockOutput = output + bid * blockSize;
+    half* blockOutput = output + bid * blockSize;
 
     int tid = threadIdx.x;
     if (tid >= blockSize) return;
