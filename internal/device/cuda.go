@@ -286,15 +286,14 @@ func (t *Tensor) storeKVTurbo(v *Tensor, kCache, vCache *Tensor, pos, heads, hea
 	qjlRows := 64
 	numBlocksPerRow := (heads * headDim) / blockSize
 	bytesPerBlock := blockSize + qjlRows + 8
-	rowOffsetBytes := pos * numBlocksPerRow * bytesPerBlock
+	rowOffsetBytes := uintptr((pos % windowSize) * numBlocksPerRow * bytesPerBlock)
 
-	// K Encode
     C.cudaTurboQuantEncode(ctx.cudaCtx.stream,
-        (*C.float)(t.cudaPtr.devPtr), // Current step K
+        (*C.float)(t.cudaPtr.devPtr),
         (*C.float)(ctx.TQRotation.cudaPtr.devPtr),
         (*C.float)(ctx.TQQJL.cudaPtr.devPtr),
-        (*C.int8_t)(unsafe.Pointer(uintptr(kCache.cudaPtr.devPtr) + uintptr(rowOffsetBytes))),
-        nil, nil, // Scales are now handled in-kernel
+        (*C.int8_t)(unsafe.Add(kCache.cudaPtr.devPtr, rowOffsetBytes)),
+        nil, nil,
         C.int(blockSize), C.int(qjlRows), C.int(numBlocksPerRow), 4)
 
 	// V Encode
@@ -302,7 +301,7 @@ func (t *Tensor) storeKVTurbo(v *Tensor, kCache, vCache *Tensor, pos, heads, hea
         (*C.float)(v.cudaPtr.devPtr),
         (*C.float)(ctx.TQRotation.cudaPtr.devPtr),
         (*C.float)(ctx.TQQJL.cudaPtr.devPtr),
-        (*C.int8_t)(unsafe.Pointer(uintptr(vCache.cudaPtr.devPtr) + uintptr(rowOffsetBytes))),
+        (*C.int8_t)(unsafe.Add(vCache.cudaPtr.devPtr, rowOffsetBytes)),
         nil, nil,
         C.int(blockSize), C.int(qjlRows), C.int(numBlocksPerRow), 4)
 }
