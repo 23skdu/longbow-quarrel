@@ -71,16 +71,22 @@ func TestCUDA_StoreKV_TurboQuant(t *testing.T) {
     ctx.Synchronize()
 
 	// Test FetchKV
-	kOutT, err := ctx.NewTensorFP32(1, heads*headDim)
+    // We need space for seqLen * heads * headDim * 2 (K and V) elements in F16
+    totalElements := (pos + 1) * heads * headDim * 2
+	kOutRT, err := ctx.NewTensorRaw(totalElements * 2) // 2 bytes per F16
 	if err != nil {
 		t.Fatal(err)
 	}
-    kOut := &Tensor{ctx: c, cudaPtr: kOutT, rows: 1, cols: heads*headDim}
+    // Set dataType to F16 so FetchKV logic stays consistent
+    kOut := &Tensor{ctx: c, cudaPtr: kOutRT, rows: (pos + 1) * 2, cols: heads * headDim, dataType: DataTypeF16}
 
 	kOut.FetchKV(kCache, vCache, pos+1, heads, headDim)
     ctx.Synchronize()
 
-    kDecoded := kOutT.ToHostF32()
+    // KV are concatenated: [K_pos0, K_pos1, ..., V_pos0, V_pos1, ...]
+    // We want K_pos1.
+    allDecoded := kOutRT.ToHostF16AsF32()
+    kDecoded := allDecoded[heads*headDim : 2*heads*headDim]
 
 	// Since TQ is lossy, we only check that we got some non-zero values back
 	// that roughly match the signs of the input.

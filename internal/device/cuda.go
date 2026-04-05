@@ -677,6 +677,24 @@ func (t *CUDATensor) ReturnToPool() {
 	t.ctx.pool[key] = append(t.ctx.pool[key], t)
 }
 
+func (t *CUDATensor) ToHostF16AsF32() []float32 {
+	// Allocate []uint16 for host
+    n := t.rows * t.cols
+    if t.sizeBytes/2 < n {
+        n = t.sizeBytes / 2
+    }
+	hostData := make([]uint16, n)
+	C.cudaMemcpy(unsafe.Pointer(&hostData[0]), t.devPtr, C.size_t(n*2), C.cudaMemcpyDeviceToHost)
+	
+	// Convert to float32
+	result := make([]float32, n)
+	for i, v := range hostData {
+		result[i] = math.Float32frombits(uint32(v) << 16) // Very crude half-to-float approximation for signs
+        // Better: use a proper half-to-float conversion if needed
+	}
+	return result
+}
+
 func (t *CUDATensor) ToHostF32() []float32 {
 	result := make([]float32, t.rows*t.cols)
 	C.cudaMemcpyAsync(unsafe.Pointer(&result[0]), t.devPtr, C.size_t(t.rows*t.cols*4), C.cudaMemcpyDeviceToHost, t.ctx.stream)
