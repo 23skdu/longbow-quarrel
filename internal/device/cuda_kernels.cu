@@ -1396,7 +1396,7 @@ __global__ void turboquant_encode_kernel(const float* __restrict__ input,
 
 __global__ void turboquant_decode_kernel(const int8_t* __restrict__ input,
                                           const float* __restrict__ rotationMatrix,
-                                          float* __restrict__ output,
+                                          half* __restrict__ output,
                                           int blockSize, int qjlRows, int numBlocks) {
     int bid = blockIdx.x;
     if (bid >= numBlocks) return;
@@ -1461,7 +1461,7 @@ void cudaTurboQuantEncode(cudaStream_t stream, const float* input,
 }
 
 void cudaTurboQuantDecode(cudaStream_t stream, const int8_t* input,
-                          const float* rotationMatrix, float* output,
+                          const float* rotationMatrix, half* output,
                           const float* scaleIn, int blockSize, int qjlRows, int numBlocks) {
     int threadsPerBlock = 256;
     int sharedMem = blockSize * sizeof(float);

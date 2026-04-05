@@ -38,7 +38,7 @@ extern void cudaFusedRMSNormAdd(cudaStream_t stream, const void* input, const vo
 extern void cudaTurboQuantPolarQuant(cudaStream_t stream, const float* input, const float* rotationMatrix, int8_t* quantized, float* scaleOut, float* residual, int n, int bits);
 extern void cudaTurboQuantQJLTransform(cudaStream_t stream, const float* residual, const float* signMatrix, int8_t* quantized, float* scaleOut, int rows, int cols);
 extern void cudaTurboQuantEncode(cudaStream_t stream, const float* input, const float* rotationMatrix, const float* qjlMatrix, int8_t* output, float* scaleOut, float* qjlScaleOut, int blockSize, int qjlRows, int numBlocks, int bits);
-extern void cudaTurboQuantDecode(cudaStream_t stream, const int8_t* input, const float* rotationMatrix, float* output, int blockSize, int qjlRows, int numBlocks);
+extern void cudaTurboQuantDecode(cudaStream_t stream, const int8_t* input, const float* rotationMatrix, half* output, const float* scaleIn, int blockSize, int qjlRows, int numBlocks);
 
 // Device properties structure for multi-GPU support
 typedef struct {
@@ -325,21 +325,20 @@ func (t *Tensor) fetchKVTurbo(kCache, vCache *Tensor, seqLen, heads, headDim int
 
 	// Decompress all blocks for the sequence
 	totalBlocks := seqLen * numBlocksPerRow
+	vOffset := seqLen * heads * headDim * 2
 	
-	// K Decode
 	C.cudaTurboQuantDecode(ctx.cudaCtx.stream,
 		(*C.int8_t)(kCache.cudaPtr.devPtr),
 		(*C.float)(ctx.TQRotation.cudaPtr.devPtr),
-		(*C.float)(t.cudaPtr.devPtr),
-		C.int(blockSize), C.int(qjlRows), C.int(totalBlocks))
-		
-	// V Decode (offset in t)
-	vOffset := seqLen * heads * headDim * 2
+		(*C.half)(t.cudaPtr.devPtr),
+		nil, C.int(blockSize), C.int(qjlRows), C.int(totalBlocks))
+
+	// V Decode
 	C.cudaTurboQuantDecode(ctx.cudaCtx.stream,
 		(*C.int8_t)(vCache.cudaPtr.devPtr),
 		(*C.float)(ctx.TQRotation.cudaPtr.devPtr),
-		(*C.float)(unsafe.Pointer(uintptr(t.cudaPtr.devPtr) + uintptr(vOffset))),
-		C.int(blockSize), C.int(qjlRows), C.int(totalBlocks))
+		(*C.half)(unsafe.Pointer(uintptr(t.cudaPtr.devPtr)+uintptr(vOffset))),
+		nil, C.int(blockSize), C.int(qjlRows), C.int(totalBlocks))
 }
 
 var cudaAllocatedBytes int64
