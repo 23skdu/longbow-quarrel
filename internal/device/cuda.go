@@ -678,6 +678,7 @@ func (t *CUDATensor) ReturnToPool() {
 }
 
 func (t *CUDATensor) ToHostF16AsF32() []float32 {
+	n := t.rows * t.cols
 	if n == 0 {
 		return nil
 	}
