@@ -91,7 +91,9 @@ func TestCUDALayerScratch(t *testing.T) {
 	}
 	defer ctx.Free()
 
-	scratch := ctx.NewLayerScratch(4096, 4096, 14336, 32, 32, 128, 2048, 49152)
+	qNormDim := 512
+	kNormDim := 512
+	scratch := ctx.NewLayerScratch(4096, 4096, 14336, 32, 32, 128, 2048, 49152, qNormDim, kNormDim)
 
 	if scratch == nil {
 		t.Errorf("Layer scratch is nil")

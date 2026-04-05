@@ -77,13 +77,7 @@ func TestCUDA_StoreKV_TurboQuant(t *testing.T) {
 	}
     kOut := &Tensor{ctx: c, cudaPtr: kOutT, rows: 1, cols: heads*headDim}
 
-	vOutT, err := ctx.NewTensorFP32(1, heads*headDim)
-	if err != nil {
-		t.Fatal(err)
-	}
-    vOut := &Tensor{ctx: c, cudaPtr: vOutT, rows: 1, cols: heads*headDim}
-
-	kOut.FetchKV(vOut, kCache, vCache, pos, heads, headDim, windowSize)
+	kOut.FetchKV(kCache, vCache, pos+1, heads, headDim)
     ctx.Synchronize()
 
     kDecoded := kOutT.ToHostF32()

@@ -1,3 +1,4 @@
+//go:build !cuda
 package device
 
 import (
