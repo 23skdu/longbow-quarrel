@@ -15,7 +15,7 @@ func TestCUDA_StoreKV_TurboQuant(t *testing.T) {
 	defer ctx.Free()
 
 	heads := 4
-	headDim := 128
+	headDim := 256 // Match blockSize
 	windowSize := 5
 	qjlRows := 64
 
