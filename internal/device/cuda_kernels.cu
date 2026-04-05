@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include <float.h>
+#include <cuda_fp16.h>
 
 // =============================================================================
 // Standard Operations
