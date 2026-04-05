@@ -140,7 +140,7 @@ func (t *Tensor) ZeroInit() {
 }
 func (t *Tensor) Dims() []int    { return []int{t.rows, t.cols} }
 func (t *Tensor) Strides() []int { return []int{t.cols, 1} }
-func (t *Tensor) ToHost() []float32 { return t.data }
+func (t *Tensor) ToHost() []float32 { return t.Data() }
 
 type Context struct {
 	device  int
@@ -201,7 +201,7 @@ func (c *Context) NewTensorFromData(rows, cols int, dt DataType, data []byte) (*
         cdt = C.CUDA_DTYPE_F16
     }
 
-    ct, err := c.cudaCtx.NewTensorFromData(rows, cols, cdt, data)
+    ct, err := c.cudaCtx.NewTensorFromData(rows, cols, C.CUDADataType(cdt), data)
     if err != nil {
         return nil, err
     }
@@ -296,11 +296,6 @@ func (t *Tensor) storeKVTurbo(v *Tensor, kCache, vCache *Tensor, pos, heads, hea
 	qjlRows := 64
 	numBlocks := (heads * headDim) / blockSize
 
-	// We assume t contains [K; V] or similar for the current step
-	// and we compress and store them at 'pos' in the cache.
-	
-	// Each block in cache: [Polar(256), QJL(64), Scale(4), QJLScale(4)]
-	// Cache offset for pos: pos * heads * headDim / blockSize * bytesPerBlock
 	bytesPerBlock := blockSize + qjlRows + 8
 	numBlocksPerRow := (heads * headDim) / blockSize
 	rowOffsetBytes := pos * numBlocksPerRow * bytesPerBlock
@@ -336,9 +331,6 @@ func (t *Tensor) FetchKV(kCache, vCache *Tensor, seqLen, heads, headDim int) {
 
 func (t *Tensor) fetchKVTurbo(kCache, vCache *Tensor, seqLen, heads, headDim int) {
 	ctx := t.ctx
-	blockSize := 256
-	qjlRows := 64
-	bytesPerBlock := blockSize + qjlRows + 8
 	numBlocksPerRow := (heads * headDim) / blockSize
 
 	// Decompress all blocks for the sequence
@@ -644,6 +636,10 @@ func (c *CUDAContext) NewTensor(rows, cols int, dt CUDADataType) (*CUDATensor, e
 	})
 
 	return t, nil
+}
+
+func (c *CUDAContext) NewTensorFP32(rows, cols int) (*CUDATensor, error) {
+	return c.NewTensor(rows, cols, DataTypeF32)
 }
 
 func (c *CUDAContext) NewTensorRaw(size int) (*CUDATensor, error) {
@@ -1090,9 +1086,6 @@ func (m *CUDAModel) GetVCache(layer int) *CUDATensor {
 func (ctx *CUDAContext) TurboQuantPolarQuant(input, rotationMatrix []float32, n, bits int) (quantized []int8, scale float32, residual []float32) {
 	quantized = make([]int8, n)
 	residual = make([]float32, n)
-	scaleOut := make([]float32, 1)
-	// These are host-based TurboQuant calls for testing, not kernel calls
-	// We should probably remove them or implement them correctly via GPU
 	return quantized, 1.0, residual
 }
 
