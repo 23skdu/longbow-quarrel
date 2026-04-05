@@ -6,6 +6,10 @@
 #include <stdint.h>
 #include <string.h>
 
+#ifdef __x86_64__
+#pragma GCC target("avx2,fma")
+#endif
+
 static float horizontal_max_f32_avx2(__m256 v) {
     __m128 v_low = _mm256_castps256_ps128(v);
     __m128 v_high = _mm256_extractf128_ps(v, 1);

@@ -1,6 +1,9 @@
 //go:build amd64 && cgo
 #if defined(__x86_64__) || defined(_M_X64)
 #pragma GCC target("avx512f,avx512bw,fma")
+#ifdef __x86_64__
+#pragma GCC target("avx512f,avx512bw,avx512dq,avx512vl")
+#endif
 #include <immintrin.h>
 #include <math.h>
 #include <stdint.h>

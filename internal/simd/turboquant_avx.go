@@ -2,7 +2,7 @@
 package simd
 
 /*
-#cgo CFLAGS: -mavx2 -mfma
+#cgo CFLAGS: -mavx2
 void polar_quant_avx2(const float* input, const float* rotation_matrix, int8_t* quantized, float* scale_out, float* residual, int n, int bits);
 void qjl_transform_avx2(const float* residual, const float* sign_matrix, int8_t* quantized, float* scale_out, int rows, int cols);
 
