@@ -32,7 +32,8 @@ void polar_quant_avx2(const float* input, const float* rotation_matrix, int8_t* 
     if (n <= 0) return;
 
     __m256 v_max_abs = _mm256_setzero_ps();
-    float* rotated = (float*)__builtin_alloca(n * sizeof(float));
+    float rotated[1024]; // Safe for current use cases
+    if (n > 1024) return;
 
     // 1. Matrix-Vector Multiplication: y = R * x
     for (int i = 0; i < n; i++) {
@@ -66,7 +67,8 @@ void polar_quant_avx2(const float* input, const float* rotation_matrix, int8_t* 
     __m256 v_max_q = _mm256_set1_ps(max_quant_val);
     __m256 v_min_q = _mm256_set1_ps(-max_quant_val);
 
-    float* res_rotated = (float*)__builtin_alloca(n * sizeof(float));
+    float res_rotated[1024]; // Safe for current use cases
+    if (n > 1024) return;
 
     // 2. Quantize and calculate residual in rotated space
     int i = 0;
@@ -113,8 +115,9 @@ void polar_quant_avx2(const float* input, const float* rotation_matrix, int8_t* 
 void qjl_transform_avx2(const float* residual, const float* sign_matrix, int8_t* quantized, float* scale_out, int rows, int cols) {
     if (rows <= 0 || cols <= 0) return;
 
-    __m256 v_norm_sq = _mm256_setzero_ps();
-    float* projected = (float*)__builtin_alloca(rows * sizeof(float));
+    float norm_sq = 0.0f;
+    float projected[1024]; // Safe for current use cases
+    if (rows > 1024) return;
 
     for (int i = 0; i < rows; i++) {
         __m256 v_sum = _mm256_setzero_ps();
@@ -131,10 +134,9 @@ void qjl_transform_avx2(const float* residual, const float* sign_matrix, int8_t*
         }
         
         projected[i] = sum;
-        v_norm_sq = _mm256_add_ps(v_norm_sq, _mm256_set1_ps(sum * sum));
+        norm_sq += sum * sum;
     }
 
-    float norm_sq = horizontal_sum_f32_avx2(v_norm_sq);
     *scale_out = sqrtf(norm_sq / (float)rows);
 
     for (int i = 0; i < rows; i++) {
