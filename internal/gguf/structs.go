@@ -108,9 +108,12 @@ func (t *TensorInfo) SizeBytes() uint64 {
 	case GGMLTypeMXFP4:
 		return (numElements / 32) * 18 // Estimate for MXFP4
 	case GGMLTypeTQ1_0:
-		return (numElements / 256) * 160 // 4-bit plus 1-bit per element = 5 bits per element. 256 * 5 / 8 = 160
+		// Layout: [polar (256 bytes), qjl (64 bytes), scale (4 bytes), qjl_scale (4 bytes)]
+		// Total: 328 bytes per 256 elements
+		return (numElements / 256) * 328
 	case GGMLTypeTQ2_0:
-		return (numElements / 256) * 288 // 8-bit plus 1-bit per element = 9 bits per element. 256 * 9 / 8 = 288
+		// Same for TQ2 for now, or could use larger polar if desired.
+		return (numElements / 256) * 328
 	default:
 		return 0
 	}

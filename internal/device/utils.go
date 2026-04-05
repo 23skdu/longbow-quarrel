@@ -17,6 +17,8 @@ const (
 	DataTypeQ6_K            = DataTypeQ6K
 	DataTypeIQ4_NL DataType = 7
 	DataTypeMXFP4  DataType = 8
+	DataTypeTQ1_0  DataType = 9
+	DataTypeTQ2_0  DataType = 10
 )
 
 // Reference implementation of Float32 <-> Float16

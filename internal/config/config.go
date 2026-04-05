@@ -14,6 +14,15 @@ const (
 	PrecisionMixed
 )
 
+type KVCacheType int
+
+const (
+	KVCacheF32 KVCacheType = iota
+	KVCacheF16
+	KVCacheTQ1_0
+	KVCacheTQ2_0
+)
+
 type Config struct {
 	Architecture string
 	Dim          int
@@ -29,6 +38,7 @@ type Config struct {
 	WindowSize   int
 
 	PrecisionMode PrecisionMode
+	KVCacheType   KVCacheType
 	KVCacheSize   int
 
 	ExpertCount                   int

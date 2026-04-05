@@ -32,3 +32,9 @@ func RecordTurboQuantCompression(layer string, ratio float64) {
 func RecordTurboQuantLatency(duration float64) {
 	TurboQuantLatency.Observe(duration)
 }
+
+// RecordTurboQuantBatch records metrics for a batch of operations
+func RecordTurboQuantBatch(compressionRatio float64, totalLatency float64) {
+	TurboQuantCompressionRatio.WithLabelValues("batch").Set(compressionRatio)
+	TurboQuantLatency.Observe(totalLatency)
+}

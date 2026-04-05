@@ -1823,7 +1823,7 @@ void Metal_TurboQuant_PolarQuant(MetalContextRef ctx_ref, MetalBufferRef input,
                                   int offRot, MetalBufferRef quantized,
                                   int offQuant, MetalBufferRef scaleOut,
                                   int offScale, MetalBufferRef residual,
-                                  int offRes, int n, int bits) {
+                                  int offRes, int n, int numBlocks, int bits) {
   @autoreleasepool {
     MetalWrapper *wrapper = (__bridge MetalWrapper *)ctx_ref;
     id<MTLComputeCommandEncoder> encoder = [wrapper ensureEncoder];
@@ -1837,7 +1837,7 @@ void Metal_TurboQuant_PolarQuant(MetalContextRef ctx_ref, MetalBufferRef input,
     [encoder setBytes:&n length:sizeof(int) atIndex:5];
     [encoder setBytes:&bits length:sizeof(int) atIndex:6];
 
-    MTLSize gridSize = MTLSizeMake(n, 1, 1);
+    MTLSize gridSize = MTLSizeMake(numBlocks * n, 1, 1);
     MTLSize threadGroupSize = MTLSizeMake((n < 256) ? n : 256, 1, 1);
     [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadGroupSize];
     [wrapper barrier];
@@ -1848,7 +1848,7 @@ void Metal_TurboQuant_QJLTransform(MetalContextRef ctx_ref, MetalBufferRef resid
                                     int offRes, MetalBufferRef signMatrix,
                                     int offSign, MetalBufferRef quantized,
                                     int offQuant, MetalBufferRef scaleOut,
-                                    int offScale, int rows, int cols) {
+                                    int offScale, int rows, int cols, int numBlocks) {
   @autoreleasepool {
     MetalWrapper *wrapper = (__bridge MetalWrapper *)ctx_ref;
     id<MTLComputeCommandEncoder> encoder = [wrapper ensureEncoder];
@@ -1861,7 +1861,7 @@ void Metal_TurboQuant_QJLTransform(MetalContextRef ctx_ref, MetalBufferRef resid
     [encoder setBytes:&rows length:sizeof(int) atIndex:4];
     [encoder setBytes:&cols length:sizeof(int) atIndex:5];
 
-    MTLSize gridSize = MTLSizeMake(rows, 1, 1);
+    MTLSize gridSize = MTLSizeMake(numBlocks * rows, 1, 1);
     MTLSize threadGroupSize = MTLSizeMake((rows < 256) ? rows : 256, 1, 1);
     [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadGroupSize];
     [wrapper barrier];
@@ -1874,7 +1874,7 @@ void Metal_TurboQuant_Encode(MetalContextRef ctx_ref, MetalBufferRef input,
                               int offQJL, MetalBufferRef output,
                               int offOut, MetalBufferRef scaleOut,
                               int offScale, MetalBufferRef qjlScaleOut,
-                              int offQJLScale, int blockSize, int qjlRows, int bits) {
+                              int offQJLScale, int blockSize, int qjlRows, int numBlocks, int bits) {
   @autoreleasepool {
     MetalWrapper *wrapper = (__bridge MetalWrapper *)ctx_ref;
     id<MTLComputeCommandEncoder> encoder = [wrapper ensureEncoder];
@@ -1890,8 +1890,8 @@ void Metal_TurboQuant_Encode(MetalContextRef ctx_ref, MetalBufferRef input,
     [encoder setBytes:&qjlRows length:sizeof(int) atIndex:7];
     [encoder setBytes:&bits length:sizeof(int) atIndex:8];
 
-    MTLSize gridSize = MTLSizeMake(qjlRows, 1, 1);
-    MTLSize threadGroupSize = MTLSizeMake((qjlRows < 256) ? qjlRows : 256, 1, 1);
+    MTLSize gridSize = MTLSizeMake(numBlocks * blockSize, 1, 1);
+    MTLSize threadGroupSize = MTLSizeMake((blockSize < 256) ? blockSize : 256, 1, 1);
     [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadGroupSize];
     [wrapper barrier];
   }
@@ -1901,7 +1901,7 @@ void Metal_TurboQuant_Decode(MetalContextRef ctx_ref, MetalBufferRef input,
                               int offInput, MetalBufferRef rotationMatrix,
                               int offRot, MetalBufferRef output,
                               int offOut, MetalBufferRef scaleIn,
-                              int offScale, int blockSize, int qjlRows) {
+                              int offScale, int blockSize, int qjlRows, int numBlocks) {
   @autoreleasepool {
     MetalWrapper *wrapper = (__bridge MetalWrapper *)ctx_ref;
     id<MTLComputeCommandEncoder> encoder = [wrapper ensureEncoder];
@@ -1914,7 +1914,7 @@ void Metal_TurboQuant_Decode(MetalContextRef ctx_ref, MetalBufferRef input,
     [encoder setBytes:&blockSize length:sizeof(int) atIndex:4];
     [encoder setBytes:&qjlRows length:sizeof(int) atIndex:5];
 
-    MTLSize gridSize = MTLSizeMake(blockSize, 1, 1);
+    MTLSize gridSize = MTLSizeMake(numBlocks * blockSize, 1, 1);
     MTLSize threadGroupSize = MTLSizeMake((blockSize < 256) ? blockSize : 256, 1, 1);
     [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadGroupSize];
     [wrapper barrier];

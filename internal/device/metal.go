@@ -53,24 +53,24 @@ void Metal_TurboQuant_PolarQuant(MetalContextRef ctx, MetalBufferRef input,
                                   int offRot, MetalBufferRef quantized,
                                   int offQuant, MetalBufferRef scaleOut,
                                   int offScale, MetalBufferRef residual,
-                                  int offRes, int n, int bits);
+                                  int offRes, int n, int numBlocks, int bits);
 void Metal_TurboQuant_QJLTransform(MetalContextRef ctx, MetalBufferRef residual,
                                     int offRes, MetalBufferRef signMatrix,
                                     int offSign, MetalBufferRef quantized,
                                     int offQuant, MetalBufferRef scaleOut,
-                                    int offScale, int rows, int cols);
+                                    int offScale, int rows, int cols, int numBlocks);
 void Metal_TurboQuant_Encode(MetalContextRef ctx, MetalBufferRef input,
                               int offInput, MetalBufferRef rotationMatrix,
                               int offRot, MetalBufferRef qjlMatrix,
                               int offQJL, MetalBufferRef output,
                               int offOut, MetalBufferRef scaleOut,
                               int offScale, MetalBufferRef qjlScaleOut,
-                              int offQJLScale, int blockSize, int qjlRows, int bits);
+                              int offQJLScale, int blockSize, int qjlRows, int numBlocks, int bits);
 void Metal_TurboQuant_Decode(MetalContextRef ctx, MetalBufferRef input,
                               int offInput, MetalBufferRef rotationMatrix,
                               int offRot, MetalBufferRef output,
                               int offOut, MetalBufferRef scaleIn,
-                              int offScale, int blockSize, int qjlRows);
+                              int offScale, int blockSize, int qjlRows, int numBlocks);
 */
 import "C"
 import (
@@ -111,6 +111,10 @@ type Context struct {
 	mu     sync.Mutex
 	pool   map[string][]*Tensor // pool by size key "RxCxType"
 	ExecMu sync.Mutex           // Execution lock for Metal command encoding
+	
+	// TurboQuant Global Matrices
+	TQRotation *Tensor
+	TQQJL      *Tensor
 }
 
 func NewContext() *Context {
@@ -541,6 +545,17 @@ func (c *Context) NewTensorWithType(rows, cols int, dt DataType) *Tensor {
 		numElements := rows * cols
 		numBlocks := numElements / 32
 		sb = numBlocks * 18
+	case DataTypeTQ1_0:
+		// TQ1_0: 1-bit + residual. BlockSize=256, QJLRows=64
+		// MVP: 1 byte per element for now (simpler kernel)
+		numElements := rows * cols
+		numBlocks := numElements / 256
+		sb = numBlocks * (256 + 64) // Primary + Secondary
+	case DataTypeTQ2_0:
+		// TQ2_0: 2-bit + residual. BlockSize=256, QJLRows=64
+		numElements := rows * cols
+		numBlocks := numElements / 256
+		sb = numBlocks * (256 + 64)
 	}
 
 	if atomic.LoadInt64(&allocatedBytes)+int64(sb) > MaxGPUMemory {
@@ -561,17 +576,40 @@ func (c *Context) NewTensorWithType(rows, cols int, dt DataType) *Tensor {
 
 	runtime.SetFinalizer(t, func(ft *Tensor) {
 		if ft.buf != nil {
-			C.Metal_FreeBuffer(ft.ctx.ref, ft.buf)
-			traceAlloc(ft, -int64(ft.sizeBytes), "FinalizerWithType")
-			metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
+			ft.ctx.mu.Lock()
+			defer ft.ctx.mu.Unlock()
+			if ft.ctx.ref != nil {
+				C.Metal_FreeBuffer(ft.ctx.ref, ft.buf)
+				traceAlloc(ft, -int64(ft.sizeBytes), "FinalizerWithType")
+				metrics.RecordGPUMemory(atomic.LoadInt64(&allocatedBytes))
+			}
 		}
 	})
 	return t
 }
 
+func (c *Context) TurboQuantEncode(input *Tensor, rotationMatrix *Tensor, qjlMatrix *Tensor, output *Tensor, scaleOut *Tensor, qjlScaleOut *Tensor, blockSize, qjlRows, bits int) {
+	c.ExecMu.Lock()
+	defer c.ExecMu.Unlock()
+	numBlocks := input.rows * input.cols / blockSize
+	C.Metal_TurboQuant_Encode(c.ref, input.buf, C.int(input.Offset), rotationMatrix.buf, C.int(rotationMatrix.Offset),
+		qjlMatrix.buf, C.int(qjlMatrix.Offset), output.buf, C.int(output.Offset),
+		scaleOut.buf, C.int(scaleOut.Offset), qjlScaleOut.buf, C.int(qjlScaleOut.Offset),
+		C.int(blockSize), C.int(qjlRows), C.int(numBlocks), C.int(bits))
+}
+
+func (c *Context) TurboQuantDecode(input *Tensor, rotationMatrix *Tensor, output *Tensor, scaleIn *Tensor, blockSize, qjlRows int) {
+	c.ExecMu.Lock()
+	defer c.ExecMu.Unlock()
+	numBlocks := output.rows * output.cols / blockSize
+	C.Metal_TurboQuant_Decode(c.ref, input.buf, C.int(input.Offset), rotationMatrix.buf, C.int(rotationMatrix.Offset),
+		output.buf, C.int(output.Offset), scaleIn.buf, C.int(scaleIn.Offset),
+		C.int(blockSize), C.int(qjlRows), C.int(numBlocks))
+}
+
 // NewTensorPooled attempts to reuse tensor from pool (defaults to F16)
-func (c *Context) newTensorPooledInternal(rows, cols int) *Tensor {
-	key := fmt.Sprintf("%dx%dx%d", rows, cols, DataTypeF16)
+func (c *Context) newTensorPooledWithTypeInternal(rows, cols int, dt DataType) *Tensor {
+	key := fmt.Sprintf("%dx%dx%d", rows, cols, dt)
 	c.mu.Lock()
 	if tensors, ok := c.pool[key]; ok && len(tensors) > 0 {
 		t := tensors[len(tensors)-1]
@@ -580,13 +618,19 @@ func (c *Context) newTensorPooledInternal(rows, cols int) *Tensor {
 		return t
 	}
 	c.mu.Unlock()
-	return c.newTensorInternal(rows, cols)
+	return c.NewTensorWithType(rows, cols, dt)
+}
+
+func (c *Context) NewTensorPooledWithType(rows, cols int, dt DataType) *Tensor {
+	c.ExecMu.Lock()
+	defer c.ExecMu.Unlock()
+	return c.newTensorPooledWithTypeInternal(rows, cols, dt)
 }
 
 func (c *Context) NewTensorPooled(rows, cols int) *Tensor {
 	c.ExecMu.Lock()
 	defer c.ExecMu.Unlock()
-	return c.newTensorPooledInternal(rows, cols)
+	return c.newTensorPooledWithTypeInternal(rows, cols, DataTypeF16)
 }
 
 // ReturnToPool returns tensor to pool for reuse.
@@ -1892,6 +1936,58 @@ func (t *Tensor) EmbeddingLookup(row int, scale float32) *Tensor {
 }
 
 func (t *Tensor) storeKVInternal(v *Tensor, kCache, vCache *Tensor, pos, heads, headDim, windowSize int) {
+	if kCache.dataType == DataTypeTQ1_0 || kCache.dataType == DataTypeTQ2_0 {
+		// TurboQuant StoreKV
+		bits := 2
+		if kCache.dataType == DataTypeTQ2_0 {
+			bits = 4
+		}
+		
+		// For TurboQuant KV Cache, we use headDim as the blockSize
+		blockSize := headDim 
+		qjlRows := 64 // Consistent with CPU device logic
+		numBlocks := heads // Each head is one or more blocks? 
+		// Actually, if headDim is blockSize, then each head is 1 block.
+		
+		if t.ctx.TQRotation == nil || t.ctx.TQQJL == nil {
+			// Fallback to F16 if matrices are missing
+			C.Metal_StoreKV_F16(t.ctx.ref, t.buf, C.int(t.Offset), v.buf, C.int(v.Offset), kCache.buf, C.int(kCache.Offset), vCache.buf, C.int(vCache.Offset), C.int(pos), C.int(heads), C.int(headDim), C.int(windowSize))
+			return
+		}
+
+		// K Cache encoding
+		// We need to calculate the physical offset in the circular buffer
+		// The kernel handles modulo windowSize internally for non-TurboQuant.
+		// For TurboQuant, we should probably pass the physical index too.
+		physicalPos := pos
+		if windowSize > 0 {
+			physicalPos = pos % windowSize
+		}
+		
+		// Each head is encoded separately
+		// Note: The TurboQuant Meta kernels might handle multiple blocks.
+		// 1 head = headDim elements.
+		
+		// K Encode
+		C.Metal_TurboQuant_Encode(t.ctx.ref, t.buf, C.int(t.Offset), 
+			t.ctx.TQRotation.buf, C.int(t.ctx.TQRotation.Offset),
+			t.ctx.TQQJL.buf, C.int(t.ctx.TQQJL.Offset),
+			kCache.buf, C.int(kCache.Offset + physicalPos * heads * (blockSize + qjlRows + 8)),
+			kCache.buf, C.int(kCache.Offset + physicalPos * heads * (blockSize + qjlRows + 8) + heads * (blockSize + qjlRows)), // scale offset
+			kCache.buf, C.int(kCache.Offset + physicalPos * heads * (blockSize + qjlRows + 8) + heads * (blockSize + qjlRows) + 4), // qjlScale offset
+			C.int(blockSize), C.int(qjlRows), C.int(heads), C.int(bits))
+			
+		// V Encode
+		C.Metal_TurboQuant_Encode(t.ctx.ref, v.buf, C.int(v.Offset), 
+			t.ctx.TQRotation.buf, C.int(t.ctx.TQRotation.Offset),
+			t.ctx.TQQJL.buf, C.int(t.ctx.TQQJL.Offset),
+			vCache.buf, C.int(vCache.Offset + physicalPos * heads * (blockSize + qjlRows + 8)),
+			vCache.buf, C.int(vCache.Offset + physicalPos * heads * (blockSize + qjlRows + 8) + heads * (blockSize + qjlRows)), // scale offset
+			vCache.buf, C.int(vCache.Offset + physicalPos * heads * (blockSize + qjlRows + 8) + heads * (blockSize + qjlRows) + 4), // qjlScale offset
+			C.int(blockSize), C.int(qjlRows), C.int(heads), C.int(bits))
+			
+		return
+	}
 	C.Metal_StoreKV_F16(t.ctx.ref, t.buf, C.int(t.Offset), v.buf, C.int(v.Offset), kCache.buf, C.int(kCache.Offset), vCache.buf, C.int(vCache.Offset), C.int(pos), C.int(heads), C.int(headDim), C.int(windowSize))
 }
 
@@ -1899,6 +1995,40 @@ func (t *Tensor) StoreKV(v *Tensor, kCache, vCache *Tensor, pos, heads, headDim,
 	t.ctx.ExecMu.Lock()
 	defer t.ctx.ExecMu.Unlock()
 	t.storeKVInternal(v, kCache, vCache, pos, heads, headDim, windowSize)
+}
+
+func (t *Tensor) FetchKV(v *Tensor, kCache, vCache *Tensor, pos, heads, headDim, windowSize int) {
+	t.ctx.ExecMu.Lock()
+	defer t.ctx.ExecMu.Unlock()
+	
+	if kCache.dataType == DataTypeTQ1_0 || kCache.dataType == DataTypeTQ2_0 {
+		blockSize := headDim
+		qjlRows := 64
+		physicalPos := pos
+		if windowSize > 0 {
+			physicalPos = pos % windowSize
+		}
+		
+		// K Decode
+		C.Metal_TurboQuant_Decode(t.ctx.ref, kCache.buf, C.int(kCache.Offset + physicalPos * heads * (blockSize + qjlRows + 8)),
+			t.ctx.TQRotation.buf, C.int(t.ctx.TQRotation.Offset),
+			t.buf, C.int(t.Offset),
+			kCache.buf, C.int(kCache.Offset + physicalPos * heads * (blockSize + qjlRows + 8) + heads * (blockSize + qjlRows)), // scale offset
+			C.int(blockSize), C.int(qjlRows), C.int(heads))
+			
+		// V Decode
+		C.Metal_TurboQuant_Decode(t.ctx.ref, vCache.buf, C.int(vCache.Offset + physicalPos * heads * (blockSize + qjlRows + 8)),
+			t.ctx.TQRotation.buf, C.int(t.ctx.TQRotation.Offset),
+			v.buf, C.int(v.Offset),
+			vCache.buf, C.int(vCache.Offset + physicalPos * heads * (blockSize + qjlRows + 8) + heads * (blockSize + qjlRows)), // scale offset
+			C.int(blockSize), C.int(qjlRows), C.int(heads))
+		return
+	}
+	
+	// Standard F16 copy
+	count := heads * headDim
+	C.Metal_Copy_F16(t.ctx.ref, kCache.buf, C.int(kCache.Offset + pos * count * 2), t.buf, C.int(t.Offset), C.int(count))
+	C.Metal_Copy_F16(t.ctx.ref, vCache.buf, C.int(vCache.Offset + pos * count * 2), v.buf, C.int(v.Offset), C.int(count))
 }
 
 func (t *Tensor) attentionInternal(kCache, vCache *Tensor, pos, numHeads, kvHeads, headDim, ctxLen, windowSize int) *Tensor {

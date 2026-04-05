@@ -35,6 +35,38 @@ func TestPolarQuant(t *testing.T) {
 	}
 }
 
+func TestTurboQuantRoundtrip(t *testing.T) {
+	n := 256
+	input := make([]float32, n)
+	for i := range input {
+		input[i] = float32(math.Sin(float64(i)))
+	}
+
+	rot := GenerateRandomOrthogonalMatrix(n)
+	qjl := GenerateRandomSignMatrix(64, n)
+
+	data, err := QuantizeTurboQuant(input, rot, qjl, n, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	output, err := DequantizeTurboQuant(data, rot, qjl, n)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(output) != n {
+		t.Errorf("got %d, want %d", len(output), n)
+	}
+
+	// Check if reconstruction is somewhat reasonable (allow higher error since it's very lossy)
+	for i := 0; i < 10; i++ {
+		if math.Abs(float64(input[i]-output[i])) > 0.5 {
+			t.Errorf("large error at %d: in=%f, out=%f", i, input[i], output[i])
+		}
+	}
+}
+
 func TestQJLTransform(t *testing.T) {
 	rows := 4
 	cols := 4

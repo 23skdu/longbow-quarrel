@@ -72,9 +72,29 @@ func (c *SlidingWindowKVCache) Init(ctx *device.Context, config config.Config) e
 		return fmt.Errorf("invalid config: kvDim=0")
 	}
 
+	// Determine data type
+	dt := device.DataTypeF32
+	switch config.KVCacheType {
+	case config.KVCacheF16:
+		dt = device.DataTypeF16
+	case config.KVCacheTQ1_0:
+		dt = device.DataTypeTQ1_0
+	case config.KVCacheTQ2_0:
+		dt = device.DataTypeTQ2_0
+	}
+
 	// Allocate tensors for each layer with size = WindowSize
 	for i := 0; i < c.layers; i++ {
-		k := ctx.NewTensor(c.windowSize, kvDim)
+		var k, v *device.Tensor
+		if dt == device.DataTypeTQ1_0 || dt == device.DataTypeTQ2_0 {
+			// For TurboQuant KV Cache, we use headDim as the block size
+			k = ctx.NewTurboTensor(c.windowSize, kvDim, dt, c.headDim, 64)
+			v = ctx.NewTurboTensor(c.windowSize, kvDim, dt, c.headDim, 64)
+		} else {
+			k = ctx.NewTensorWithType(c.windowSize, kvDim, dt)
+			v = ctx.NewTensorWithType(c.windowSize, kvDim, dt)
+		}
+
 		if k == nil {
 			c.Free()
 			return fmt.Errorf("failed to allocate K cache for layer %d", i)
@@ -83,7 +103,6 @@ func (c *SlidingWindowKVCache) Init(ctx *device.Context, config config.Config) e
 		k.ZeroInit()
 		c.kCache[i] = k
 
-		v := ctx.NewTensor(c.windowSize, kvDim)
 		if v == nil {
 			c.Free()
 			return fmt.Errorf("failed to allocate V cache for layer %d", i)
@@ -97,6 +116,11 @@ func (c *SlidingWindowKVCache) Init(ctx *device.Context, config config.Config) e
 
 	// Record initial capacity
 	totalBytes := int64(c.layers * 2 * c.windowSize * kvDim * 2)
+	if dt == device.DataTypeTQ1_0 {
+		// Approximation for metrics: TQ1 is roughly 1-2 bits per element
+		// Real size is in rawData.
+		totalBytes = int64(c.layers * 2 * c.windowSize * (c.headDim + 64 + 8) * c.kvHeads)
+	}
 	metrics.RecordKVCacheStats(totalBytes, 0)
 
 	return nil

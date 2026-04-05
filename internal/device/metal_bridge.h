@@ -358,7 +358,32 @@ void Metal_MOE_ExpertGateUpSwiGLU(MetalContextRef ctx, MetalBufferRef input,
                                   int offIndices, MetalBufferRef expertWeights,
                                   int offWeights, MetalBufferRef output,
                                   int offOutput, int batchSize, int dim,
-                                  int hiddenDim, int topK);
+    int hiddenDim, int topK);
+
+// TurboQuant Kernels
+void Metal_TurboQuant_PolarQuant(MetalContextRef ctx, MetalBufferRef input,
+                                  int offInput, MetalBufferRef rotationMatrix,
+                                  int offRot, MetalBufferRef quantized,
+                                  int offQuant, MetalBufferRef scaleOut,
+                                  int offScale, MetalBufferRef residual,
+                                  int offRes, int n, int numBlocks, int bits);
+void Metal_TurboQuant_QJLTransform(MetalContextRef ctx, MetalBufferRef residual,
+                                    int offRes, MetalBufferRef signMatrix,
+                                    int offSign, MetalBufferRef quantized,
+                                    int offQuant, MetalBufferRef scaleOut,
+                                    int offScale, int rows, int cols, int numBlocks);
+void Metal_TurboQuant_Encode(MetalContextRef ctx, MetalBufferRef input,
+                              int offInput, MetalBufferRef rotationMatrix,
+                              int offRot, MetalBufferRef qjlMatrix,
+                              int offQJL, MetalBufferRef output,
+                              int offOut, MetalBufferRef scaleOut,
+                              int offScale, MetalBufferRef qjlScaleOut,
+                              int offQJLScale, int blockSize, int qjlRows, int numBlocks, int bits);
+void Metal_TurboQuant_Decode(MetalContextRef ctx, MetalBufferRef input,
+                              int offInput, MetalBufferRef rotationMatrix,
+                              int offRot, MetalBufferRef output,
+                              int offOut, MetalBufferRef scaleIn,
+                              int offScale, int blockSize, int qjlRows, int numBlocks);
 
 #ifdef __cplusplus
 }

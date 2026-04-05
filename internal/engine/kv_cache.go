@@ -43,19 +43,19 @@ type TensorKVCache struct {
 }
 
 // Init initializes the cache tensors
-func (c *TensorKVCache) Init(ctx *device.Context, config config.Config) error {
+func (c *TensorKVCache) Init(ctx *device.Context, cfg config.Config) error {
 	c.ctx = ctx
-	c.config = config
-	c.kvHeads = config.KVHeads
-	c.headDim = config.HeadDim
+	c.config = cfg
+	c.kvHeads = cfg.KVHeads
+	c.headDim = cfg.HeadDim
 
 	// Determine context length (priority: KVCacheSize config, then WindowSize, then SeqLen, default 2048)
-	c.contextLen = config.KVCacheSize
+	c.contextLen = cfg.KVCacheSize
 	if c.contextLen == 0 {
-		c.contextLen = config.WindowSize
+		c.contextLen = cfg.WindowSize
 	}
 	if c.contextLen == 0 {
-		c.contextLen = config.SeqLen
+		c.contextLen = cfg.SeqLen
 		// SAFETY: If SeqLen is huge (e.g. 1M for Nemotron), cap it to 8192 to prevent OOM
 		// unless explicitly overridden by WindowSize or KVCacheSize.
 		if c.contextLen > 8192 {
@@ -67,7 +67,7 @@ func (c *TensorKVCache) Init(ctx *device.Context, config config.Config) error {
 		c.contextLen = 2048 // Default fallback
 	}
 
-	c.layers = config.Layers
+	c.layers = cfg.Layers
 	if c.layers == 0 {
 		return fmt.Errorf("invalid config: layers=0")
 	}
@@ -80,18 +80,36 @@ func (c *TensorKVCache) Init(ctx *device.Context, config config.Config) error {
 		return fmt.Errorf("invalid config: kvDim=0")
 	}
 
+	// Determine data type
+	dt := device.DataTypeF32
+	switch cfg.KVCacheType {
+	case config.KVCacheF16:
+		dt = device.DataTypeF16
+	case config.KVCacheTQ1_0:
+		dt = device.DataTypeTQ1_0
+	case config.KVCacheTQ2_0:
+		dt = device.DataTypeTQ2_0
+	}
+
 	// Allocate tensors for each layer
 	for i := 0; i < c.layers; i++ {
 		// K cache: [ContextLen, KVDim]
-		k := ctx.NewTensor(c.contextLen, kvDim)
+		var k, v *device.Tensor
+		if dt == device.DataTypeTQ1_0 || dt == device.DataTypeTQ2_0 {
+			// For TurboQuant KV Cache, we use headDim as the block size
+			k = ctx.NewTurboTensor(c.contextLen, kvDim, dt, c.headDim, 64)
+			v = ctx.NewTurboTensor(c.contextLen, kvDim, dt, c.headDim, 64)
+		} else {
+			k = ctx.NewTensorWithType(c.contextLen, kvDim, dt)
+			v = ctx.NewTensorWithType(c.contextLen, kvDim, dt)
+		}
+
 		if k == nil {
 			c.Free() // Cleanup what we allocated so far
 			return fmt.Errorf("failed to allocate K cache for layer %d", i)
 		}
 		c.kCache[i] = k
 
-		// V cache: [ContextLen, KVDim]
-		v := ctx.NewTensor(c.contextLen, kvDim)
 		if v == nil {
 			c.Free()
 			return fmt.Errorf("failed to allocate V cache for layer %d", i)

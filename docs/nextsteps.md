@@ -3,7 +3,7 @@
 ## Executive Summary
 
 | Feature | Status | Priority |
-|---------|--------|----------|
+| :--- | :--- | :--- |
 | **Metal Backend (Apple)** | ✅ RESTORED | - |
 | **CUDA Backend (Linux)** | ✅ IMPLEMENTED | - |
 | **Test Coverage** | ✅ IMPROVED (36.8% → 46.8%) | - |
@@ -15,6 +15,7 @@
 | **All High/Medium Priority Items** | ✅ COMPLETE | - |
 
 ## TurboQuant KV Cache Support Goals
+
 - ✅ Design GGUF layout for `TQ1_0` and `TQ2_0` (turbo4 and turbo8).
 - ✅ Integrate Prometheus metrics and unit/fuzz tests.
 - ✅ Develop native Go CPU stubs for development.
@@ -22,40 +23,111 @@
 
 ### GPU Kernel Development Steps (Required for MVP)
 
-#### 1. Metal Kernels (Apple Silicon)
-- [ ] Implement `PolarQuant` kernel in Metal for fused rotation+quantization
-- [ ] Implement `QJLTransform` kernel for 1-bit residual projection
-- [ ] Create fused `TurboQuantEncode` kernel combining both operations
-- [ ] Create `TurboQuantDecode` kernel for fused dequantization+inverse rotation
-- [ ] Add MTLBuffer memory pooling for TurboQuant blocks
+#### Metal Kernels (Apple Silicon)
+
+- [x] Implement `PolarQuant` kernel in Metal for fused rotation+quantization
+- [x] Implement `QJLTransform` kernel for 1-bit residual projection
+- [x] Create fused `TurboQuantEncode` kernel combining both operations
+- [x] Create `TurboQuantDecode` kernel for fused dequantization+inverse rotation
+- [x] Add MTLBuffer memory pooling for TurboQuant blocks
 - [ ] Location: `internal/device/metal_kernels.metal`
 
-#### 2. CUDA Kernels (Linux NVIDIA)
-- [ ] Implement `PolarQuant` CUDA kernel using tensor core operations
-- [ ] Implement `QJLTransform` CUDA kernel with warp-level reductions
-- [ ] Create `TurboQuantEncode` fused kernel for CUDA
-- [ ] Create `TurboQuantDecode` fused kernel for CUDA
-- [ ] Add CUDA stream overlapping for async quantization
-- [ ] Location: `internal/device/cuda_kernels.cu`
+### GPU Kernel Development Steps
+
+| ID | Task | Status | Priority |
+| :--- | :--- | :--- | :--- |
+| 1 | Unified Dispatch (Core) | - | - |
+| 2 | Metal Backend (Performance) | - | - |
+| 3 | SIMD CPU Kernels (Fallback) | - | - |
+| 4 | Integration & Storage | - | - |
+| 5 | Metadata & GGUF Support | - | - |
+| 6 | Monitoring & Metrics | - | - |
+| 7 | Benchmarking | - | - |
+
+#### 1. Unified Dispatch (Core)
+
+- [x] Create `internal/device/utils.go` for shared types/interfaces
+- [x] refactor `internal/device/metal.go` to use `Context` and `Tensor`
+- [x] implement `internal/device/cpu.go` for shared types/interfaces
+
+#### 2. Metal Backend (Performance Implementation)
+
+- [x] Metal kernel for `turboquant_polar_quant`
+- [x] Metal kernel for `turboquant_qjl_transform`
+- [x] Metal kernel for `turboquant_encode`
+- [x] Metal kernel for `turboquant_decode`
+- [x] Metal memory pooling (`MTLBuffer` reuse)
+- [ ] Implement CUDA backend kernels
 
 #### 3. SIMD CPU Kernels (Fallback Path)
-- [ ] Implement AVX2 `PolarQuant` for x86-64 fallback
-- [ ] Implement AVX-512 `PolarQuant` for Zen4+/IceLake+
-- [ ] Implement ARM NEON `PolarQuant` for ARM64 CPU fallback
-- [ ] Add QJL 1-bit projection SIMD implementations
-- [ ] Location: `internal/simd/turboquant_*.go
+
+- [x] Implement AVX2 `PolarQuant` for x86-64 fallback
+- [x] Implement AVX-512 `PolarQuant` for Zen4+/IceLake+
+- [x] Implement ARM NEON `PolarQuant` for ARM64 CPU fallback
+- [x] Add QJL 1-bit projection SIMD implementations
+- [ ] Location: `internal/simd/turboquant_*.go`
+
+#### 4. Integration & Storage
+
+- [x] Define `DataTypeTQ1_0` and `DataTypeTQ2_0` in `internal/device`
+- [ ] Implement `StoreKV` logic in `internal/device/cpu.go`
+- [ ] Implement `FetchKV` logic for decoding
+- [ ] Update `llm.go` to support TurboQuant cache types
+
+#### 5. Metadata & GGUF Support
+
+- [x] Update `internal/gguf/quantize_turboquant.go` reference
+- [ ] Add GGUF KV cache type markers for TurboQuant
+- [ ] Implement GGUF save/load for TurboQuant blocks
+
+#### 6. Monitoring & Metrics
+
+- [x] Add Prometheus metrics for compression ratio
+- [ ] Add metrics for kernel execution latency
+- [ ] Add metrics for KV cache memory savings
+
+#### 7. Benchmarking
+
+- [ ] Benchmark Metal kernels vs CPU (SIMD)
+- [ ] Benchmark end-to-end inference latency with TurboQuant
+- [ ] Validate numerical parity (MSE) between Metal and SIMD
+
+## Completed Tasks
+
+### Phase 1: Metal Implementation
+
+- [x] MSL kernels for all TurboQuant stages
+- [x] Generic tensor pooling system
+- [x] Metal Go bridge and context management
+
+### Phase 2: SIMD Fallback Implementation
+
+- [x] NEON intrinsics for ARM64
+- [x] AVX2/AVX-512 intrinsics for x86-64
+- [x] Integration into CPU backend context
+
+### Implementation Status Map
+
+| Backend | PolarQuant | QJL | Encode | Decode |
+| :--- | :--- | :--- | :--- | :--- |
+| Metal | [x] | [x] | [x] | [x] |
+| SIMD | [x] | [x] | [x] | [ ] |
+| CUDA | [ ] | [ ] | [ ] | [ ] |
+| Reference | [x] | [x] | [x] | [x] |
 
 ## GPU Architecture Support Status
 
 Both Metal (Apple Silicon) and CUDA (Linux NVIDIA) backends are fully implemented and functional. Recent Linux CUDA work has NOT broken Metal support - the codebases are properly separated by Go build tags with no shared mutable state between architectures.
 
-### Current GPU Implementation Status:
+### Current GPU Implementation Status
+
 - **Metal Backend**: Complete with 61 GPU kernels, Q3_K/Q4_K/Q6_K/Q8_0 quantization, fused kernels, memory pooling
 - **CUDA Backend**: Complete with Tensor Core WMMA, Flash Attention, Paged KV Cache, multi-GPU support
 - **Build Tags**: Properly segregated (`darwin && metal` vs `linux && cuda`)
 - **No Cross-Contamination**: Recent CUDA work modified only Linux/CUDA files
 
 ---
+
 ## Prioritized Fixes for Continued Dual-Architecture GPU Support
 
 Based on codebase analysis, here are the prioritized items to improve and maintain GPU support on both Metal and CUDA architectures:
@@ -63,6 +135,7 @@ Based on codebase analysis, here are the prioritized items to improve and mainta
 ### 🔴 High Priority (Architecture Integrity)
 
 #### 1. Engine Interface Unification ✅
+
 - **Status**: COMPLETED
 - **Changes**:
   - Created `internal/engine/sampler_config.go` with common `SamplerConfig` struct (shared between Metal and CUDA)
@@ -71,6 +144,7 @@ Based on codebase analysis, here are the prioritized items to improve and mainta
 - **Location**: `internal/engine/sampler_config.go`, `internal/engine/types_base.go`, `internal/engine/types.go`
 
 #### 2. Memory Abstraction Consistency ✅
+
 - **Status**: COMPLETED
 - **Changes**:
   - Created `internal/device/memory.go` with common `MemoryConfig` struct
@@ -79,6 +153,7 @@ Based on codebase analysis, here are the prioritized items to improve and mainta
 - **Location**: `internal/device/memory.go`, `internal/device/metal.go`, `internal/device/cuda.go`
 
 #### 3. CUDA Kernel Completeness Audit ✅
+
 - **Status**: PARTIALLY COMPLETED
 - **Changes**:
   - Implemented `storeKV()` in `engine_cuda.go` to store K/V tensors into CUDA KV cache
@@ -88,6 +163,7 @@ Based on codebase analysis, here are the prioritized items to improve and mainta
 ### 🟡 Medium Priority (Quality & Performance)
 
 #### vLLM Integration
+
 - **Status:** COMPLETE (Export operators package implemented, commit `bbcc523`)
 - **Files:** `cmd/vllm_export/`, `internal/device/cuda_export.go`
 - **Export Operators:**
@@ -106,6 +182,7 @@ Based on codebase analysis, here are the prioritized items to improve and mainta
 - **Note:** PyTorch custom op registration and batch scheduler remain as future enhancements
 
 #### 4. Common Utilities Safety Verification
+
 - **Issue**: Files `internal/device/utils.go`, `internal/device/validation.go`, and `internal/device/cpu_ref.go` have no build tags (compile into all builds). Need to verify they don't inadvertently reference Metal/CUDA-specific types.
 - **Impact**: Potential compilation errors or runtime panics if GPU-specific types are used in common code.
 - **Fix**: Audit these files for GPU-type usage and add appropriate guards or refactor to use interfaces.
@@ -113,17 +190,19 @@ Based on codebase analysis, here are the prioritized items to improve and mainta
 - **Effort**: Low
 
 #### 5. Build Tag Consistency Check
+
 - **Issue**: Ensure all GPU-related files have correct and conservative build tags to prevent accidental cross-compilation.
 - **Impact**: Build failures or incorrect binaries if tags are wrong.
 - **Fix**: Verify build tags on all GPU files match their intended platform:
   - Metal files: `//go:build darwin && metal`
-  - CUDA files: `//go:build linux && cuda`  
+  - CUDA files: `//go:build linux && cuda`
   - CPU files: `//go:build (!darwin || !metal) && (!linux || !cuda)`
   - Common files: No build tags OR `//go:build !darwin,!metal,!linux,!cuda` (explicit exclusion)
 - **Location**: All files in `internal/device/` and `internal/engine/*_*.go`
 - **Effort**: Low
 
 #### 6. Cross-Platform Testability
+
 - **Issue**: Metal-specific tests use `//go:build darwin && metal` but there's no equivalent way to run CUDA-specific tests in CI/metal-less environments.
 - **Impact**: Difficult to validate CUDA changes on Metal development machines and vice versa.
 - **Fix**: Consider adding test build tags or mock implementations for cross-platform test execution.
@@ -133,6 +212,7 @@ Based on codebase analysis, here are the prioritized items to improve and mainta
 ### 🟢 Low Priority (Future Enhancements)
 
 #### 7. Unified Tensor Interface
+
 - **Issue**: Metal (`device.Tensor`) and CUDA (`device.CUDATensor`) have different tensor types despite similar functionality.
 - **Impact**: Code duplication in engine layers that handle both tensor types.
 - **Fix**: Explore creating a common tensor interface or abstraction layer.
@@ -140,6 +220,7 @@ Based on codebase analysis, here are the prioritized items to improve and mainta
 - **Effort**: High (long-term)
 
 #### 8. Feature Parity Tracking
+
 - **Issue**: Metal has more quantization support (Q3_K, Q4_K, Q6_K, Q8_0) while CUDA focuses on F16 with on-the-fly dequantization.
 - **Impact**: Inconsistent capabilities between platforms.
 - **Fix**: Document and optionally align quantization kernel support where beneficial.
@@ -148,7 +229,7 @@ Based on codebase analysis, here are the prioritized items to improve and mainta
 
 ---
 
-## Build Commands Reference (Unchanged)
+## Build Commands Reference
 
 ```bash
 # Metal backend (macOS Apple Silicon)
@@ -170,20 +251,6 @@ go build -tags=cuda,amd64,avx512 ./...
 go build -tags=cuda,amd64,nccl ./...
 ```
 
-## Testing Commands (Unchanged)
-
-```bash
-# Run all tests with coverage
-go test -coverprofile=coverage.out ./...
-
-# Run specific package tests
-go test ./internal/cpu/...
-go test ./internal/simd/...
-go test ./internal/metrics/...
-
-# Metal-specific tests (macOS)
-go test -tags=metal ./internal/device/...
-
 ---
 
 ## Incomplete Features & Code TODOs
@@ -191,12 +258,14 @@ go test -tags=metal ./internal/device/...
 ### High Priority (Blocking Functionality)
 
 #### Model Hot-Swapping (cmd/webui/engine/adapter_*.go)
+
 - **Status:** ✅ FIXED
 - **Issue:** `UnloadModel()` exists but no hot-swap logic for active requests
 - **Fix:** Implemented `HotSwapModel()` in both CUDA and Metal adapters with active request waiting
 - **Location:** `cmd/webui/engine/adapter_cuda.go:283-349`, `cmd/webui/engine/adapter_metal.go:197-240`
 
 #### KV Cache Sharing Between Requests (internal/engine/engine.go)
+
 - **Status:** ✅ IMPLEMENTED
 - **Issue:** Current sequential processing, single CachePos
 - **Fix:** Added SequenceManager for per-sequence position tracking; replaced single CachePos with per-sequence tracking
@@ -208,6 +277,7 @@ go test -tags=metal ./internal/device/...
 - **Location:** `internal/engine/types.go`, `internal/engine/engine.go`
 
 #### Mamba Layer Detection (internal/engine/mamba.go:91)
+
 - **Status:** ✅ FIXED
 - **Issue:** `IsMambaLayer()` relied on weight-based nil check - needed proper config-based detection
 - **Fix:** Implemented config-based detection with multiple patterns:
@@ -224,11 +294,13 @@ go test -tags=metal ./internal/device/...
 - **Location:** `internal/engine/mamba.go`, `internal/config/config.go`
 
 #### Tensor Zero() Method (internal/engine/engine.go:1191)
+
 - **Status:** ✅ FIXED
 - **Issue:** `// TODO: Add Zero() to tensor` - SSM state initialization incomplete
 - **Fix:** Added `ZeroInit()` calls for ConvState and SSMState tensors
 
 #### Quantization Support (internal/gguf/quantize.go:6)
+
 - **Status:** ✅ IMPLEMENTED
 - **Issue:** `QuantizeWeightsToQ4K()` returns "not implemented"
 - **Fix:** Implemented Q4_K quantization encoder consistent with existing DequantizeQ4K decoder
@@ -242,11 +314,13 @@ go test -tags=metal ./internal/device/...
 ### Medium Priority (Quality/Performance)
 
 #### RoPE Attention Causal Mask Test (internal/device/rope_attention_test.go:122)
+
 - **Status:** ✅ FIXED
 - **Issue:** `// TODO: Call attention kernel with causal mask`
 - **Fix:** Updated test to call `q.Attention()` kernel with proper parameters
 
 #### Perplexity Calculation (internal/engine/engine.go:113)
+
 - **Status:** ✅ FIXED
 - **Issue:** Simplified implementation - `// This is just a placeholder - real perplexity requires model probabilities`
 - **Fix:** Implemented `CalculatePerplexityFromLogits()` on Engine that runs the forward pass at each token position, collects logits, computes log probabilities via log-sum-exp, and returns real model-based perplexity
@@ -257,6 +331,7 @@ go test -tags=metal ./internal/device/...
 - **Location:** `internal/engine/engine.go:131`, `cmd/smoke_test/moe_regression_test.go:311`
 
 #### Quality Evaluator Tests (internal/engine/smollm2_zero_logits_test.go:17,23)
+
 - **Status:** DOCUMENTED
 - **Issues:**
   - Skipped tests documented with implementation notes
@@ -265,6 +340,7 @@ go test -tags=metal ./internal/device/...
 ### Low Priority (Future/Backlog)
 
 #### CUDA Coherence Tests (cmd/smoke_test/cuda_coherence_test.go)
+
 - **Status:** ✅ IMPLEMENTED
 - **Issue:** `t.Skip("CUDA engine not implemented - this is a placeholder for CUDA coherence tests")`
 - **Fix:** Implemented 4 CUDA coherence tests using synthetic GGUF model and CUDA engine
@@ -276,16 +352,19 @@ go test -tags=metal ./internal/device/...
 - **Location:** `cmd/smoke_test/cuda_coherence_test.go`
 
 #### Inference String Method (internal/engine/engine.go:1260)
+
 - **Status:** ✅ FIXED
 - **Issue:** Uses `inputTokens := []int{1, 2, 3} // Placeholder tokenization`
 - **Fix:** Updated to use `e.Tokenizer.Encode(prompt)` and `e.Tokenizer.Decode(tokens)`
 
 #### IQ1_M Quantization (internal/gguf/structs.go)
+
 - **Status:** ✅ IMPLEMENTED
 - **Issue:** `t.Errorf("IQ1_M SizeBytes() = %d, want 0 (not implemented)", got)`
 - **Fix:** Added IQ1_M block size: 56 bytes per 256 elements
 
 #### Fused QKV + RoPE Kernel (internal/device/cuda_kernels.cu:1158)
+
 - **Status:** ✅ IMPLEMENTED
 - **Issue:** `// TODO: Add fused QKV + RoPE kernel with precomputed frequencies`
 - **Fix:** Implemented proper fused RoPE kernel that applies rotary positional encoding to pre-computed Q and K projections using precomputed cos/sin frequency tables in a single kernel launch
@@ -301,7 +380,7 @@ go test -tags=metal ./internal/device/...
 ## API Endpoints Summary
 
 | Endpoint | Method | Description | Status |
-|----------|--------|-------------|--------|
+| :--- | :--- | :--- | :--- |
 | `/health` | GET | Health check | ✅ Complete |
 | `/healthz` | GET | Simple liveness | ✅ Complete |
 | `/readyz` | GET | Readiness probe | ✅ Complete |
@@ -323,13 +402,14 @@ This section outlines the roadmap to achieve feature equivalence with vLLM and s
 **Goal:** Close the 3-14x performance gap with llama.cpp/vLLM on existing hardware.
 
 | Task | Target | Expected Impact |
-|------|--------|-----------------|
+| :--- | :--- | :--- |
 | Reduce Metal sync overhead | -60% sync calls | 2-3x speedup |
 | Batch kernel dispatch | Combine ops | 1.5x speedup |
 | KV cache optimization | Paged cache default | 1.2x speedup |
 | Quantized kernel tuning | Q4_K optimization | 1.5x speedup |
 
 **Deliverables:**
+
 - [ ] Implement kernel fusion pipeline (QKV + RoPE + Attention)
 - [ ] Add Persistent Batch pattern (cache input tensors)
 - [ ] Optimize Metal memory allocator (reduce fragmentation)
@@ -343,7 +423,7 @@ This section outlines the roadmap to achieve feature equivalence with vLLM and s
 #### P0 - Critical
 
 | Feature | Implementation | Dependencies |
-|---------|-----------------|--------------|
+| :--- | :--- | :--- |
 | Hash-based Prefix Caching | O(1) LRU cache with content hashing | KV cache refactor |
 | Chunked Prefill | Split large prompts across steps | Batching scheduler |
 | Safetensors Support | Add Safetensors loader | Model loading |
@@ -352,7 +432,7 @@ This section outlines the roadmap to achieve feature equivalence with vLLM and s
 #### P1 - High Priority
 
 | Feature | Implementation | Dependencies |
-|---------|-----------------|--------------|
+| :--- | :--- | :--- |
 | Speculative Decoding | Draft-verifier pattern | Sampling layer |
 | Structured Output | JSON/schema validation | Sampling layer |
 | Full OpenAI API | /embeddings, /completions | API layer |
@@ -362,7 +442,7 @@ This section outlines the roadmap to achieve feature equivalence with vLLM and s
 **Goal:** Implement differentiated capabilities.
 
 | Feature | Target | Differentiation |
-|---------|--------|-----------------|
+| :--- | :--- | :--- |
 | Multimodal (VLM) | Image input support | Native Go implementation |
 | Multi-LoRA | Multiple adapter support | Model loader |
 | Embedding Models | Encoder support | Model runner |
@@ -375,7 +455,7 @@ This section outlines the roadmap to achieve feature equivalence with vLLM and s
 #### Performance Targets
 
 | Metric | Current | vLLM Reference | Target |
-|--------|---------|----------------|--------|
+| :--- | :--- | :--- | :--- |
 | Throughput (7B) | 1.9 t/s | ~50 t/s (H100) | >60 t/s |
 | Throughput (Smollm2) | 38.8 t/s | N/A | >60 t/s |
 | Prefix cache overhead | N/A | <1% | <0.5% |
@@ -433,7 +513,7 @@ type PersistentBatch struct {
 ```go
 type PrefixCache struct {
     hashIndex map[uint64]CacheEntry  // O(1) lookup
-    lru       list.List              // O(1) eviction
+    lru       list.List              // O(1) dieted eviction
     lock      sync.RWMutex
 }
 
@@ -444,10 +524,10 @@ type PrefixCache struct {
 
 ```go
 type Scheduler struct {
-    pending    *PriorityQueue  // Waiting requests
-    running    *TokenBudget    // Active sequences
-    maxTokens  int             // Budget per iteration
-    prefillRatio float64       // Prefill/decode balance
+    pending      *PriorityQueue  // Waiting requests
+    running      *TokenBudget    // Active sequences
+    maxTokens    int             // Budget per iteration
+    prefillRatio float64         // Prefill/decode balance
 }
 
 // Benefits: Maximize GPU utilization, minimize latency
@@ -456,7 +536,7 @@ type Scheduler struct {
 ### Resource Requirements
 
 | Phase | Engineers | Timeline | Key Dependencies |
-|-------|-----------|----------|------------------|
+| :--- | :--- | :--- | :--- |
 | Phase 1 | 1-2 | 6 weeks | Metal/CUDA kernels |
 | Phase 2 | 2 | 12 weeks | KV cache, scheduler |
 | Phase 3 | 2 | 12 weeks | Model loader, sampling |
@@ -465,7 +545,7 @@ type Scheduler struct {
 ### Risk Mitigation
 
 | Risk | Probability | Mitigation |
-|------|-------------|------------|
+| :--- | :--- | :--- |
 | Metal kernel complexity | High | Start with CUDA, port later |
 | Feature scope creep | Medium | Strict phase gates |
 | Performance targets | Medium | Monthly benchmarking |
@@ -483,7 +563,7 @@ type Scheduler struct {
 *Last updated: March 2026*
 *See also: [Comparison with vLLM](./comparison.md)*
 
-## Testing Commands (Unchanged)
+## Testing Commands
 
 ```bash
 # Run all tests with coverage
