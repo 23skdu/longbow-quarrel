@@ -1410,6 +1410,8 @@ __global__ void turboquant_decode_kernel(const int8_t* __restrict__ input,
     if (tid >= blockSize) return;
 
     float scale = *blockScale;
+    extern __shared__ float sdata_decode[];
+
     // Dequantize and store in shared memory for inverse rotation
     sdata_decode[tid] = (float)(blockInput[tid]) * scale;
     __syncthreads();
