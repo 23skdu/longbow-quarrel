@@ -159,8 +159,20 @@ func (c *Context) Synchronize() {
 	}
 }
 
-func (c *Context) NewTensor(rows, cols int) *Tensor {
-	return c.NewTensorWithType(rows, cols, DataTypeF16)
+func (c *Context) NewTensorRaw(sizeBytes int) (*Tensor, error) {
+	ct, err := c.cudaCtx.NewTensorRaw(sizeBytes)
+	if err != nil {
+		return nil, err
+	}
+	return &Tensor{
+		ctx:       c,
+		sizeBytes: sizeBytes,
+		cudaPtr:   ct,
+	}, nil
+}
+
+func (t *Tensor) LoadFromRaw(data []byte) error {
+	return t.cudaPtr.LoadFromRaw(data)
 }
 
 func (c *Context) NewTensorFP32(rows, cols int) *Tensor {
@@ -179,29 +191,28 @@ func (c *Context) NewTensorFP32(rows, cols int) *Tensor {
 }
 
 func (c *Context) NewTensorFromData(rows, cols int, dt DataType, data []byte) (*Tensor, error) {
-	// Map DataType to CUDADataType
-	var cdt C.CUDADataType
-	switch dt {
-	case DataTypeF16:
-		cdt = C.CUDA_DTYPE_F16
-	case DataTypeQ8_0:
-		cdt = C.CUDA_DTYPE_Q8_0
-	default:
-		cdt = C.CUDA_DTYPE_F16
-	}
+    var cdt C.CUDADataType
+    switch dt {
+    case DataTypeF16:
+        cdt = C.CUDA_DTYPE_F16
+    case DataTypeQ8_0:
+        cdt = C.CUDA_DTYPE_Q8_0
+    default:
+        cdt = C.CUDA_DTYPE_F16
+    }
 
-	ct, err := c.cudaCtx.NewTensorFromData(rows, cols, cdt, data)
-	if err != nil {
-		return nil, err
-	}
-	return &Tensor{
-		ctx:       c,
-		rows:      rows,
-		cols:      cols,
-		cudaPtr:   ct,
-		dataType:  dt,
-		sizeBytes: len(data),
-	}, nil
+    ct, err := c.cudaCtx.NewTensorFromData(rows, cols, cdt, data)
+    if err != nil {
+        return nil, err
+    }
+    return &Tensor{
+        ctx:       c,
+        rows:      rows,
+        cols:      cols,
+        cudaPtr:   ct,
+        dataType:  dt,
+        sizeBytes: len(data),
+    }, nil
 }
 
 func (c *Context) NewTensorPooled(rows, cols int) *Tensor {
@@ -216,15 +227,12 @@ func (c *Context) NewTensorPooled(rows, cols int) *Tensor {
 	}
 }
 
-// NewTurboTensor handles block-based quantization memory allocation on GPU
-
 func (c *Context) NewTurboTensor(rows, cols int, dt DataType, blockSize, qjlRows int) *Tensor {
 	numElements := rows * cols
 	numBlocks := numElements / blockSize
 	if numElements%blockSize != 0 {
 		numBlocks++
 	}
-	// Block format: [Polar(blockSize) + QJL(qjlRows) + Scale(4) + QJLScale(4)]
 	bytesPerBlock := blockSize + qjlRows + 8
 	sizeBytes := numBlocks * bytesPerBlock
 
@@ -248,7 +256,7 @@ func (c *Context) NewTensorWithType(rows, cols int, dt DataType) *Tensor {
 		return c.NewTurboTensor(rows, cols, dt, 256, 64)
 	}
 
-	sizeBytes := rows * cols * 2 // FP16
+	sizeBytes := rows * cols * 2
 	ct, err := c.cudaCtx.NewTensor(rows, cols, C.CUDA_DTYPE_F16)
 	if err != nil {
 		panic(fmt.Sprintf("Failed to allocate CUDA Tensor: %v", err))
@@ -638,31 +646,14 @@ func (c *CUDAContext) NewTensor(rows, cols int, dt CUDADataType) (*CUDATensor, e
 	return t, nil
 }
 
-func (c *CUDAContext) NewTensorFP32(rows, cols int) (*CUDATensor, error) {
-	elementSize := 4
-	size := rows * cols * elementSize
+func (c *CUDAContext) NewTensorRaw(size int) (*CUDATensor, error) {
 	var devPtr unsafe.Pointer
 	result := C.cudaMalloc(&devPtr, C.size_t(size))
 	if result != C.cudaSuccess {
 		return nil, fmt.Errorf("cudaMalloc failed: %v", result)
 	}
-
 	cudaTraceAlloc(int64(size))
-
-	t := &CUDATensor{
-		ctx:       c,
-		rows:      rows,
-		cols:      cols,
-		sizeBytes: size,
-		devPtr:    devPtr,
-		dataType:  DataTypeF32,
-	}
-
-	runtime.SetFinalizer(t, func(t *CUDATensor) {
-		t.Free()
-	})
-
-	return t, nil
+	return &CUDATensor{ctx: c, sizeBytes: size, devPtr: devPtr}, nil
 }
 
 func (c *CUDAContext) NewTensorFromData(rows, cols int, dt CUDADataType, data []byte) (*CUDATensor, error) {
@@ -711,6 +702,11 @@ func (t *CUDATensor) ToHostF32() []float32 {
 func (t *CUDATensor) LoadFrom(data []float32) error {
 	size := len(data) * 4
 	C.cudaMemcpyAsync(t.devPtr, unsafe.Pointer(&data[0]), C.size_t(size), C.cudaMemcpyHostToDevice, t.ctx.stream)
+	return nil
+}
+
+func (t *CUDATensor) LoadFromRaw(data []byte) error {
+	C.cudaMemcpyAsync(t.devPtr, unsafe.Pointer(&data[0]), C.size_t(len(data)), C.cudaMemcpyHostToDevice, t.ctx.stream)
 	return nil
 }
 
