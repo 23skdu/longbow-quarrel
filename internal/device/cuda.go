@@ -39,7 +39,7 @@ extern void cudaFusedRMSNormAdd(cudaStream_t stream, const void* input, const vo
 extern void cudaTurboQuantPolarQuant(cudaStream_t stream, const float* input, const float* rotationMatrix, int8_t* quantized, float* scaleOut, float* residual, int n, int bits);
 extern void cudaTurboQuantQJLTransform(cudaStream_t stream, const float* residual, const float* signMatrix, int8_t* quantized, float* scaleOut, int rows, int cols);
 extern void cudaTurboQuantEncode(cudaStream_t stream, const float* input, const float* rotationMatrix, const float* qjlMatrix, int8_t* output, float* scaleOut, float* qjlScaleOut, int blockSize, int qjlRows, int numBlocks, int bits);
-extern void cudaTurboQuantDecode(cudaStream_t stream, const int8_t* input, const float* rotationMatrix, __half* output, const float* scaleIn, int blockSize, int qjlRows, int numBlocks);
+extern void cudaTurboQuantDecode(cudaStream_t stream, const int8_t* input, const float* rotationMatrix, void* output, const float* scaleIn, int blockSize, int qjlRows, int numBlocks);
 
 // Device properties structure for multi-GPU support
 typedef struct {
@@ -331,14 +331,14 @@ func (t *Tensor) fetchKVTurbo(kCache, vCache *Tensor, seqLen, heads, headDim int
 	C.cudaTurboQuantDecode(ctx.cudaCtx.stream,
 		(*C.int8_t)(kCache.cudaPtr.devPtr),
 		(*C.float)(ctx.TQRotation.cudaPtr.devPtr),
-		(*C.half)(t.cudaPtr.devPtr),
+		t.cudaPtr.devPtr,
 		nil, C.int(blockSize), C.int(qjlRows), C.int(totalBlocks))
 
 	// V Decode
 	C.cudaTurboQuantDecode(ctx.cudaCtx.stream,
 		(*C.int8_t)(vCache.cudaPtr.devPtr),
 		(*C.float)(ctx.TQRotation.cudaPtr.devPtr),
-		(*C.half)(unsafe.Pointer(uintptr(t.cudaPtr.devPtr)+uintptr(vOffset))),
+		unsafe.Pointer(uintptr(t.cudaPtr.devPtr)+uintptr(vOffset)),
 		nil, C.int(blockSize), C.int(qjlRows), C.int(totalBlocks))
 }
 
