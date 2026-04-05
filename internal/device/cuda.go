@@ -297,18 +297,21 @@ func (t *Tensor) storeKVTurbo(v *Tensor, kCache, vCache *Tensor, pos, heads, hea
 	numBlocksPerRow := (heads * headDim) / blockSize
 	rowOffsetBytes := pos * numBlocksPerRow * bytesPerBlock
 
+	// K Encode
     C.cudaTurboQuantEncode(ctx.cudaCtx.stream,
-        t.cudaPtr.devPtr, // Current step K
-        ctx.TQRotation.cudaPtr.devPtr,
-        ctx.TQQJL.cudaPtr.devPtr,
+        (*C.float)(t.cudaPtr.devPtr), // Current step K
+        (*C.float)(ctx.TQRotation.cudaPtr.devPtr),
+        (*C.float)(ctx.TQQJL.cudaPtr.devPtr),
         (*C.int8_t)(unsafe.Pointer(uintptr(kCache.cudaPtr.devPtr) + uintptr(rowOffsetBytes))),
         nil, nil, // Scales are now handled in-kernel
         C.int(blockSize), C.int(qjlRows), C.int(numBlocksPerRow), 4)
 
+	// V Encode (assuming V is offset by heads*headDim*2 bytes in t)
+	vOffset := heads * headDim * 2
     C.cudaTurboQuantEncode(ctx.cudaCtx.stream,
-        unsafe.Pointer(uintptr(t.cudaPtr.devPtr) + uintptr(vOffset)),
-        ctx.TQRotation.cudaPtr.devPtr,
-        ctx.TQQJL.cudaPtr.devPtr,
+        (*C.float)(unsafe.Pointer(uintptr(t.cudaPtr.devPtr) + uintptr(vOffset))),
+        (*C.float)(ctx.TQRotation.cudaPtr.devPtr),
+        (*C.float)(ctx.TQQJL.cudaPtr.devPtr),
         (*C.int8_t)(unsafe.Pointer(uintptr(vCache.cudaPtr.devPtr) + uintptr(rowOffsetBytes))),
         nil, nil,
         C.int(blockSize), C.int(qjlRows), C.int(numBlocksPerRow), 4)
@@ -333,15 +336,18 @@ func (t *Tensor) fetchKVTurbo(kCache, vCache *Tensor, seqLen, heads, headDim int
 	// Decompress all blocks for the sequence
 	totalBlocks := seqLen * numBlocksPerRow
 	
+	// K Decode
 	C.cudaTurboQuantDecode(ctx.cudaCtx.stream,
 		(*C.int8_t)(kCache.cudaPtr.devPtr),
-		ctx.TQRotation.cudaPtr.devPtr,
+		(*C.float)(ctx.TQRotation.cudaPtr.devPtr),
 		(*C.float)(t.cudaPtr.devPtr),
 		C.int(blockSize), C.int(qjlRows), C.int(totalBlocks))
 		
+	// V Decode (offset in t)
+	vOffset := seqLen * heads * headDim * 2
 	C.cudaTurboQuantDecode(ctx.cudaCtx.stream,
 		(*C.int8_t)(vCache.cudaPtr.devPtr),
-		ctx.TQRotation.cudaPtr.devPtr,
+		(*C.float)(ctx.TQRotation.cudaPtr.devPtr),
 		(*C.float)(unsafe.Pointer(uintptr(t.cudaPtr.devPtr) + uintptr(vOffset))),
 		C.int(blockSize), C.int(qjlRows), C.int(totalBlocks))
 }
