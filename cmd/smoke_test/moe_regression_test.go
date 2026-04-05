@@ -154,8 +154,8 @@ func TestMOELLamaCPPComparison(t *testing.T) {
 					continue
 				}
 
-				quarrelText := tok.Decode(quarrelTokens)
-				llamaText := llamaEntry.GeneratedText
+				_ = tok.Decode(quarrelTokens)
+				_ = llamaEntry.GeneratedText
 
 				// Compare token sequences
 				tokenMatch := compareTokenSequences(quarrelTokens, llamaEntry.Tokens)
@@ -308,7 +308,7 @@ func compareTokenSequences(a, b []int) float64 {
 	return float64(matches) / float64(minLen)
 }
 
-func calculatePerplexityForTokens(e *engine.Engine, inputTokens, generatedTokens []int) float64 {
+func calculatePerplexityForTokens(e engine.Engine, promptTokens, generatedTokens []int) float64 {
 	// Simplified perplexity calculation
 	// In a real implementation, this would use the actual logits
 	return 0.0

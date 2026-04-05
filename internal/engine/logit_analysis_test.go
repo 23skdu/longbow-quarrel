@@ -229,7 +229,7 @@ func TestTemperatureEffects(t *testing.T) {
 			// Sample many times to check variance
 			samples := make(map[int]int)
 			for i := 0; i < 100; i++ {
-				val := s.Sample(tt.logits, nil, len(tt.logits))
+				val := s.Sample(tt.logits, nil)
 				samples[val]++
 			}
 
@@ -296,7 +296,7 @@ func TestTopPFilter(t *testing.T) {
 
 			// Sample many times - should only get tokens in expectInTop
 			for i := 0; i < 50; i++ {
-				val := s.Sample(tt.logits, nil, len(tt.logits))
+				val := s.Sample(tt.logits, nil)
 				found := false
 				for _, expected := range tt.expectInTop {
 					if val == expected {
@@ -351,7 +351,7 @@ func TestSamplerNaNHandling(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			s := NewSampler(SamplerConfig{Temperature: 0.5})
 
-			val := s.Sample(tt.logits, nil, len(tt.logits))
+			val := s.Sample(tt.logits, nil)
 
 			if tt.expectValid {
 				if val < 0 || val >= len(tt.logits) {
@@ -384,8 +384,8 @@ func TestSamplerSeedReproducibility(t *testing.T) {
 	results2 := make([]int, 20)
 
 	for i := 0; i < 20; i++ {
-		results1[i] = s1.Sample(logits, nil, len(logits))
-		results2[i] = s2.Sample(logits, nil, len(logits))
+		results1[i] = s1.Sample(logits, nil)
+		results2[i] = s2.Sample(logits, nil)
 	}
 
 	// Verify all results match

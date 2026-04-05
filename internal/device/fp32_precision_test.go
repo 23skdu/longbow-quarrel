@@ -61,7 +61,7 @@ func TestFFN_Scratch_Allocation_For_Large_Models(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			scratch := ctx.NewLayerScratch(1, tc.dim, tc.hiddenDim, tc.heads, tc.kvHeads, tc.headDim, tc.seqLen, tc.vocabSize)
+			scratch := ctx.NewLayerScratch(1, tc.dim, tc.hiddenDim, tc.heads, tc.kvHeads, tc.headDim, tc.seqLen, tc.vocabSize, tc.headDim, tc.headDim)
 			if scratch == nil {
 				t.Fatal("Failed to create layer scratch")
 			}
@@ -87,7 +87,7 @@ func TestFFN_F32_Intermediate_Tensors(t *testing.T) {
 	dim := 4096
 	hiddenDim := 14336
 
-	scratch := ctx.NewLayerScratch(1, dim, hiddenDim, 32, 8, 128, 4096, 49152)
+	scratch := ctx.NewLayerScratch(1, dim, hiddenDim, 32, 8, 128, 4096, 49152, 128, 128)
 	if scratch == nil {
 		t.Fatal("Failed to create scratch")
 	}
@@ -132,7 +132,7 @@ func TestFP32_Accumulation_Prevents_Overflow(t *testing.T) {
 	dim := 4096
 	hiddenDim := 14336
 
-	scratch := ctx.NewLayerScratch(1, dim, hiddenDim, 32, 8, 128, 4096, 49152)
+	scratch := ctx.NewLayerScratch(1, dim, hiddenDim, 32, 8, 128, 4096, 49152, 128, 128)
 	if scratch == nil {
 		t.Fatal("Failed to create scratch")
 	}
@@ -209,7 +209,7 @@ func TestHiddenDim_Allocation_For_FP32(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			scratch := ctx.NewLayerScratch(1, 4096, tc.hiddenDim, 32, 8, 128, 4096, 49152)
+			scratch := ctx.NewLayerScratch(1, 4096, tc.hiddenDim, 32, 8, 128, 4096, 49152, 128, 128)
 			if scratch == nil {
 				t.Fatal("Failed to create scratch")
 			}

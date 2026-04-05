@@ -13,12 +13,12 @@ import (
 // MOELayerForward performs MOE layer forward pass
 // input: [batch_size, dim] hidden states
 // Returns: [batch_size, dim] output hidden states
-func (e *Engine) MOELayerForward(layerIdx int, input *device.Tensor) *device.Tensor {
+func (e *metalEngine) MOELayerForward(layerIdx int, input *device.Tensor) *device.Tensor {
 	moeStart := time.Now()
 	defer func() {
 		metrics.RecordMOELayerLatency(time.Since(moeStart))
 	}()
-	moeWeights := e.Weights.MOE[layerIdx]
+	moeWeights := e.weights.MOE[layerIdx]
 	if moeWeights == nil || moeWeights.Router == nil || moeWeights.Experts == nil {
 		logger.Log.Warn("MOE layer has no weights, skipping", "layer", layerIdx)
 		return input
@@ -28,17 +28,17 @@ func (e *Engine) MOELayerForward(layerIdx int, input *device.Tensor) *device.Ten
 	dim := input.Cols()
 	numExperts := moeWeights.Experts.NumExperts
 	hiddenDim := moeWeights.Experts.HiddenDim
-	topK := e.Config.ExpertUsedCount
+	topK := e.config.ExpertUsedCount
 
 	logger.Log.Debug("MOE layer forward", "layer", layerIdx, "batch", batchSize, "dim", dim,
 		"num_experts", numExperts, "hidden_dim", hiddenDim, "top_k", topK)
 
 	// Step 1: Compute routing logits
 	startTime := time.Now()
-	logits := e.Ctx.MOERouterLogits(input, moeWeights.Router.GateInput)
+	logits := e.ctx.MOERouterLogits(input, moeWeights.Router.GateInput)
 
 	// Step 2: Select top-k experts
-	expertIndices, expertWeights := e.Ctx.MOETopKSelection(logits, topK)
+	expertIndices, expertWeights := e.ctx.MOETopKSelection(logits, topK)
 	logits.Free()
 	routingDuration := time.Since(startTime)
 	metrics.RecordMOERoutingLatency(routingDuration)
@@ -56,7 +56,7 @@ func (e *Engine) MOELayerForward(layerIdx int, input *device.Tensor) *device.Ten
 	gemmStart := time.Now()
 	var activated *device.Tensor
 	if moeWeights.Experts.FfnGateExperts != nil && moeWeights.Experts.FfnUpExperts != nil {
-		activated = e.Ctx.MOEExpertGateUpSwiGLU(input, moeWeights.Experts.FfnGateExperts,
+		activated = e.ctx.MOEExpertGateUpSwiGLU(input, moeWeights.Experts.FfnGateExperts,
 			moeWeights.Experts.FfnUpExperts, expertIndices, expertWeights, hiddenDim)
 	} else {
 		logger.Log.Warn("MOE layer missing gate or up weights", "layer", layerIdx)
@@ -68,7 +68,7 @@ func (e *Engine) MOELayerForward(layerIdx int, input *device.Tensor) *device.Ten
 	// Step 5: Down projection
 	var output *device.Tensor
 	if moeWeights.Experts.FfnDownExperts != nil {
-		output = e.Ctx.MOEExpertForward(activated, moeWeights.Experts.FfnDownExperts,
+		output = e.ctx.MOEExpertForward(activated, moeWeights.Experts.FfnDownExperts,
 			expertIndices, expertWeights, dim)
 		activated.Free()
 	} else {
@@ -109,11 +109,11 @@ func (e *Engine) MOELayerForward(layerIdx int, input *device.Tensor) *device.Ten
 }
 
 // IsMOELayer checks if a layer index corresponds to an MOE layer
-func (e *Engine) IsMOELayer(l int) bool {
-	if l < 0 || l >= len(e.Weights.MOE) {
+func (e *metalEngine) IsMOELayer(l int) bool {
+	if l < 0 || l >= len(e.weights.MOE) {
 		return false
 	}
-	res := e.Weights.MOE[l] != nil
+	res := e.weights.MOE[l] != nil
 	if res {
 		logger.Log.Debug("IsMOELayer true", "layer", l)
 	}

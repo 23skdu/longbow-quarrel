@@ -273,7 +273,7 @@ func TestPrecision_Accumulation_Stability(t *testing.T) {
 		ctx := NewContext()
 		defer ctx.Free()
 
-		scratch := ctx.NewLayerScratch(1, 8192, 28672, 64, 8, 128, 8192, 49152)
+		scratch := ctx.NewLayerScratch(1, 8192, 28672, 64, 8, 128, 8192, 49152, 128, 128)
 		if scratch == nil {
 			t.Fatal("Failed to create scratch for large model")
 		}
@@ -294,7 +294,7 @@ func TestPrecision_Accumulation_Stability(t *testing.T) {
 		dim := 8192
 		hiddenDim := 28672
 
-		scratch := ctx.NewLayerScratch(1, dim, hiddenDim, 64, 8, 128, 8192, 49152)
+		scratch := ctx.NewLayerScratch(1, dim, hiddenDim, 64, 8, 128, 8192, 49152, 128, 128)
 		if scratch == nil {
 			t.Fatal("Failed to create scratch")
 		}

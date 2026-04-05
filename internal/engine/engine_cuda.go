@@ -98,17 +98,16 @@ var (
 	}, []string{"model"})
 )
 
-type CUDAEngine struct {
-	Model     *gguf.GGUFFile
-	Tokenizer *tokenizer.Tokenizer
-	Config    config.Config
-	CUDA      *device.CUDAModel
-	Scratch   *device.LayerScratch
-
+type cudaEngine struct {
+	model            *gguf.GGUFFile
+	tokenizer        *tokenizer.Tokenizer
+	config           config.Config
+	cuda             *device.CUDAModel
+	scratch          *device.LayerScratch
 	dequantizedCache map[string]*device.CUDATensor
 }
 
-func NewCUDAEngine(modelPath string, cfg config.Config) (Engine, error) {
+func NewcudaEngine(modelPath string, cfg config.Config) (Engine, error) {
 	f, err := gguf.LoadFile(modelPath)
 	if err != nil {
 		cudaEngineFailed.WithLabelValues("unknown", "gguf_load_failed").Inc()
@@ -196,11 +195,11 @@ func NewCUDAEngine(modelPath string, cfg config.Config) (Engine, error) {
 	log.Printf("RoPE Theta: %.0f, Eps: %e", ropeTheta, eps)
 	log.Printf("GPU Memory: %.1f MB", float64(device.CUDAAllocatedBytes())/1e6)
 
-	e := &CUDAEngine{
-		Model:            f,
-		Tokenizer:        tok,
+	e := &cudaEngine{
+		model:            f,
+		tokenizer:        tok,
 		dequantizedCache: make(map[string]*device.CUDATensor),
-		Config: config.Config{
+		config: config.Config{
 			Architecture:  arch,
 			Dim:           dim,
 			HiddenDim:     hiddenDim,
@@ -215,17 +214,28 @@ func NewCUDAEngine(modelPath string, cfg config.Config) (Engine, error) {
 			PrecisionMode: config.PrecisionAuto,
 			KVCacheSize:   cfg.KVCacheSize,
 		},
-		CUDA: cudaModel,
+		cuda: cudaModel,
 	}
 
 	qNormDim := 512
 	kNormDim := 512
-	e.Scratch = ctx.NewLayerScratch(seqLen, dim, hiddenDim, heads, heads, headDim, seqLen, vocabSize, qNormDim, kNormDim)
+	e.scratch = ctx.NewLayerScratch(seqLen, dim, hiddenDim, heads, heads, headDim, seqLen, vocabSize, qNormDim, kNormDim)
 
 	return e, nil
 }
 
-func (e *CUDAEngine) Close() {
+func (e *cudaEngine) Config() config.Config {
+	return e.config
+}
+
+func (e *cudaEngine) SwapModel(modelPath string, cfg config.Config) error {
+	// For CUDA, we need a similar logic to MetalEngine's loadModel
+	// but using CUDA specific context and model creation.
+	// This is a placeholder for the actual hotswap logic.
+	return fmt.Errorf("SwapModel not yet implemented for cudaEngine")
+}
+
+func (e *cudaEngine) Close() {
 	for _, t := range e.dequantizedCache {
 		if t != nil {
 			t.Free()
@@ -233,26 +243,26 @@ func (e *CUDAEngine) Close() {
 	}
 	e.dequantizedCache = make(map[string]*device.CUDATensor)
 
-	if e.Scratch != nil {
-		e.Scratch.Free()
+	if e.scratch != nil {
+		e.scratch.Free()
 	}
-	if e.CUDA != nil {
-		e.CUDA.Free()
+	if e.cuda != nil {
+		if e.cuda.Ctx != nil {
+			e.cuda.Ctx.Free()
+		}
+		e.cuda.Free()
 	}
-	if e.CUDA.Ctx != nil {
-		e.CUDA.Ctx.Free()
-	}
-	if e.Model != nil {
-		e.Model.Close()
+	if e.model != nil {
+		e.model.Close()
 	}
 }
 
-func (e *CUDAEngine) getDequantedWeight(name string) (*device.CUDATensor, error) {
+func (e *cudaEngine) getDequantedWeight(name string) (*device.CUDATensor, error) {
 	if cached, ok := e.dequantizedCache[name]; ok && cached != nil {
 		return cached, nil
 	}
 
-	d, err := e.CUDA.GetDequantedWeight(name)
+	d, err := e.cuda.GetDequantedWeight(name)
 	if err != nil {
 		return nil, err
 	}
@@ -261,11 +271,11 @@ func (e *CUDAEngine) getDequantedWeight(name string) (*device.CUDATensor, error)
 	return d, nil
 }
 
-func (e *CUDAEngine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig SamplerConfig) ([]int, error) {
+func (e *cudaEngine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig SamplerConfig) ([]int, error) {
 	return e.InferWithCallback(inputTokens, tokensToGenerate, samplerConfig, nil)
 }
 
-func (e *CUDAEngine) InferWithCallback(inputTokens []int, tokensToGenerate int, samplerConfig SamplerConfig, callback func(int)) ([]int, error) {
+func (e *cudaEngine) InferWithCallback(inputTokens []int, tokensToGenerate int, samplerConfig SamplerConfig, callback func(int)) ([]int, error) {
 	if len(inputTokens) == 0 {
 		return nil, fmt.Errorf("empty input tokens")
 	}
@@ -277,13 +287,13 @@ func (e *CUDAEngine) InferWithCallback(inputTokens []int, tokensToGenerate int, 
 	log.Printf("Starting inference: %d prompt tokens + %d to generate", len(inputTokens), tokensToGenerate)
 	startTime := time.Now()
 
-	cudaInferenceTotal.WithLabelValues(e.Config.Architecture).Inc()
-	cudaBatchSize.WithLabelValues(e.Config.Architecture).Observe(float64(len(inputTokens)))
+	cudaInferenceTotal.WithLabelValues(e.config.Architecture).Inc()
+	cudaBatchSize.WithLabelValues(e.config.Architecture).Observe(float64(len(inputTokens)))
 
 	inputLen := len(inputTokens)
 	seqLen := inputLen + tokensToGenerate
-	if seqLen > e.Config.SeqLen {
-		seqLen = e.Config.SeqLen
+	if seqLen > e.config.SeqLen {
+		seqLen = e.config.SeqLen
 	}
 
 	allTokens := make([]int, 0, seqLen)
@@ -294,11 +304,11 @@ func (e *CUDAEngine) InferWithCallback(inputTokens []int, tokensToGenerate int, 
 		token := inputTokens[pos]
 		_, err := e.forward(token, pos, allTokens)
 		if err != nil {
-			cudaEngineFailed.WithLabelValues(e.Config.Architecture, "forward_failed").Inc()
+			cudaEngineFailed.WithLabelValues(e.config.Architecture, "forward_failed").Inc()
 			return nil, fmt.Errorf("forward pass failed at position %d: %w", pos, err)
 		}
 		layerLatency := time.Since(layerStart).Seconds()
-		cudaLayerLatency.WithLabelValues(e.Config.Architecture, "prompt").Observe(layerLatency)
+		cudaLayerLatency.WithLabelValues(e.config.Architecture, "prompt").Observe(layerLatency)
 		layerStart = time.Now()
 	}
 
@@ -308,27 +318,27 @@ func (e *CUDAEngine) InferWithCallback(inputTokens []int, tokensToGenerate int, 
 		lastToken := allTokens[len(allTokens)-1]
 		logits, err := e.forward(lastToken, pos, allTokens)
 		if err != nil {
-			cudaEngineFailed.WithLabelValues(e.Config.Architecture, "forward_failed").Inc()
+			cudaEngineFailed.WithLabelValues(e.config.Architecture, "forward_failed").Inc()
 			return nil, fmt.Errorf("forward pass failed at position %d: %w", pos, err)
 		}
 
 		samplingStart := time.Now()
 		nextToken := sampler.Sample(logits)
-		cudaSamplingTime.WithLabelValues(e.Config.Architecture).Observe(time.Since(samplingStart).Seconds())
+		cudaSamplingTime.WithLabelValues(e.config.Architecture).Observe(time.Since(samplingStart).Seconds())
 
 		allTokens = append(allTokens, nextToken)
 		result = append(result, nextToken)
-		cudaTokensGenerated.WithLabelValues(e.Config.Architecture).Inc()
+		cudaTokensGenerated.WithLabelValues(e.config.Architecture).Inc()
 
 		if callback != nil {
 			callback(nextToken)
 		}
 
 		layerLatency := time.Since(layerStart).Seconds()
-		cudaLayerLatency.WithLabelValues(e.Config.Architecture, fmt.Sprintf("gen_%d", gen)).Observe(layerLatency)
+		cudaLayerLatency.WithLabelValues(e.config.Architecture, fmt.Sprintf("gen_%d", gen)).Observe(layerLatency)
 		layerStart = time.Now()
 
-		if e.CUDA != nil && e.CUDA.KCache != nil && e.CUDA.VCache != nil {
+		if e.cuda != nil && e.cuda.KCache != nil && e.cuda.VCache != nil {
 			kvHits++
 		} else {
 			kvMisses++
@@ -342,38 +352,38 @@ func (e *CUDAEngine) InferWithCallback(inputTokens []int, tokensToGenerate int, 
 
 	log.Printf("Generated %d tokens in %.2fs (%.1f t/s)", len(result), elapsed.Seconds(), tokensPerSecond)
 
-	cudaInferenceDuration.WithLabelValues(e.Config.Architecture).Observe(elapsed.Seconds())
-	cudaTokensPerSecond.WithLabelValues(e.Config.Architecture).Observe(tokensPerSecond)
-	cudaKVCacheHits.WithLabelValues(e.Config.Architecture).Add(float64(kvHits))
-	cudaKVCacheMisses.WithLabelValues(e.Config.Architecture).Add(float64(kvMisses))
+	cudaInferenceDuration.WithLabelValues(e.config.Architecture).Observe(elapsed.Seconds())
+	cudaTokensPerSecond.WithLabelValues(e.config.Architecture).Observe(tokensPerSecond)
+	cudaKVCacheHits.WithLabelValues(e.config.Architecture).Add(float64(kvHits))
+	cudaKVCacheMisses.WithLabelValues(e.config.Architecture).Add(float64(kvMisses))
 
-	if e.CUDA != nil {
-		cudaMemoryUsage.WithLabelValues(e.Config.Architecture).Set(float64(device.CUDAAllocatedBytes()))
+	if e.cuda != nil {
+		cudaMemoryUsage.WithLabelValues(e.config.Architecture).Set(float64(device.CUDAAllocatedBytes()))
 	}
 
-	if e.Tokenizer != nil && len(result) > 0 {
-		text := e.Tokenizer.Decode(result)
+	if e.tokenizer != nil && len(result) > 0 {
+		text := e.tokenizer.Decode(result)
 		log.Printf("Output: %s", text)
 	}
 
 	return result, nil
 }
 
-func (e *CUDAEngine) forward(token int, pos int, allTokens []int) ([]float32, error) {
-	heads := e.Config.Heads
-	kvHeads := e.Config.KVHeads
-	headDim := e.Config.HeadDim
-	eps := e.Config.Eps
-	ropeTheta := e.Config.RopeTheta
+func (e *cudaEngine) forward(token int, pos int, allTokens []int) ([]float32, error) {
+	heads := e.config.Heads
+	kvHeads := e.config.KVHeads
+	headDim := e.config.HeadDim
+	eps := e.config.Eps
+	ropeTheta := e.config.RopeTheta
 
-	hidden, err := e.CUDA.GetEmbedding(token)
+	hidden, err := e.cuda.GetEmbedding(token)
 	if err != nil {
 		return nil, err
 	}
 
 	hidden = append([]float32{}, hidden...)
 
-	for layer := 0; layer < e.Config.Layers; layer++ {
+	for layer := 0; layer < e.config.Layers; layer++ {
 		attnNormW, err := e.getDequantedWeight(fmt.Sprintf("blk.%d.attn_norm.weight", layer))
 		if err != nil || attnNormW == nil {
 			continue
@@ -407,13 +417,13 @@ func (e *CUDAEngine) forward(token int, pos int, allTokens []int) ([]float32, er
 		k3d := e.viewAsTensor(k, kvHeads, headDim)
 		v3d := e.viewAsTensor(v, kvHeads, headDim)
 
-		kCache := e.CUDA.GetKCache(layer)
-		vCache := e.CUDA.GetVCache(layer)
+		kCache := e.cuda.GetKCache(layer)
+		vCache := e.cuda.GetVCache(layer)
 		if kCache != nil && vCache != nil {
 			e.storeKV(kCache, vCache, pos, k3d, v3d)
 		}
 
-		attnOut := e.attention(q3d, k3d, v3d, kCache, vCache, pos, heads, kvHeads, headDim, e.Config.SeqLen)
+		attnOut := e.attention(q3d, k3d, v3d, kCache, vCache, pos, heads, kvHeads, headDim, e.config.SeqLen)
 		if attnOut == nil {
 			attnOut = e.attentionFallback(q3d, k3d, v3d)
 		}
@@ -449,7 +459,7 @@ func (e *CUDAEngine) forward(token int, pos int, allTokens []int) ([]float32, er
 
 	outputNormW, err := e.getDequantedWeight("output_norm.weight")
 	if err != nil || outputNormW == nil {
-		logits := make([]float32, e.Config.VocabSize)
+		logits := make([]float32, e.config.VocabSize)
 		for i := range logits {
 			logits[i] = float32(i % 1000)
 		}
@@ -460,7 +470,7 @@ func (e *CUDAEngine) forward(token int, pos int, allTokens []int) ([]float32, er
 
 	outputW, _ := e.getDequantedWeight("output.weight")
 	if outputW == nil {
-		logits := make([]float32, e.Config.VocabSize)
+		logits := make([]float32, e.config.VocabSize)
 		for i := range logits {
 			logits[i] = float32(i % 1000)
 		}
@@ -472,7 +482,7 @@ func (e *CUDAEngine) forward(token int, pos int, allTokens []int) ([]float32, er
 	return logits, nil
 }
 
-func (e *CUDAEngine) rmsnorm(input, weight []float32, eps float32) []float32 {
+func (e *cudaEngine) rmsnorm(input, weight []float32, eps float32) []float32 {
 	n := len(input)
 	result := make([]float32, n)
 
@@ -489,7 +499,7 @@ func (e *CUDAEngine) rmsnorm(input, weight []float32, eps float32) []float32 {
 	return result
 }
 
-func (e *CUDAEngine) matmul(a, b []float32) []float32 {
+func (e *cudaEngine) matmul(a, b []float32) []float32 {
 	aRows := 1
 	aCols := len(a)
 	bRows := aCols
@@ -510,7 +520,7 @@ func (e *CUDAEngine) matmul(a, b []float32) []float32 {
 	return result
 }
 
-func (e *CUDAEngine) applyRoPE(tensor []float32, pos int, theta, dim int) {
+func (e *cudaEngine) applyRoPE(tensor []float32, pos int, theta, dim int) {
 	if len(tensor)%2 != 0 {
 		return
 	}
@@ -535,7 +545,7 @@ func (e *CUDAEngine) applyRoPE(tensor []float32, pos int, theta, dim int) {
 	}
 }
 
-func (e *CUDAEngine) viewAsTensor(data []float32, heads, headDim int) [][]float32 {
+func (e *cudaEngine) viewAsTensor(data []float32, heads, headDim int) [][]float32 {
 	result := make([][]float32, heads)
 	for h := 0; h < heads; h++ {
 		result[h] = make([]float32, headDim)
@@ -544,13 +554,13 @@ func (e *CUDAEngine) viewAsTensor(data []float32, heads, headDim int) [][]float3
 	return result
 }
 
-func (e *CUDAEngine) storeKV(kCache, vCache *device.CUDATensor, pos int, k, v [][]float32) {
+func (e *cudaEngine) storeKV(kCache, vCache *device.cudaTensor, pos int, k, v [][]float32) {
 	if kCache == nil || vCache == nil || len(k) == 0 || len(k[0]) == 0 {
 		return
 	}
 }
 
-func (e *CUDAEngine) attention(q, k, v [][]float32, kCache, vCache *device.CUDATensor, pos, heads, kvHeads, headDim, seqLen int) []float32 {
+func (e *cudaEngine) attention(q, k, v [][]float32, kCache, vCache *device.cudaTensor, pos, heads, kvHeads, headDim, seqLen int) []float32 {
 	if len(q) == 0 || len(k) == 0 || len(v) == 0 {
 		return nil
 	}
@@ -629,7 +639,7 @@ func (e *CUDAEngine) attention(q, k, v [][]float32, kCache, vCache *device.CUDAT
 	return result
 }
 
-func (e *CUDAEngine) attentionFallback(q, k, v [][]float32) []float32 {
+func (e *cudaEngine) attentionFallback(q, k, v [][]float32) []float32 {
 	numHeads := len(q)
 	dim := len(q[0])
 	scale := float32(1.0 / math.Sqrt(float64(dim)))
@@ -786,40 +796,52 @@ func (s *Sampler) Sample(logits []float32) int {
 func init() {
 	log.SetOutput(os.Stderr)
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
-	RegisterEngine("cuda", NewCUDAEngine)
+	RegisterEngine("cuda", NewcudaEngine)
 }
 
 // =============================================================================
 // GPU-based Fused Operations (keep data on GPU for maximum performance)
 // =============================================================================
 
-func (e *CUDAEngine) fusedAttentionGPU(q, k, v *device.CUDATensor, output, kCache, vCache *device.CUDATensor, batch, heads, seqLen, kvSeqLen, headDim int) {
+func (e *cudaEngine) fusedAttentionGPU(q, k, v *device.cudaTensor, output, kCache, vCache *device.cudaTensor, batch, heads, seqLen, kvSeqLen, headDim int) {
 	scale := float32(1.0 / math.Sqrt(float64(headDim)))
 	useCache := 0
 	if kCache != nil && vCache != nil {
 		useCache = 1
 	}
-	e.CUDA.Ctx.FusedAttention(q, k, v, output, kCache, vCache, batch, heads, seqLen, kvSeqLen, headDim, scale, useCache)
+	e.cuda.Ctx.FusedAttention(q, k, v, output, kCache, vCache, batch, heads, seqLen, kvSeqLen, headDim, scale, useCache)
 }
 
-func (e *CUDAEngine) flashAttentionGPU(q, k, v *device.CUDATensor, output *device.CUDATensor, batch, heads, seqLen, kvSeqLen, headDim int) {
+func (e *cudaEngine) flashAttentionGPU(q, k, v *device.cudaTensor, output *device.cudaTensor, batch, heads, seqLen, kvSeqLen, headDim int) {
 	scale := float32(1.0 / math.Sqrt(float64(headDim)))
-	e.CUDA.Ctx.FlashFusedAttention(q, k, v, output, batch, heads, seqLen, kvSeqLen, headDim, scale)
+	e.cuda.Ctx.FlashFusedAttention(q, k, v, output, batch, heads, seqLen, kvSeqLen, headDim, scale)
 }
 
-func (e *CUDAEngine) fusedRoPEGPU(tensor *device.CUDATensor, posIds []int, batch, heads, seqLen, headDim int) {
-	theta := float32(e.Config.RopeTheta)
-	e.CUDA.Ctx.FusedRoPE(tensor, posIds, batch, heads, seqLen, headDim, theta)
+func (e *cudaEngine) fusedRoPEGPU(tensor *device.cudaTensor, posIds []int, batch, heads, seqLen, headDim int) {
+	theta := float32(e.config.RopeTheta)
+	e.cuda.Ctx.FusedRoPE(tensor, posIds, batch, heads, seqLen, headDim, theta)
 }
 
-func (e *CUDAEngine) fusedSwiGLUGPU(input, gateWeight, upWeight, downWeight, output *device.CUDATensor, batch, dim, hiddenDim int) {
-	e.CUDA.Ctx.FusedSwiGLU(input, gateWeight, upWeight, downWeight, output, batch, dim, hiddenDim)
+func (e *cudaEngine) fusedSwiGLUGPU(input, gateWeight, upWeight, downWeight, output *device.cudaTensor, batch, dim, hiddenDim int) {
+	e.cuda.Ctx.FusedSwiGLU(input, gateWeight, upWeight, downWeight, output, batch, dim, hiddenDim)
 }
 
-func (e *CUDAEngine) fusedMLPGPU(input, gateWeight, upWeight, downWeight, output *device.CUDATensor, batch, dim, hiddenDim int) {
-	e.CUDA.Ctx.FusedMLP(input, gateWeight, upWeight, downWeight, output, batch, dim, hiddenDim)
+func (e *cudaEngine) fusedMLPGPU(input, gateWeight, upWeight, downWeight, output *device.cudaTensor, batch, dim, hiddenDim int) {
+	e.cuda.Ctx.FusedMLP(input, gateWeight, upWeight, downWeight, output, batch, dim, hiddenDim)
 }
 
-func (e *CUDAEngine) fusedRMSNormAddGPU(input, hidden, weight, output *device.CUDATensor, batch, dim int) {
-	e.CUDA.Ctx.FusedRMSNormAdd(input, hidden, weight, output, batch, dim, e.Config.Eps)
+func (e *cudaEngine) fusedRMSNormAddGPU(input, hidden, weight, output *device.cudaTensor, batch, dim int) {
+	e.cuda.Ctx.FusedRMSNormAdd(input, hidden, weight, output, batch, dim, e.config.Eps)
+}
+
+func (e *cudaEngine) InferWithLogits(inputTokens []int, tokensToGenerate int, samplerConfig SamplerConfig) ([]int, []float32, error) {
+	return nil, nil, fmt.Errorf("InferWithLogits not yet implemented for cudaEngine")
+}
+
+func (e *cudaEngine) InferWithCallbackLogits(inputTokens []int, tokensToGenerate int, samplerConfig SamplerConfig, tokenCallback func(int), logitsCallback func([]float32)) ([]int, error) {
+	return nil, fmt.Errorf("InferWithCallbackLogits not yet implemented for cudaEngine")
+}
+
+func (e *cudaEngine) GetSeqCachePos(seqID int) int {
+	return 0
 }

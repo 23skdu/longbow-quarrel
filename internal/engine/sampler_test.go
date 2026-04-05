@@ -13,7 +13,7 @@ func TestSampler_Greedy(t *testing.T) {
 	// Logits: 1.0, 5.0, 2.0, 0.5
 	logits := []float32{1.0, 5.0, 2.0, 0.5}
 
-	val := s.Sample(logits, nil, len(logits))
+	val := s.Sample(logits, nil)
 	if val != 1 {
 		t.Errorf("Greedy failed. Expected 1 (logit 5.0), got %d", val)
 	}
@@ -26,7 +26,7 @@ func TestSampler_TopK(t *testing.T) {
 	logits := []float32{2.0, 10.0, 5.0, 1.0}
 
 	// Even with temp 1.0, TopK=1 forces selection of the max
-	val := s.Sample(logits, nil, len(logits))
+	val := s.Sample(logits, nil)
 	if val != 1 {
 		t.Errorf("TopK=1 failed. Expected 1, got %d", val)
 	}
@@ -41,7 +41,7 @@ func TestSampler_TopK_Filtering(t *testing.T) {
 
 	// Run many times to ensure 0 and 3 never appear
 	for i := 0; i < 100; i++ {
-		val := s.Sample(logits, nil, len(logits))
+		val := s.Sample(logits, nil)
 		if val == 0 || val == 3 {
 			t.Errorf("TopK=2 failed. Got excluded token %d", val)
 		}
@@ -74,7 +74,7 @@ func TestSampler_TopP(t *testing.T) {
 
 	s := NewSampler(SamplerConfig{Temperature: 1.0, TopP: 0.5})
 	for i := 0; i < 100; i++ {
-		val := s.Sample(logits, nil, len(logits))
+		val := s.Sample(logits, nil)
 		if val == 2 || val == 3 {
 			t.Errorf("TopP=0.5 failed. Got excluded token %d", val)
 		}
@@ -99,7 +99,7 @@ func TestSampler_RepetitionPenalty(t *testing.T) {
 	// Normal: 1 wins.
 	// Penalized (1.0/2.0 = 0.5): 1 becomes 0.5. 0 and 2 (0.8) win.
 
-	val := s.Sample(logits, history, len(logits))
+	val := s.Sample(logits, history)
 	if val == 1 {
 		t.Errorf("RepPenalty failed. Penalized token 1 was selected over higher prob tokens.")
 	}

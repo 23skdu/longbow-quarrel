@@ -25,14 +25,14 @@ func NewSampler(cfg SamplerConfig) *Sampler {
 	}
 }
 
-func (s *Sampler) SampleAdvanced(logits []float32, history []int, vocabSize int, qualityMode bool) int {
+func (s *Sampler) SampleAdvanced(logits []float32, history []int, qualityMode bool) int {
 	if qualityMode {
-		return s.sampleWithQualityControl(logits, history, vocabSize)
+		return s.sampleWithQualityControl(logits, history)
 	}
-	return s.Sample(logits, history, vocabSize)
+	return s.Sample(logits, history)
 }
 
-func (s *Sampler) sampleWithQualityControl(logits []float32, history []int, vocabSize int) int {
+func (s *Sampler) sampleWithQualityControl(logits []float32, history []int) int {
 	if !s.validateLogits(logits) {
 		return s.findFirstValidToken(logits)
 	}
@@ -69,7 +69,7 @@ func (s *Sampler) sampleWithQualityControl(logits []float32, history []int, voca
 	return s.sampleFromCandidates(candidates)
 }
 
-func (s *Sampler) Sample(logits []float32, history []int, vocabSize int) int {
+func (s *Sampler) Sample(logits []float32, history []int) int {
 	if !s.validateLogits(logits) {
 		return s.findFirstValidToken(logits)
 	}

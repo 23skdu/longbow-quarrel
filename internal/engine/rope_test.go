@@ -51,7 +51,7 @@ func TestRoPEFrequency_Mistral(t *testing.T) {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
 
-	engineTheta := float64(engine.Config.RopeTheta)
+	engineTheta := float64(engine.Config().RopeTheta)
 	if engineTheta != ropeFreqBase {
 		t.Errorf("Engine RopeTheta mismatch: got %.0f, want %.0f", engineTheta, ropeFreqBase)
 	}

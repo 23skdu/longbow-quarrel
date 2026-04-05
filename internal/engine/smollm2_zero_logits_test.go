@@ -28,15 +28,6 @@ func TestSmollm2TokenizerMismatch(t *testing.T) {
 	// 3. Compare token IDs to verify alignment
 }
 
-// Helper to check if array contains only the given value
-func allZeros[T comparable](arr []T, value T) bool {
-	for _, v := range arr {
-		if v != value {
-			return false
-		}
-	}
-	return true
-}
 
 // Test that output contains only <unk> tokens
 func TestSmollm2OutputIsAllUnk(t *testing.T) {

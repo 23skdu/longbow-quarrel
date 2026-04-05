@@ -513,7 +513,7 @@ func TestLayerScratch_Heap_Management(t *testing.T) {
 	defer ctx.Free()
 
 	t.Run("Create and free scratch", func(t *testing.T) {
-		scratch := ctx.NewLayerScratch(1, 4096, 11008, 32, 8, 128, 4096, 49152)
+		scratch := ctx.NewLayerScratch(1, 4096, 11008, 32, 8, 128, 4096, 49152, 128, 128)
 		if scratch == nil {
 			t.Fatal("Failed to create layer scratch")
 		}
@@ -522,7 +522,7 @@ func TestLayerScratch_Heap_Management(t *testing.T) {
 
 	t.Run("Multiple allocations", func(t *testing.T) {
 		for i := 0; i < 5; i++ {
-			scratch := ctx.NewLayerScratch(1, 4096, 11008, 32, 8, 128, 4096, 49152)
+			scratch := ctx.NewLayerScratch(1, 4096, 11008, 32, 8, 128, 4096, 49152, 128, 128)
 			if scratch == nil {
 				t.Fatalf("Failed to create scratch %d", i)
 			}
@@ -531,7 +531,7 @@ func TestLayerScratch_Heap_Management(t *testing.T) {
 	})
 
 	t.Run("Heap reference cleanup", func(t *testing.T) {
-		scratch := ctx.NewLayerScratch(1, 4096, 11008, 32, 8, 128, 4096, 49152)
+		scratch := ctx.NewLayerScratch(1, 4096, 11008, 32, 8, 128, 4096, 49152, 128, 128)
 		if scratch.heap == nil {
 			t.Error("Heap should be set")
 		}
@@ -567,7 +567,7 @@ func TestFFN_FP32_For_Large_Models(t *testing.T) {
 	})
 
 	t.Run("FFN tensors exist", func(t *testing.T) {
-		scratch := ctx.NewLayerScratch(1, dim, hiddenDim, 32, 8, 128, 4096, 49152)
+		scratch := ctx.NewLayerScratch(1, dim, hiddenDim, 32, 8, 128, 4096, 49152, 128, 128)
 		defer scratch.Free()
 
 		if scratch.NormedFFN_F32 == nil {

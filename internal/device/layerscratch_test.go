@@ -10,7 +10,7 @@ func TestLayerScratch_Heap_Allocation_And_Free(t *testing.T) {
 	ctx := NewContext()
 	defer ctx.Free()
 
-	scratch := ctx.NewLayerScratch(1, 4096, 14336, 32, 8, 128, 4096, 49152)
+	scratch := ctx.NewLayerScratch(1, 4096, 14336, 32, 8, 128, 4096, 49152, 128, 128)
 	if scratch == nil {
 		t.Fatal("Failed to create LayerScratch")
 	}
@@ -33,7 +33,7 @@ func TestLayerScratch_Multiple_Allocations(t *testing.T) {
 	var scratches []*LayerScratch
 
 	for i := 0; i < 5; i++ {
-		scratch := ctx.NewLayerScratch(1, 4096, 14336, 32, 8, 128, 4096, 49152)
+		scratch := ctx.NewLayerScratch(1, 4096, 14336, 32, 8, 128, 4096, 49152, 128, 128)
 		if scratch == nil {
 			t.Fatalf("Failed to create LayerScratch %d", i)
 		}
@@ -75,7 +75,7 @@ func TestLayerScratch_Different_Configurations(t *testing.T) {
 
 	for _, cfg := range configs {
 		t.Run(cfg.name, func(t *testing.T) {
-			scratch := ctx.NewLayerScratch(cfg.batch, cfg.dim, cfg.hiddenDim, cfg.heads, cfg.kvHeads, cfg.headDim, cfg.seqLen, cfg.vocabSize)
+			scratch := ctx.NewLayerScratch(cfg.batch, cfg.dim, cfg.hiddenDim, cfg.heads, cfg.kvHeads, cfg.headDim, cfg.seqLen, cfg.vocabSize, cfg.headDim, cfg.headDim)
 			if scratch == nil {
 				t.Fatal("Failed to create LayerScratch")
 			}
@@ -118,7 +118,7 @@ func TestLayerScratch_FP32_Buffers_Allocated(t *testing.T) {
 	ctx := NewContext()
 	defer ctx.Free()
 
-	scratch := ctx.NewLayerScratch(1, 4096, 14336, 32, 8, 128, 4096, 49152)
+	scratch := ctx.NewLayerScratch(1, 4096, 14336, 32, 8, 128, 4096, 49152, 128, 128)
 	if scratch == nil {
 		t.Fatal("Failed to create LayerScratch")
 	}
@@ -145,7 +145,7 @@ func TestLayerScratch_Small_Model_FP32(t *testing.T) {
 	ctx := NewContext()
 	defer ctx.Free()
 
-	scratch := ctx.NewLayerScratch(1, 512, 2048, 8, 8, 64, 512, 32000)
+	scratch := ctx.NewLayerScratch(1, 512, 2048, 8, 8, 64, 512, 32000, 64, 64)
 	if scratch == nil {
 		t.Fatal("Failed to create LayerScratch")
 	}
@@ -166,7 +166,7 @@ func TestLayerScratch_Free_Safety(t *testing.T) {
 	ctx := NewContext()
 	defer ctx.Free()
 
-	scratch := ctx.NewLayerScratch(1, 4096, 14336, 32, 8, 128, 4096, 49152)
+	scratch := ctx.NewLayerScratch(1, 4096, 14336, 32, 8, 128, 4096, 49152, 128, 128)
 	if scratch == nil {
 		t.Fatal("Failed to create LayerScratch")
 	}
@@ -184,7 +184,7 @@ func TestLayerScratch_Tensor_Ownership(t *testing.T) {
 	ctx := NewContext()
 	defer ctx.Free()
 
-	scratch := ctx.NewLayerScratch(1, 4096, 14336, 32, 8, 128, 4096, 49152)
+	scratch := ctx.NewLayerScratch(1, 4096, 14336, 32, 8, 128, 4096, 49152, 128, 128)
 	if scratch == nil {
 		t.Fatal("Failed to create LayerScratch")
 	}
@@ -241,7 +241,7 @@ func TestLayerScratch_Heap_Size_Calculation(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			scratch := ctx.NewLayerScratch(tc.batch, tc.dim, tc.hiddenDim, tc.heads, tc.kvHeads, tc.headDim, tc.seqLen, tc.vocabSize)
+			scratch := ctx.NewLayerScratch(tc.batch, tc.dim, tc.hiddenDim, tc.heads, tc.kvHeads, tc.headDim, tc.seqLen, tc.vocabSize, tc.headDim, tc.headDim)
 			if scratch == nil {
 				t.Fatal("Failed to create LayerScratch")
 			}

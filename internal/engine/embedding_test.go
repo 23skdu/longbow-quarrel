@@ -9,8 +9,8 @@ import (
 func TestEmbeddingDim(t *testing.T) {
 	t.Skip("Requires loaded model")
 
-	e := &Engine{
-		Weights: &LlamaWeights{
+	e := &metalEngine{
+		weights: &LlamaWeights{
 			TokenEmb: nil,
 		},
 	}
@@ -24,8 +24,8 @@ func TestEmbeddingDim(t *testing.T) {
 func TestGetEmbedding(t *testing.T) {
 	t.Skip("Requires loaded model")
 
-	e := &Engine{
-		Weights: &LlamaWeights{
+	e := &metalEngine{
+		weights: &LlamaWeights{
 			TokenEmb: nil,
 		},
 	}
@@ -39,8 +39,8 @@ func TestGetEmbedding(t *testing.T) {
 func TestGetEmbeddings(t *testing.T) {
 	t.Skip("Requires loaded model")
 
-	e := &Engine{
-		Weights: &LlamaWeights{
+	e := &metalEngine{
+		weights: &LlamaWeights{
 			TokenEmb: nil,
 		},
 	}
@@ -54,7 +54,7 @@ func TestGetEmbeddings(t *testing.T) {
 func TestTextToEmbedding(t *testing.T) {
 	t.Skip("Requires loaded model and tokenizer")
 
-	e := &Engine{
+	e := &metalEngine{
 		Tokenizer: nil,
 	}
 

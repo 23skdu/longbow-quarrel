@@ -105,13 +105,13 @@ func TestIsMambaLayer(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			e := &Engine{
-				Config: config.Config{
+			e := &metalEngine{
+				config: config.Config{
 					Layers:            tt.layers,
 					MambaLayerPattern: tt.pattern,
 					IsHybrid:          tt.isHybrid,
 				},
-				Weights: &LlamaWeights{
+				weights: &LlamaWeights{
 					Mamba: make([]*MambaWeights, tt.layers),
 				},
 			}
@@ -119,7 +119,7 @@ func TestIsMambaLayer(t *testing.T) {
 			// Set up Mamba weights for weight-based tests
 			for _, idx := range tt.mambaIdx {
 				if idx < tt.layers {
-					e.Weights.Mamba[idx] = &MambaWeights{}
+					e.weights.Mamba[idx] = &MambaWeights{}
 				}
 			}
 
@@ -174,20 +174,20 @@ func TestCountMambaLayers(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			e := &Engine{
-				Config: config.Config{
+			e := &metalEngine{
+				config: config.Config{
 					Layers:            tt.layers,
 					MambaLayerPattern: tt.pattern,
 					IsHybrid:          tt.isHybrid,
 				},
-				Weights: &LlamaWeights{
+				weights: &LlamaWeights{
 					Mamba: make([]*MambaWeights, tt.layers),
 				},
 			}
 
 			for _, idx := range tt.mambaIdx {
 				if idx < tt.layers {
-					e.Weights.Mamba[idx] = &MambaWeights{}
+					e.weights.Mamba[idx] = &MambaWeights{}
 				}
 			}
 

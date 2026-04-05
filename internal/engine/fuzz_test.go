@@ -165,7 +165,7 @@ func FuzzConfigJSON(f *testing.F) {
 }
 
 // Helper function to create test engine
-func createTestEngine() *Engine {
+func createTestEngine() Engine {
 	// Use a small test model - would need to have one available
 	// For now, return nil to indicate we need a test model
 	// This would be implemented with an actual test model file

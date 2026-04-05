@@ -32,12 +32,13 @@ func TestEngineHotSwap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
-	if e == nil {
-		t.Fatal("Engine is nil")
+	me := e.(*metalEngine)
+	if me.weights == nil {
+		t.Fatal("Weights should be loaded")
 	}
 
 	// Verify we are loaded
-	if e.Weights.TokenEmb == nil {
+	if me.weights.TokenEmb == nil {
 		t.Fatal("Expected TokenEmb to be loaded for model 1")
 	}
 
@@ -78,7 +79,11 @@ func TestEngineHotSwap(t *testing.T) {
 	}
 
 	// Verify model 2 is loaded and usable
-	if e.Weights.TokenEmb == nil {
+	me2 := e.(*metalEngine)
+	if me2.weights == nil {
+		t.Fatal("Weights should be loaded after swap")
+	}
+	if me2.weights.TokenEmb == nil {
 		t.Fatal("Expected TokenEmb to be valid after swap")
 	}
 

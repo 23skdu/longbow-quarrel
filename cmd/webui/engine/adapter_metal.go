@@ -15,7 +15,7 @@ import (
 )
 
 type WrappedMetalEngine struct {
-	engine     *engine.Engine
+	engine     engine.Engine
 	tok        *tokenizer.Tokenizer
 	model      string
 	loadedAt   time.Time

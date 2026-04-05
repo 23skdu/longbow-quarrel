@@ -166,14 +166,17 @@ func TestLargeContext_8K_Integration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
-	defer engine.Ctx.Free()
+	me := engine.(*metalEngine)
+	if me.Ctx() != nil {
+		defer me.Ctx().Free()
+	}
 
-	if engine.Config.SeqLen != 8000 {
-		t.Errorf("Expected SeqLen=8000, got %d", engine.Config.SeqLen)
+	if me.Config().SeqLen != 8000 {
+		t.Errorf("Expected SeqLen=8000, got %d", me.Config().SeqLen)
 	}
 
 	t.Logf("8K context model: Dim=%d, Heads=%d, KVHeads=%d, SeqLen=%d",
-		engine.Config.Dim, engine.Config.Heads, engine.Config.KVHeads, engine.Config.SeqLen)
+		me.Config().Dim, me.Config().Heads, me.Config().KVHeads, me.Config().SeqLen)
 }
 
 func TestLargeContext_16K_Integration(t *testing.T) {
@@ -201,10 +204,13 @@ func TestLargeContext_16K_Integration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
-	defer engine.Ctx.Free()
+	me := engine.(*metalEngine)
+	if me.Ctx() != nil {
+		defer me.Ctx().Free()
+	}
 
-	if engine.Config.SeqLen != 16000 {
-		t.Errorf("Expected SeqLen=16000, got %d", engine.Config.SeqLen)
+	if me.Config().SeqLen != 16000 {
+		t.Errorf("Expected SeqLen=16000, got %d", me.Config().SeqLen)
 	}
 
 	t.Logf("16K context model loaded successfully")
@@ -235,10 +241,13 @@ func TestLargeContext_32K_Integration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
-	defer engine.Ctx.Free()
+	me := engine.(*metalEngine)
+	if me.Ctx() != nil {
+		defer me.Ctx().Free()
+	}
 
-	if engine.Config.SeqLen != 32000 {
-		t.Errorf("Expected SeqLen=32000, got %d", engine.Config.SeqLen)
+	if me.Config().SeqLen != 32000 {
+		t.Errorf("Expected SeqLen=32000, got %d", me.Config().SeqLen)
 	}
 
 	t.Logf("32K context model loaded successfully")
@@ -284,16 +293,19 @@ func TestGQA_Configuration_Integration(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Failed to create engine: %v", err)
 			}
-			defer engine.Ctx.Free()
-
-			if engine.Config.Heads != tc.heads {
-				t.Errorf("Expected Heads=%d, got %d", tc.heads, engine.Config.Heads)
-			}
-			if engine.Config.KVHeads != tc.kvHeads {
-				t.Errorf("Expected KVHeads=%d, got %d", tc.kvHeads, engine.Config.KVHeads)
+			me := engine.(*metalEngine)
+			if me.Ctx() != nil {
+				defer me.Ctx().Free()
 			}
 
-			if tc.validGQA && engine.Config.Heads%engine.Config.KVHeads != 0 {
+			if me.Config().Heads != tc.heads {
+				t.Errorf("Expected Heads=%d, got %d", tc.heads, me.Config().Heads)
+			}
+			if me.Config().KVHeads != tc.kvHeads {
+				t.Errorf("Expected KVHeads=%d, got %d", tc.kvHeads, me.Config().KVHeads)
+			}
+
+			if tc.validGQA && me.Config().Heads%me.Config().KVHeads != 0 {
 				t.Error("GQA ratio should be valid")
 			}
 		})
@@ -344,10 +356,13 @@ func TestSliding_Window_Integration(t *testing.T) {
 				}
 				return
 			}
-			defer engine.Ctx.Free()
+			me := engine.(*metalEngine)
+			if me.Ctx() != nil {
+				defer me.Ctx().Free()
+			}
 
-			if engine.Config.WindowSize != tc.windowSize {
-				t.Errorf("Expected WindowSize=%d, got %d", tc.windowSize, engine.Config.WindowSize)
+			if me.Config().WindowSize != tc.windowSize {
+				t.Errorf("Expected WindowSize=%d, got %d", tc.windowSize, me.Config().WindowSize)
 			}
 		})
 	}

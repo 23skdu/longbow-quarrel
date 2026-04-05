@@ -29,6 +29,12 @@ type TestResult struct {
 	Match         bool    `json:"match"`
 }
 
+type inferenceResult struct {
+	text   string
+	tokens int
+	tps    float64
+}
+
 func main() {
 	modelPath := flag.String("model", "", "Path to model GGUF file")
 	ollamaModel := flag.String("ollama-model", "gemma4:e4b", "Ollama model name")
@@ -41,25 +47,66 @@ func main() {
 		os.Exit(1)
 	}
 
-	prompts := []string{
-		"The capital of France is",
-		"Once upon a time in a distant land",
-		"The meaning of life is",
-		"Hello, my name is",
-		"In the beginning God",
+	conf := config.Default()
+	conf.KVCacheSize = 8192 // Need more for long battery
+	conf.DebugEmbedding = false
+	conf.DebugAttention = false
+	conf.DebugFFN = false
+	conf.DebugLayerOutput = false
+	conf.DebugLogits = false
+	conf.DebugMemory = false
+
+	fmt.Printf("Loading engine: %s...\n", *modelPath)
+	e, err := engine.NewEngine(*modelPath, conf)
+	if err != nil {
+		log.Fatalf("Failed to load engine: %v", err)
+	}
+	defer e.Close()
+
+	tok, err := tokenizer.New(*modelPath)
+	if err != nil {
+		log.Fatalf("Failed to load tokenizer: %v", err)
 	}
 
-	fmt.Printf("=== Coherence Test: Quarrel vs Ollama ===\n")
-	fmt.Printf("Model: %s\n", *modelPath)
-	fmt.Printf("Ollama Model: %s\n", *ollamaModel)
-	fmt.Printf("Tokens per prompt: %d\n\n", *tokens)
+	prompts := []string{
+		"Explain quantum entanglement in simple terms.",
+		"Write a Python function to calculate Fibonacci numbers.",
+		"What are the three laws of thermodynamics?",
+		"Translate 'Where is the library?' into French, Spanish, and German.",
+		"Who wrote the play 'Hamlet'?",
+		"Explain the difference between a list and a tuple in Python.",
+		"Summarize the plot of the movie 'Inception'.",
+		"How do photosynthesis and respiration differ?",
+		"Write a short poem about a rainy day in a city.",
+		"What is the approximate distance from the Earth to the Moon?",
+		"List five major cities in Japan.",
+		"Explain the concept of 'opportunity cost' in economics.",
+		"How does a blockchain work?",
+		"Write a SQL query to find all users over age 30 from a 'users' table.",
+		"What are the primary ingredients in a classic Margherita pizza?",
+		"Describe the process of brewing a cup of espresso.",
+		"Who is known as the 'Father of Modern Physics'?",
+		"Write a function in JavaScript to reverse a string.",
+		"What is the chemical formula for table salt?",
+		"Summarize the main theme of the book '1984' by George Orwell.",
+		"How many continents are there on Earth?",
+		"Explain the difference between 'HTTP' and 'HTTPS'.",
+		"Write a short story (3 sentences) about a robot that learns to paint.",
+		"What is the value of the mathematical constant 'pi' to 5 decimal places?",
+		"List the colors of a rainbow in order.",
+		"How do you declare a variable in C++?",
+		"What is the capital city of Australia?",
+		"Explain the 'Turing Test'.",
+		"Write a CSS rule to make all h1 elements blue.",
+		"Who painted the 'Mona Lisa'?",
+	}
 
 	results := make([]TestResult, 0, len(prompts))
 
 	for i, prompt := range prompts {
 		fmt.Printf("[%d/%d] Testing: %q\n", i+1, len(prompts), prompt)
 
-		qResult := testQuarrel(*modelPath, prompt, *tokens)
+		qResult := testQuarrel(e, tok, prompt, *tokens)
 		fmt.Printf("  Quarrel: %s (%.1f t/s)\n", qResult.text, qResult.tps)
 
 		oResult := testOllama(*ollamaModel, prompt, *tokens)
@@ -84,27 +131,7 @@ func main() {
 	printSummary(results)
 }
 
-type inferenceResult struct {
-	text   string
-	tokens int
-	tps    float64
-}
-
-func testQuarrel(modelPath, prompt string, maxTokens int) inferenceResult {
-	conf := config.Default()
-	conf.KVCacheSize = 1024
-
-	e, err := engine.NewEngine(modelPath, conf)
-	if err != nil {
-		log.Fatalf("Failed to load engine: %v", err)
-	}
-	defer e.Close()
-
-	tok, err := tokenizer.New(modelPath)
-	if err != nil {
-		log.Fatalf("Failed to load tokenizer: %v", err)
-	}
-
+func testQuarrel(e engine.Engine, tok *tokenizer.Tokenizer, prompt string, maxTokens int) inferenceResult {
 	inputTokens := tok.Encode(prompt)
 	sampler := engine.SamplerConfig{
 		Temperature: 0.7,

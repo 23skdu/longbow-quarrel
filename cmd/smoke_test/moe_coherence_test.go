@@ -122,12 +122,12 @@ func TestNemotronMOECoherence(t *testing.T) {
 	}
 	defer e.Close()
 
-	if !e.Config.IsMOE {
+	if !e.Config().IsMOE {
 		t.Fatal("Engine did not detect MOE architecture")
 	}
 
 	t.Logf("MOE Config: experts=%d, used=%d, shared=%d",
-		e.Config.ExpertCount, e.Config.ExpertUsedCount, e.Config.ExpertSharedCount)
+		e.Config().ExpertCount, e.Config().ExpertUsedCount, e.Config().ExpertSharedCount)
 
 	// Basic inference test
 	inputs := []int{1, 2, 3}
@@ -245,16 +245,16 @@ func TestNemotronMiniMOECoherence(t *testing.T) {
 	}
 	defer e.Close()
 
-	if !e.Config.IsMOE {
+	if !e.Config().IsMOE {
 		t.Fatal("Engine did not detect MOE architecture")
 	}
 
 	t.Logf("Nemotron-Mini MOE Config: experts=%d, used=%d, shared=%d",
-		e.Config.ExpertCount, e.Config.ExpertUsedCount, e.Config.ExpertSharedCount)
+		e.Config().ExpertCount, e.Config().ExpertUsedCount, e.Config().ExpertSharedCount)
 
 	// Verify it's the mini variant (smaller FFN)
-	if e.Config.ExpertFeedForwardLength != 96 {
-		t.Logf("Note: ExpertFeedForwardLength=%d (expected 96 for mini)", e.Config.ExpertFeedForwardLength)
+	if e.Config().ExpertFeedForwardLength != 96 {
+		t.Logf("Note: ExpertFeedForwardLength=%d (expected 96 for mini)", e.Config().ExpertFeedForwardLength)
 	}
 
 	inputs := []int{1, 2, 3}
@@ -367,25 +367,26 @@ func TestGPTOSSMOECoherence(t *testing.T) {
 	defer os.Remove(modelPath)
 
 	conf := config.Default()
+	t.Logf("DEBUG: conf before NewEngine = %+v", conf)
 	e, err := engine.NewEngine(modelPath, conf)
 	if err != nil {
 		t.Fatalf("Failed to initialize engine: %v", err)
 	}
 	defer e.Close()
 
-	if !e.Config.IsMOE {
+	if !e.Config().IsMOE {
 		t.Fatal("Engine did not detect MOE architecture")
 	}
 
 	t.Logf("GPT-OSS MOE Config: experts=%d, used=%d, shared=%d",
-		e.Config.ExpertCount, e.Config.ExpertUsedCount, e.Config.ExpertSharedCount)
+		e.Config().ExpertCount, e.Config().ExpertUsedCount, e.Config().ExpertSharedCount)
 
 	// Verify GPT-OSS specific config (64 experts, top-4)
-	if e.Config.ExpertCount != 64 {
-		t.Errorf("Expected 64 experts for GPT-OSS, got %d", e.Config.ExpertCount)
+	if e.Config().ExpertCount != 64 {
+		t.Errorf("Expected 64 experts for GPT-OSS, got %d", e.Config().ExpertCount)
 	}
-	if e.Config.ExpertUsedCount != 4 {
-		t.Errorf("Expected top-4 routing for GPT-OSS, got %d", e.Config.ExpertUsedCount)
+	if e.Config().ExpertUsedCount != 4 {
+		t.Errorf("Expected top-4 routing for GPT-OSS, got %d", e.Config().ExpertUsedCount)
 	}
 
 	inputs := []int{1, 2, 3}
@@ -504,19 +505,19 @@ func TestMixtralMOECoherence(t *testing.T) {
 	}
 	defer e.Close()
 
-	if !e.Config.IsMOE {
+	if !e.Config().IsMOE {
 		t.Fatal("Engine did not detect MOE architecture")
 	}
 
 	t.Logf("Mixtral MOE Config: experts=%d, used=%d, shared=%d",
-		e.Config.ExpertCount, e.Config.ExpertUsedCount, e.Config.ExpertSharedCount)
+		e.Config().ExpertCount, e.Config().ExpertUsedCount, e.Config().ExpertSharedCount)
 
 	// Verify Mixtral specific config (8 experts, top-2)
-	if e.Config.ExpertCount != 8 {
-		t.Errorf("Expected 8 experts for Mixtral, got %d", e.Config.ExpertCount)
+	if e.Config().ExpertCount != 8 {
+		t.Errorf("Expected 8 experts for Mixtral, got %d", e.Config().ExpertCount)
 	}
-	if e.Config.ExpertUsedCount != 2 {
-		t.Errorf("Expected top-2 routing for Mixtral, got %d", e.Config.ExpertUsedCount)
+	if e.Config().ExpertUsedCount != 2 {
+		t.Errorf("Expected top-2 routing for Mixtral, got %d", e.Config().ExpertUsedCount)
 	}
 
 	inputs := []int{1, 2, 3}

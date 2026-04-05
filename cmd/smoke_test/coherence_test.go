@@ -137,14 +137,11 @@ func TestCoherenceWrapping(t *testing.T) {
 
 	t.Logf("Generated %d tokens", len(tokens))
 
-	if e.CachePos <= 32 {
-		t.Errorf("CachePos %d did not advance beyond context limit 32", e.CachePos)
+	pos := e.GetSeqCachePos(1)
+	if pos <= 32 {
+		t.Errorf("CachePos %d did not advance beyond context limit 32", pos)
 	} else {
-		t.Logf("CachePos reached %d successfully (Context Wrapping Verified)", e.CachePos)
+		t.Logf("CachePos reached %d successfully (Context Wrapping Verified)", pos)
 	}
 }
 
-func TestMainCoherence(t *testing.T) {
-	// This test is usually run via go test, so this is just a wrapper if needed
-	TestCoherenceWrapping(t)
-}

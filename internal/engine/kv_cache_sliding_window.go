@@ -29,37 +29,32 @@ type SlidingWindowKVCache struct {
 }
 
 // Init initializes the sliding window cache tensors
-func (c *SlidingWindowKVCache) Init(ctx *device.Context, config config.Config) error {
+func (c *SlidingWindowKVCache) Init(ctx *device.Context, cfg config.Config) error {
 	c.ctx = ctx
-	c.config = config
-	c.kvHeads = config.KVHeads
-	c.headDim = config.HeadDim
+	c.config = cfg
+	c.kvHeads = cfg.KVHeads
+	c.headDim = cfg.HeadDim
 
-	// Use WindowSize from config if explicitly set for SWA
-	c.windowSize = config.WindowSize
-
-	// Priority:
-	// 1. Explicit EngineConfig.KVCacheSize (user override)
+	// Priority for window size:
+	// 1. Explicit config.KVCacheSize (user override)
 	// 2. config.WindowSize (model metadata for SWA)
 	// 3. config.SeqLen (fallback to full context)
-	if config.KVCacheSize > 0 {
-		c.windowSize = config.KVCacheSize
+	c.windowSize = cfg.WindowSize
+	if cfg.KVCacheSize > 0 {
+		c.windowSize = cfg.KVCacheSize
 		logger.Log.Info("KV Cache using explicit override size", "size", c.windowSize)
 	} else if c.windowSize == 0 {
-		c.windowSize = config.SeqLen
-		// SAFETY: If SeqLen is huge (e.g. 1M for Nemotron), cap it to 8192 to prevent OOM
-		// only if we are using the fallback and no explicit size was given.
+		c.windowSize = cfg.SeqLen
 		if c.windowSize > 8192 {
-			logger.Log.Warn("Capping excessively large context length for KV Cache", "original", config.SeqLen, "capped", 8192)
+			logger.Log.Warn("Capping excessively large context length", "original", cfg.SeqLen, "capped", 8192)
 			c.windowSize = 8192
 		}
 	}
-
-	if c.windowSize <= 0 {
-		c.windowSize = 2048 // Hard default
+	if c.windowSize == 0 {
+		c.windowSize = 2048
 	}
 
-	c.layers = config.Layers
+	c.layers = cfg.Layers
 	if c.layers == 0 {
 		return fmt.Errorf("invalid config: layers=0")
 	}
@@ -74,7 +69,7 @@ func (c *SlidingWindowKVCache) Init(ctx *device.Context, config config.Config) e
 
 	// Determine data type
 	dt := device.DataTypeF32
-	switch config.KVCacheType {
+	switch cfg.KVCacheType {
 	case config.KVCacheF16:
 		dt = device.DataTypeF16
 	case config.KVCacheTQ1_0:

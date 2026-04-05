@@ -74,11 +74,6 @@ func main() {
 		vocabSize = int(v)
 	}
 
-	seqLen := 2048
-	if v, ok := f.KV["llama.context_length"].(uint32); ok {
-		seqLen = int(v)
-	}
-
 	fmt.Printf("Architecture: %s\n", arch)
 	fmt.Printf("Layers: %d\n", layers)
 	fmt.Printf("Vocab: %d\n", vocabSize)

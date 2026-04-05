@@ -186,14 +186,15 @@ func TestEngineLifecycle(t *testing.T) {
 		t.Fatal("Engine is nil")
 	}
 
-	if e.Weights.TokenEmb == nil {
+	me := e.(*metalEngine)
+	if me.weights.TokenEmb == nil {
 		t.Fatal("Expected TokenEmb to be loaded")
 	}
 
-	if len(e.Weights.AttnQ) < 1 {
+	if len(me.weights.AttnQ) < 1 {
 		t.Fatal("Expected AttnQ to be initialized with layers")
 	}
-	if e.Weights.AttnQ[0] == nil {
+	if me.weights.AttnQ[0] == nil {
 		t.Fatal("Expected blk.0.attn_q.weight to be loaded")
 	}
 
@@ -363,13 +364,16 @@ func TestMistralMetadataSupport(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
-	defer e.Ctx.Free()
-
-	if e.Config.KVHeads != 8 {
-		t.Errorf("Expected KVHeads=8 (GQA), got %d", e.Config.KVHeads)
+	me := e.(*metalEngine)
+	if me.Ctx() != nil {
+		defer me.Ctx().Free()
 	}
-	if e.Config.RopeTheta != 100000.0 {
-		t.Errorf("Expected RopeTheta=100000.0, got %f", e.Config.RopeTheta)
+
+	if me.Config().KVHeads != 8 {
+		t.Errorf("Expected KVHeads=8 (GQA), got %d", me.Config().KVHeads)
+	}
+	if me.Config().RopeTheta != 100000.0 {
+		t.Errorf("Expected RopeTheta=100000.0, got %f", me.Config().RopeTheta)
 	}
 }
 
@@ -606,11 +610,12 @@ func TestInitKVCache(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			e := &Engine{
-				Ctx:    device.NewContext(),
-				Config: tt.config,
+			ctx := device.NewContext()
+			defer ctx.Free()
+			e := &metalEngine{
+				ctx:    ctx,
+				config: tt.config,
 			}
-			defer e.Ctx.Free()
 
 			err := e.initKVCache()
 
@@ -623,12 +628,12 @@ func TestInitKVCache(t *testing.T) {
 				t.Fatalf("Unexpected error for %s: %v", tt.name, err)
 			}
 
-			if e.Config.Layers != tt.expectedKVCacheKLen {
-				t.Errorf("Layers count mismatch for %s: got %d, expected %d", tt.name, e.Config.Layers, tt.expectedKVCacheKLen)
+			if e.config.Layers != tt.expectedKVCacheKLen {
+				t.Errorf("Layers count mismatch for %s: got %d, expected %d", tt.name, e.config.Layers, tt.expectedKVCacheKLen)
 			}
 
 			for i := 0; i < tt.expectedKVCacheKLen; i++ {
-				view := e.Cache.Get("seq-0", i)
+				view := e.cache.Get("seq-0", i)
 				if view.K == nil {
 					t.Errorf("KVCacheK[%d] is nil for %s", i, tt.name)
 				}
@@ -705,17 +710,16 @@ func TestNemotronStyleLoading(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
-	defer e.Ctx.Free()
-
-	if e.Weights.TokenEmb == nil {
+	me := e.(*metalEngine)
+	if me.weights.TokenEmb == nil {
 		t.Error("Expected TokenEmb to be loaded via suffix match")
 	}
-	if e.Weights.OutputNorm == nil {
+	if me.weights.OutputNorm == nil {
 		t.Error("Expected OutputNorm to be loaded via suffix match")
 	}
 	// Note: Tied embeddings logic might overwrite Output if it's missing,
 	// but here we expect it to be loaded directly.
-	if e.Weights.Output == nil {
+	if me.weights.Output == nil {
 		t.Error("Expected Output to be loaded via suffix match")
 	}
 }

@@ -266,17 +266,17 @@ func (w *MOELayerWeights) Free() {
 	}
 }
 
-type Engine struct {
-	Ctx     *device.Context
-	Model   *gguf.GGUFFile
-	Config  config.Config
-	Weights *LlamaWeights
+type metalEngine struct {
+	ctx     *device.Context
+	model   *gguf.GGUFFile
+	config  config.Config
+	weights *LlamaWeights
 
 	// Quality Evaluation
-	QualityEval *QualityEvaluator
+	qualityEval *QualityEvaluator
 
 	// KV Cache
-	Cache KVCache
+	cache KVCache
 	// KVCacheK []*device.Tensor // Deprecated: Use Cache.Get()
 	// KVCacheV []*device.Tensor // Deprecated: Use Cache.Get()
 
@@ -306,8 +306,24 @@ type Engine struct {
 	mu sync.RWMutex
 }
 
-func (e *Engine) GetSeqCachePos(seqID uint64) int {
-	if seq, ok := e.SeqMgr.GetSequence(seqID); ok {
+func (e *metalEngine) Ctx() *device.Context {
+	return e.ctx
+}
+
+func (e *metalEngine) Config() config.Config {
+	return e.config
+}
+
+func (e *metalEngine) Weights() *LlamaWeights {
+	return e.weights
+}
+
+func (e *metalEngine) Model() *gguf.GGUFFile {
+	return e.model
+}
+
+func (e *metalEngine) GetSeqCachePos(seqID int) int {
+	if seq, ok := e.SeqMgr.GetSequence(uint64(seqID)); ok {
 		seq.mu.RLock()
 		defer seq.mu.RUnlock()
 		return seq.Pos
@@ -315,7 +331,7 @@ func (e *Engine) GetSeqCachePos(seqID uint64) int {
 	return 0
 }
 
-func (e *Engine) IncSeqCachePos(seqID uint64) {
+func (e *metalEngine) IncSeqCachePos(seqID uint64) {
 	if seq, ok := e.SeqMgr.GetSequence(seqID); ok {
 		seq.mu.Lock()
 		defer seq.mu.Unlock()
@@ -323,7 +339,7 @@ func (e *Engine) IncSeqCachePos(seqID uint64) {
 	}
 }
 
-func (e *Engine) SeqIDStr(seqID uint64) string {
+func (e *metalEngine) SeqIDStr(seqID uint64) string {
 	return fmt.Sprintf("seq-%d", seqID)
 }
 

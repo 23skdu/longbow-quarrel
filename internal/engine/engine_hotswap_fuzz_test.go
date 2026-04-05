@@ -45,7 +45,8 @@ func FuzzEngineHotSwap(f *testing.F) {
 		if err != nil {
 			t.Fatalf("Failed to create engine: %v", err)
 		}
-		defer e.Ctx.Free() // Assume free cleans up
+		me := e.(*metalEngine)
+		defer me.ctx.Free()
 
 		var wg sync.WaitGroup
 

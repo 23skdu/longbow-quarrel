@@ -77,7 +77,7 @@ func main() {
 				prevTokens[j] = allGenerated[j]
 			}
 			generated, err = e.Infer(prevTokens, 1, sampler)
-			fmt.Printf("Previous %d tokens: %v\n", prevTokens)
+			fmt.Printf("Previous %d tokens: %v\n", len(prevTokens), prevTokens)
 		}
 
 		if err != nil {
@@ -91,7 +91,7 @@ func main() {
 		}
 
 		tokenID := generated[0]
-		allGenerated[i] = tokenID
+		allGenerated = append(allGenerated, tokenID)
 
 		tokenText := tokenizer.Decode([]int{tokenID})
 		fmt.Printf("Generated token ID: %d\n", tokenID)

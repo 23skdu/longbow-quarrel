@@ -681,6 +681,7 @@ func generateF16Pattern(n int) []byte {
 }
 
 func generateSlidingWindowScores(pos, windowSize int) [][]float32 {
+	_ = pos
 	// Generate scores for sliding window attention
 	// Size should match seqLen (windowSize or seqLen from test)
 	scores := make([]float32, windowSize)
@@ -738,8 +739,6 @@ func TestActivationFlowAnalysis(t *testing.T) {
 	metrics.RecordActivationFlowAudit(len(audit.CollapsedLayers), len(audit.SaturatedLayers), 0)
 }
 
-// TestNaNPropagationDetection detects NaN propagation issues
-// Addresses: Current critical problem - NaN starting around Layer 23
 func TestNaNPropagationDetection(t *testing.T) {
 	// Simulate the observed issue: NaNs starting at Layer 23
 	numLayers := 32

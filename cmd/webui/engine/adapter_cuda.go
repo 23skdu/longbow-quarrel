@@ -15,7 +15,7 @@ import (
 )
 
 type WrappedCUDAEngine struct {
-	engine     *engine.CUDAEngine
+	engine     engine.Engine
 	tok        *tokenizer.Tokenizer
 	model      string
 	loadedAt   time.Time

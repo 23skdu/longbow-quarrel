@@ -514,6 +514,15 @@ func (c *Context) NewTensorFromData(rows, cols int, dt DataType, data []byte) (*
 	return t, nil
 }
 
+func (c *Context) NewTurboTensor(rows, cols int, dt DataType, blockSize, qjlRows int) *Tensor {
+	numElements := rows * cols
+	numBlocks := numElements / blockSize
+	if numElements%blockSize != 0 {
+		numBlocks++
+	}
+	return c.NewTensorWithType(rows, cols, dt) // NewTensorWithType will recalculate sb correctly
+}
+
 func (c *Context) NewTensorWithType(rows, cols int, dt DataType) *Tensor {
 	sb := rows * cols * 2
 	switch dt {
@@ -545,17 +554,16 @@ func (c *Context) NewTensorWithType(rows, cols int, dt DataType) *Tensor {
 		numElements := rows * cols
 		numBlocks := numElements / 32
 		sb = numBlocks * 18
-	case DataTypeTQ1_0:
-		// TQ1_0: 1-bit + residual. BlockSize=256, QJLRows=64
-		// MVP: 1 byte per element for now (simpler kernel)
+	case DataTypeTQ1_0, DataTypeTQ2_0:
+		// TurboQuant: blockSize + qjlRows + 8 (scales)
 		numElements := rows * cols
-		numBlocks := numElements / 256
-		sb = numBlocks * (256 + 64) // Primary + Secondary
-	case DataTypeTQ2_0:
-		// TQ2_0: 2-bit + residual. BlockSize=256, QJLRows=64
-		numElements := rows * cols
-		numBlocks := numElements / 256
-		sb = numBlocks * (256 + 64)
+		blockSize := 256
+		qjlRows := 64
+		numBlocks := numElements / blockSize
+		if numElements%blockSize != 0 {
+			numBlocks++
+		}
+		sb = numBlocks * (blockSize + qjlRows + 8)
 	}
 
 	if atomic.LoadInt64(&allocatedBytes)+int64(sb) > MaxGPUMemory {
@@ -608,6 +616,10 @@ func (c *Context) TurboQuantDecode(input *Tensor, rotationMatrix *Tensor, output
 }
 
 // NewTensorPooled attempts to reuse tensor from pool (defaults to F16)
+func (c *Context) newTensorPooledInternal(rows, cols int) *Tensor {
+	return c.newTensorPooledWithTypeInternal(rows, cols, DataTypeF16)
+}
+
 func (c *Context) newTensorPooledWithTypeInternal(rows, cols int, dt DataType) *Tensor {
 	key := fmt.Sprintf("%dx%dx%d", rows, cols, dt)
 	c.mu.Lock()
@@ -1462,13 +1474,10 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 
 	// DEBUG: Add per-layer debug output for Gemma4
 	debugLayer := false
-	if gemma4Config.IsGemma4 {
-		debugLayer = true
-		fmt.Fprintf(os.Stderr, "DEBUG_LAYER: IsGemma4=true, layer %d, IsSliding=%v\n", layerIdx, gemma4Config.IsSlidingWindowLayer)
-	}
+	// Gemma4 debug logs disabled for benchmark performance
 
 	if debugLayer {
-		fmt.Fprintf(os.Stderr, "DEBUG_LAYER: Starting layer %d\n", layerIdx)
+		// fmt.Fprintf(os.Stderr, "DEBUG_LAYER: Starting layer %d\n", layerIdx)
 	}
 
 	// probe("Input", t) // Disabled due to potential deadlock with ScanMax
@@ -1486,18 +1495,15 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 	}
 	metrics.RecordKernelDuration("Layer_RMSNorm1", time.Since(t0_rmsnorm1))
 	if debugLayer {
-		fmt.Printf("DEBUG_LAYER: After RMSNorm1, layer %d\n", layerIdx)
+		// fmt.Printf("DEBUG_LAYER: After RMSNorm1, layer %d\n", layerIdx)
 	}
 
 	// Gemma4 Q/K normalization - DISABLED for testing
 	// The q_norm/k_norm normalization is complex - it should normalize specific dimensions
 	// before Q/K projection but the dimension handling needs more work
 	if gemma4Config.IsGemma4 && gemma4QNorm != nil && gemma4KNorm != nil {
-		qNormLen := gemma4QNorm.cols
-		kNormLen := gemma4KNorm.cols
 		if debugLayer {
-			fmt.Printf("DEBUG_LAYER: Gemma4 Q/K norm available but disabled for test, q_norm=%d, k_norm=%d\n",
-				qNormLen, kNormLen)
+			// fmt.Printf("DEBUG_LAYER: Gemma4 Q/K norm available but disabled for test, q_norm=%d, k_norm=%d\n", qNormLen, kNormLen)
 		}
 	}
 
@@ -1534,7 +1540,7 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 	}
 
 	if debugLayer {
-		fmt.Printf("DEBUG_LAYER: After QKV, layer %d\n", layerIdx)
+		// fmt.Printf("DEBUG_LAYER: After QKV, layer %d\n", layerIdx)
 	}
 
 	// Gemma4 Q/K normalization - apply AFTER Q/K projections
@@ -1589,8 +1595,7 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 			attnWindowSize = 65536 // Full attention for layers 5, 11, 17, etc. (use large value)
 		}
 		if debugLayer {
-			fmt.Printf("DEBUG_LAYER: Attention for layer %d, windowSize=%d, IsSliding=%v\n",
-				layerIdx, attnWindowSize, gemma4Config.IsSlidingWindowLayer)
+			// fmt.Printf("DEBUG_LAYER: Attention for layer %d, windowSize=%d, IsSliding=%v\n", layerIdx, attnWindowSize, gemma4Config.IsSlidingWindowLayer)
 		}
 	}
 
@@ -1618,7 +1623,7 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 	}
 	metrics.RecordKernelDuration("Layer_Attention", time.Since(t0_attn))
 	if debugLayer {
-		fmt.Printf("DEBUG_LAYER: After Attention, layer %d\n", layerIdx)
+		// fmt.Printf("DEBUG_LAYER: After Attention, layer %d\n", layerIdx)
 	}
 
 	// 6. Attention Output Projection
@@ -1724,7 +1729,7 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 	}
 
 	if debugLayer {
-		fmt.Fprintf(os.Stderr, "DEBUG_LAYER: Completed layer %d\n", layerIdx)
+		// fmt.Fprintf(os.Stderr, "DEBUG_LAYER: Completed layer %d\n", layerIdx)
 	}
 }
 func (t *Tensor) ropeInternal(posOffset, heads, headDim, seqLen int, ropeTheta float32) {
@@ -1946,7 +1951,7 @@ func (t *Tensor) storeKVInternal(v *Tensor, kCache, vCache *Tensor, pos, heads, 
 		// For TurboQuant KV Cache, we use headDim as the blockSize
 		blockSize := headDim 
 		qjlRows := 64 // Consistent with CPU device logic
-		numBlocks := heads // Each head is one or more blocks? 
+		// numBlocks := heads // Each head is one or more blocks? 
 		// Actually, if headDim is blockSize, then each head is 1 block.
 		
 		if t.ctx.TQRotation == nil || t.ctx.TQQJL == nil {

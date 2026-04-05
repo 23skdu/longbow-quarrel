@@ -1,4 +1,4 @@
-//go:build !cuda
+//go:build (!darwin || !metal) && (!linux || !cuda)
 package device
 
 import (
