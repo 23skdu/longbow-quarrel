@@ -191,17 +191,7 @@ func (c *Context) NewTensorFP32(rows, cols int) *Tensor {
 }
 
 func (c *Context) NewTensorFromData(rows, cols int, dt DataType, data []byte) (*Tensor, error) {
-    var cdt C.CUDADataType
-    switch dt {
-    case DataTypeF16:
-        cdt = C.CUDA_DTYPE_F16
-    case DataTypeQ8_0:
-        cdt = C.CUDA_DTYPE_Q8_0
-    default:
-        cdt = C.CUDA_DTYPE_F16
-    }
-
-    ct, err := c.cudaCtx.NewTensorFromData(rows, cols, C.CUDADataType(cdt), data)
+    ct, err := c.cudaCtx.NewTensorFromData(rows, cols, dt, data)
     if err != nil {
         return nil, err
     }
@@ -294,10 +284,8 @@ func (t *Tensor) storeKVTurbo(v *Tensor, kCache, vCache *Tensor, pos, heads, hea
 
 	blockSize := 256
 	qjlRows := 64
-	numBlocks := (heads * headDim) / blockSize
-
-	bytesPerBlock := blockSize + qjlRows + 8
 	numBlocksPerRow := (heads * headDim) / blockSize
+	bytesPerBlock := blockSize + qjlRows + 8
 	rowOffsetBytes := pos * numBlocksPerRow * bytesPerBlock
 
 	// K Encode
@@ -331,6 +319,8 @@ func (t *Tensor) FetchKV(kCache, vCache *Tensor, seqLen, heads, headDim int) {
 
 func (t *Tensor) fetchKVTurbo(kCache, vCache *Tensor, seqLen, heads, headDim int) {
 	ctx := t.ctx
+	blockSize := 256
+	qjlRows := 64
 	numBlocksPerRow := (heads * headDim) / blockSize
 
 	// Decompress all blocks for the sequence
