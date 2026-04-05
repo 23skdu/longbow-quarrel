@@ -218,7 +218,9 @@ func NewCUDAEngine(modelPath string, cfg config.Config) (Engine, error) {
 		CUDA: cudaModel,
 	}
 
-	e.Scratch = ctx.NewLayerScratch(seqLen, dim, hiddenDim, heads, heads, headDim, seqLen, vocabSize)
+	qNormDim := 512
+	kNormDim := 512
+	e.Scratch = ctx.NewLayerScratch(seqLen, dim, hiddenDim, heads, heads, headDim, seqLen, vocabSize, qNormDim, kNormDim)
 
 	return e, nil
 }
