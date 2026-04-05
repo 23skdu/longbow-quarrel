@@ -10,6 +10,15 @@ package device
 #include <stdio.h>
 #include <stdlib.h>
 
+typedef enum {
+    CUDA_DTYPE_F16 = 0,
+    CUDA_DTYPE_F32 = 1,
+    CUDA_DTYPE_Q8_0 = 2,
+    CUDA_DTYPE_Q4_0 = 3,
+    CUDA_DTYPE_Q4_K = 4,
+    CUDA_DTYPE_Q6_K = 5
+} CUDADataType;
+
 extern void cudaDequantQ8_0(cudaStream_t stream, void* src, void* dst, int numElements);
 extern void cudaDequantQ8_0ToBF16(cudaStream_t stream, void* src, void* dst, int numElements);
 extern void cudaDequantQ4_K(cudaStream_t stream, void* src, void* dst, int numElements);
