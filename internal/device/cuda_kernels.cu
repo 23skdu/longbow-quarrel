@@ -1416,7 +1416,7 @@ __global__ void turboquant_decode_kernel(const int8_t* __restrict__ input,
     sdata_decode[tid] = (float)(blockInput[tid]) * scale;
     __syncthreads();
 
-    if (tid == 0 && bid < 4) {
+    if (tid == 0 && bid < 8) {
         printf("Kernel Decode Block %d: scale=%f, in0=%d, sdata0=%f\n", bid, scale, (int)blockInput[0], sdata_decode[0]);
     }
 
