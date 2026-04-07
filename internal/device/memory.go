@@ -1,5 +1,8 @@
 package device
 
+// memory.go provides platform-agnostic memory configuration and constants.
+// This file is compiled into all builds and defines defaults for all backends.
+
 const (
 	DefaultMaxMemoryMetal int64 = 32 * 1024 * 1024 * 1024
 	DefaultMaxMemoryCUDA  int64 = 8 * 1024 * 1024 * 1024

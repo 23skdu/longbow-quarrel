@@ -1,5 +1,9 @@
 package device
 
+// utils.go provides platform-agnostic data types and utility functions.
+// This file is compiled into all builds and must NOT contain platform-specific
+// build tags, CGO references, or dependencies on Metal/CUDA-specific headers.
+
 import "math"
 
 type DataType int

@@ -93,7 +93,7 @@ void Metal_SwiGLU_F16(MetalContextRef ctx, MetalBufferRef inputVal, int offVal,
                       MetalBufferRef output, int offOut, int n, int interSize);
 
 void Metal_Softmax_F16(MetalContextRef ctx, MetalBufferRef input, int offIn,
-                       MetalBufferRef result, int offRes, int rows, int cols);
+                     MetalBufferRef output, int offOut, int rows, int cols);
 
 void Metal_StoreKV_F16_Batch(MetalContextRef ctx, MetalBufferRef k, int offK,
                              MetalBufferRef v, int offV, MetalBufferRef kCache,
@@ -360,6 +360,9 @@ void Metal_MOE_ExpertGateUpSwiGLU(MetalContextRef ctx, MetalBufferRef input,
                                   int offOutput, int batchSize, int dim,
     int hiddenDim, int topK);
 
+void Metal_Softmax_F16(MetalContextRef ctx, MetalBufferRef input, int offIn,
+                       MetalBufferRef output, int offOut, int n, int rows);
+
 // TurboQuant Kernels
 void Metal_TurboQuant_PolarQuant(MetalContextRef ctx, MetalBufferRef input,
                                   int offInput, MetalBufferRef rotationMatrix,
@@ -381,9 +384,27 @@ void Metal_TurboQuant_Encode(MetalContextRef ctx, MetalBufferRef input,
                               int offQJLScale, int blockSize, int qjlRows, int numBlocks, int bits);
 void Metal_TurboQuant_Decode(MetalContextRef ctx, MetalBufferRef input,
                               int offInput, MetalBufferRef rotationMatrix,
-                              int offRot, MetalBufferRef output,
+                              int offRot, MetalBufferRef qjlMatrix,
+                              int offQJL, MetalBufferRef output,
                               int offOut, MetalBufferRef scaleIn,
                               int offScale, int blockSize, int qjlRows, int numBlocks);
+void Metal_Attention_TQ_Scores_F16(MetalContextRef ctx, MetalBufferRef q_prime, int offQP,
+                                    MetalBufferRef q_double_prime, int offQDP,
+                                    MetalBufferRef k_cache, int offKC,
+                                    MetalBufferRef scores, int offS,
+                                    int head_dim, int qjl_rows, int pos,
+                                    int num_heads, int kv_heads, float sm_scale);
+void Metal_Prepare_TQ_Query(MetalContextRef ctx, MetalBufferRef q, int offQ,
+                             MetalBufferRef rotationMatrix, int offRot,
+                             MetalBufferRef qjlMatrix, int offQJL,
+                             MetalBufferRef q_prime, int offQP,
+                             MetalBufferRef q_double_prime, int offQDP,
+                             int head_dim, int qjl_rows, int num_heads);
+void Metal_Attention_TQ_Values_F16(MetalContextRef ctx, MetalBufferRef probabilities, int offP,
+                                    MetalBufferRef v_cache, int offVC,
+                                    MetalBufferRef output, int offOut,
+                                    int head_dim, int qjl_rows, int pos,
+                                    int num_heads, int kv_heads);
 
 #ifdef __cplusplus
 }

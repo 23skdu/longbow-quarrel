@@ -16,6 +16,7 @@ import (
 	"github.com/23skdu/longbow-quarrel/cmd/webui/handlers"
 	"github.com/23skdu/longbow-quarrel/cmd/webui/templates"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"net/http/pprof"
 )
 
 var (
@@ -58,6 +59,18 @@ func main() {
 	mux.Handle("/readyz", handlers.ReadyzHandler())
 	mux.Handle("/version", handlers.VersionHandler())
 	mux.Handle("/metrics", loggingMiddleware.Middleware(http.HandlerFunc(promhttp.Handler().ServeHTTP)))
+	
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	mux.Handle("/debug/pprof/allocs", pprof.Handler("allocs"))
+	mux.Handle("/debug/pprof/heap", pprof.Handler("heap"))
+	mux.Handle("/debug/pprof/goroutine", pprof.Handler("goroutine"))
+	mux.Handle("/debug/pprof/threadcreate", pprof.Handler("threadcreate"))
+	mux.Handle("/debug/pprof/block", pprof.Handler("block"))
+	mux.Handle("/debug/pprof/mutex", pprof.Handler("mutex"))
 
 	apiMux := http.NewServeMux()
 	apiMux.Handle("/models", authMiddleware.Authenticate(handlers.ModelsHandler(cfg)))

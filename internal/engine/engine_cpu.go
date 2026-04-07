@@ -1,4 +1,4 @@
-//go:build linux && !cuda
+//go:build !cuda
 
 package engine
 
@@ -167,66 +167,95 @@ func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(s) > len(substr) && (s[:len(substr)] == substr || contains(s[1:], substr)))
 }
 
+
+func (e *CPUEngine) Config() config.Config {
+	return e.config
+}
+
+func (e *CPUEngine) GetSeqCachePos(seqID int) int {
+	// CPU engine doesn't have a sophisticated KV cache yet
+	return 0
+}
+
 func (e *CPUEngine) Infer(tokens []int, count int, cfg SamplerConfig) ([]int, error) {
-	result := make([]int, 0, count)
+	return e.InferWithCallback(tokens, count, cfg, nil)
+}
 
-	for len(result) < count {
-		nextToken, err := e.sample(tokens, cfg)
-		if err != nil {
-			return result, err
-		}
-		result = append(result, nextToken)
-		tokens = append(tokens, nextToken)
-	}
-
-	return result, nil
+func (e *CPUEngine) InferWithLogits(tokens []int, count int, cfg SamplerConfig) ([]int, []float32, error) {
+	var lastLogits []float32
+	tokens, err := e.InferWithCallbackLogits(tokens, count, cfg, nil, func(logits []float32) {
+		lastLogits = make([]float32, len(logits))
+		copy(lastLogits, logits)
+	})
+	return tokens, lastLogits, err
 }
 
 func (e *CPUEngine) InferWithCallback(tokens []int, count int, cfg SamplerConfig, callback func(token int)) ([]int, error) {
-	result := make([]int, 0, count)
+	return e.InferWithCallbackLogits(tokens, count, cfg, callback, nil)
+}
 
-	for len(result) < count {
-		nextToken, err := e.sample(tokens, cfg)
+func (e *CPUEngine) InferWithCallbackLogits(tokens []int, count int, cfg SamplerConfig, tokenCallback func(int), logitsCallback func([]float32)) ([]int, error) {
+	inputTokens := make([]int, len(tokens))
+	copy(inputTokens, tokens)
+
+	outputTokens := make([]int, 0, count)
+	for i := 0; i < count; i++ {
+		token, err := e.sample(inputTokens, cfg)
 		if err != nil {
-			return result, err
+			return nil, err
 		}
-		result = append(result, nextToken)
-		tokens = append(tokens, nextToken)
-		callback(nextToken)
+		outputTokens = append(outputTokens, token)
+		inputTokens = append(inputTokens, token)
+
+		if tokenCallback != nil {
+			tokenCallback(token)
+		}
 	}
 
-	return result, nil
+	return outputTokens, nil
+}
+
+func (e *CPUEngine) SwapModel(modelPath string, cfg config.Config) error {
+	e.Close()
+	newEngine, err := NewCPUEngine(modelPath, cfg)
+	if err != nil {
+		return err
+	}
+	*e = *(newEngine.(*CPUEngine))
+	return nil
 }
 
 func (e *CPUEngine) sample(tokens []int, cfg SamplerConfig) (int, error) {
 	logits := e.forward(tokens)
 
 	if cfg.Temperature > 0 {
-		logits = applyTemperature(logits, cfg.Temperature)
+		logits = applyTempCPU(logits, cfg.Temperature)
 	}
 
-	logits = applyTopK(logits, cfg.TopK)
-	logits = applyTopP(logits, cfg.TopP)
+	logits = applyTopKCPU(logits, cfg.TopK)
+	logits = applyTopPCPU(logits, cfg.TopP)
 
-	probs := softmax(logits)
+	probs := softmaxCPU(logits)
 
 	seed := cfg.Seed + int64(len(tokens))
 	r := rand.New(rand.NewSource(seed))
 
-	return sampleFromDist(probs, r), nil
+	return sampleFromDistCPU(probs, r), nil
 }
 
 func (e *CPUEngine) forward(tokens []int) []float32 {
-	hiddenSize := 4096
+	hiddenSize := 0
 	if len(e.weights.TokenEmb) > 0 {
 		hiddenSize = len(e.weights.TokenEmb[0])
 	}
 
 	hidden := make([]float32, hiddenSize)
 
-	lastToken := tokens[len(tokens)-1]
-	if lastToken < len(e.weights.TokenEmb) && len(e.weights.TokenEmb) > 0 {
-		copy(hidden, e.weights.TokenEmb[lastToken])
+	if len(tokens) > 0 {
+		lastToken := tokens[len(tokens)-1]
+		if lastToken < len(e.weights.TokenEmb) && len(e.weights.TokenEmb) > 0 {
+			copy(hidden, e.weights.TokenEmb[lastToken])
+		}
 	}
 
 	return hidden
@@ -257,7 +286,7 @@ func (w *CPUWeights) Free() {
 	w.FfnNorm = nil
 }
 
-func applyTemperature(logits []float32, temp float64) []float32 {
+func applyTempCPU(logits []float32, temp float64) []float32 {
 	result := make([]float32, len(logits))
 	for i, l := range logits {
 		result[i] = float32(float64(l) / temp)
@@ -265,7 +294,7 @@ func applyTemperature(logits []float32, temp float64) []float32 {
 	return result
 }
 
-func applyTopK(logits []float32, k int) []float32 {
+func applyTopKCPU(logits []float32, k int) []float32 {
 	if k >= len(logits) || k <= 0 {
 		return logits
 	}
@@ -297,8 +326,8 @@ func applyTopK(logits []float32, k int) []float32 {
 	return logits
 }
 
-func applyTopP(logits []float32, p float64) []float32 {
-	probs := softmax(logits)
+func applyTopPCPU(logits []float32, p float64) []float32 {
+	probs := softmaxCPU(logits)
 	cumSum := 0.0
 	cutoff := p
 
@@ -316,14 +345,14 @@ func applyTopP(logits []float32, p float64) []float32 {
 	return logits
 }
 
-func softmax(logits []float32) []float32 {
+func softmaxCPU(logits []float32) []float32 {
 	probs := make([]float32, len(logits))
 	copy(probs, logits)
 	simd.SoftmaxAVX2(probs)
 	return probs
 }
 
-func sampleFromDist(probs []float32, r *rand.Rand) int {
+func sampleFromDistCPU(probs []float32, r *rand.Rand) int {
 	cumSum := float32(0)
 	threshold := float32(r.Float32())
 	for i, p := range probs {

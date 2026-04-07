@@ -66,9 +66,22 @@ void Metal_TurboQuant_Encode(MetalContextRef ctx, MetalBufferRef input,
                               int offOut, MetalBufferRef scaleOut,
                               int offScale, MetalBufferRef qjlScaleOut,
                               int offQJLScale, int blockSize, int qjlRows, int numBlocks, int bits);
+// Buffer Management
+MetalBufferRef Metal_Alloc(MetalContextRef ctx, long long size);
+void Metal_FreeBuffer(MetalContextRef ctx, MetalBufferRef buf);
+void Metal_CopyToDevice(MetalBufferRef buf, int offset, const void *data, int size);
+void Metal_CopyToHost(MetalBufferRef buf, int offset, void *data, int size);
+void *Metal_GetBufferContents(MetalBufferRef buf);
+void Metal_ZeroBuffer(MetalBufferRef buf, int offset, int size);
+void Metal_ZeroBufferGPU(MetalContextRef ctx, MetalBufferRef buf, int offset, int size);
+
+void Metal_Copy_F32_F16(MetalContextRef ctx, MetalBufferRef src, int oS, MetalBufferRef dst, int oD, int n);
+void Metal_Copy_F16_F32(MetalContextRef ctx, MetalBufferRef src, int oS, MetalBufferRef dst, int oD, int n);
+
 void Metal_TurboQuant_Decode(MetalContextRef ctx, MetalBufferRef input,
                               int offInput, MetalBufferRef rotationMatrix,
-                              int offRot, MetalBufferRef output,
+                              int offRot, MetalBufferRef qjlMatrix,
+                              int offQJL, MetalBufferRef output,
                               int offOut, MetalBufferRef scaleIn,
                               int offScale, int blockSize, int qjlRows, int numBlocks);
 */
@@ -77,7 +90,6 @@ import (
 	_ "embed"
 	"fmt"
 	"math"
-	"os"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -86,6 +98,7 @@ import (
 
 	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
+	"github.com/23skdu/longbow-quarrel/internal/logger"
 	"github.com/23skdu/longbow-quarrel/internal/metrics"
 )
 
@@ -111,7 +124,7 @@ type Context struct {
 	mu     sync.Mutex
 	pool   map[string][]*Tensor // pool by size key "RxCxType"
 	ExecMu sync.Mutex           // Execution lock for Metal command encoding
-	
+
 	// TurboQuant Global Matrices
 	TQRotation *Tensor
 	TQQJL      *Tensor
@@ -177,10 +190,33 @@ type Tensor struct {
 	heap      unsafe.Pointer // Track if this buffer is part of a heap
 	Offset    int            // Offset in bytes from buf start
 	dataType  DataType       // 0=F16, 1=Q4K, 2=Q3K
+	blockSize int
+	qjlRows   int
+}
+
+func (t *Tensor) SizeBytes() int {
+	return t.sizeBytes
 }
 
 func (t *Tensor) Rows() int { return t.rows }
 func (t *Tensor) Cols() int { return t.cols }
+
+func (t *Tensor) Data() []float32 {
+	return t.ToHostF32()
+}
+
+func (t *Tensor) RawData() []byte {
+	// For Metal, we need to sync and copy back if it's TQ
+	if t.dataType == DataTypeTQ1_0 || t.dataType == DataTypeTQ2_0 {
+		t.ctx.Synchronize()
+		ptr := C.Metal_GetBufferContents(t.buf)
+		if ptr == nil {
+			return nil
+		}
+		return unsafe.Slice((*byte)(ptr), t.sizeBytes)
+	}
+	return nil
+}
 
 // NewQ3KTensor creates a tensor with Q3_K quantization layout (110 bytes per 256 weights)
 // Returns error if dimensions are invalid
@@ -440,6 +476,13 @@ func (t *Tensor) Free() {
 	runtime.SetFinalizer(t, nil)
 	t.ctx.ExecMu.Lock()
 	defer t.ctx.ExecMu.Unlock()
+	t.freeInternal()
+}
+
+func (t *Tensor) freeInternal() {
+	if t.buf == nil {
+		return
+	}
 	C.Metal_FreeBuffer(t.ctx.ref, t.buf)
 
 	// Only track memory if it's NOT a heap-backed buffer
@@ -520,7 +563,26 @@ func (c *Context) NewTurboTensor(rows, cols int, dt DataType, blockSize, qjlRows
 	if numElements%blockSize != 0 {
 		numBlocks++
 	}
-	return c.NewTensorWithType(rows, cols, dt) // NewTensorWithType will recalculate sb correctly
+	bytesPerBlock := blockSize + qjlRows + 8
+	sizeBytes := numBlocks * bytesPerBlock
+
+	buf := C.Metal_Alloc(c.ref, C.longlong(sizeBytes))
+	if buf == nil {
+		return nil
+	}
+
+	t := &Tensor{
+		ctx:       c,
+		rows:      rows,
+		cols:      cols,
+		sizeBytes: sizeBytes,
+		buf:       buf,
+		dataType:  dt,
+		blockSize: blockSize,
+		qjlRows:   qjlRows,
+	}
+	traceAlloc(t, int64(sizeBytes), "NewTurboTensor")
+	return t
 }
 
 func (c *Context) NewTensorWithType(rows, cols int, dt DataType) *Tensor {
@@ -555,15 +617,7 @@ func (c *Context) NewTensorWithType(rows, cols int, dt DataType) *Tensor {
 		numBlocks := numElements / 32
 		sb = numBlocks * 18
 	case DataTypeTQ1_0, DataTypeTQ2_0:
-		// TurboQuant: blockSize + qjlRows + 8 (scales)
-		numElements := rows * cols
-		blockSize := 256
-		qjlRows := 64
-		numBlocks := numElements / blockSize
-		if numElements%blockSize != 0 {
-			numBlocks++
-		}
-		sb = numBlocks * (blockSize + qjlRows + 8)
+		return c.NewTurboTensor(rows, cols, dt, 128, 64)
 	}
 
 	if atomic.LoadInt64(&allocatedBytes)+int64(sb) > MaxGPUMemory {
@@ -606,12 +660,13 @@ func (c *Context) TurboQuantEncode(input *Tensor, rotationMatrix *Tensor, qjlMat
 		C.int(blockSize), C.int(qjlRows), C.int(numBlocks), C.int(bits))
 }
 
-func (c *Context) TurboQuantDecode(input *Tensor, rotationMatrix *Tensor, output *Tensor, scaleIn *Tensor, blockSize, qjlRows int) {
+func (c *Context) TurboQuantDecode(input *Tensor, rotationMatrix *Tensor, qjlMatrix *Tensor, output *Tensor, scaleIn *Tensor, blockSize, qjlRows int) {
 	c.ExecMu.Lock()
 	defer c.ExecMu.Unlock()
 	numBlocks := output.rows * output.cols / blockSize
 	C.Metal_TurboQuant_Decode(c.ref, input.buf, C.int(input.Offset), rotationMatrix.buf, C.int(rotationMatrix.Offset),
-		output.buf, C.int(output.Offset), scaleIn.buf, C.int(scaleIn.Offset),
+		qjlMatrix.buf, C.int(qjlMatrix.Offset), output.buf, C.int(output.Offset),
+		scaleIn.buf, C.int(scaleIn.Offset),
 		C.int(blockSize), C.int(qjlRows), C.int(numBlocks))
 }
 
@@ -758,23 +813,20 @@ func (t *Tensor) LoadFromBytes(data []byte) {
 
 func (t *Tensor) Probe(name string, n int) {
 	t.ctx.Synchronize()
-	// data := t.ToHost()
 	ptr := C.Metal_GetBufferContents(t.buf)
 	if ptr == nil {
-		fmt.Printf("DEBUG_PROBE: %s -> BUFFER IS NIL!\n", name)
+		logger.Log.Debug("probe buffer is nil", "name", name)
 		return
 	}
 
-	// Access as uint16 slice
 	f16Slice := unsafe.Slice((*uint16)(ptr), t.rows*t.cols)
 
-	// Convert first n to float32
 	f32Data := make([]float32, n)
 	for i := 0; i < n && i < len(f16Slice); i++ {
 		f32Data[i] = Float16ToFloat32(f16Slice[i])
 	}
 
-	fmt.Printf("DEBUG_PROBE: %s [%d]: %v\n", name, len(f16Slice), f32Data)
+	logger.Log.Debug("probe data", "name", name, "len", len(f16Slice), "data", f32Data)
 }
 
 // GetBufferContents returns unsafe pointer to buffer for diagnostics
@@ -1761,6 +1813,10 @@ func (t *Tensor) SwiGLU(gate *Tensor) (*Tensor, error) {
 func (t *Tensor) Softmax() {
 	t.ctx.ExecMu.Lock()
 	defer t.ctx.ExecMu.Unlock()
+	t.softmaxInternal()
+}
+
+func (t *Tensor) softmaxInternal() {
 	C.Metal_Softmax_F16(t.ctx.ref, t.buf, C.int(t.Offset), t.buf, C.int(t.Offset), C.int(t.rows), C.int(t.cols))
 }
 
@@ -1771,8 +1827,9 @@ func (t *Tensor) Softmax() {
 func (t *Tensor) LinearToFP32_Into(weight *Tensor, out *Tensor) {
 	t.ctx.ExecMu.Lock()
 	defer t.ctx.ExecMu.Unlock()
-	fmt.Fprintf(os.Stderr, "DEBUG_OUTPUT: LinearToFP32_Into: t=[%d,%d] type=%v, weight=[%d,%d] type=%v, out=[%d,%d] type=%v\n",
-		t.rows, t.cols, t.dataType, weight.rows, weight.cols, weight.dataType, out.rows, out.cols, out.dataType)
+	logger.Log.Debug("LinearToFP32_Into", "t_rows", t.rows, "t_cols", t.cols, "t_type", t.dataType,
+		"weight_rows", weight.rows, "weight_cols", weight.cols, "weight_type", weight.dataType,
+		"out_rows", out.rows, "out_cols", out.cols, "out_type", out.dataType)
 	switch weight.dataType {
 	case DataTypeQ6K:
 		// Output head logic: F16 input * Q6K weight -> F32 output
@@ -1947,13 +2004,13 @@ func (t *Tensor) storeKVInternal(v *Tensor, kCache, vCache *Tensor, pos, heads, 
 		if kCache.dataType == DataTypeTQ2_0 {
 			bits = 4
 		}
-		
+
 		// For TurboQuant KV Cache, we use headDim as the blockSize
-		blockSize := headDim 
+		blockSize := headDim
 		qjlRows := 64 // Consistent with CPU device logic
-		// numBlocks := heads // Each head is one or more blocks? 
+		// numBlocks := heads // Each head is one or more blocks?
 		// Actually, if headDim is blockSize, then each head is 1 block.
-		
+
 		if t.ctx.TQRotation == nil || t.ctx.TQQJL == nil {
 			// Fallback to F16 if matrices are missing
 			C.Metal_StoreKV_F16(t.ctx.ref, t.buf, C.int(t.Offset), v.buf, C.int(v.Offset), kCache.buf, C.int(kCache.Offset), vCache.buf, C.int(vCache.Offset), C.int(pos), C.int(heads), C.int(headDim), C.int(windowSize))
@@ -1968,29 +2025,29 @@ func (t *Tensor) storeKVInternal(v *Tensor, kCache, vCache *Tensor, pos, heads, 
 		if windowSize > 0 {
 			physicalPos = pos % windowSize
 		}
-		
+
 		// Each head is encoded separately
 		// Note: The TurboQuant Meta kernels might handle multiple blocks.
 		// 1 head = headDim elements.
-		
+
 		// K Encode
-		C.Metal_TurboQuant_Encode(t.ctx.ref, t.buf, C.int(t.Offset), 
+		C.Metal_TurboQuant_Encode(t.ctx.ref, t.buf, C.int(t.Offset),
 			t.ctx.TQRotation.buf, C.int(t.ctx.TQRotation.Offset),
 			t.ctx.TQQJL.buf, C.int(t.ctx.TQQJL.Offset),
-			kCache.buf, C.int(kCache.Offset + physicalPos * heads * (blockSize + qjlRows + 8)),
-			kCache.buf, C.int(kCache.Offset + physicalPos * heads * (blockSize + qjlRows + 8) + heads * (blockSize + qjlRows)), // scale offset
-			kCache.buf, C.int(kCache.Offset + physicalPos * heads * (blockSize + qjlRows + 8) + heads * (blockSize + qjlRows) + 4), // qjlScale offset
+			kCache.buf, C.int(kCache.Offset+physicalPos*heads*(blockSize+qjlRows+8)),
+			kCache.buf, C.int(kCache.Offset+physicalPos*heads*(blockSize+qjlRows+8)+heads*(blockSize+qjlRows)), // scale offset
+			kCache.buf, C.int(kCache.Offset+physicalPos*heads*(blockSize+qjlRows+8)+heads*(blockSize+qjlRows)+4), // qjlScale offset
 			C.int(blockSize), C.int(qjlRows), C.int(heads), C.int(bits))
-			
+
 		// V Encode
-		C.Metal_TurboQuant_Encode(t.ctx.ref, v.buf, C.int(v.Offset), 
+		C.Metal_TurboQuant_Encode(t.ctx.ref, v.buf, C.int(v.Offset),
 			t.ctx.TQRotation.buf, C.int(t.ctx.TQRotation.Offset),
 			t.ctx.TQQJL.buf, C.int(t.ctx.TQQJL.Offset),
-			vCache.buf, C.int(vCache.Offset + physicalPos * heads * (blockSize + qjlRows + 8)),
-			vCache.buf, C.int(vCache.Offset + physicalPos * heads * (blockSize + qjlRows + 8) + heads * (blockSize + qjlRows)), // scale offset
-			vCache.buf, C.int(vCache.Offset + physicalPos * heads * (blockSize + qjlRows + 8) + heads * (blockSize + qjlRows) + 4), // qjlScale offset
+			vCache.buf, C.int(vCache.Offset+physicalPos*heads*(blockSize+qjlRows+8)),
+			vCache.buf, C.int(vCache.Offset+physicalPos*heads*(blockSize+qjlRows+8)+heads*(blockSize+qjlRows)), // scale offset
+			vCache.buf, C.int(vCache.Offset+physicalPos*heads*(blockSize+qjlRows+8)+heads*(blockSize+qjlRows)+4), // qjlScale offset
 			C.int(blockSize), C.int(qjlRows), C.int(heads), C.int(bits))
-			
+
 		return
 	}
 	C.Metal_StoreKV_F16(t.ctx.ref, t.buf, C.int(t.Offset), v.buf, C.int(v.Offset), kCache.buf, C.int(kCache.Offset), vCache.buf, C.int(vCache.Offset), C.int(pos), C.int(heads), C.int(headDim), C.int(windowSize))
@@ -2005,35 +2062,95 @@ func (t *Tensor) StoreKV(v *Tensor, kCache, vCache *Tensor, pos, heads, headDim,
 func (t *Tensor) FetchKV(v *Tensor, kCache, vCache *Tensor, pos, heads, headDim, windowSize int) {
 	t.ctx.ExecMu.Lock()
 	defer t.ctx.ExecMu.Unlock()
-	
+
 	if kCache.dataType == DataTypeTQ1_0 || kCache.dataType == DataTypeTQ2_0 {
+		if t.ctx.TQRotation == nil {
+			// For TurboQuant, rotation is mandatory for decoding.
+			// If missing, we skip or could implement a zero-fallback, but that would produce garbage.
+			return
+		}
 		blockSize := headDim
 		qjlRows := 64
 		physicalPos := pos
 		if windowSize > 0 {
 			physicalPos = pos % windowSize
 		}
-		
+
 		// K Decode
-		C.Metal_TurboQuant_Decode(t.ctx.ref, kCache.buf, C.int(kCache.Offset + physicalPos * heads * (blockSize + qjlRows + 8)),
+		C.Metal_TurboQuant_Decode(t.ctx.ref, kCache.buf, C.int(kCache.Offset+physicalPos*heads*(blockSize+qjlRows+8)),
 			t.ctx.TQRotation.buf, C.int(t.ctx.TQRotation.Offset),
+			t.ctx.TQQJL.buf, C.int(t.ctx.TQQJL.Offset),
 			t.buf, C.int(t.Offset),
-			kCache.buf, C.int(kCache.Offset + physicalPos * heads * (blockSize + qjlRows + 8) + heads * (blockSize + qjlRows)), // scale offset
+			kCache.buf, C.int(kCache.Offset+physicalPos*heads*(blockSize+qjlRows+8)+heads*(blockSize+qjlRows)), // scale offset
 			C.int(blockSize), C.int(qjlRows), C.int(heads))
-			
+
 		// V Decode
-		C.Metal_TurboQuant_Decode(t.ctx.ref, vCache.buf, C.int(vCache.Offset + physicalPos * heads * (blockSize + qjlRows + 8)),
+		C.Metal_TurboQuant_Decode(t.ctx.ref, vCache.buf, C.int(vCache.Offset+physicalPos*heads*(blockSize+qjlRows+8)),
 			t.ctx.TQRotation.buf, C.int(t.ctx.TQRotation.Offset),
+			t.ctx.TQQJL.buf, C.int(t.ctx.TQQJL.Offset),
 			v.buf, C.int(v.Offset),
-			vCache.buf, C.int(vCache.Offset + physicalPos * heads * (blockSize + qjlRows + 8) + heads * (blockSize + qjlRows)), // scale offset
+			vCache.buf, C.int(vCache.Offset+physicalPos*heads*(blockSize+qjlRows+8)+heads*(blockSize+qjlRows)), // scale offset
 			C.int(blockSize), C.int(qjlRows), C.int(heads))
 		return
 	}
-	
+
 	// Standard F16 copy
 	count := heads * headDim
-	C.Metal_Copy_F16(t.ctx.ref, kCache.buf, C.int(kCache.Offset + pos * count * 2), t.buf, C.int(t.Offset), C.int(count))
-	C.Metal_Copy_F16(t.ctx.ref, vCache.buf, C.int(vCache.Offset + pos * count * 2), v.buf, C.int(v.Offset), C.int(count))
+	C.Metal_Copy_F16(t.ctx.ref, kCache.buf, C.int(kCache.Offset+pos*count*2), t.buf, C.int(t.Offset), C.int(count))
+	C.Metal_Copy_F16(t.ctx.ref, vCache.buf, C.int(vCache.Offset+pos*count*2), v.buf, C.int(v.Offset), C.int(count))
+}
+
+func (t *Tensor) PrepareTQQuery(rotationMatrix, qjlMatrix *Tensor, headDim, qjlRows, numHeads int) (*Tensor, *Tensor) {
+	qPrime := t.ctx.newTensorInternal(numHeads, headDim)
+	qDoublePrime := t.ctx.newTensorInternal(numHeads, qjlRows)
+
+	C.Metal_Prepare_TQ_Query(t.ctx.ref, t.buf, C.int(t.Offset),
+		rotationMatrix.buf, C.int(rotationMatrix.Offset),
+		qjlMatrix.buf, C.int(qjlMatrix.Offset),
+		qPrime.buf, C.int(qPrime.Offset),
+		qDoublePrime.buf, C.int(qDoublePrime.Offset),
+		C.int(headDim), C.int(qjlRows), C.int(numHeads))
+
+	return qPrime, qDoublePrime
+}
+
+func (t *Tensor) attentionTQInternal(kCache, vCache *Tensor, pos, numHeads, kvHeads, headDim, ctxLen, windowSize int) *Tensor {
+	qjlRows := 64 // Standard TQ config
+
+	// Step 1: Prepare Query
+	qPrime, qDoublePrime := t.PrepareTQQuery(t.ctx.TQRotation, t.ctx.TQQJL, headDim, qjlRows, numHeads)
+	defer qPrime.freeInternal()
+	defer qDoublePrime.freeInternal()
+
+	// Step 2: Fused Scoring
+	scoresDim := numHeads * ctxLen
+	if scoresDim < 32768 {
+		scoresDim = 32768
+	}
+	scores := t.ctx.newTensorFP32PooledInternal(1, scoresDim)
+	defer scores.ReturnToPool()
+
+	smScale := 1.0 / float32(math.Sqrt(float64(headDim)))
+
+	C.Metal_Attention_TQ_Scores_F16(t.ctx.ref,
+		qPrime.buf, C.int(qPrime.Offset),
+		qDoublePrime.buf, C.int(qDoublePrime.Offset),
+		kCache.buf, C.int(kCache.Offset),
+		scores.buf, C.int(scores.Offset),
+		C.int(headDim), C.int(qjlRows), C.int(pos),
+		C.int(numHeads), C.int(kvHeads), C.float(smScale))
+
+	scores.softmaxInternal()
+
+	res := t.ctx.newTensorPooledInternal(1, numHeads*headDim)
+	C.Metal_Attention_TQ_Values_F16(t.ctx.ref,
+		scores.buf, C.int(scores.Offset),
+		vCache.buf, C.int(vCache.Offset),
+		res.buf, C.int(res.Offset),
+		C.int(headDim), C.int(qjlRows), C.int(pos),
+		C.int(numHeads), C.int(kvHeads))
+
+	return res
 }
 
 func (t *Tensor) attentionInternal(kCache, vCache *Tensor, pos, numHeads, kvHeads, headDim, ctxLen, windowSize int) *Tensor {
@@ -2043,6 +2160,7 @@ func (t *Tensor) attentionInternal(kCache, vCache *Tensor, pos, numHeads, kvHead
 		scoresDim = 32768
 	}
 	scores := t.ctx.newTensorFP32PooledInternal(1, scoresDim)
+	defer scores.ReturnToPool()
 	C.Metal_Attention_F16(t.ctx.ref, t.buf, C.int(t.Offset), kCache.buf, C.int(kCache.Offset), vCache.buf, C.int(vCache.Offset), res.buf, C.int(res.Offset), scores.buf, C.int(scores.Offset), C.int(pos), C.int(numHeads), C.int(kvHeads), C.int(headDim), C.int(ctxLen), C.int(windowSize))
 	return res
 }
@@ -2050,6 +2168,11 @@ func (t *Tensor) attentionInternal(kCache, vCache *Tensor, pos, numHeads, kvHead
 func (t *Tensor) Attention(kCache, vCache *Tensor, pos, numHeads, kvHeads, headDim, ctxLen, windowSize int) *Tensor {
 	t.ctx.ExecMu.Lock()
 	defer t.ctx.ExecMu.Unlock()
+
+	if kCache.dataType == DataTypeTQ1_0 || kCache.dataType == DataTypeTQ2_0 {
+		return t.attentionTQInternal(kCache, vCache, pos, numHeads, kvHeads, headDim, ctxLen, windowSize)
+	}
+
 	return t.attentionInternal(kCache, vCache, pos, numHeads, kvHeads, headDim, ctxLen, windowSize)
 }
 
@@ -2201,6 +2324,11 @@ func (t *Tensor) CopyToF16_Into(dest *Tensor) error {
 
 func (t *Tensor) ToF32InPlace(res *Tensor) {
 	C.Metal_Copy_F16_F32(t.ctx.ref, t.buf, C.int(t.Offset), res.buf, C.int(res.Offset), C.int(t.rows*t.cols))
+}
+
+// LoadBuffer loads raw bytes into a tensor's buffer
+func (c *Context) LoadBuffer(t *Tensor, data []byte) {
+	C.Metal_CopyToDevice(t.buf, C.int(0), unsafe.Pointer(&data[0]), C.int(len(data)))
 }
 
 // Test helper methods

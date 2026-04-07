@@ -110,12 +110,26 @@ func (c *SlidingWindowKVCache) Init(ctx *device.Context, cfg config.Config) erro
 	c.initialized = true
 
 	// Record initial capacity
-	totalBytes := int64(c.layers * 2 * c.windowSize * kvDim * 2)
-	if dt == device.DataTypeTQ1_0 {
-		// Approximation for metrics: TQ1 is roughly 1-2 bits per element
-		// Real size is in rawData.
-		totalBytes = int64(c.layers * 2 * c.windowSize * (c.headDim + 64 + 8) * c.kvHeads)
+	// Accurate memory estimation for TurboQuant: numBlocks * bytesPerBlock
+	// FP16/FP32 case: contextLen * heads * headDim * bytesPerElement
+	bytesPerElement := 4 // F32
+	if dt == device.DataTypeF16 {
+		bytesPerElement = 2
 	}
+	totalBytes := int64(c.layers * 2 * c.windowSize * kvDim * bytesPerElement)
+	
+	if dt == device.DataTypeTQ1_0 || dt == device.DataTypeTQ2_0 {
+		qjlRows := 64 // Fixed
+		bytesPerBlock := c.headDim + qjlRows + 8
+		totalBytes = int64(c.layers * 2 * c.windowSize * c.kvHeads * bytesPerBlock)
+	}
+
+	// OOM Guard: Check against MaxMemory
+	if device.AllocatedBytes()+totalBytes > device.MaxGPUMemory {
+		logger.Log.Warn("KV Cache exceeds memory budget", "requested_mb", totalBytes/1024/1024, "available_mb", (device.MaxGPUMemory-device.AllocatedBytes())/1024/1024)
+		// We could attempt to clear pool or scale down window size here
+	}
+
 	metrics.RecordKVCacheStats(totalBytes, 0)
 
 	return nil

@@ -10,9 +10,13 @@ comp*
 *.dylib
 *.test
 *.out
-coverage.*
+coverage.out
 *.coverprofile
 profile.cov
+race_output.txt
+engine_race_output.txt
+test_output.txt
+crash.log
 
 # Go workspace
 go.work
@@ -28,6 +32,9 @@ go.work.sum
 /inspect_vocab
 /test_q4k_kernel
 /test_q6k_kernel
+/main
+/gemma4_coherence_test
+cmd/webui/webui
 
 # Logs, profiles, and outputs
 *.log

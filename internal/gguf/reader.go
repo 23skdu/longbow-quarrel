@@ -10,6 +10,8 @@ import (
 	"sort"
 	"syscall"
 	"unsafe"
+
+	"github.com/23skdu/longbow-quarrel/internal/logger"
 )
 
 // LoadFile maps a GGUF file into memory and parses headers/metadata.
@@ -73,7 +75,7 @@ func LoadFile(path string) (*GGUFFile, error) {
 		// Search for "tokenizer.ggml.tokens" in the file
 		tokenizerIdx := bytes.Index(data, []byte("tokenizer.ggml.tokens"))
 		if tokenizerIdx > 0 {
-			fmt.Fprintf(os.Stderr, "DEBUG: Found ollama format with tokenizer at offset %d\n", tokenizerIdx)
+			logger.Log.Debug("found ollama format with tokenizer", "offset", tokenizerIdx)
 			// Parse KV pairs from the end of the file
 			// Search backwards from tokenizer to find the KV section
 			// The format is: [string key][uint32 type][value...] repeated
@@ -119,7 +121,7 @@ func LoadFile(path string) (*GGUFFile, error) {
 				}
 
 				file.KV[key] = val
-				fmt.Fprintf(os.Stderr, "DEBUG: Loaded KV: %s\n", key)
+				logger.Log.Debug("loaded KV", "key", key)
 
 				// Move back to find more keys
 				pos = keyOff - 8
@@ -199,8 +201,8 @@ func LoadFile(path string) (*GGUFFile, error) {
 		alignment = uint64(alignVal)
 	}
 
-	fmt.Fprintf(os.Stderr, "DEBUG: Alignment = %d\n", alignment)
-	fmt.Fprintf(os.Stderr, "DEBUG: Offset BEFORE padding: %d\n", offset)
+	logger.Log.Debug("alignment", "value", alignment)
+	logger.Log.Debug("offset before padding", "offset", offset)
 
 	// Pad offset to alignment
 	padding := alignment - (offset % alignment)
@@ -209,10 +211,10 @@ func LoadFile(path string) (*GGUFFile, error) {
 	}
 
 	file.DataOffset = offset
-	fmt.Fprintf(os.Stderr, "DEBUG: Computed Padding Offset: %d\n", offset)
+	logger.Log.Debug("computed padding offset", "offset", offset)
 
 	// Update tensor pointers
-	fmt.Fprintf(os.Stderr, "DEBUG: Data Start Offset: %d\n", offset)
+	logger.Log.Debug("data start offset", "offset", offset)
 	for _, t := range file.Tensors {
 		// Absolute offset = dataStart + t.Offset
 		absOffset := offset + t.Offset

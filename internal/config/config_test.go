@@ -19,25 +19,6 @@ func TestDefault(t *testing.T) {
 	if cfg.PrecisionMode != PrecisionAuto {
 		t.Errorf("expected PrecisionMode PrecisionAuto, got %v", cfg.PrecisionMode)
 	}
-	// Debug flags should be enabled by default
-	if !cfg.DebugEmbedding {
-		t.Error("expected DebugEmbedding to be true")
-	}
-	if !cfg.DebugAttention {
-		t.Error("expected DebugAttention to be true")
-	}
-	if !cfg.DebugFFN {
-		t.Error("expected DebugFFN to be true")
-	}
-	if !cfg.DebugLayerOutput {
-		t.Error("expected DebugLayerOutput to be true")
-	}
-	if !cfg.DebugLogits {
-		t.Error("expected DebugLogits to be true")
-	}
-	if !cfg.DebugMemory {
-		t.Error("expected DebugMemory to be true")
-	}
 }
 
 func TestValidate(t *testing.T) {

@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"fmt"
 	"github.com/23skdu/longbow-quarrel/internal/config"
 )
 
@@ -24,4 +25,21 @@ var engineCreators = make(map[string]EngineCreator)
 // RegisterEngine registers a new engine implementation with a name
 func RegisterEngine(name string, creator EngineCreator) {
 	engineCreators[name] = creator
+}
+
+// NewRegisteredEngine creates the best available engine implementation
+func NewRegisteredEngine(modelPath string, cfg config.Config) (Engine, error) {
+	// Priority order
+	for _, name := range []string{"metal", "cuda", "cpu", "mock"} {
+		if creator, ok := engineCreators[name]; ok {
+			return creator(modelPath, cfg)
+		}
+	}
+	return nil, fmt.Errorf("no registered engine found")
+}
+
+// NewEngine is the standard entry point to create an engine.
+// It uses the registered factory to pick the best available backend.
+func NewEngine(modelPath string, cfg config.Config) (Engine, error) {
+	return NewRegisteredEngine(modelPath, cfg)
 }

@@ -1,5 +1,3 @@
-//go:build darwin && metal
-
 package engine
 
 import (
@@ -9,45 +7,7 @@ import (
 	"os"
 )
 
-// ActivationLog stores layer-by-layer activations for debugging
-type ActivationLog struct {
-	Prompt      string             `json:"prompt"`
-	Tokens      []int              `json:"tokens"`
-	Embedding   []float32          `json:"embedding"` // First 100 values
-	Layers      []LayerLog         `json:"layers"`
-	FinalLogits map[string]float32 `json:"final_logits"` // String keys for JSON
-}
 
-// LayerLog captures activations for a single transformer layer
-type LayerLog struct {
-	Idx        int       `json:"idx"`
-	QMax       float32   `json:"q_max"`
-	KMax       float32   `json:"k_max"`
-	VMax       float32   `json:"v_max"`
-	AttnOutMax float32   `json:"attn_out_max"`
-	FFNOutMax  float32   `json:"ffn_out_max"`
-	QSample    []float32 `json:"q_sample"` // First 10 values
-	KSample    []float32 `json:"k_sample"`
-	VSample    []float32 `json:"v_sample"`
-
-	// NaN/Inf detection
-	QNaNCount    int `json:"q_nan_count"`
-	QInfCount    int `json:"q_inf_count"`
-	KNaNCount    int `json:"k_nan_count"`
-	KInfCount    int `json:"k_inf_count"`
-	VNaNCount    int `json:"v_nan_count"`
-	VInfCount    int `json:"v_inf_count"`
-	AttnNaNCount int `json:"attn_nan_count"`
-	AttnInfCount int `json:"attn_inf_count"`
-	FFNNaNCount  int `json:"ffn_nan_count"`
-	FFNInfCount  int `json:"ffn_inf_count"`
-}
-
-// ActivationLogger manages activation logging during inference
-type ActivationLogger struct {
-	enabled bool
-	log     *ActivationLog
-}
 
 // NewActivationLogger creates a new activation logger
 func NewActivationLogger() *ActivationLogger {

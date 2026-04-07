@@ -1,5 +1,9 @@
 package device
 
+// validation.go provides platform-agnostic model configuration and tensor validation.
+// This file is compiled into all builds and interacts with the platform-specific
+// Tensor implementation through its public API (Rows, Cols, ToHost).
+
 import (
 	"errors"
 	"fmt"

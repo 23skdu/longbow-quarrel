@@ -1,5 +1,9 @@
 package device
 
+// activation_stats.go provides platform-agnostic activation analysis.
+// This file is compiled into all builds and interacts with the platform-specific
+// Tensor implementation through its public API (Rows, Cols, ToHost).
+
 import "math"
 
 // ActivationStats contains comprehensive activation statistics

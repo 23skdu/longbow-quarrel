@@ -126,7 +126,10 @@ void qjl_transform_neon(const float* residual, const float* sign_matrix, int8_t*
         }
         
         projected[i] = sum;
-        v_norm_sq = vfmaq_n_f32(v_norm_sq, vdupq_n_f32(sum * sum), 1.0f); // Simple sum square
+        // Correctly accumulate only to the first lane or use a proper horizontal sum later
+        float32x4_t v_sq = vdupq_n_f32(0.0f);
+        v_sq = vsetq_lane_f32(sum * sum, v_sq, 0);
+        v_norm_sq = vaddq_f32(v_norm_sq, v_sq);
     }
 
     // Horizontal sum of normSq

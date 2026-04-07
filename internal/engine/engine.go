@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"os"
 	"runtime"
 	"strings"
 	"time"
@@ -19,63 +18,6 @@ import (
 	"github.com/23skdu/longbow-quarrel/internal/metrics"
 	"github.com/23skdu/longbow-quarrel/internal/tokenizer"
 )
-
-// Helper to get KV value with architecture-aware fallback
-func getKV(f *gguf.GGUFFile, llamaKey, qwenKey string) (interface{}, bool) {
-	// log.Printf("[DEBUG] Searching KV: llama=%s, qwen=%s", llamaKey, qwenKey)
-
-	// 1. Try provided llama key
-	if val, ok := f.KV[llamaKey]; ok {
-		return val, true
-	}
-
-	// 2. Try provided qwen key
-	if qwenKey != "" {
-		if val, ok := f.KV[qwenKey]; ok {
-			return val, true
-		}
-	}
-
-	// 3. Try general keys if applicable
-	if strings.Contains(llamaKey, "llama.") {
-		generalKey := strings.Replace(llamaKey, "llama.", "general.", 1)
-		if val, ok := f.KV[generalKey]; ok {
-			return val, true
-		}
-	}
-
-	// 4. Try granite prefix (common in Ollama)
-	if strings.Contains(llamaKey, "llama.") {
-		graniteKey := strings.Replace(llamaKey, "llama.", "granite.", 1)
-		if val, ok := f.KV[graniteKey]; ok {
-			return val, true
-		}
-	}
-
-	// 5. Dynamic architecture detection
-	if arch, ok := f.KV["general.architecture"].(string); ok {
-		// Replace "llama." with "<arch>."
-		archKey := strings.Replace(llamaKey, "llama.", arch+".", 1)
-		if val, ok := f.KV[archKey]; ok {
-			return val, true
-		}
-
-		// Also try some variations if arch is like "llama" but keys are different
-		for _, alt := range []string{"mistral", "qwen2", "phi3", "starcoder2", "gemma"} {
-			altKey := strings.Replace(llamaKey, "llama.", alt+".", 1)
-			if val, ok := f.KV[altKey]; ok {
-				return val, true
-			}
-		}
-	}
-
-	return nil, false
-}
-
-// QualityEvaluator provides metrics for evaluating generated text quality
-type QualityEvaluator struct {
-	tokenizer *tokenizer.Tokenizer
-}
 
 // NewQualityEvaluator creates a new quality evaluator
 func NewQualityEvaluator(t *tokenizer.Tokenizer) *QualityEvaluator {
@@ -368,7 +310,11 @@ func getCharNGrams(chars []rune, n int) map[string]int {
 	return nGrams
 }
 
-func NewEngine(modelPath string, config config.Config) (Engine, error) {
+func init() {
+	RegisterEngine("metal", NewMetalEngine)
+}
+
+func NewMetalEngine(modelPath string, config config.Config) (Engine, error) {
 	ctx := device.NewContext()
 
 	e := &metalEngine{
@@ -391,39 +337,6 @@ func NewEngine(modelPath string, config config.Config) (Engine, error) {
 
 // Internal load method
 // Internal load method
-func isNeededTensor(name string) bool {
-	lowerName := strings.ToLower(name)
-	// Global weights
-	if (strings.HasSuffix(lowerName, "token_embd.weight") ||
-		strings.HasSuffix(lowerName, "output_norm.weight") ||
-		strings.HasSuffix(lowerName, "output.weight") ||
-		strings.HasSuffix(lowerName, "model.embed_tokens.weight") ||
-		strings.HasSuffix(lowerName, "model.norm.weight") ||
-		strings.HasSuffix(lowerName, "model.lm_head.weight")) && !strings.Contains(lowerName, "blk.") {
-		return true
-	}
-
-	// Layer weights
-	if strings.Contains(lowerName, "blk.") {
-		suffixes := []string{
-			"attn_q.weight", "attn_k.weight", "attn_v.weight", "attn_output.weight", "attn_norm.weight",
-			"attn_q_norm.weight", "attn_k_norm.weight", // Gemma4 Q/K normalization
-			"ffn_gate.weight", "ffn_up.weight", "ffn_down.weight", "ffn_norm.weight",
-			"ssm_a", "ssm_d", "ssm_conv1d.weight", "ssm_conv1d.bias", "ssm_dt.weight", "ssm_dt.bias",
-			"ssm_norm.weight", "ssm_norm.bias", "ssm_out.weight", "ssm_in.weight",
-			// MOE weights
-			"ffn_gate_inp.weight", "exp_probs_b.bias",
-			"ffn_down_exps.weight", "ffn_up_exps.weight", "ffn_gate_exps.weight",
-			"ffn_down_shexp.weight", "ffn_up_shexp.weight", "ffn_gate_shexp.weight",
-		}
-		for _, s := range suffixes {
-			if strings.HasSuffix(lowerName, s) {
-				return true
-			}
-		}
-	}
-	return false
-}
 
 func (e *metalEngine) loadModel(path string) error {
 	logger.Log.Debug("loadModel starting", "path", path, "ctx_is_nil", e.ctx == nil, "config", fmt.Sprintf("%+v", e.config))
@@ -849,7 +762,7 @@ func (e *metalEngine) loadModel(path string) error {
 		case gguf.GGMLTypeQ6_K:
 			// Type 14 (Q6_K).
 			if t.Name == "token_embd.weight" {
-				fmt.Fprintf(os.Stderr, "DEBUG: token_embd.weight - dequantizing to FP16\n")
+				logger.Log.Debug("token_embd.weight dequantizing to FP16")
 				f32Data := gguf.DequantizeQ6K(t.Data, numElements)
 				mt = e.ctx.NewTensorWithType(rows, cols, device.DataTypeF16)
 				mt.LoadFrom(f32Data)
@@ -883,11 +796,11 @@ func (e *metalEngine) loadModel(path string) error {
 
 		// Mapping Logic
 		name := t.Name
-		fmt.Fprintf(os.Stderr, "Loading Tensor %s Dims: %v Type: %vOffset: %d\n", name, t.Dimensions, t.Type, t.Offset)
+		logger.Log.Debug("loading tensor", "name", name, "dims", t.Dimensions, "type", t.Type, "offset", t.Offset)
 
 		// DEBUG: Check if this is a Gemma4 norm tensor
 		if strings.Contains(name, "attn_q_norm") || strings.Contains(name, "attn_k_norm") {
-			fmt.Fprintf(os.Stderr, "DEBUG_GEMMA4: Found Q/K norm tensor: %s, layerIdx will be: ", name)
+			logger.Log.Debug("found Gemma4 Q/K norm tensor", "name", name)
 		}
 
 		// 1. Global weights (supporting prefixes like nemotron., model., etc.)
@@ -940,7 +853,7 @@ func (e *metalEngine) loadModel(path string) error {
 
 			// Gemma-specific: attn_q_norm, attn_k_norm (RMSNorm before Q/K)
 			case "attn_q_norm.weight":
-				fmt.Fprintf(os.Stderr, "DEBUG_LOAD: Setting AttnQNorm[%d] = %s\n", layerIdx, name)
+				logger.Log.Debug("setting AttnQNorm", "layer", layerIdx, "name", name)
 				if e.weights.AttnQNorm == nil || len(e.weights.AttnQNorm) <= layerIdx {
 					newSlice := make([]*device.Tensor, layerIdx+1)
 					copy(newSlice, e.weights.AttnQNorm)
@@ -948,7 +861,7 @@ func (e *metalEngine) loadModel(path string) error {
 				}
 				e.weights.AttnQNorm[layerIdx] = mt
 			case "attn_k_norm.weight":
-				fmt.Fprintf(os.Stderr, "DEBUG_LOAD: Setting AttnKNorm[%d] = %s\n", layerIdx, name)
+				logger.Log.Debug("setting AttnKNorm", "layer", layerIdx, "name", name)
 				if e.weights.AttnKNorm == nil || len(e.weights.AttnKNorm) <= layerIdx {
 					newSlice := make([]*device.Tensor, layerIdx+1)
 					copy(newSlice, e.weights.AttnKNorm)
@@ -1244,47 +1157,6 @@ func (e *metalEngine) loadModel(path string) error {
 	return nil
 }
 
-// Helper for loose typing in GGUF KV
-func toFloat64(v interface{}) float64 {
-	switch i := v.(type) {
-	case float64:
-		return i
-	case float32:
-		return float64(i)
-	case int64:
-		return float64(i)
-	case int32:
-		return float64(i)
-	case int:
-		return float64(i)
-	case uint64:
-		return float64(i)
-	case uint32:
-		return float64(i)
-	case uint16:
-		return float64(i)
-	case uint8:
-		return float64(i)
-	case []interface{}:
-		if len(i) > 0 {
-			return toFloat64(i[0])
-		}
-		return 0
-	case []uint32:
-		if len(i) > 0 {
-			return float64(i[0])
-		}
-		return 0
-	case []int32:
-		if len(i) > 0 {
-			return float64(i[0])
-		}
-		return 0
-	default:
-		return 0
-	}
-}
-
 // InferString is a convenience method that takes a string prompt and returns generated text
 func (e *metalEngine) InferString(prompt string, tokensToGenerate int) (string, error) {
 	samplerConfig := SamplerConfig{
@@ -1293,7 +1165,7 @@ func (e *metalEngine) InferString(prompt string, tokensToGenerate int) (string, 
 		TopP:             0.9,
 		RepPenalty:       1.0,
 		Seed:             0,
-		DebugActivations: true,
+		DebugActivations: false,
 		QualityMode:      false,
 	}
 
@@ -1410,7 +1282,7 @@ func (e *metalEngine) inferInternal(inputTokens []int, tokensToGenerate int, sam
 	// Phase 1: Prefill all input tokens
 	cachePos := e.GetSeqCachePos(int(seq.ID))
 	logger.Log.Debug("Start Inference", "seq_id", seq.ID, "cache_pos", cachePos)
-	fmt.Fprintf(os.Stderr, "DEBUG: Starting prefill phase with %d tokens, IsGemma4=%v, Layers=%d\n", len(inputTokens), e.config.IsGemma4, e.config.Layers)
+	logger.Log.Debug("starting prefill phase", "tokens", len(inputTokens), "is_gemma4", e.config.IsGemma4, "layers", e.config.Layers)
 	for i := 0; i < len(inputTokens); i++ {
 		// Autorelease Pool for this iteration
 		pool := e.ctx.AutoreleasePoolPush()
@@ -1435,10 +1307,9 @@ func (e *metalEngine) inferInternal(inputTokens []int, tokensToGenerate int, sam
 		// Layers (Attention + FFN)
 		for l := 0; l < e.config.Layers; l++ {
 			if l == 0 && i == 0 {
-				fmt.Fprintf(os.Stderr, "DEBUG: Layer 0, IsGemma4=%v, HasQNorm=%v, HasKNorm=%v\n",
-					e.config.IsGemma4,
-					e.weights.AttnQNorm != nil && len(e.weights.AttnQNorm) > l && e.weights.AttnQNorm[l] != nil,
-					e.weights.AttnKNorm != nil && len(e.weights.AttnKNorm) > l && e.weights.AttnKNorm[l] != nil)
+				logger.Log.Debug("layer info", "layer", 0, "is_gemma4", e.config.IsGemma4,
+					"has_qnorm", e.weights.AttnQNorm != nil && len(e.weights.AttnQNorm) > l && e.weights.AttnQNorm[l] != nil,
+					"has_knorm", e.weights.AttnKNorm != nil && len(e.weights.AttnKNorm) > l && e.weights.AttnKNorm[l] != nil)
 			}
 
 			attnNorm := e.weights.AttnNorm[l]
@@ -1563,11 +1434,11 @@ func (e *metalEngine) inferInternal(inputTokens []int, tokensToGenerate int, sam
 			}
 		}
 
-		fmt.Fprintf(os.Stderr, "DEBUG: Finished all %d layers\n", e.config.Layers)
+		logger.Log.Debug("finished layers", "count", e.config.Layers)
 
 		// If this is the LAST prompt token, sample the first next token
 		if i == len(inputTokens)-1 {
-			fmt.Fprintf(os.Stderr, "DEBUG: Starting final norm\n")
+			logger.Log.Debug("starting final norm")
 			// Final Norm (F32 -> F16)
 			// Debug Output Norm Weights
 			if i == 0 {
@@ -1576,12 +1447,13 @@ func (e *metalEngine) inferInternal(inputTokens []int, tokensToGenerate int, sam
 			}
 
 			// Debug: check currentF32 before final norm
-			currentF32.ScanMax(fmt.Sprintf("Layer %d Final Input (before norm)", i))
+			if samplerConfig.DebugActivations {
+				currentF32.ScanMax(fmt.Sprintf("Layer %d Final Input (before norm)", i))
+			}
 
 			// Check for and handle Inf/NaN values before final norm
 			if infInfo := currentF32.ScanForNaN(fmt.Sprintf("Layer %d Pre-Final Norm", i), 5); infInfo.HasInf || infInfo.HasNaN() {
 				logger.Log.Warn("NaN detected in pre-final norm, clamping", "count", infInfo.Count, "inf_count", infInfo.InfCount)
-				fmt.Fprintf(os.Stderr, "DEBUG: NaN detected, clamping %d values\n", infInfo.Count)
 				// Clamp extreme values to prevent RMSNorm issues
 				hostData := currentF32.ToHost()
 				for j := range hostData {
@@ -1602,16 +1474,16 @@ func (e *metalEngine) inferInternal(inputTokens []int, tokensToGenerate int, sam
 						hostData[j] = -1e6
 					}
 				}
-				fmt.Fprintf(os.Stderr, "DEBUG: Creating cleanTensor\n")
+				logger.Log.Debug("creating cleanTensor")
 				// Load cleaned data back
 				cleanTensor := e.ctx.NewTensorFP32(currentF32.Rows(), currentF32.Cols())
 				cleanTensor.LoadFromF32(hostData)
-				fmt.Fprintf(os.Stderr, "DEBUG: Running RMSNorm on cleanTensor\n")
+				logger.Log.Debug("running RMSNorm on cleanTensor")
 				// Use cleaned tensor for RMSNorm
 				cleanTensor.RMSNormFP32_ToF16_Into(e.weights.OutputNorm, e.config.Eps, scratch.Normed)
-				fmt.Fprintf(os.Stderr, "DEBUG: RMSNorm complete, synchronizing\n")
+				logger.Log.Debug("RMSNorm complete, synchronizing")
 				e.ctx.Synchronize()
-				fmt.Fprintf(os.Stderr, "DEBUG: Synchronize complete\n")
+				logger.Log.Debug("synchronize complete")
 				cleanTensor.ReturnToPool()
 			} else {
 				currentF32.RMSNormFP32_ToF16_Into(e.weights.OutputNorm, e.config.Eps, scratch.Normed)
@@ -1619,7 +1491,9 @@ func (e *metalEngine) inferInternal(inputTokens []int, tokensToGenerate int, sam
 			}
 
 			// Debug: check normed output
-			scratch.Normed.ScanMax(fmt.Sprintf("Layer %d Final Norm Output", i))
+			if samplerConfig.DebugActivations {
+				scratch.Normed.ScanMax(fmt.Sprintf("Layer %d Final Norm Output", i))
+			}
 
 			// Check for NaN in normalized output
 			if nanInfo := scratch.Normed.ScanForNaN("Final Norm", 5); nanInfo.HasNaN() {
@@ -1628,12 +1502,11 @@ func (e *metalEngine) inferInternal(inputTokens []int, tokensToGenerate int, sam
 
 			// Output Head (F16 -> F32 Logits)
 			// scratch.Normed contains result. Use it.
-			fmt.Fprintf(os.Stderr, "DEBUG_OUTPUT_HEAD: before LinearToFP32_Into, Normed=[%d,%d], Output=[%d,%d]\n",
-				scratch.Normed.Rows(), scratch.Normed.Cols(), e.weights.Output.Rows(), e.weights.Output.Cols())
+			logger.Log.Debug("before LinearToFP32_Into", "normed_rows", scratch.Normed.Rows(), "normed_cols", scratch.Normed.Cols(), "output_rows", e.weights.Output.Rows(), "output_cols", e.weights.Output.Cols())
 			scratch.Normed.LinearToFP32_Into(e.weights.Output, logits)
-			fmt.Fprintf(os.Stderr, "DEBUG_OUTPUT_HEAD: after LinearToFP32_Into\n")
+			logger.Log.Debug("after LinearToFP32_Into")
 			e.ctx.Synchronize()
-			fmt.Fprintf(os.Stderr, "DEBUG_OUTPUT_HEAD: after synchronize\n")
+			logger.Log.Debug("after synchronize")
 			e.ctx.Synchronize()
 
 			logitsData := logits.ToHost()
@@ -1870,12 +1743,45 @@ func (e *metalEngine) initKVCache() error {
 	// and handles the wrapping (circular buffer) automatically.
 	// This prevents crashes when context length is exceeded.
 
+	if err := e.initTurboQuant(); err != nil {
+		return err
+	}
+
 	cache := &SlidingWindowKVCache{}
 	if err := cache.Init(e.ctx, e.config); err != nil {
 		return err
 	}
 	e.cache = cache
 
+	return nil
+}
+
+func (e *metalEngine) initTurboQuant() error {
+	if e.config.KVCacheType != config.KVCacheTQ1_0 && e.config.KVCacheType != config.KVCacheTQ2_0 {
+		return nil
+	}
+
+	// 1. Orthogonal Rotation Matrix
+	headDim := e.config.HeadDim
+	rotData := generateOrthogonalMatrix(headDim)
+	rot := e.ctx.NewTensorFP32(headDim, headDim)
+	if rot == nil {
+		return fmt.Errorf("failed to allocate TQRotation tensor")
+	}
+	rot.LoadFromF32(rotData)
+	e.ctx.TQRotation = rot
+
+	// 2. QJL Projection Matrix
+	qjlRows := 64 // Fixed for now
+	qjlData := generateRandomSigns(qjlRows * headDim)
+	qjl := e.ctx.NewTensorFP32(qjlRows, headDim)
+	if qjl == nil {
+		return fmt.Errorf("failed to allocate TQQJL tensor")
+	}
+	qjl.LoadFromF32(qjlData)
+	e.ctx.TQQJL = qjl
+
+	logger.Log.Info("TurboQuant matrices initialized", "head_dim", headDim, "qjl_rows", qjlRows)
 	return nil
 }
 
@@ -1986,42 +1892,6 @@ func LoadWeightFromGGUF(e *metalEngine, name string) []float32 {
 		return out
 	}
 	panic(fmt.Sprintf("Unsupported type %d for %s", t.Type, name))
-}
-
-func isNormWeight(name string) bool {
-	return strings.HasSuffix(name, "attn_norm.weight") || strings.HasSuffix(name, "ffn_norm.weight") || name == "output_norm.weight"
-}
-
-// ValidateTensorDimensions validates tensor dimensions based on quantization type
-func ValidateTensorDimensions(name string, rows, cols int, ggufType gguf.GGMLType) error {
-	switch ggufType {
-	case gguf.GGMLTypeF32, gguf.GGMLTypeF16:
-		if rows <= 0 || cols <= 0 {
-			return fmt.Errorf("invalid dimensions: rows=%d, cols=%d", rows, cols)
-		}
-	case gguf.GGMLTypeQ4_0:
-		if cols%32 != 0 {
-			return fmt.Errorf("Q4_0 requires cols divisible by 32, got cols=%d", cols)
-		}
-		if rows <= 0 || cols <= 0 {
-			return fmt.Errorf("invalid Q4_0 dimensions: rows=%d, cols=%d", rows, cols)
-		}
-	case gguf.GGMLTypeQ4_K:
-		if cols%256 != 0 {
-			return fmt.Errorf("Q4_K requires cols divisible by 256, got cols=%d", cols)
-		}
-		if rows <= 0 || cols <= 0 {
-			return fmt.Errorf("invalid Q4_K dimensions: rows=%d, cols=%d", rows, cols)
-		}
-	case gguf.GGMLTypeQ6_K:
-		if cols%256 != 0 {
-			return fmt.Errorf("Q6_K requires cols divisible by 256, got cols=%d", cols)
-		}
-		if rows <= 0 || cols <= 0 {
-			return fmt.Errorf("invalid Q6_K dimensions: rows=%d, cols=%d", rows, cols)
-		}
-	}
-	return nil
 }
 
 // SwapModel safely replaces the currently loaded model with a new one

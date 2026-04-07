@@ -1,5 +1,6 @@
 //go:build darwin && metal
 
+
 package engine
 
 import (
@@ -7,12 +8,6 @@ import (
 
 	"github.com/23skdu/longbow-quarrel/internal/device"
 )
-
-// MambaLayer executes a Mamba/SSM block
-type MambaLayer struct {
-	Index   int
-	Weights *MambaWeights
-}
 
 // Forward executes the Mamba layer
 // Input: [Batch, Dim]

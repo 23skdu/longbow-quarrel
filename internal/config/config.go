@@ -171,11 +171,11 @@ func Default() Config {
 		RopeTheta:     10000.0,
 		PrecisionMode: PrecisionAuto,
 
-		DebugEmbedding:   true,
-		DebugAttention:   true,
-		DebugFFN:         true,
-		DebugLayerOutput: true,
-		DebugLogits:      true,
-		DebugMemory:      true,
+		DebugEmbedding:   false,
+		DebugAttention:   false,
+		DebugFFN:         false,
+		DebugLayerOutput: false,
+		DebugLogits:      false,
+		DebugMemory:      false,
 	}
 }
