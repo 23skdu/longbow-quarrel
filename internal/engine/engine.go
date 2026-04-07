@@ -1761,9 +1761,35 @@ func (e *metalEngine) initTurboQuant() error {
 		return nil
 	}
 
-	// 1. Orthogonal Rotation Matrix
 	headDim := e.config.HeadDim
-	rotData := generateOrthogonalMatrix(headDim)
+	qjlRows := 64 // Fixed for now
+
+	var rotData []float32
+	var qjlData []float32
+
+	// 1. Try Loading from Model (GGUF)
+	if e.model != nil {
+		rot, qjl, err := e.model.GetTurboQuantMatrices()
+		if err == nil {
+			rotData = rot
+			qjlData = qjl
+			logger.Log.Info("TurboQuant matrices loaded from model", "head_dim", headDim)
+		} else {
+			logger.Log.Debug("TurboQuant matrices not found in model, using fallbacks", "error", err)
+		}
+	}
+
+	// 2. Deterministic Fallbacks
+	if rotData == nil {
+		rotData = device.GetPrecomputedRotation(headDim)
+	}
+	if qjlData == nil {
+		qjlData = device.GetPrecomputedQJLSigns(qjlRows * headDim)
+	}
+
+	logger.Log.Info("TurboQuant matrices initialized", "head_dim", headDim, "qjl_rows", qjlRows, "source", "loaded/precomputed")
+
+	// 3. Tensor Allocation
 	rot := e.ctx.NewTensorFP32(headDim, headDim)
 	if rot == nil {
 		return fmt.Errorf("failed to allocate TQRotation tensor")
@@ -1771,9 +1797,6 @@ func (e *metalEngine) initTurboQuant() error {
 	rot.LoadFromF32(rotData)
 	e.ctx.TQRotation = rot
 
-	// 2. QJL Projection Matrix
-	qjlRows := 64 // Fixed for now
-	qjlData := generateRandomSigns(qjlRows * headDim)
 	qjl := e.ctx.NewTensorFP32(qjlRows, headDim)
 	if qjl == nil {
 		return fmt.Errorf("failed to allocate TQQJL tensor")
@@ -1781,7 +1804,7 @@ func (e *metalEngine) initTurboQuant() error {
 	qjl.LoadFromF32(qjlData)
 	e.ctx.TQQJL = qjl
 
-	logger.Log.Info("TurboQuant matrices initialized", "head_dim", headDim, "qjl_rows", qjlRows)
+	logger.Log.Info("TurboQuant matrices initialized", "head_dim", headDim, "qjl_rows", qjlRows, "source", "loaded/generated")
 	return nil
 }
 

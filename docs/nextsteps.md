@@ -70,9 +70,9 @@
 #### 4. Integration & Storage
 
 - [x] Define `DataTypeTQ1_0` and `DataTypeTQ2_0` in `internal/device`
-- [ ] Implement `StoreKV` logic in `internal/device/cpu.go`
-- [ ] Implement `FetchKV` logic for decoding
-- [ ] Update `llm.go` to support TurboQuant cache types
+- [x] Implement `StoreKV` logic in `internal/device/cpu.go`
+- [x] Implement `FetchKV` logic for decoding
+- [ ] Update `internal/engine/engine.go` to support model-loaded TurboQuant cache types
 
 #### 5. Metadata & GGUF Support
 

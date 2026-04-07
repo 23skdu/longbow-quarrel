@@ -2,7 +2,6 @@ package engine
 
 import (
 	"fmt"
-	"math"
 	"strings"
 
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
@@ -158,24 +157,3 @@ func isNeededTensor(name string) bool {
 	return false
 }
 
-func generateOrthogonalMatrix(n int) []float32 {
-	data := make([]float32, n*n)
-	for i := 0; i < n; i++ {
-		for j := 0; j < n; j++ {
-			data[i*n+j] = float32(math.Cos(math.Pi * float64(i) * (float64(j) + 0.5) / float64(n)))
-		}
-	}
-	return data
-}
-
-func generateRandomSigns(n int) []float32 {
-	data := make([]float32, n)
-	for i := 0; i < n; i++ {
-		if math.Sin(float64(i)) > 0 {
-			data[i] = 1.0
-		} else {
-			data[i] = -1.0
-		}
-	}
-	return data
-}
