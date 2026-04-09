@@ -55,7 +55,7 @@
 
 ### Fix 2: Implement CUDA InferWithLogits (`internal/engine/engine_cuda.go:837-838`)
 
-**Status:** 🔴 NOT IMPLEMENTED
+**Status:** ✅ IMPLEMENTED
 
 **Current code:**
 ```go
@@ -68,7 +68,7 @@ func (e *cudaEngine) InferWithLogits(inputTokens []int, tokensToGenerate int, sa
 
 ### Fix 3: Implement CUDA InferWithCallbackLogits (`internal/engine/engine_cuda.go:841-842`)
 
-**Status:** 🔴 NOT IMPLEMENTED
+**Status:** ✅ IMPLEMENTED
 
 **Current code:**
 ```go
@@ -81,7 +81,7 @@ func (e *cudaEngine) InferWithCallbackLogits(inputTokens []int, tokensToGenerate
 
 ### Fix 4: Implement CUDA SwapModel (Hot-Swap) (`internal/engine/engine_cuda.go:231-236`)
 
-**Status:** 🔴 NOT IMPLEMENTED
+**Status:** ✅ IMPLEMENTED
 
 **Current code:**
 ```go
@@ -93,7 +93,7 @@ func (e *cudaEngine) SwapModel(modelPath string, cfg config.Config) error {
 
 **Required fix:** Implement model hot-swap logic for CUDA, similar to Metal's implementation at `cmd/webui/engine/adapter_metal.go:197-240`.
 
-### Fix 5: Implement Metrics Audit Functions (`internal/metrics/metrics.go:596-622`)
+### Fix 5: Implement Metrics Audit Functions (`internal/metrics/metrics.go:593-623`)
 
 **Status:** ✅ IMPLEMENTED - Functions extract values from map interface{}
 
