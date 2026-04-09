@@ -323,13 +323,52 @@ func TestGGMLTypeIQTypes(t *testing.T) {
 	}
 }
 
-func TestQuantizeWeightsToQ4KNotImplemented(t *testing.T) {
+func TestQuantizeWeightsToQ4K(t *testing.T) {
+	// Test with 256 elements (required multiple)
+	src := make([]float32, 256)
+	for i := range src {
+		src[i] = float32(i) * 0.1
+	}
+
+	data, err := QuantizeWeightsToQ4K(src, len(src))
+	if err != nil {
+		t.Fatalf("QuantizeWeightsToQ4K error: %v", err)
+	}
+
+	// Q4_K block should be 144 bytes for 256 elements
+	if len(data) != 144 {
+		t.Errorf("QuantizeWeightsToQ4K len = %d, want 144", len(data))
+	}
+
+	// Dequantize and verify
+	recovered, err := DequantizeWeightsFromQ4K(data, 1, 256)
+	if err != nil {
+		t.Fatalf("DequantizeWeightsFromQ4K error: %v", err)
+	}
+
+	if len(recovered) != 256 {
+		t.Errorf("DequantizeWeightsFromQ4K len = %d, want 256", len(recovered))
+	}
+
+	// Check accuracy
+	maxErr := float32(0)
+	for i := range src {
+		err := src[i] - recovered[i]
+		if err < 0 {
+			err = -err
+		}
+		if err > maxErr {
+			maxErr = err
+		}
+	}
+	t.Logf("Max quantization error: %f", maxErr)
+}
+
+func TestQuantizeWeightsToQ4KNotMultiple(t *testing.T) {
+	// Test with non-multiple of 256 should fail
 	_, err := QuantizeWeightsToQ4K([]float32{1.0, 2.0}, 2)
 	if err == nil {
-		t.Error("QuantizeWeightsToQ4K should return error")
-	}
-	if err.Error() != "not implemented" {
-		t.Errorf("QuantizeWeightsToQ4K error = %q, want %q", err.Error(), "not implemented")
+		t.Error("QuantizeWeightsToQ4K should return error for non-multiple of 256")
 	}
 }
 

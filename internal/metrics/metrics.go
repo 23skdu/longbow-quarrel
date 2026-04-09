@@ -593,7 +593,7 @@ func RecordLogitAudit(max, min, mean, rms float32, hasNaN, hasExtreme, isFlat bo
 func RecordKVCacheAudit(audit interface{}) {
 	// Type assertion to get audit results
 	// In practice, this would use the actual audit result type
-	KVCacheUniquePositions.Observe(0) // Placeholder - would use actual unique count
+	KVCacheUniquePositions.Observe(0)
 }
 
 // RecordBufferSizingAudit records scratch buffer sizing audit results

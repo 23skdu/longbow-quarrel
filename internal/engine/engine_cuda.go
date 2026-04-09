@@ -9,11 +9,13 @@ import (
 	"math/rand"
 	"os"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/device"
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
+	"github.com/23skdu/longbow-quarrel/internal/metrics"
 	"github.com/23skdu/longbow-quarrel/internal/tokenizer"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -105,6 +107,7 @@ type cudaEngine struct {
 	cuda             *device.CUDAModel
 	scratch          *device.LayerScratch
 	dequantizedCache map[string]*device.CUDATensor
+	mu               sync.RWMutex
 }
 
 func NewcudaEngine(modelPath string, cfg config.Config) (Engine, error) {
@@ -223,18 +226,74 @@ func NewcudaEngine(modelPath string, cfg config.Config) (Engine, error) {
 
 	return e, nil
 }
-
 func (e *cudaEngine) Config() config.Config {
 	return e.config
 }
 
-func (e *cudaEngine) SwapModel(modelPath string, cfg config.Config) error {
-	// For CUDA, we need a similar logic to MetalEngine's loadModel
-	// but using CUDA specific context and model creation.
-	// This is a placeholder for the actual hotswap logic.
-	return fmt.Errorf("SwapModel not yet implemented for cudaEngine")
-}
+func (e *cudaEngine) SwapModel(newModelPath string, newConfig config.Config) error {
+	startTime := time.Now()
+	success := false
 
+	defer func() {
+		metrics.RecordModelHotSwap(time.Since(startTime), success)
+	}()
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	// Free existing cache and weights
+	if e.cuda != nil {
+		for _, c := range e.cuda.KCache {
+			if c != nil {
+				c.Free()
+			}
+		}
+		for _, c := range e.cuda.VCache {
+			if c != nil {
+				c.Free()
+			}
+		}
+		e.cuda.Free()
+	}
+	if e.model != nil {
+		e.model.Close()
+	}
+
+	// Load the new model
+	f, err := gguf.LoadFile(newModelPath)
+	if err != nil {
+		return fmt.Errorf("failed to load GGUF: %w", err)
+	}
+
+	arch := "unknown"
+	if v, ok := f.KV["general.architecture"].(string); ok {
+		arch = v
+	}
+
+	ctx, err := device.NewCUDAContext()
+	if err != nil {
+		f.Close()
+		return fmt.Errorf("failed to create CUDA context: %w", err)
+	}
+
+	cudaModel, err := ctx.NewCUDAModel(f, true, newConfig.KVCacheSize)
+	if err != nil {
+		ctx.Free()
+		f.Close()
+		return fmt.Errorf("failed to load model to GPU: %w", err)
+	}
+
+	// Update config
+	e.config = newConfig
+	e.config.KVCacheSize = newConfig.KVCacheSize
+
+	// Update components
+	e.model = f
+	e.cuda = cudaModel
+
+	success = true
+	return nil
+}
 func (e *cudaEngine) Close() {
 	for _, t := range e.dequantizedCache {
 		if t != nil {
@@ -835,11 +894,110 @@ func (e *cudaEngine) fusedRMSNormAddGPU(input, hidden, weight, output *device.cu
 }
 
 func (e *cudaEngine) InferWithLogits(inputTokens []int, tokensToGenerate int, samplerConfig SamplerConfig) ([]int, []float32, error) {
-	return nil, nil, fmt.Errorf("InferWithLogits not yet implemented for cudaEngine")
+	var lastLogits []float32
+	tokens, err := e.InferWithCallbackLogits(inputTokens, tokensToGenerate, samplerConfig, nil, func(logits []float32) {
+		lastLogits = make([]float32, len(logits))
+		copy(lastLogits, logits)
+	})
+	return tokens, lastLogits, err
 }
 
 func (e *cudaEngine) InferWithCallbackLogits(inputTokens []int, tokensToGenerate int, samplerConfig SamplerConfig, tokenCallback func(int), logitsCallback func([]float32)) ([]int, error) {
-	return nil, fmt.Errorf("InferWithCallbackLogits not yet implemented for cudaEngine")
+	if len(inputTokens) == 0 {
+		return nil, fmt.Errorf("empty input tokens")
+	}
+
+	result := make([]int, 0, tokensToGenerate)
+
+	sampler := NewSampler(samplerConfig)
+
+	log.Printf("Starting inference: %d prompt tokens + %d to generate", len(inputTokens), tokensToGenerate)
+	startTime := time.Now()
+
+	cudaInferenceTotal.WithLabelValues(e.config.Architecture).Inc()
+	cudaBatchSize.WithLabelValues(e.config.Architecture).Observe(float64(len(inputTokens)))
+
+	inputLen := len(inputTokens)
+	seqLen := inputLen + tokensToGenerate
+	if seqLen > e.config.SeqLen {
+		seqLen = e.config.SeqLen
+	}
+
+	allTokens := make([]int, 0, seqLen)
+	allTokens = append(allTokens, inputTokens...)
+
+	layerStart := time.Now()
+	for pos := 0; pos < inputLen; pos++ {
+		token := inputTokens[pos]
+		_, err := e.forward(token, pos, allTokens)
+		if err != nil {
+			cudaEngineFailed.WithLabelValues(e.config.Architecture, "forward_failed").Inc()
+			return nil, fmt.Errorf("forward pass failed at position %d: %w", pos, err)
+		}
+		layerLatency := time.Since(layerStart).Seconds()
+		cudaLayerLatency.WithLabelValues(e.config.Architecture, "prompt").Observe(layerLatency)
+		layerStart = time.Now()
+	}
+
+	kvHits, kvMisses := 0, 0
+	pos := inputLen
+	for gen := 0; gen < tokensToGenerate && pos < seqLen-1; gen++ {
+		lastToken := allTokens[len(allTokens)-1]
+		logits, err := e.forward(lastToken, pos, allTokens)
+		if err != nil {
+			cudaEngineFailed.WithLabelValues(e.config.Architecture, "forward_failed").Inc()
+			return nil, fmt.Errorf("forward pass failed at position %d: %w", pos, err)
+		}
+
+		if logitsCallback != nil {
+			logitsCallback(logits)
+		}
+
+		samplingStart := time.Now()
+		nextToken := sampler.Sample(logits)
+		cudaSamplingTime.WithLabelValues(e.config.Architecture).Observe(time.Since(samplingStart).Seconds())
+
+		allTokens = append(allTokens, nextToken)
+		result = append(result, nextToken)
+		cudaTokensGenerated.WithLabelValues(e.config.Architecture).Inc()
+
+		if tokenCallback != nil {
+			tokenCallback(nextToken)
+		}
+
+		layerLatency := time.Since(layerStart).Seconds()
+		cudaLayerLatency.WithLabelValues(e.config.Architecture, fmt.Sprintf("gen_%d", gen)).Observe(layerLatency)
+		layerStart = time.Now()
+
+		if e.cuda != nil && e.cuda.KCache != nil && e.cuda.VCache != nil {
+			kvHits++
+		} else {
+			kvMisses++
+		}
+
+		pos++
+	}
+
+	elapsed := time.Since(startTime)
+	tokensPerSecond := float64(len(result)) / elapsed.Seconds()
+
+	log.Printf("Generated %d tokens in %.2fs (%.1f t/s)", len(result), elapsed.Seconds(), tokensPerSecond)
+
+	cudaInferenceDuration.WithLabelValues(e.config.Architecture).Observe(elapsed.Seconds())
+	cudaTokensPerSecond.WithLabelValues(e.config.Architecture).Observe(tokensPerSecond)
+	cudaKVCacheHits.WithLabelValues(e.config.Architecture).Add(float64(kvHits))
+	cudaKVCacheMisses.WithLabelValues(e.config.Architecture).Add(float64(kvMisses))
+
+	if e.cuda != nil {
+		cudaMemoryUsage.WithLabelValues(e.config.Architecture).Set(float64(device.CUDAAllocatedBytes()))
+	}
+
+	if e.tokenizer != nil && len(result) > 0 {
+		text := e.tokenizer.Decode(result)
+		log.Printf("Output: %s", text)
+	}
+
+	return result, nil
 }
 
 func (e *cudaEngine) GetSeqCachePos(seqID int) int {
