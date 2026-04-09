@@ -29,7 +29,7 @@
 
 | ID | Issue | Location | Status |
 | :--- | :--- | :--- | :--- |
-| 5 | Metrics audit placeholders return zero values | `internal/metrics/metrics.go:596-622` | 🔴 PLACEHOLDER |
+| 5 | Metrics audit placeholders return zero values | `internal/metrics/metrics.go:596-622` | ✅ IMPLEMENTED |
 
 ---
 
@@ -95,7 +95,7 @@ func (e *cudaEngine) SwapModel(modelPath string, cfg config.Config) error {
 
 ### Fix 5: Implement Metrics Audit Functions (`internal/metrics/metrics.go:596-622`)
 
-**Status:** 🔴 PLACEHOLDER - Functions return zero values
+**Status:** ✅ IMPLEMENTED - Functions extract values from map interface{}
 
 **Current code:**
 ```go
@@ -104,13 +104,13 @@ func RecordKVCacheAudit(audit interface{}) {
 }
 ```
 
-**Required fix:** Implement actual audit logic to capture:
-- `RecordKVCacheAudit`: Unique cache positions count
-- `RecordBufferSizingAudit`: GQA ratio
-- `RecordDequantizationAudit`: Max absolute/relative error
-- `RecordWeightAlignmentAudit`: Padding bytes
-- `RecordSoftmaxMaskingAudit`: Mask values
-- `RecordHeadDimensionAudit`: Threadgroup sizes
+**Implementation:** Functions now accept map[string]interface{} and extract:
+- `RecordKVCacheAudit`: UniquePositions (int)
+- `RecordBufferSizingAudit`: GQARatio (int)
+- `RecordDequantizationAudit`: MaxAbsError, MaxRelError (float64)
+- `RecordWeightAlignmentAudit`: PaddingBytes (int)
+- `RecordSoftmaxMaskingAudit`: MaxMaskValue (float64)
+- `RecordHeadDimensionAudit`: ThreadgroupSize (int)
 
 ---
 

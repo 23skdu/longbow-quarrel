@@ -591,35 +591,65 @@ func RecordLogitAudit(max, min, mean, rms float32, hasNaN, hasExtreme, isFlat bo
 
 // RecordKVCacheAudit records KV cache position audit results
 func RecordKVCacheAudit(audit interface{}) {
-	// Type assertion to get audit results
-	// In practice, this would use the actual audit result type
-	KVCacheUniquePositions.Observe(0)
+	// Accepts map with UniquePositions int, HasOverlap bool, HasOutOfBounds bool
+	if m, ok := audit.(map[string]interface{}); ok {
+		if v, ok := m["UniquePositions"].(int); ok {
+			KVCacheUniquePositions.Observe(float64(v))
+		}
+	}
 }
 
 // RecordBufferSizingAudit records scratch buffer sizing audit results
 func RecordBufferSizingAudit(audit interface{}) {
-	BufferGQARatio.Observe(0) // Placeholder - would use actual GQA ratio
+	// Accepts map with GQA ratio, overflow, overlap
+	if m, ok := audit.(map[string]interface{}); ok {
+		if v, ok := m["GQARatio"].(int); ok {
+			BufferGQARatio.Observe(float64(v))
+		}
+	}
 }
 
 // RecordDequantizationAudit records dequantization accuracy audit results
 func RecordDequantizationAudit(audit interface{}) {
-	DequantMaxAbsError.Observe(0)   // Placeholder
-	DequantMaxRelError.Observe(0.0) // Placeholder
+	// Accepts map with MaxAbsError, MaxRelError, HasNaN
+	if m, ok := audit.(map[string]interface{}); ok {
+		if v, ok := m["MaxAbsError"].(float64); ok {
+			DequantMaxAbsError.Observe(v)
+		}
+		if v, ok := m["MaxRelError"].(float64); ok {
+			DequantMaxRelError.Observe(v)
+		}
+	}
 }
 
 // RecordWeightAlignmentAudit records weight padding/alignment audit results
 func RecordWeightAlignmentAudit(audit interface{}) {
-	WeightPaddingBytes.Observe(0) // Placeholder
+	// Accepts map with PaddingBytes, AlignmentErrors
+	if m, ok := audit.(map[string]interface{}); ok {
+		if v, ok := m["PaddingBytes"].(int); ok {
+			WeightPaddingBytes.Observe(float64(v))
+		}
+	}
 }
 
 // RecordSoftmaxMaskingAudit records softmax masking audit results
 func RecordSoftmaxMaskingAudit(audit interface{}) {
-	SoftmaxMaskValue.Observe(0) // Placeholder
+	// Accepts map with MaxMaskValue, MaskingErrors
+	if m, ok := audit.(map[string]interface{}); ok {
+		if v, ok := m["MaxMaskValue"].(float64); ok {
+			SoftmaxMaskValue.Observe(v)
+		}
+	}
 }
 
 // RecordHeadDimensionAudit records head dimension logic audit results
 func RecordHeadDimensionAudit(audit interface{}) {
-	HeadDimThreadgroupSize.Observe(0) // Placeholder
+	// Accepts map with ThreadgroupSize, Errors
+	if m, ok := audit.(map[string]interface{}); ok {
+		if v, ok := m["ThreadgroupSize"].(int); ok {
+			HeadDimThreadgroupSize.Observe(float64(v))
+		}
+	}
 }
 
 // RecordNaNPropagationAudit records NaN propagation detection results
