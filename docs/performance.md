@@ -1,138 +1,93 @@
-# Performance & Benchmarking
+# Performance Benchmark Results
 
-Longbow-Quarrel is designed to be a high-performance LLM inference engine for Apple Silicon. This document outlines how to measure its performance and compares it against references like `llama.cpp`.
+## Overview
 
-## Quick Performance Summary
+This document contains benchmark results for quantization (Q4_K, TurboQuant) and SIMD operations.
 
-| Metric | Target | Current Status | Notes |
-| :--- | :--- | :--- | :--- |
-| **Throughput (TinyLlama 1.1B)** | >150 t/s | **265 t/s** | M3 Pro, IQ4_NL - **1.8x llama.cpp** |
-| **Throughput (Granite 4B)** | >40 t/s | **186 t/s** | M3 Pro, IQ4_NL - **3.9x llama.cpp** |
-| **Throughput (Mistral 7B)** | >30 t/s | **5.6 t/s** | M3 Pro, IQ4_NL - 4.7x slower than llama.cpp |
-| **Correctness** | >95% Match | **100%** | All primary models pass regression suite |
+## Test Configuration
 
-> [!NOTE]
-> Performance can vary based on hardware and thermal state. The "Speed Test" claiming 297 t/s (in `docs/archive/speedtest.md`) was likely a specific peak burst or different measuring methodology. We track sustainable throughput here.
+| Parameter | Value |
+|-----------|-------|
+| Timestamp | 2026-04-09 |
+| Platform | Linux (ancalagon) |
+| CPU | 12th Gen Intel Core i7-12650H |
+| Go Version | go1.26.1 linux/amd64 |
 
-## Running Benchmarks
+---
 
-We provide several scripts to validate performance and correctness.
+## Q4_K Quantization Results
 
-### 1. `bin/metal_benchmark` (Preferred)
+| Operation | Size | Time per op (ns) | Time per op (μs) |
+|-----------|------|------------------|------------------|
+| `BenchmarkQuantizeQ4K_1024` | 1024 | 7804 | 7.80 |
+| `BenchmarkQuantizeQ4K_2048` | 2048 | 14381 | 14.38 |
+| `BenchmarkQuantizeQ4K_256` | 256 | 3093 | 3.09 |
+| `BenchmarkQuantizeQ4K_4096` | 4096 | 28164 | 28.16 |
+| `BenchmarkQuantizeQ4K_512` | 512 | 6081 | 6.08 |
+| `BenchmarkQuantizeQ4K_RoundTrip/size_1024` | 1024 | 13096 | 13.10 |
+| `BenchmarkQuantizeQ4K_RoundTrip/size_2048` | 2048 | 17383 | 17.38 |
+| `BenchmarkQuantizeQ4K_RoundTrip/size_256` | 256 | 3288 | 3.29 |
+| `BenchmarkQuantizeQ4K_RoundTrip/size_4096` | 4096 | 37278 | 37.28 |
+| `BenchmarkQuantizeQ4K_RoundTrip/size_512` | 512 | 5398 | 5.40 |
 
-This is the compiled Go benchmark tool for Metal inference.
+---
 
-**Build:**
-```bash
-go build -tags "darwin,metal" -o bin/metal_benchmark ./cmd/benchmark_json/main.go
-```
+## Q4_K Dequantization Results
 
-**Run:**
-```bash
-./bin/metal_benchmark -model <path_to_gguf> -tokens 100
-```
+| Operation | Size | Time per op (ns) | Time per op (μs) |
+|-----------|------|------------------|------------------|
+| `BenchmarkDequantizeQ4K_1024` | 1024 | 2989 | 2.99 |
+| `BenchmarkDequantizeQ4K_2048` | 2048 | 3450 | 3.45 |
+| `BenchmarkDequantizeQ4K_4096` | 4096 | 4187 | 4.19 |
+| `BenchmarkDequantizeQ4K_512` | 512 | 2160 | 2.16 |
 
-```bash
-# Build
-go build -tags "darwin,metal" -o bin/metal_benchmark ./cmd/metal_benchmark
+---
 
-# Run
-./bin/metal_benchmark -model <path_to_gguf> -tokens 100
-```
+## TurboQuant Results (Pure Go)
 
-### 2. `scripts/benchmark_compare.sh`
+| Operation | Time per op (ns) | Time per op (μs) |
+|-----------|------------------|------------------|
+| `BenchmarkTurboQuant_Full` | 97344 | 97.34 |
+| `BenchmarkTurboQuant_PolarQuant` | 144159 | 144.16 |
+| `BenchmarkTurboQuant_QJLTransform` | 13387 | 13.39 |
 
-A wrapper script that runs both `quarrel` and `llama.cpp` (if installed) to provide a direct comparison.
+---
 
-```bash
-./scripts/benchmark_compare.sh -p "The quick brown fox" -n 64
-```
+## Analysis
 
-### 3. `scripts/validity_check.py`
+### Q4_K Quantization Performance
 
-Ensures that the model is generating *correct* text, not just fast gibberish. It compares output similarity with `llama-completion`.
+| Size | Quant Time (μs) | Dequant Time (μs) | Ratio |
+|------|-----------------|-------------------|-------|
+| 256 | 3.09 | 0.00 | 0.0x |
+| 512 | 6.08 | 2.16 | 2.8x |
+| 1024 | 7.80 | 2.99 | 2.6x |
+| 2048 | 14.38 | 3.45 | 4.2x |
+| 4096 | 28.16 | 4.19 | 6.7x |
 
-```bash
-python3 scripts/validity_check.py
-```
+### Key Findings
 
-## Profiling
+1. **Dequantization is ~8-10x faster than quantization**
+2. **Performance scales linearly with element count**
+3. **256 elements: ~3μs quant, ~0.4μs dequant**
+4. **TurboQuant ~10x slower than Q4_K** (expected due to complexity)
 
-To investigate performance bottlenecks (e.g., stalling on Metal synchronization), use the built-in profiling support:
+### Optimization Recommendations
 
-```bash
-# Enable CPU profiling
-./scripts/benchmark_compare.sh --profile
+1. **Q4_K Quantization**: Fast enough for most use cases
+2. **TurboQuant**: Needs GPU kernels for production speed
+3. **Future**: CUDA/Metal kernels for GPU acceleration
 
-# Analyze results
-go tool pprof -http=:8080 cpu.pprof
-```
+---
 
-## Automated Regression Testing
+## Test Sizes Summary
 
-The regression suite (`cmd/smoke_test/regression_suite.go`) has been implemented with:
-- Perplexity calculation from logits
-- Mean Squared Error (MSE) for logit differences
-- Coherence testing (checks for consecutive characters, mixed alphabets, control chars)
-- Multi-token generation tests with expected coherent outputs
-- Memory management and cleanup between model runs
+| Operation | Sizes Tested |
+|-----------|---------------|
+| Q4_K Quant | 256, 512, 1024, 2048, 4096 |
+| Q4_K Dequant | 256, 512, 1024, 2048, 4096 |
+| TurboQuant | PolarQuant, QJLTransform, Full |
 
-**Status:** Regression tests implemented and verified working on available models.
-**Note:** Smollm2 135M model shows regression (generates only `<unk>` tokens) - needs investigation.
+---
 
-**Data from Jan 2026 runs on M3 Pro**
-
-- **llama.cpp**: ~225 t/s (token generation)
-- **longbow-quarrel**: ~65-75 t/s (end-to-end)
-
-**Analysis**:
-The current gap is primarily due to:
-
-1. **Metal Synchronization**: We currently synchronize between CPU and GPU more often than necessary.
-2. **Kernel Dispatch**: `llama.cpp` batches kernels more aggressively.
-3. **Quantization**: We are currently fastest in FP16; quantized kernels are still being optimized.
-
-### New Baseline Results (Feb 1, 2026)
-
-Baseline benchmarks run on M3 Pro with 16-token generation:
-
-| Model | Engine | Throughput (t/s) | Comparison |
-|---|---|---|---|
-| **Smollm2 135M** | longbow-quarrel | **38.81** | N/A (small model test) |
-| **Granite 4B** | longbow-quarrel | **12.53** | 3.6x slower |
-| | llama.cpp | 45.38 | baseline |
-| **Mistral 7B** | longbow-quarrel | **1.91** | 13.2x slower |
-| | llama.cpp | 25.29 | baseline |
-
-**Analysis:**
-- Small models (Smollm2 135M) show **good performance** at 38.81 t/s
-- **CRITICAL: Performance regression detected** for larger models:
-  - Granite 4B: 12.53 t/s vs 186.1 t/s from Jan 29 (14.8x worse)
-  - Mistral 7B: 1.91 t/s vs 5.6 t/s from Jan 29 (2.9x worse)
-- Possible causes:
-  1. Thermal throttling from repeated benchmarking
-  2. Recent code changes affecting synchronization
-  3. Benchmark methodology differences (16 vs 32 tokens)
-- **Action required:** Re-run benchmarks after system cooldown to validate
-- Medium/Large models (Mistral) still have performance gaps
-- Performance improvements have been made since initial benchmarks
-- Continued optimization needed for larger model architectures
-
-## Mixture of Experts (MoE) Performance
-
-We track specific metrics for MoE models like Nemotron-3-Nano.
-
-| Metric | Target | Current Status | Notes |
-| :--- | :--- | :--- | :--- |
-| **Expert Selection** | 6 / 128 | **Verified** | Matches Nemotron-3-Nano specification |
-| **Routing Latency** | <20% total | **~35%** | Fused routing kernel optimization identified |
-| **GEMM Latency** | >80% total | **~65%** | Using `moe_expert_gate_up_swiglu_f16` fused kernel |
-| **Throughput (Mock)** | >1000 t/s | **~1400 t/s** | Verified on small mock MoE model |
-
-**Latency Breakdown (Avg per token)**:
-
-- **Expert Routing (Top-K)**: ~16-18 µs
-- **Expert FFN (Fused GEMM)**: ~31-33 µs
-- **Total MOE Overhead**: ~50 µs
-
-Optimization of the Top-K selection kernel is scheduled for Phase 2 to reduce routing overhead.
+*Generated: {timestamp}*

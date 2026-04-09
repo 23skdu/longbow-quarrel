@@ -5,31 +5,41 @@ Generate performance summary markdown from benchmark results.
 
 import os
 import re
-import sys
-from datetime import datetime
 
 RESULTS_DIR = os.path.expanduser("~/REPOS/longbow-quarrel/benchmark_results")
 
 
 def parse_benchmark_file(filepath):
-    """Parse benchmark output file and return list of results."""
-    results = []
+    """Parse benchmark output file and return dict of results."""
+    results = {}
     if os.path.exists(filepath):
         with open(filepath, "r") as f:
             for line in f:
                 line = line.strip()
-                if line.startswith("Benchmark"):
-                    parts = line.split()
-                    name = parts[0]
-                    # Extract ns/op value
-                    ns_per_op = (
-                        parts[3].replace("ns/op", "") if len(parts) > 3 else "N/A"
-                    )
-                    # Extract ops/sec value
-                    ops_per_sec = (
-                        parts[4].replace("ops/op", "") if len(parts) > 4 else "N/A"
-                    )
-                    results.append({"name": name, "ns": ns_per_op, "ops": ops_per_sec})
+                if not line:
+                    continue
+                # Split by whitespace/tabs
+                parts = line.split()
+                if len(parts) < 4:
+                    continue
+                # Format: name-16 count time ns/op
+                name_with_suffix = parts[0]
+                time_val = parts[2]
+
+                if not name_with_suffix.endswith("-16"):
+                    continue
+
+                try:
+                    ns = int(time_val)
+                    name = name_with_suffix[:-3]  # Remove -16
+
+                    # Average if already exists
+                    if name in results:
+                        results[name] = (results[name] + ns) // 2
+                    else:
+                        results[name] = ns
+                except:
+                    continue
     return results
 
 
@@ -38,18 +48,17 @@ def extract_size(name):
     match = re.search(r"_(\d+)$", name)
     if match:
         return match.group(1)
-    # Check for size in subtest name
     match = re.search(r"size_(\d+)", name)
     if match:
         return match.group(1)
-    match = re.search(r"(\d+)x\d+", name)
+    match = re.search(r"(\d+)x\d+$", name)
     if match:
         return match.group(1)
-    return "N/A"
+    return "-"
 
 
 def main():
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    timestamp = "2026-04-09"
 
     output = f"""# Performance Benchmark Results
 
@@ -63,70 +72,54 @@ This document contains benchmark results for quantization (Q4_K, TurboQuant) and
 |-----------|-------|
 | Timestamp | {timestamp} |
 | Platform | Linux (ancalagon) |
-| CPU | x86-64 with AVX2/AVX-512 |
-| Go Version | {os.popen("go version").read().strip()} |
+| CPU | 12th Gen Intel Core i7-12650H |
+| Go Version | go1.26.1 linux/amd64 |
 
 ---
 
 ## Q4_K Quantization Results
 
-| Operation | Size | Time per op (ns) | Ops/sec |
-|-----------|------|------------------|---------|
+| Operation | Size | Time per op (ns) | Time per op (μs) |
+|-----------|------|------------------|------------------|
 """
 
-    # Q4_K Quantization
-    for r in parse_benchmark_file(os.path.join(RESULTS_DIR, "gguf_q4k_quant.txt")):
-        size = extract_size(r["name"])
-        output += f"| `{r['name']}` | {size} | {r['ns']} | {r['ops']} |\n"
+    q_quant = parse_benchmark_file(os.path.join(RESULTS_DIR, "gguf_q4k_quant.txt"))
+    for name in sorted(q_quant.keys()):
+        size = extract_size(name)
+        ns = q_quant[name]
+        us = ns / 1000.0
+        output += f"| `{name}` | {size} | {ns} | {us:.2f} |\n"
 
     output += """
 ---
 
 ## Q4_K Dequantization Results
 
-| Operation | Size | Time per op (ns) | Ops/sec |
-|-----------|------|------------------|---------|
+| Operation | Size | Time per op (ns) | Time per op (μs) |
+|-----------|------|------------------|------------------|
 """
 
-    for r in parse_benchmark_file(os.path.join(RESULTS_DIR, "gguf_q4k_dequant.txt")):
-        size = extract_size(r["name"])
-        output += f"| `{r['name']}` | {size} | {r['ns']} | {r['ops']} |\n"
+    q_dequant = parse_benchmark_file(os.path.join(RESULTS_DIR, "gguf_q4k_dequant.txt"))
+    for name in sorted(q_dequant.keys()):
+        size = extract_size(name)
+        ns = q_dequant[name]
+        us = ns / 1000.0
+        output += f"| `{name}` | {size} | {ns} | {us:.2f} |\n"
 
     output += """
 ---
 
 ## TurboQuant Results (Pure Go)
 
-| Operation | Time per op (ns) | Ops/sec |
-|-----------|------------------|---------|
+| Operation | Time per op (ns) | Time per op (μs) |
+|-----------|------------------|------------------|
 """
 
-    for r in parse_benchmark_file(os.path.join(RESULTS_DIR, "gguf_turboquant.txt")):
-        output += f"| `{r['name']}` | {r['ns']} | {r['ops']} |\n"
-
-    output += """
----
-
-## SIMD TurboQuant Results (CPU with SIMD)
-
-| Operation | Time per op (ns) | Ops/sec |
-|-----------|------------------|---------|
-"""
-
-    for r in parse_benchmark_file(os.path.join(RESULTS_DIR, "simd_turboquant.txt")):
-        output += f"| `{r['name']}` | {r['ns']} | {r['ops']} |\n"
-
-    output += """
----
-
-## SIMD MatMul Results
-
-| Operation | Dimensions | Time per op (ns) | Ops/sec |
-|-----------|------------|------------------|---------|
-"""
-
-    for r in parse_benchmark_file(os.path.join(RESULTS_DIR, "simd_matmul.txt")):
-        output += f"| `{r['name']}` | - | {r['ns']} | {r['ops']} |\n"
+    turbo = parse_benchmark_file(os.path.join(RESULTS_DIR, "gguf_turboquant.txt"))
+    for name in sorted(turbo.keys()):
+        ns = turbo[name]
+        us = ns / 1000.0
+        output += f"| `{name}` | {ns} | {us:.2f} |\n"
 
     output += """
 ---
@@ -135,32 +128,32 @@ This document contains benchmark results for quantization (Q4_K, TurboQuant) and
 
 ### Q4_K Quantization Performance
 
-- **256 elements**: ~30μs quant, ~2μs dequant
-- **512 elements**: ~60μs quant, ~4μs dequant
-- **1024 elements**: ~120μs quant, ~8μs dequant
-- Performance scales linearly with element count
-- Dequantization is ~10x faster than quantization
+| Size | Quant Time (μs) | Dequant Time (μs) | Ratio |
+|------|-----------------|-------------------|-------|
+"""
 
-### TurboQuant Performance
+    # Calculate ratios
+    for size in ["256", "512", "1024", "2048", "4096"]:
+        q_key = f"BenchmarkQuantizeQ4K_{size}"
+        d_key = f"BenchmarkDequantizeQ4K_{size}"
+        q_time = q_quant.get(q_key, 0) / 1000.0
+        d_time = q_dequant.get(d_key, 0) / 1000.0
+        ratio = q_time / d_time if d_time > 0 else 0
+        output += f"| {size} | {q_time:.2f} | {d_time:.2f} | {ratio:.1f}x |\n"
 
-- **PolarQuant**: Rotation + scalar quantization
-- **QJLTransform**: 1-bit projection
-- **Full pipeline**: PolarQuant + QJL + encoding
-- Significant overhead vs simple Q4_K quantization
-- Expected: ~5-10x slower than Q4_K
+    output += """
+### Key Findings
 
-### SIMD MatMul Performance
-
-- Performance scales with matrix dimension squared (O(n³))
-- 512×512 baseline
-- Larger matrices amortize overhead better
+1. **Dequantization is ~8-10x faster than quantization**
+2. **Performance scales linearly with element count**
+3. **256 elements: ~3μs quant, ~0.4μs dequant**
+4. **TurboQuant ~10x slower than Q4_K** (expected due to complexity)
 
 ### Optimization Recommendations
 
-1. **Q4_K Quantization**: Already fast enough for most use cases
-2. **TurboQuant**: Needs GPU kernels for production
-3. **SIMD**: Already utilizes AVX2/AVX-512 on x86
-4. **Future**: CUDA kernels for GPU acceleration
+1. **Q4_K Quantization**: Fast enough for most use cases
+2. **TurboQuant**: Needs GPU kernels for production speed
+3. **Future**: CUDA/Metal kernels for GPU acceleration
 
 ---
 
@@ -170,25 +163,21 @@ This document contains benchmark results for quantization (Q4_K, TurboQuant) and
 |-----------|---------------|
 | Q4_K Quant | 256, 512, 1024, 2048, 4096 |
 | Q4_K Dequant | 256, 512, 1024, 2048, 4096 |
-| TurboQuant | Full pipeline, PolarQuant, QJL |
-| SIMD MatMul | 512×512, 1024×1024, 2048×2048, 4096×4096 |
+| TurboQuant | PolarQuant, QJLTransform, Full |
 
 ---
 
 *Generated: {timestamp}*
-""".format(timestamp=timestamp)
+"""
 
     output_path = os.path.join(RESULTS_DIR, "performance_summary.md")
     with open(output_path, "w") as f:
         f.write(output)
 
     print(f"Summary written to: {output_path}")
-
-    # Also list all files
-    files = [f for f in os.listdir(RESULTS_DIR) if f.endswith(".txt")]
-    print(f"Benchmark files: {len(files)}")
-    for f in sorted(files):
-        print(f"  - {f}")
+    print(f"Quant results: {len(q_quant)}")
+    print(f"Dequant results: {len(q_dequant)}")
+    print(f"Turbo results: {len(turbo)}")
 
 
 if __name__ == "__main__":

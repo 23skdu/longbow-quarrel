@@ -1,10 +1,8 @@
 #!/bin/bash
-
 set -e
 
 RESULTS_DIR="$HOME/REPOS/longbow-quarrel/benchmark_results"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-export TIMESTAMP RESULTS_DIR
 
 mkdir -p "$RESULTS_DIR"
 
@@ -31,5 +29,3 @@ echo "Running SIMD MatMul benchmarks..."
 go test -v -run=NONE -bench=BenchmarkSIMD_MatMul -benchtime=1x -count=5 . 2>&1 | grep "^Benchmark" > "$RESULTS_DIR/simd_matmul.txt"
 
 echo "Done! Results in $RESULTS_DIR/"
-'SCRIPTEND'
-chmod +x scripts/run_quantization_benchmarks.sh
