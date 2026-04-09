@@ -21,9 +21,9 @@
 | ID | Issue | Location | Status |
 | :--- | :--- | :--- | :--- |
 | 1 | `QuantizeWeightsToQ4K` returns "not implemented" | `internal/gguf/quantize.go:5-6` | ✅ IMPLEMENTED |
-| 2 | `InferWithLogits` not implemented for CUDA | `internal/engine/engine_cuda.go:837-838` | 🔴 NOT IMPLEMENTED |
-| 3 | `InferWithCallbackLogits` not implemented for CUDA | `internal/engine/engine_cuda.go:841-842` | 🔴 NOT IMPLEMENTED |
-| 4 | `SwapModel` (hotswap) not implemented for CUDA | `internal/engine/engine_cuda.go:231-236` | 🔴 NOT IMPLEMENTED |
+| 2 | `InferWithLogits` not implemented for CUDA | `internal/engine/engine_cuda.go:837-838` | ✅ IMPLEMENTED |
+| 3 | `InferWithCallbackLogits` not implemented for CUDA | `internal/engine/engine_cuda.go:841-842` | ✅ IMPLEMENTED |
+| 4 | `SwapModel` (hotswap) not implemented for CUDA | `internal/engine/engine_cuda.go:231-236` | ✅ IMPLEMENTED |
 
 ### MEDIUM PRIORITY - Quality/Performance
 
