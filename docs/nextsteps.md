@@ -172,13 +172,13 @@ func RecordKVCacheAudit(audit interface{}) {
 - [x] Define `DataTypeTQ1_0` and `DataTypeTQ2_0` in `internal/device`
 - [x] Implement `StoreKV` logic in `internal/device/cpu.go`
 - [x] Implement `FetchKV` logic for decoding
-- [ ] Update `internal/engine/engine.go` to support model-loaded TurboQuant cache types 🔴 PENDING
+- [ ] Update `internal/engine/engine.go` to support model-loaded TurboQuant cache types ✅ COMPLETE
 
 #### 5. Metadata & GGUF Support - 🟡 IN PROGRESS
 
 - [x] Update `internal/gguf/quantize_turboquant.go` reference
-- [ ] Add GGUF KV cache type markers for TurboQuant 🔴 PENDING
-- [ ] Implement GGUF save/load for TurboQuant blocks 🔴 PENDING
+- [ ] Add GGUF KV cache type markers for TurboQuant ✅ COMPLETE
+- [ ] Implement GGUF save/load for TurboQuant blocks ✅ COMPLETE (GetTurboQuantMatrices reads from GGUF)
 
 #### 6. Monitoring & Metrics - 🟡 IN PROGRESS
 
