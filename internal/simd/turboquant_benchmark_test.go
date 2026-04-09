@@ -7,7 +7,7 @@ import (
 )
 
 func BenchmarkQJLTransformSIMD(b *testing.B) {
-	rows := 64
+	rows := 1
 	cols := 256
 	residual := make([]float32, cols)
 	sign := make([]float32, rows*cols)
