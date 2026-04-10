@@ -1070,11 +1070,6 @@ func (m *CUDAModel) GetEmbedding(token int) ([]float32, error) {
 	result := make([]float32, dim)
 	offset := token * dim
 
-	// Manual dequantization for Q8_0 format
-	// Q8_0: 8-bit quantized, block size 32
-	// Each block: 1 scale (float32) + 32 values (int8)
-	blockSize := 32
-
 	switch emb.GGMLType {
 	case gguf.GGMLTypeQ8_0, gguf.GGMLTypeF32, gguf.GGMLTypeF16:
 		// For now, just try reading as raw float32 and hope the dequantization happened somewhere
