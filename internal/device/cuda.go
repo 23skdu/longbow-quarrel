@@ -61,9 +61,17 @@ typedef struct {
     int memoryBusWidth;
 } cudaDevicePropFull;
 */
+/*
+#include <stdlib.h>
+#include <string.h>
+#include <cuda.h>
+#include <cuda_runtime.h>
+*/
 import "C"
 import (
+	"encoding/binary"
 	"fmt"
+	"log"
 	"math"
 	"runtime"
 	"sync"
@@ -980,9 +988,10 @@ func (c *CUDAContext) NewCUDAModel(f *gguf.GGUFFile, kvCache bool, maxSeqLen int
 			Cols:      cols,
 			GGMLType:  t.Type,
 			DevPtr:    devPtr,
-			HostData:  t.Data,
+			HostData:  make([]byte, dataBytes),
 			DataBytes: dataBytes,
 		}
+		copy(m.Weights[name].HostData, t.Data)
 	}
 
 	fmt.Printf("Loaded %d tensors total\n", len(m.Weights))
@@ -1027,7 +1036,11 @@ func (m *CUDAModel) GetDequantedWeight(name string) (*CUDATensor, error) {
 		return nil, fmt.Errorf("weight not found: %s", name)
 	}
 
+	log.Printf("DEBUG GetDequantedWeight: %s, rows=%d, cols=%d, type=%v, hasData=%v",
+		name, w.Rows, w.Cols, w.GGMLType, len(w.HostData) > 0)
+
 	if w.Dequanted != nil {
+		log.Printf("DEBUG: using cached dequantized weight for %s", name)
 		return w.Dequanted, nil
 	}
 
@@ -1045,8 +1058,20 @@ func (m *CUDAModel) GetDequantedWeight(name string) (*CUDATensor, error) {
 	case gguf.GGMLTypeQ6_K:
 		C.cudaDequantQ6_K(m.Ctx.stream, unsafe.Pointer(&w.HostData[0]), d.devPtr, C.int(numElements))
 	case gguf.GGMLTypeF32, gguf.GGMLTypeF16:
-		// Host to device copy handled elsewhere or here
-		d.LoadFromRaw(w.HostData)
+		// F32/F16: copy raw bytes from HostData to GPU
+		expectedBytes := w.Rows * w.Cols * 4
+		if w.GGMLType == gguf.GGMLTypeF16 {
+			expectedBytes = w.Rows * w.Cols * 2
+		}
+		log.Printf("DEBUG: Loading F32/F16 weight %s: have %d bytes, expected %d bytes (rows=%d, cols=%d)",
+			name, len(w.HostData), expectedBytes, w.Rows, w.Cols)
+		if len(w.HostData) >= expectedBytes {
+			d.LoadFromRaw(w.HostData[:expectedBytes])
+		} else if len(w.HostData) > 0 {
+			log.Printf("WARNING: F32 weight %s has insufficient data (%d < %d)", name, len(w.HostData), expectedBytes)
+		} else {
+			log.Printf("WARNING: F32 weight %s has no HostData!", name)
+		}
 	default:
 		return nil, fmt.Errorf("unsupported quantization type: %v", w.GGMLType)
 	}
@@ -1066,19 +1091,35 @@ func (m *CUDAModel) GetEmbedding(token int) ([]float32, error) {
 
 	switch emb.GGMLType {
 	case gguf.GGMLTypeQ8_0:
-		// Test: just read raw bytes as signed int8 with guess scale
+		const blockSize = 32
+		const blockBytes = 34 // 2 (scale) + 32 (quants)
 		data := emb.HostData
-		scale := float32(0.01) // arbitrary small scale
-		for i := 0; i < dim; i++ {
-			if token*dim+i >= len(data) {
-				break
-			}
-			qval := int8(data[token*dim+i])
-			result[i] = float32(qval) * scale
+
+		// dim = 2048 (embedding dimension)
+		// numBlocks = 2048/32 = 64 blocks per token
+		numBlocks := dim / blockSize
+		bytesPerToken := numBlocks * blockBytes
+
+		if len(data) < (token+1)*bytesPerToken {
+			log.Printf("WARNING: embedding data too small: have %d bytes, need %d for token %d",
+				len(data), (token+1)*bytesPerToken, token)
 		}
 
-		// Debug first values
-		fmt.Printf("GetEmbed: token=%d raw_bytes=%v\n", token, data[token*dim:token*dim+10])
+		for blk := 0; blk < numBlocks; blk++ {
+			blockOffset := token*bytesPerToken + blk*blockBytes
+			if blockOffset+2 >= len(data) {
+				break
+			}
+
+			scale := Float16ToFloat32(binary.LittleEndian.Uint16(data[blockOffset : blockOffset+2]))
+			qs := data[blockOffset+2 : blockOffset+blockBytes]
+			for j := 0; j < blockSize; j++ {
+				result[blk*blockSize+j] = scale * float32(int8(qs[j]))
+			}
+		}
+
+		// Debug: print first few values
+		log.Printf("DEBUG: Q8_0 embedding token=%d first5=%v", token, result[:5])
 
 	case gguf.GGMLTypeF32:
 		offset := token * dim * 4

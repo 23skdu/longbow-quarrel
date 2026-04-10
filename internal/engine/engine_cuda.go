@@ -198,6 +198,12 @@ func NewcudaEngine(modelPath string, cfg config.Config) (Engine, error) {
 	log.Printf("RoPE Theta: %.0f, Eps: %e", ropeTheta, eps)
 	log.Printf("GPU Memory: %.1f MB", float64(device.CUDAAllocatedBytes())/1e6)
 
+	// Detect Gemma4 architecture
+	isGemma4 := arch == "gemma4"
+	if isGemma4 {
+		log.Printf("Gemma4 architecture detected - enabling hybrid attention")
+	}
+
 	e := &cudaEngine{
 		model:            f,
 		tokenizer:        tok,
@@ -216,8 +222,21 @@ func NewcudaEngine(modelPath string, cfg config.Config) (Engine, error) {
 			RopeTheta:     float32(ropeTheta),
 			PrecisionMode: config.PrecisionAuto,
 			KVCacheSize:   cfg.KVCacheSize,
+			IsGemma4:      isGemma4,
 		},
 		cuda: cudaModel,
+	}
+
+	// Set Gemma4-specific config
+	if isGemma4 {
+		e.config.Gemma4SlidingWindowSize = 512
+		e.config.Gemma4SlidingRoPETheta = 10000.0
+		e.config.Gemma4FullRoPETheta = 1000000.0
+		e.config.Gemma4PartialRoPEFactor = 0.25
+		e.config.Gemma4SlidingHeadDim = 256
+		e.config.Gemma4FullHeadDim = 512
+		log.Printf("Gemma4 config: sliding_window=%d, sliding_theta=%.0f, full_theta=%.0f",
+			e.config.Gemma4SlidingWindowSize, e.config.Gemma4SlidingRoPETheta, e.config.Gemma4FullRoPETheta)
 	}
 
 	qNormDim := 512
@@ -328,7 +347,18 @@ func (e *cudaEngine) getDequantedWeight(name string) (*device.CUDATensor, error)
 }
 
 func (e *cudaEngine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig SamplerConfig) ([]int, error) {
-	return e.InferWithCallback(inputTokens, tokensToGenerate, samplerConfig, nil)
+	return e.InferWithCallbackLogits(inputTokens, tokensToGenerate, samplerConfig, nil, func(logits []float32) {
+		// Debug: print top logits
+		if len(logits) > 0 {
+			topVal := logits[0]
+			for i := 1; i < min(10, len(logits)); i++ {
+				if logits[i] > topVal {
+					topVal = logits[i]
+				}
+			}
+			log.Printf("DEBUG: Top logit value: %f", topVal)
+		}
+	})
 }
 
 func (e *cudaEngine) InferWithCallback(inputTokens []int, tokensToGenerate int, samplerConfig SamplerConfig, callback func(int)) ([]int, error) {
@@ -436,16 +466,29 @@ func (e *cudaEngine) forward(token int, pos int, allTokens []int) ([]float32, er
 	if err != nil {
 		return nil, err
 	}
-	if token == 0 && len(hidden) > 0 {
-		log.Printf("DEBUG: token=0 embedding sum=%f", hidden[0])
+	if token == 0 && pos == 0 && len(hidden) > 0 {
+		log.Printf("DEBUG: GetEmbedding token=%d first5=%v", token, hidden[:5])
+		sum := float32(0)
+		for i := 0; i < min(10, len(hidden)); i++ {
+			sum += hidden[i]
+		}
+		log.Printf("DEBUG: token=%d embedding sum (first 10): %f", token, sum)
 	}
 
 	hidden = append([]float32{}, hidden...)
 
+	isGemma4 := e.config.IsGemma4
+	gemma4SlidingWindowSize := e.config.Gemma4SlidingWindowSize
+	gemma4SlidingRoPETheta := e.config.Gemma4SlidingRoPETheta
+	gemma4FullRoPETheta := e.config.Gemma4FullRoPETheta
+	gemma4SlidingHeadDim := e.config.Gemma4SlidingHeadDim
+	gemma4FullHeadDim := e.config.Gemma4FullHeadDim
+	_ = gemma4SlidingWindowSize // Suppress unused warning
+
 	for layer := 0; layer < e.config.Layers; layer++ {
 		attnNormW, err := e.getDequantedWeight(fmt.Sprintf("blk.%d.attn_norm.weight", layer))
 		if err != nil {
-			continue // Only skip on error, not on missing weight
+			continue
 		}
 		if attnNormW == nil {
 			log.Printf("Forward: blk.%d.attn_norm.weight is nil", layer)
@@ -453,7 +496,35 @@ func (e *cudaEngine) forward(token int, pos int, allTokens []int) ([]float32, er
 		}
 		attnNorm := attnNormW.ToHostF32()
 
+		// Debug: print attn_norm weight stats
+		if layer == 0 {
+			attnNormData := attnNormW.ToHostF32()
+			sum := float32(0)
+			log.Printf("DEBUG: attn_norm dequantized tensor rows=%d, cols=%d, len(data)=%d",
+				attnNormW.Rows, attnNormW.Cols, len(attnNormData))
+			for i := 0; i < min(10, len(attnNormData)); i++ {
+				sum += attnNormData[i]
+			}
+			log.Printf("DEBUG: attn_norm dequantized first 10 sum: %f, values: %v", sum, attnNormData[:10])
+
+			// Also check hidden before RMSNorm
+			hiddenSum := float32(0)
+			for i := 0; i < min(10, len(hidden)); i++ {
+				hiddenSum += hidden[i]
+			}
+			log.Printf("DEBUG: hidden before rmsnorm first 10 sum: %f, values: %v", hiddenSum, hidden[:10])
+		}
+
 		hidden = e.rmsnorm(hidden, attnNorm, eps)
+
+		// Debug: check hidden after attn_norm
+		if layer == 0 && pos == 0 {
+			sum := float32(0)
+			for i := 0; i < min(10, len(hidden)); i++ {
+				sum += hidden[i]
+			}
+			log.Printf("DEBUG: layer0 pos0 after attn_norm hidden sum: %f", sum)
+		}
 
 		qW, _ := e.getDequantedWeight(fmt.Sprintf("blk.%d.attn_q.weight", layer))
 		kW, _ := e.getDequantedWeight(fmt.Sprintf("blk.%d.attn_k.weight", layer))
@@ -468,8 +539,37 @@ func (e *cudaEngine) forward(token int, pos int, allTokens []int) ([]float32, er
 		k := e.matmul(hidden, kW.ToHostF32())
 		v := e.matmul(hidden, vW.ToHostF32())
 
-		e.applyRoPE(q, pos, int(ropeTheta), headDim)
-		e.applyRoPE(k, pos, int(ropeTheta), headDim)
+		// Gemma4: Apply Q/K normalization after projection
+		if isGemma4 {
+			qNormW, _ := e.getDequantedWeight(fmt.Sprintf("blk.%d.attn_q_norm.weight", layer))
+			kNormW, _ := e.getDequantedWeight(fmt.Sprintf("blk.%d.attn_k_norm.weight", layer))
+			if qNormW != nil && kNormW != nil {
+				qNorm := qNormW.ToHostF32()
+				kNorm := kNormW.ToHostF32()
+				for i := range q {
+					q[i] = q[i] * qNorm[i]
+					k[i] = k[i] * kNorm[i]
+				}
+			}
+
+			// Determine if this is a sliding window or full attention layer
+			isSlidingWindowLayer := (layer % 6) != 5
+			if isSlidingWindowLayer {
+				currentHeadDim := gemma4SlidingHeadDim
+				currentTheta := gemma4SlidingRoPETheta
+				e.applyRoPE(q, pos, int(currentTheta), currentHeadDim)
+				e.applyRoPE(k, pos, int(currentTheta), currentHeadDim)
+			} else {
+				// Full attention layer - use full RoPE theta but standard dim
+				currentHeadDim := gemma4FullHeadDim
+				currentTheta := gemma4FullRoPETheta
+				e.applyRoPE(q, pos, int(currentTheta), currentHeadDim)
+				e.applyRoPE(k, pos, int(currentTheta), currentHeadDim)
+			}
+		} else {
+			e.applyRoPE(q, pos, int(ropeTheta), headDim)
+			e.applyRoPE(k, pos, int(ropeTheta), headDim)
+		}
 
 		ffnNormW, _ := e.getDequantedWeight(fmt.Sprintf("blk.%d.ffn_norm.weight", layer))
 		ffnGateW, _ := e.getDequantedWeight(fmt.Sprintf("blk.%d.ffn_gate.weight", layer))
@@ -531,16 +631,88 @@ func (e *cudaEngine) forward(token int, pos int, allTokens []int) ([]float32, er
 	outputNorm := outputNormW.ToHostF32()
 	hidden = e.rmsnorm(hidden, outputNorm, eps)
 
-	outputW, _ := e.getDequantedWeight("output.weight")
+	outputW, err := e.getDequantedWeight("output.weight")
+	log.Printf("DEBUG: output.weight get result: %v, err: %v", outputW, err)
+
 	if outputW == nil {
-		logits := make([]float32, e.config.VocabSize)
-		for i := range logits {
-			logits[i] = float32(-i)
+		// Fallback: use token_embd.weight (tied embeddings)
+		log.Printf("DEBUG: output.weight not found, trying token_embd.weight")
+
+		// Try to get the raw weight (not dequantized) and dequantize on CPU
+		emb, ok := e.cuda.GetWeight("token_embd.weight")
+		if ok && emb != nil {
+			log.Printf("DEBUG: Got token_embd raw weight, type=%v, rows=%d, cols=%d", emb.GGMLType, emb.Rows, emb.Cols)
+
+			// Dequantize on CPU
+			numElements := emb.Rows * emb.Cols
+			var dequantized []float32
+			switch emb.GGMLType {
+			case gguf.GGMLTypeQ8_0:
+				dequantized = gguf.DequantizeQ8_0(emb.HostData, numElements)
+			case gguf.GGMLTypeQ4_K:
+				dequantized = gguf.DequantizeQ4K(emb.HostData, numElements)
+			case gguf.GGMLTypeQ6_K:
+				dequantized = gguf.DequantizeQ6K(emb.HostData, numElements)
+			case gguf.GGMLTypeF32:
+				dequantized = make([]float32, numElements)
+				for i := 0; i < numElements; i++ {
+					dequantized[i] = math.Float32frombits(uint32(emb.HostData[i*4]) | uint32(emb.HostData[i*4+1])<<8 | uint32(emb.HostData[i*4+2])<<16 | uint32(emb.HostData[i*4+3])<<24)
+				}
+			}
+
+			if len(dequantized) > 0 {
+				log.Printf("DEBUG: CPU dequantized token_embd, first10: %v", dequantized[:10])
+				logits = e.matmul(hidden, dequantized)
+			}
 		}
-		return logits, nil
 	}
 
-	logits := e.matmul(hidden, outputW.ToHostF32())
+	// If still no logits, use GPU path or fallback
+	if len(logits) == 0 {
+		if outputW != nil {
+			log.Printf("DEBUG: Using GPU output weight")
+			outputData := outputW.ToHostF32()
+			logits = e.matmul(hidden, outputData)
+		} else {
+			log.Printf("DEBUG: Using fallback logits (uniform)")
+			logits = make([]float32, e.config.VocabSize)
+			for i := range logits {
+				logits[i] = float32(-i)
+			}
+		}
+	}
+
+	// Debug: print logits stats
+	if len(logits) > 0 {
+		// First check hidden before output projection
+		hiddenSum := float32(0)
+		for i := 0; i < min(20, len(hidden)); i++ {
+			hiddenSum += hidden[i]
+		}
+		log.Printf("DEBUG: hidden before output layer sum: %f, values: %v", hiddenSum, hidden[:20])
+
+		// Check output weight
+		if outputW != nil {
+			outputData := outputW.ToHostF32()
+			outSum := float32(0)
+			for i := 0; i < min(20, len(outputData)); i++ {
+				outSum += outputData[i]
+			}
+			log.Printf("DEBUG: output weight first 20 sum: %f, values: %v", outSum, outputData[:20])
+		}
+
+		minLogit := logits[0]
+		maxLogit := logits[0]
+		for i := 1; i < min(100, len(logits)); i++ {
+			if logits[i] < minLogit {
+				minLogit = logits[i]
+			}
+			if logits[i] > maxLogit {
+				maxLogit = logits[i]
+			}
+		}
+		log.Printf("DEBUG: logits min=%f, max=%f, first20=%v", minLogit, maxLogit, logits[:20])
+	}
 
 	return logits, nil
 }
@@ -570,13 +742,12 @@ func (e *cudaEngine) matmul(a, b []float32) []float32 {
 
 	result := make([]float32, aRows*bCols)
 
-	for i := 0; i < aRows; i++ {
+	// b is [bRows, bCols] = [hidden_dim, vocab_size]
+	// We need: result[j] = sum(a[i] * b[i*bCols + j])
+	// This is: result[j] = sum(a[i] * b[i][j])
+	for i := 0; i < aCols; i++ {
 		for j := 0; j < bCols; j++ {
-			var sum float32 = 0
-			for l := 0; l < aCols; l++ {
-				sum += a[i*aCols+l] * b[l*bCols+j]
-			}
-			result[i*bCols+j] = sum
+			result[j] += a[i] * b[i*bCols+j]
 		}
 	}
 
@@ -947,11 +1118,14 @@ func (e *cudaEngine) InferWithCallbackLogits(inputTokens []int, tokensToGenerate
 	pos := inputLen
 	for gen := 0; gen < tokensToGenerate && pos < seqLen-1; gen++ {
 		lastToken := allTokens[len(allTokens)-1]
+		log.Printf("DEBUG: Generation loop iter %d: lastToken=%d, pos=%d, allTokens len=%d", gen, lastToken, pos, len(allTokens))
 		logits, err := e.forward(lastToken, pos, allTokens)
 		if err != nil {
 			cudaEngineFailed.WithLabelValues(e.config.Architecture, "forward_failed").Inc()
 			return nil, fmt.Errorf("forward pass failed at position %d: %w", pos, err)
 		}
+
+		log.Printf("DEBUG: After forward call, logits len=%d, first5=%v", len(logits), logits[:5])
 
 		if logitsCallback != nil {
 			logitsCallback(logits)
