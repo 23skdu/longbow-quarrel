@@ -4,7 +4,10 @@ package device
 // This file is compiled into all builds and must NOT contain platform-specific
 // build tags, CGO references, or dependencies on Metal/CUDA-specific headers.
 
-import "math"
+import (
+	"encoding/binary"
+	"math"
+)
 
 type DataType int
 
@@ -86,4 +89,12 @@ func Float16ToFloat32(f uint16) float32 {
 
 	newExp := exp - 15 + 127
 	return math.Float32frombits((sign << 31) | (newExp << 23) | (mant << 13))
+}
+
+func float32SliceToBytes(f32 []float32) []byte {
+	result := make([]byte, len(f32)*4)
+	for i, v := range f32 {
+		binary.LittleEndian.PutUint32(result[i*4:], math.Float32bits(v))
+	}
+	return result
 }

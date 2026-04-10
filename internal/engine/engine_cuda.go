@@ -339,6 +339,7 @@ func (e *cudaEngine) getDequantedWeight(name string) (*device.CUDATensor, error)
 
 	d, err := e.cuda.GetDequantedWeight(name)
 	if err != nil {
+		log.Printf("DEBUG getDequantedWeight(%s) returning error: %v", name, err)
 		return nil, err
 	}
 
@@ -348,15 +349,14 @@ func (e *cudaEngine) getDequantedWeight(name string) (*device.CUDATensor, error)
 
 func (e *cudaEngine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig SamplerConfig) ([]int, error) {
 	return e.InferWithCallbackLogits(inputTokens, tokensToGenerate, samplerConfig, nil, func(logits []float32) {
-		// Debug: print top logits
 		if len(logits) > 0 {
-			topVal := logits[0]
-			for i := 1; i < min(10, len(logits)); i++ {
-				if logits[i] > topVal {
-					topVal = logits[i]
+			maxVal := float32(-999999)
+			for i := 1; i < min(100, len(logits)); i++ {
+				if logits[i] > maxVal {
+					maxVal = logits[i]
 				}
 			}
-			log.Printf("DEBUG: Top logit value: %f", topVal)
+			log.Printf("DEBUG: Top logit value: %f", maxVal)
 		}
 	})
 }
@@ -500,13 +500,12 @@ func (e *cudaEngine) forward(token int, pos int, allTokens []int) ([]float32, er
 			continue
 		}
 		if attnNormW == nil {
-			log.Printf("Forward: blk.%d.attn_norm.weight is nil", layer)
 			continue
 		}
 		attnNorm := attnNormW.ToHostF32()
 
 		// Debug: print attn_norm weight stats
-		if layer == 0 {
+		if layer == 0 && token == 0 && pos == 0 {
 			attnNormData := attnNormW.ToHostF32()
 			sum := float32(0)
 			log.Printf("DEBUG: attn_norm dequantized tensor rows=%d, cols=%d, len(data)=%d",
@@ -527,7 +526,7 @@ func (e *cudaEngine) forward(token int, pos int, allTokens []int) ([]float32, er
 		hidden = e.rmsnorm(hidden, attnNorm, eps)
 
 		// Debug: check hidden after attn_norm
-		if layer == 0 && pos == 0 {
+		if layer == 0 && pos == 0 && token == 0 {
 			sum := float32(0)
 			for i := 0; i < min(10, len(hidden)); i++ {
 				sum += hidden[i]

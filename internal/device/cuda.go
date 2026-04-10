@@ -625,6 +625,7 @@ func (c *CUDAContext) NewTensor(rows, cols int, dt CUDADataType) (*CUDATensor, e
 	}
 
 	size := rows * cols * elementSize
+	log.Printf("DEBUG NewTensor: rows=%d, cols=%d, elementSize=%d, size=%d bytes", rows, cols, elementSize, size)
 	var devPtr unsafe.Pointer
 	result := C.cudaMalloc(&devPtr, C.size_t(size))
 	if result != C.cudaSuccess {
@@ -718,6 +719,18 @@ func (t *CUDATensor) ToHostF16AsF32() []float32 {
 
 func (t *CUDATensor) ToHostF32() []float32 {
 	result := make([]float32, t.rows*t.cols)
+
+	if len(t.HostData) > 0 {
+		numElements := t.rows * t.cols
+		for i := 0; i < numElements; i++ {
+			offset := i * 4
+			if offset+4 <= len(t.HostData) {
+				result[i] = math.Float32frombits(binary.LittleEndian.Uint32(t.HostData[offset : offset+4]))
+			}
+		}
+		return result
+	}
+
 	C.cudaMemcpyAsync(unsafe.Pointer(&result[0]), t.devPtr, C.size_t(t.rows*t.cols*4), C.cudaMemcpyDeviceToHost, t.ctx.stream)
 	t.ctx.Synchronize()
 	return result
@@ -1036,44 +1049,47 @@ func (m *CUDAModel) GetDequantedWeight(name string) (*CUDATensor, error) {
 		return nil, fmt.Errorf("weight not found: %s", name)
 	}
 
-	log.Printf("DEBUG GetDequantedWeight: %s, rows=%d, cols=%d, type=%v, hasData=%v",
-		name, w.Rows, w.Cols, w.GGMLType, len(w.HostData) > 0)
-
 	if w.Dequanted != nil {
-		log.Printf("DEBUG: using cached dequantized weight for %s", name)
 		return w.Dequanted, nil
 	}
 
 	numElements := w.Rows * w.Cols
-	d, err := m.Ctx.NewTensorFP32(w.Rows, w.Cols)
-	if err != nil {
-		return nil, err
-	}
+	var resultData []float32
 
 	switch w.GGMLType {
 	case gguf.GGMLTypeQ8_0:
-		C.cudaDequantQ8_0(m.Ctx.stream, unsafe.Pointer(&w.HostData[0]), d.devPtr, C.int(numElements))
+		resultData = gguf.DequantizeQ8_0(w.HostData, numElements)
 	case gguf.GGMLTypeQ4_K:
-		C.cudaDequantQ4_K(m.Ctx.stream, unsafe.Pointer(&w.HostData[0]), d.devPtr, C.int(numElements))
+		resultData = gguf.DequantizeQ4K(w.HostData, numElements)
 	case gguf.GGMLTypeQ6_K:
-		C.cudaDequantQ6_K(m.Ctx.stream, unsafe.Pointer(&w.HostData[0]), d.devPtr, C.int(numElements))
-	case gguf.GGMLTypeF32, gguf.GGMLTypeF16:
-		// F32/F16: copy raw bytes from HostData to GPU
-		expectedBytes := w.Rows * w.Cols * 4
-		if w.GGMLType == gguf.GGMLTypeF16 {
-			expectedBytes = w.Rows * w.Cols * 2
+		resultData = gguf.DequantizeQ6K(w.HostData, numElements)
+	case gguf.GGMLTypeF32:
+		resultData = make([]float32, numElements)
+		for i := 0; i < numElements; i++ {
+			offset := i * 4
+			if offset+4 <= len(w.HostData) {
+				resultData[i] = math.Float32frombits(binary.LittleEndian.Uint32(w.HostData[offset : offset+4]))
+			}
 		}
-		log.Printf("DEBUG: Loading F32/F16 weight %s: have %d bytes, expected %d bytes (rows=%d, cols=%d)",
-			name, len(w.HostData), expectedBytes, w.Rows, w.Cols)
-		if len(w.HostData) >= expectedBytes {
-			d.LoadFromRaw(w.HostData[:expectedBytes])
-		} else if len(w.HostData) > 0 {
-			log.Printf("WARNING: F32 weight %s has insufficient data (%d < %d)", name, len(w.HostData), expectedBytes)
-		} else {
-			log.Printf("WARNING: F32 weight %s has no HostData!", name)
+	case gguf.GGMLTypeF16:
+		resultData = make([]float32, numElements)
+		for i := 0; i < numElements; i++ {
+			offset := i * 2
+			if offset+2 <= len(w.HostData) {
+				resultData[i] = Float16ToFloat32(binary.LittleEndian.Uint16(w.HostData[offset : offset+2]))
+			}
 		}
 	default:
 		return nil, fmt.Errorf("unsupported quantization type: %v", w.GGMLType)
+	}
+
+	d := &CUDATensor{
+		ctx:       m.Ctx,
+		rows:      w.Rows,
+		cols:      w.Cols,
+		sizeBytes: numElements * 4,
+		HostData:  float32SliceToBytes(resultData),
+		ggmlType:  w.GGMLType,
 	}
 
 	w.Dequanted = d
