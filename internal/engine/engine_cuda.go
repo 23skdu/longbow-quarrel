@@ -477,6 +477,15 @@ func (e *cudaEngine) forward(token int, pos int, allTokens []int) ([]float32, er
 
 	hidden = append([]float32{}, hidden...)
 
+	// Debug: after copy
+	if token == 0 && pos == 0 {
+		sum := float32(0)
+		for i := 0; i < min(10, len(hidden)); i++ {
+			sum += hidden[i]
+		}
+		log.Printf("DEBUG: after copy, hidden sum (first 10): %f", sum)
+	}
+
 	isGemma4 := e.config.IsGemma4
 	gemma4SlidingWindowSize := e.config.Gemma4SlidingWindowSize
 	gemma4SlidingRoPETheta := e.config.Gemma4SlidingRoPETheta
@@ -582,8 +591,13 @@ func (e *cudaEngine) forward(token int, pos int, allTokens []int) ([]float32, er
 
 		kCache := e.cuda.GetKCache(layer)
 		vCache := e.cuda.GetVCache(layer)
-		if kCache != nil && vCache != nil {
-			e.storeKV(kCache, vCache, pos, k3d, v3d)
+
+		// Debug: before attention
+		if token == 0 && pos == 0 && layer == 0 {
+			q3d := e.viewAsTensor(q, heads, headDim)
+			k3d := e.viewAsTensor(k, kvHeads, headDim)
+			v3d := e.viewAsTensor(v, kvHeads, headDim)
+			log.Printf("DEBUG: before attention: q3d[0][0:5]=%v, k3d[0][0:5]=%v, v3d[0][0:5]=%v", q3d[0][:5], k3d[0][:5], v3d[0][:5])
 		}
 
 		attnOut := e.attention(q3d, k3d, v3d, kCache, vCache, pos, heads, kvHeads, headDim, e.config.SeqLen)
@@ -591,11 +605,27 @@ func (e *cudaEngine) forward(token int, pos int, allTokens []int) ([]float32, er
 			attnOut = e.attentionFallback(q3d, k3d, v3d)
 		}
 
+		// Debug: after attention
+		if token == 0 && pos == 0 && layer == 0 {
+			log.Printf("DEBUG: after attention: attnOut[0:5]=%v", attnOut[:5])
+		}
+
 		oWHost := oW.ToHostF32()
 		attnProj := e.matmul(attnOut, oWHost)
 
+		// Debug: after proj
+		if token == 0 && pos == 0 && layer == 0 {
+			log.Printf("DEBUG: after proj: attnProj[0:5]=%v", attnProj[:5])
+			log.Printf("DEBUG: before add: hidden[0:5]=%v", hidden[:5])
+		}
+
 		for i := range hidden {
 			hidden[i] += attnProj[i]
+		}
+
+		// Debug: after add
+		if token == 0 && pos == 0 && layer == 0 {
+			log.Printf("DEBUG: after add: hidden[0:5]=%v", hidden[:5])
 		}
 
 		if ffnNormW != nil && ffnGateW != nil && ffnUpW != nil && ffnDownW != nil {
@@ -618,6 +648,15 @@ func (e *cudaEngine) forward(token int, pos int, allTokens []int) ([]float32, er
 				hidden[i] += ffnDown[i]
 			}
 		}
+
+		// Debug: after layer
+		if token == 0 && pos == 0 && layer < 3 {
+			sum := float32(0)
+			for i := 0; i < min(10, len(hidden)); i++ {
+				sum += hidden[i]
+			}
+			log.Printf("DEBUG: after layer %d, hidden sum: %f", layer, sum)
+		}
 	}
 
 	outputNormW, err := e.getDequantedWeight("output_norm.weight")
@@ -630,6 +669,8 @@ func (e *cudaEngine) forward(token int, pos int, allTokens []int) ([]float32, er
 	}
 	outputNorm := outputNormW.ToHostF32()
 	hidden = e.rmsnorm(hidden, outputNorm, eps)
+
+	var logits []float32
 
 	outputW, err := e.getDequantedWeight("output.weight")
 	log.Printf("DEBUG: output.weight get result: %v, err: %v", outputW, err)
@@ -792,6 +833,8 @@ func (e *cudaEngine) storeKV(kCache, vCache *device.CUDATensor, pos int, k, v []
 	if kCache == nil || vCache == nil || len(k) == 0 || len(k[0]) == 0 {
 		return
 	}
+	// Store current k/v to GPU cache at position
+	// This is a no-op since we don't have GPU access from Go currently
 }
 
 func (e *cudaEngine) attention(q, k, v [][]float32, kCache, vCache *device.CUDATensor, pos, heads, kvHeads, headDim, seqLen int) []float32 {

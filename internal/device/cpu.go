@@ -239,11 +239,11 @@ func (t *Tensor) FetchKV(v *Tensor, kCache, vCache *Tensor, pos, heads, headDim,
 
 		for h := 0; h < heads; h++ {
 			blockCacheStart := cacheOff + h*bytesPerBlock
-			
+
 			kSrc := kCache.rawData[blockCacheStart:]
 			kDest := t.data[h*headDim : (h+1)*headDim]
 			dequantizeBlock(t.ctx, kSrc, kDest, blockSize, qjlRows, rot)
-			
+
 			vSrc := vCache.rawData[blockCacheStart:]
 			vDest := v.data[h*headDim : (h+1)*headDim]
 			dequantizeBlock(t.ctx, vSrc, vDest, blockSize, qjlRows, rot)
@@ -351,7 +351,7 @@ func (t *Tensor) StoreKV(v *Tensor, kCache, vCache *Tensor, pos, heads, headDim,
 			qjlRows = 64
 		}
 		bytesPerBlock := blockSize + qjlRows + 8
-		
+
 		// Verify if rawData was allocated with this blockSize
 		// If not, we might need a separate field in Tensor for blockSize
 		// For now, assume it matches.
@@ -476,7 +476,7 @@ func (c *Context) TurboQuantDecode(input *Tensor, rotationMatrix *Tensor, qjlMat
 			continue
 		}
 
-		// Proper Decoder: 
+		// Proper Decoder:
 		// 1. Reconstruct rotated part (Polar)
 		rotatedRes := make([]float32, blockSize)
 		for i := 0; i < blockSize; i++ {
@@ -496,10 +496,9 @@ func (c *Context) TurboQuantDecode(input *Tensor, rotationMatrix *Tensor, qjlMat
 		// 3. Add QJL contribution (Residual) already in original space
 		if sj > 0 && qjlMatrix != nil {
 			for i := 0; i < qjlRows; i++ {
+				scale_i := float32(int8(qj[i])) * sj / float32(qjlRows)
 				for j := 0; j < blockSize; j++ {
-					// Approximate original space residual using Sign Matrix transpose
-					// Use explicit int8 cast to ensure 255 is interpreted as -1
-					out[j] += float32(int8(qj[i])) * sj * qjlMatrix.data[i*blockSize+j] / float32(qjlRows)
+					out[j] += scale_i * qjlMatrix.data[i*blockSize+j]
 				}
 			}
 		}
@@ -526,7 +525,6 @@ func qInt8ToF32(in []int8) []float32 {
 	}
 	return out
 }
-
 
 func (t *Tensor) BufferID() uintptr {
 	return 0

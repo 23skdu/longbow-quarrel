@@ -1132,6 +1132,18 @@ func (m *CUDAModel) GetEmbedding(token int) ([]float32, error) {
 					uint32(data[offset+i*4+3])<<24)
 		}
 
+	case gguf.GGMLTypeQ5_0:
+		return m.GetEmbeddingQ5_0(token, emb)
+
+	case gguf.GGMLTypeQ4_0:
+		return m.GetEmbeddingQ4_0(token, emb)
+
+	case gguf.GGMLTypeQ6_K:
+		return m.GetEmbeddingQ6_K(token, emb)
+
+	case gguf.GGMLTypeQ4_K:
+		return m.GetEmbeddingQ4_K(token, emb)
+
 	default:
 		return nil, fmt.Errorf("unsupported embedding quantization: %v", emb.GGMLType)
 	}
@@ -1151,6 +1163,182 @@ func (m *CUDAModel) GetVCache(layer int) *CUDATensor {
 		return nil
 	}
 	return m.VCache[layer]
+}
+
+func (m *CUDAModel) GetEmbeddingQ5_0(token int, emb *CUDAWeight) ([]float32, error) {
+	dim := emb.Rows
+	result := make([]float32, dim)
+	data := emb.HostData
+
+	blockSize := 32
+	blockBytes := 38
+	numBlocks := dim / blockSize
+	bytesPerToken := numBlocks * blockBytes
+
+	if len(data) < (token+1)*bytesPerToken {
+		return nil, fmt.Errorf("embedding data too small for token %d", token)
+	}
+
+	tokenOffset := token * bytesPerToken
+	for blk := 0; blk < numBlocks; blk++ {
+		blockOffset := tokenOffset + blk*blockBytes
+		if blockOffset+blockBytes > len(data) {
+			break
+		}
+
+		scale := Float16ToFloat32(binary.LittleEndian.Uint16(data[blockOffset : blockOffset+2]))
+		qs := data[blockOffset+4 : blockOffset+36]
+
+		for j := 0; j < blockSize; j++ {
+			var qval int8
+			if j < 16 {
+				qval = int8(qs[j/2] & 0xF)
+				if qval > 7 {
+					qval -= 16
+				}
+			} else {
+				qval = int8((qs[(j-16)/2] >> 4) & 0xF)
+				if qval > 7 {
+					qval -= 16
+				}
+			}
+			result[blk*blockSize+j] = scale * float32(qval)
+		}
+	}
+
+	return result, nil
+}
+
+func (m *CUDAModel) GetEmbeddingQ4_0(token int, emb *CUDAWeight) ([]float32, error) {
+	dim := emb.Rows
+	result := make([]float32, dim)
+	data := emb.HostData
+
+	blockSize := 32
+	blockBytes := 20
+	numBlocks := dim / blockSize
+	bytesPerToken := numBlocks * blockBytes
+
+	if len(data) < (token+1)*bytesPerToken {
+		return nil, fmt.Errorf("embedding data too small for token %d", token)
+	}
+
+	tokenOffset := token * bytesPerToken
+	for blk := 0; blk < numBlocks; blk++ {
+		blockOffset := tokenOffset + blk*blockBytes
+		if blockOffset+blockBytes > len(data) {
+			break
+		}
+
+		scale := Float16ToFloat32(binary.LittleEndian.Uint16(data[blockOffset : blockOffset+2]))
+		qs := data[blockOffset+2 : blockOffset+18]
+
+		for j := 0; j < blockSize; j++ {
+			var qval int8
+			if j < 16 {
+				qval = int8(qs[j/2] & 0xF)
+				if qval > 7 {
+					qval -= 16
+				}
+			} else {
+				qval = int8((qs[(j-16)/2] >> 4) & 0xF)
+				if qval > 7 {
+					qval -= 16
+				}
+			}
+			result[blk*blockSize+j] = scale * float32(qval)
+		}
+	}
+
+	return result, nil
+}
+
+func (m *CUDAModel) GetEmbeddingQ6_K(token int, emb *CUDAWeight) ([]float32, error) {
+	dim := emb.Rows
+	result := make([]float32, dim)
+	data := emb.HostData
+
+	blockSize := 256
+	blockBytes := 210
+	numBlocks := dim / blockSize
+	bytesPerToken := numBlocks * blockBytes
+
+	if len(data) < (token+1)*bytesPerToken {
+		return nil, fmt.Errorf("embedding data too small for token %d", token)
+	}
+
+	tokenOffset := token * bytesPerToken
+	for blk := 0; blk < numBlocks; blk++ {
+		blockOffset := tokenOffset + blk*blockBytes
+		if blockOffset+blockBytes > len(data) {
+			break
+		}
+
+		d := Float16ToFloat32(binary.LittleEndian.Uint16(data[blockOffset : blockOffset+2]))
+		scales := data[blockOffset+4 : blockOffset+20]
+		qs := data[blockOffset+20 : blockOffset+212]
+
+		var D [8]float32
+		for j := 0; j < 8; j++ {
+			D[j] = d * float32(scales[j]&63)
+		}
+
+		for j := 0; j < blockSize; j++ {
+			qsIdx := j/16*12 + (j%16)/4
+			qbit := (j % 4) * 2
+			qval := (int8(qs[qsIdx]>>qbit) & 3)
+			if qval > 1 {
+				qval -= 4
+			}
+			result[blk*blockSize+j] = D[j/32] * float32(qval)
+		}
+	}
+
+	return result, nil
+}
+
+func (m *CUDAModel) GetEmbeddingQ4_K(token int, emb *CUDAWeight) ([]float32, error) {
+	dim := emb.Rows
+	result := make([]float32, dim)
+	data := emb.HostData
+
+	blockSize := 256
+	blockBytes := 176
+	numBlocks := dim / blockSize
+	bytesPerToken := numBlocks * blockBytes
+
+	if len(data) < (token+1)*bytesPerToken {
+		return nil, fmt.Errorf("embedding data too small for token %d", token)
+	}
+
+	tokenOffset := token * bytesPerToken
+	for blk := 0; blk < numBlocks; blk++ {
+		blockOffset := tokenOffset + blk*blockBytes
+		if blockOffset+blockBytes > len(data) {
+			break
+		}
+
+		d := Float16ToFloat32(binary.LittleEndian.Uint16(data[blockOffset : blockOffset+2]))
+		dmin := Float16ToFloat32(binary.LittleEndian.Uint16(data[blockOffset+2 : blockOffset+4]))
+		scales := data[blockOffset+4 : blockOffset+20]
+		qs := data[blockOffset+20 : blockOffset+148]
+
+		var D [8]float32
+		var M [8]float32
+		for j := 0; j < 8; j++ {
+			D[j] = d * float32(scales[j]&63)
+			M[j] = dmin * float32((scales[j+8] & 63))
+		}
+
+		for j := 0; j < blockSize; j++ {
+			q := (j/32)*16 + (j%32)/2
+			bit := (j % 2) * 4
+			qval := (int8((qs[q]>>bit)&0xF) - 8)
+			result[blk*blockSize+j] = D[j/32]*float32(qval&0xF) - M[j/32]
+		}
+	}
+
+	return result, nil
 }
 
 func (ctx *CUDAContext) TurboQuantPolarQuant(input, rotationMatrix []float32, n, bits int) (quantized []int8, scale float32, residual []float32) {

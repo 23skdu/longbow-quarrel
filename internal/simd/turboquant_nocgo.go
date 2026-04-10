@@ -1,4 +1,5 @@
 //go:build !(arm64 && cgo) && !(amd64 && cgo)
+
 package simd
 
 import (
@@ -6,7 +7,6 @@ import (
 )
 
 func PolarQuantSIMD(input []float32, rotationMatrix []float32, n int, bits int) ([]int8, float32, []float32) {
-	// Scalar implementation (same as gguf reference)
 	rotated := make([]float32, n)
 	maxAbs := float32(0.0)
 
