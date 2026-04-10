@@ -1061,30 +1061,35 @@ func (m *CUDAModel) GetEmbedding(token int) ([]float32, error) {
 		return nil, fmt.Errorf("embedding weight not found")
 	}
 
-	rows := emb.Rows
-	// cols := emb.Cols
-	// dataLen := len(emb.HostData)
-
-	// dim = embedding size = 2048
-	dim := rows
+	dim := emb.Rows // 2048
 	result := make([]float32, dim)
-	offset := token * dim
 
 	switch emb.GGMLType {
-	case gguf.GGMLTypeQ8_0, gguf.GGMLTypeF32, gguf.GGMLTypeF16:
-		// For now, just try reading as raw float32 and hope the dequantization happened somewhere
-		// This won't give correct results but might give non-zero values
-		rawBytes := emb.HostData[offset*4 : (offset+dim)*4]
+	case gguf.GGMLTypeQ8_0:
+		// Test: just read raw bytes as signed int8 with guess scale
+		data := emb.HostData
+		scale := float32(0.01) // arbitrary small scale
 		for i := 0; i < dim; i++ {
-			result[i] = math.Float32frombits(uint32(rawBytes[i*4]) | uint32(rawBytes[i*4+1])<<8 | uint32(rawBytes[i*4+2])<<16 | uint32(rawBytes[i*4+3])<<24)
+			if token*dim+i >= len(data) {
+				break
+			}
+			qval := int8(data[token*dim+i])
+			result[i] = float32(qval) * scale
 		}
 
-		// Debug
-		sum := float32(0)
-		for i := 0; i < min(10, dim); i++ {
-			sum += result[i]
+		// Debug first values
+		fmt.Printf("GetEmbed: token=%d raw_bytes=%v\n", token, data[token*dim:token*dim+10])
+
+	case gguf.GGMLTypeF32:
+		offset := token * dim * 4
+		data := emb.HostData
+		for i := 0; i < dim; i++ {
+			result[i] = math.Float32frombits(
+				uint32(data[offset+i*4]) |
+					uint32(data[offset+i*4+1])<<8 |
+					uint32(data[offset+i*4+2])<<16 |
+					uint32(data[offset+i*4+3])<<24)
 		}
-		fmt.Printf("GetEmbed: token=%d raw sum first 10=%f\n", token, sum)
 
 	default:
 		return nil, fmt.Errorf("unsupported embedding quantization: %v", emb.GGMLType)
