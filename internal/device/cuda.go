@@ -919,7 +919,7 @@ func (c *CUDAContext) NewCUDAModel(f *gguf.GGUFFile, kvCache bool, maxSeqLen int
 	fmt.Printf("Loading %s with %d layers, %d heads, headDim=%d\n", arch, m.NumLayers, m.NumHeads, m.HeadDim)
 	fmt.Printf("Loading %d tensors from GGUF...\n", len(f.Tensors))
 
-	for i, t := range f.Tensors {
+	for _, t := range f.Tensors {
 		name := t.Name
 
 		numElements := uint64(1)
@@ -976,11 +976,9 @@ func (c *CUDAContext) NewCUDAModel(f *gguf.GGUFFile, kvCache bool, maxSeqLen int
 			HostData:  t.Data,
 			DataBytes: dataBytes,
 		}
-
-		if i >= 10 && i < len(f.Tensors)-10 {
-			continue
-		}
 	}
+
+	fmt.Printf("Loaded %d tensors total\n", len(m.Weights))
 
 	c.Synchronize()
 
@@ -1060,11 +1058,9 @@ func (m *CUDAModel) GetEmbedding(token int) ([]float32, error) {
 	cols := emb.Cols
 	dataLen := len(emb.HostData)
 
-	if rows < cols && rows <= 2048 {
-		rows, cols = cols, rows
-	}
-
-	dim := cols
+	// Token embedding shape: [vocab, dim] = [49152, 2048]
+	// rows=49152 > cols=2048, so don't swap - keep rows as vocab, cols as dim
+	dim := cols // dim should be 2048
 	result := make([]float32, dim)
 	offset := token * dim * 4
 

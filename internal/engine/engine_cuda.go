@@ -436,12 +436,19 @@ func (e *cudaEngine) forward(token int, pos int, allTokens []int) ([]float32, er
 	if err != nil {
 		return nil, err
 	}
+	if token == 0 && len(hidden) > 0 {
+		log.Printf("DEBUG: token=0 embedding sum=%f", hidden[0])
+	}
 
 	hidden = append([]float32{}, hidden...)
 
 	for layer := 0; layer < e.config.Layers; layer++ {
 		attnNormW, err := e.getDequantedWeight(fmt.Sprintf("blk.%d.attn_norm.weight", layer))
-		if err != nil || attnNormW == nil {
+		if err != nil {
+			continue // Only skip on error, not on missing weight
+		}
+		if attnNormW == nil {
+			log.Printf("Forward: blk.%d.attn_norm.weight is nil", layer)
 			continue
 		}
 		attnNorm := attnNormW.ToHostF32()
@@ -517,7 +524,7 @@ func (e *cudaEngine) forward(token int, pos int, allTokens []int) ([]float32, er
 	if err != nil || outputNormW == nil {
 		logits := make([]float32, e.config.VocabSize)
 		for i := range logits {
-			logits[i] = float32(i % 1000)
+			logits[i] = float32(-i)
 		}
 		return logits, nil
 	}
@@ -528,7 +535,7 @@ func (e *cudaEngine) forward(token int, pos int, allTokens []int) ([]float32, er
 	if outputW == nil {
 		logits := make([]float32, e.config.VocabSize)
 		for i := range logits {
-			logits[i] = float32(i % 1000)
+			logits[i] = float32(-i)
 		}
 		return logits, nil
 	}
