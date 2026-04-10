@@ -258,12 +258,11 @@ func (w *LlamaWeights) Free() {
 		return
 	}
 
-	freed := make(map[uintptr]bool)
 	freeTensor := func(t *device.Tensor) {
-		if t == nil || t.BufferID() == 0 || freed[t.BufferID()] {
+		if t == nil {
 			return
 		}
-		freed[t.BufferID()] = true
+		// Skip BufferID check - handle by pointer
 		t.Free()
 	}
 

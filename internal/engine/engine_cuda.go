@@ -265,10 +265,7 @@ func (e *cudaEngine) SwapModel(newModelPath string, newConfig config.Config) err
 		return fmt.Errorf("failed to load GGUF: %w", err)
 	}
 
-	arch := "unknown"
-	if v, ok := f.KV["general.architecture"].(string); ok {
-		arch = v
-	}
+	_ = f // Close will happen in deferred cleanup
 
 	ctx, err := device.NewCUDAContext()
 	if err != nil {
@@ -613,13 +610,13 @@ func (e *cudaEngine) viewAsTensor(data []float32, heads, headDim int) [][]float3
 	return result
 }
 
-func (e *cudaEngine) storeKV(kCache, vCache *device.cudaTensor, pos int, k, v [][]float32) {
+func (e *cudaEngine) storeKV(kCache, vCache *device.CUDATensor, pos int, k, v [][]float32) {
 	if kCache == nil || vCache == nil || len(k) == 0 || len(k[0]) == 0 {
 		return
 	}
 }
 
-func (e *cudaEngine) attention(q, k, v [][]float32, kCache, vCache *device.cudaTensor, pos, heads, kvHeads, headDim, seqLen int) []float32 {
+func (e *cudaEngine) attention(q, k, v [][]float32, kCache, vCache *device.CUDATensor, pos, heads, kvHeads, headDim, seqLen int) []float32 {
 	if len(q) == 0 || len(k) == 0 || len(v) == 0 {
 		return nil
 	}
@@ -862,7 +859,7 @@ func init() {
 // GPU-based Fused Operations (keep data on GPU for maximum performance)
 // =============================================================================
 
-func (e *cudaEngine) fusedAttentionGPU(q, k, v *device.cudaTensor, output, kCache, vCache *device.cudaTensor, batch, heads, seqLen, kvSeqLen, headDim int) {
+func (e *cudaEngine) fusedAttentionGPU(q, k, v *device.CUDATensor, output, kCache, vCache *device.CUDATensor, batch, heads, seqLen, kvSeqLen, headDim int) {
 	scale := float32(1.0 / math.Sqrt(float64(headDim)))
 	useCache := 0
 	if kCache != nil && vCache != nil {
@@ -871,25 +868,25 @@ func (e *cudaEngine) fusedAttentionGPU(q, k, v *device.cudaTensor, output, kCach
 	e.cuda.Ctx.FusedAttention(q, k, v, output, kCache, vCache, batch, heads, seqLen, kvSeqLen, headDim, scale, useCache)
 }
 
-func (e *cudaEngine) flashAttentionGPU(q, k, v *device.cudaTensor, output *device.cudaTensor, batch, heads, seqLen, kvSeqLen, headDim int) {
+func (e *cudaEngine) flashAttentionGPU(q, k, v *device.CUDATensor, output *device.CUDATensor, batch, heads, seqLen, kvSeqLen, headDim int) {
 	scale := float32(1.0 / math.Sqrt(float64(headDim)))
 	e.cuda.Ctx.FlashFusedAttention(q, k, v, output, batch, heads, seqLen, kvSeqLen, headDim, scale)
 }
 
-func (e *cudaEngine) fusedRoPEGPU(tensor *device.cudaTensor, posIds []int, batch, heads, seqLen, headDim int) {
+func (e *cudaEngine) fusedRoPEGPU(tensor *device.CUDATensor, posIds []int, batch, heads, seqLen, headDim int) {
 	theta := float32(e.config.RopeTheta)
 	e.cuda.Ctx.FusedRoPE(tensor, posIds, batch, heads, seqLen, headDim, theta)
 }
 
-func (e *cudaEngine) fusedSwiGLUGPU(input, gateWeight, upWeight, downWeight, output *device.cudaTensor, batch, dim, hiddenDim int) {
+func (e *cudaEngine) fusedSwiGLUGPU(input, gateWeight, upWeight, downWeight, output *device.CUDATensor, batch, dim, hiddenDim int) {
 	e.cuda.Ctx.FusedSwiGLU(input, gateWeight, upWeight, downWeight, output, batch, dim, hiddenDim)
 }
 
-func (e *cudaEngine) fusedMLPGPU(input, gateWeight, upWeight, downWeight, output *device.cudaTensor, batch, dim, hiddenDim int) {
+func (e *cudaEngine) fusedMLPGPU(input, gateWeight, upWeight, downWeight, output *device.CUDATensor, batch, dim, hiddenDim int) {
 	e.cuda.Ctx.FusedMLP(input, gateWeight, upWeight, downWeight, output, batch, dim, hiddenDim)
 }
 
-func (e *cudaEngine) fusedRMSNormAddGPU(input, hidden, weight, output *device.cudaTensor, batch, dim int) {
+func (e *cudaEngine) fusedRMSNormAddGPU(input, hidden, weight, output *device.CUDATensor, batch, dim int) {
 	e.cuda.Ctx.FusedRMSNormAdd(input, hidden, weight, output, batch, dim, e.config.Eps)
 }
 

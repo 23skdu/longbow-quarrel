@@ -139,8 +139,8 @@ func (t *Tensor) ZeroInit() {
 		t.ctx.cudaCtx.ZeroF16(t.cudaPtr)
 	}
 }
-func (t *Tensor) Dims() []int    { return []int{t.rows, t.cols} }
-func (t *Tensor) Strides() []int { return []int{t.cols, 1} }
+func (t *Tensor) Dims() []int       { return []int{t.rows, t.cols} }
+func (t *Tensor) Strides() []int    { return []int{t.cols, 1} }
 func (t *Tensor) ToHost() []float32 { return t.Data() }
 
 type Context struct {
@@ -192,18 +192,18 @@ func (c *Context) NewTensorFP32(rows, cols int) *Tensor {
 }
 
 func (c *Context) NewTensorFromData(rows, cols int, dt DataType, data []byte) (*Tensor, error) {
-    ct, err := c.cudaCtx.NewTensorFromData(rows, cols, dt, data)
-    if err != nil {
-        return nil, err
-    }
-    return &Tensor{
-        ctx:       c,
-        rows:      rows,
-        cols:      cols,
-        cudaPtr:   ct,
-        dataType:  dt,
-        sizeBytes: len(data),
-    }, nil
+	ct, err := c.cudaCtx.NewTensorFromData(rows, cols, dt, data)
+	if err != nil {
+		return nil, err
+	}
+	return &Tensor{
+		ctx:       c,
+		rows:      rows,
+		cols:      cols,
+		cudaPtr:   ct,
+		dataType:  dt,
+		sizeBytes: len(data),
+	}, nil
 }
 
 func (c *Context) NewTensorPooled(rows, cols int) *Tensor {
@@ -288,28 +288,28 @@ func (t *Tensor) storeKVTurbo(v *Tensor, kCache, vCache *Tensor, pos, heads, hea
 	numBlocksPerRow := (heads * headDim) / blockSize
 	bytesPerBlock := blockSize + qjlRows + 8
 	rowOffsetBytes := uintptr((pos % windowSize) * numBlocksPerRow * bytesPerBlock)
-    
-    bits := 2
-    if kCache.dataType == DataTypeTQ2_0 {
-        bits = 4
-    }
 
-    C.cudaTurboQuantEncode(ctx.cudaCtx.stream,
-        (*C.float)(t.cudaPtr.devPtr),
-        (*C.float)(ctx.TQRotation.cudaPtr.devPtr),
-        (*C.float)(ctx.TQQJL.cudaPtr.devPtr),
-        (*C.int8_t)(unsafe.Add(kCache.cudaPtr.devPtr, rowOffsetBytes)),
-        nil, nil,
-        C.int(blockSize), C.int(qjlRows), C.int(numBlocksPerRow), C.int(bits))
+	bits := 2
+	if kCache.dataType == DataTypeTQ2_0 {
+		bits = 4
+	}
+
+	C.cudaTurboQuantEncode(ctx.cudaCtx.stream,
+		(*C.float)(t.cudaPtr.devPtr),
+		(*C.float)(ctx.TQRotation.cudaPtr.devPtr),
+		(*C.float)(ctx.TQQJL.cudaPtr.devPtr),
+		(*C.int8_t)(unsafe.Add(kCache.cudaPtr.devPtr, rowOffsetBytes)),
+		nil, nil,
+		C.int(blockSize), C.int(qjlRows), C.int(numBlocksPerRow), C.int(bits))
 
 	// V Encode
-    C.cudaTurboQuantEncode(ctx.cudaCtx.stream,
-        (*C.float)(v.cudaPtr.devPtr),
-        (*C.float)(ctx.TQRotation.cudaPtr.devPtr),
-        (*C.float)(ctx.TQQJL.cudaPtr.devPtr),
-        (*C.int8_t)(unsafe.Add(vCache.cudaPtr.devPtr, rowOffsetBytes)),
-        nil, nil,
-        C.int(blockSize), C.int(qjlRows), C.int(numBlocksPerRow), C.int(bits))
+	C.cudaTurboQuantEncode(ctx.cudaCtx.stream,
+		(*C.float)(v.cudaPtr.devPtr),
+		(*C.float)(ctx.TQRotation.cudaPtr.devPtr),
+		(*C.float)(ctx.TQQJL.cudaPtr.devPtr),
+		(*C.int8_t)(unsafe.Add(vCache.cudaPtr.devPtr, rowOffsetBytes)),
+		nil, nil,
+		C.int(blockSize), C.int(qjlRows), C.int(numBlocksPerRow), C.int(bits))
 }
 
 func (t *Tensor) FetchKV(kCache, vCache *Tensor, seqLen, heads, headDim int) {
@@ -330,7 +330,7 @@ func (t *Tensor) fetchKVTurbo(kCache, vCache *Tensor, seqLen, heads, headDim int
 	// Decompress all blocks for the sequence
 	totalBlocks := seqLen * numBlocksPerRow
 	vOffset := seqLen * heads * headDim * 2
-	
+
 	C.cudaTurboQuantDecode(ctx.cudaCtx.stream,
 		(*C.int8_t)(kCache.cudaPtr.devPtr),
 		(*C.float)(ctx.TQRotation.cudaPtr.devPtr),
@@ -587,6 +587,9 @@ type CUDATensor struct {
 
 func (t *CUDATensor) Rows() int { return t.rows }
 func (t *CUDATensor) Cols() int { return t.cols }
+func (t *CUDATensor) BufferID() uintptr {
+	return uintptr(t.devPtr)
+}
 
 func (t *CUDATensor) Free() {
 	if t.devPtr != nil && t.ctx != nil {
@@ -688,12 +691,12 @@ func (t *CUDATensor) ToHostF16AsF32() []float32 {
 	}
 	hostData := make([]uint16, n)
 	C.cudaMemcpy(unsafe.Pointer(&hostData[0]), t.devPtr, C.size_t(n*2), C.cudaMemcpyDeviceToHost)
-	
+
 	// Convert to float32
 	result := make([]float32, n)
 	for i, v := range hostData {
 		result[i] = math.Float32frombits(uint32(v) << 16) // Very crude half-to-float approximation for signs
-        // Better: use a proper half-to-float conversion if needed
+		// Better: use a proper half-to-float conversion if needed
 	}
 	return result
 }
