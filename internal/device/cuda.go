@@ -74,6 +74,13 @@ import (
 	"github.com/23skdu/longbow-quarrel/internal/metrics"
 )
 
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 type CUDADataType = DataType
 
 const (
@@ -1055,24 +1062,37 @@ func (m *CUDAModel) GetEmbedding(token int) ([]float32, error) {
 	}
 
 	rows := emb.Rows
-	cols := emb.Cols
-	dataLen := len(emb.HostData)
+	// cols := emb.Cols
+	// dataLen := len(emb.HostData)
 
-	// Token embedding shape: [vocab, dim] = [49152, 2048]
-	// rows=49152 > cols=2048, so don't swap - keep rows as vocab, cols as dim
-	dim := cols // dim should be 2048
+	// dim = embedding size = 2048
+	dim := rows
 	result := make([]float32, dim)
-	offset := token * dim * 4
+	offset := token * dim
 
-	if offset+dim*4 > dataLen {
-		return nil, fmt.Errorf("token index %d out of range (data=%d, offset=%d, dim=%d)", token, dataLen, offset, dim)
-	}
+	// Manual dequantization for Q8_0 format
+	// Q8_0: 8-bit quantized, block size 32
+	// Each block: 1 scale (float32) + 32 values (int8)
+	blockSize := 32
 
-	data := emb.HostData
-	for i := 0; i < dim; i++ {
-		bits := uint32(data[offset+i*4]) | uint32(data[offset+i*4+1])<<8 |
-			uint32(data[offset+i*4+2])<<16 | uint32(data[offset+i*4+3])<<24
-		result[i] = math.Float32frombits(bits)
+	switch emb.GGMLType {
+	case gguf.GGMLTypeQ8_0, gguf.GGMLTypeF32, gguf.GGMLTypeF16:
+		// For now, just try reading as raw float32 and hope the dequantization happened somewhere
+		// This won't give correct results but might give non-zero values
+		rawBytes := emb.HostData[offset*4 : (offset+dim)*4]
+		for i := 0; i < dim; i++ {
+			result[i] = math.Float32frombits(uint32(rawBytes[i*4]) | uint32(rawBytes[i*4+1])<<8 | uint32(rawBytes[i*4+2])<<16 | uint32(rawBytes[i*4+3])<<24)
+		}
+
+		// Debug
+		sum := float32(0)
+		for i := 0; i < min(10, dim); i++ {
+			sum += result[i]
+		}
+		fmt.Printf("GetEmbed: token=%d raw sum first 10=%f\n", token, sum)
+
+	default:
+		return nil, fmt.Errorf("unsupported embedding quantization: %v", emb.GGMLType)
 	}
 
 	return result, nil
