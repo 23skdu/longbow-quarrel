@@ -1327,7 +1327,8 @@ func (e *metalEngine) inferInternal(inputTokens []int, tokensToGenerate int, sam
 	// New Scratch Buffer for Zero-Alloc	// Initialize scratch buffers (Heap backed, includes Logits)
 	qNormDim := 512 // Gemma4 full attention uses 512, sliding uses 256
 	kNormDim := 512
-	scratch := e.ctx.NewLayerScratch(len(inputTokens), e.config.Dim, e.config.HiddenDim,
+	scratchBatch := 1 // Always use batch=1, the kernels will process whatever batch size the input has
+	scratch := e.ctx.NewLayerScratch(scratchBatch, e.config.Dim, e.config.HiddenDim,
 		e.config.Heads, e.config.KVHeads, e.config.HeadDim, e.config.SeqLen, e.config.VocabSize, qNormDim, kNormDim)
 	defer scratch.Free()
 
@@ -1617,12 +1618,12 @@ func (e *metalEngine) inferInternal(inputTokens []int, tokensToGenerate int, sam
 		// Layers (Attention + FFN)
 		for l := 0; l < e.config.Layers; l++ {
 			logger.Log.Debug("Layer Precision Info", "layer", l, "dim", e.config.Dim, "mode", e.config.PrecisionMode)
-			// e.updateCurrentLayer(l) // This function call is not defined in the provided context. Removed.
+
 			attnNorm := e.weights.AttnNorm[l]
 			q := e.weights.AttnQ[l]
 			k := e.weights.AttnK[l]
 			v := e.weights.AttnV[l]
-			o := e.weights.AttnO[l] // Corrected from AttnOutput
+			o := e.weights.AttnO[l]
 			ffnNorm := e.weights.FfnNorm[l]
 			ffnGate := e.weights.FfnGate[l]
 			ffnUp := e.weights.FfnUp[l]
@@ -1723,21 +1724,12 @@ func (e *metalEngine) inferInternal(inputTokens []int, tokensToGenerate int, sam
 			}
 
 			if samplerConfig.DebugActivations {
-				// Before layer: capture input
-				inputBefore := currentF32.ToHost()
-				var inputSum float64
-				for _, v := range inputBefore {
-					inputSum += float64(v)
-				}
-				fmt.Printf("DEBUG: Before Layer %d, input sum=%f\n", l, inputSum)
 				currentF32.ScanMax(fmt.Sprintf("[Pos %d] Layer %d Input", cachePos, l))
 				currentF32.ScanMax(fmt.Sprintf("[Pos %d] Layer %d Output", cachePos, l))
 			}
 		}
 
 		// Final Norm (F32 -> F16)
-
-		// Use Into to avoid alloc
 		currentF32.RMSNormFP32_ToF16_Into(e.weights.OutputNorm, e.config.Eps, scratch.Normed)
 
 		// Output Head (F16 -> F32 Logits) - FIXED: Use same path as Phase 1
@@ -1755,8 +1747,6 @@ func (e *metalEngine) inferInternal(inputTokens []int, tokensToGenerate int, sam
 
 		e.ctx.Synchronize()
 		logitsData := logits.ToHost()
-
-		// Save logits for debugging
 
 		currentF32.ReturnToPool()
 
