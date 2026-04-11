@@ -7,61 +7,35 @@ import (
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
 )
 
-func getKV(f *gguf.GGUFFile, llamaKey, qwenKey string) (interface{}, bool) {
-	// 1. Try provided llama key
-	if val, ok := f.KV[llamaKey]; ok {
-		return val, true
-	}
-
-	// 2. Try provided qwen key
-	if qwenKey != "" {
-		if val, ok := f.KV[qwenKey]; ok {
-			return val, true
+func getKV(f *gguf.GGUFFile, keys ...string) (interface{}, bool) {
+	// First, try all provided keys directly
+	for _, key := range keys {
+		if key == "" {
+			continue
 		}
-	}
-
-	// 3. Try general keys if applicable
-	if strings.Contains(llamaKey, "llama.") {
-		generalKey := strings.Replace(llamaKey, "llama.", "general.", 1)
-		if val, ok := f.KV[generalKey]; ok {
-			return val, true
-		}
-	}
-
-	// 4. Try granite prefix (common in Ollama)
-	if strings.Contains(llamaKey, "llama.") {
-		graniteKey := strings.Replace(llamaKey, "llama.", "granite.", 1)
-		if val, ok := f.KV[graniteKey]; ok {
-			return val, true
-		}
-	}
-
-	// 5. Dynamic architecture detection - try model-specific keys
-	if arch, ok := f.KV["general.architecture"].(string); ok {
-		// Replace "llama." with "<arch>."
-		archKey := strings.Replace(llamaKey, "llama.", arch+".", 1)
-		if val, ok := f.KV[archKey]; ok {
+		if val, ok := f.KV[key]; ok {
 			return val, true
 		}
 
-		// Also try some common architecture prefixes
-		architectures := []string{arch, "gemma", "gemma2", "gemma3", "mistral", "qwen2", "phi3", "starcoder2", "llama"}
-		for _, alt := range architectures {
-			altKey := strings.Replace(llamaKey, "llama.", alt+".", 1)
-			if val, ok := f.KV[altKey]; ok {
+		// Try general keys if applicable
+		if strings.Contains(key, "llama.") {
+			generalKey := strings.Replace(key, "llama.", "general.", 1)
+			if val, ok := f.KV[generalKey]; ok {
 				return val, true
 			}
 		}
 	}
 
-	// 6. Try gemma4 specific keys directly
-	if val, ok := f.KV["gemma4.attention.head_count"]; ok {
-		return val, true
-	}
-
-	// 7. Try gemma2/3 variations
-	if val, ok := f.KV["gemma2.attention.head_count"]; ok {
-		return val, true
+	// Try dynamic architecture detection
+	if arch, ok := f.KV["general.architecture"].(string); ok && len(keys) > 0 {
+		// Replace "llama." prefix with architecture name
+		primaryKey := keys[0]
+		if strings.Contains(primaryKey, "llama.") {
+			archKey := strings.Replace(primaryKey, "llama.", arch+".", 1)
+			if val, ok := f.KV[archKey]; ok {
+				return val, true
+			}
+		}
 	}
 
 	return nil, false
@@ -156,4 +130,3 @@ func isNeededTensor(name string) bool {
 	}
 	return false
 }
-

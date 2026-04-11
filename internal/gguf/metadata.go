@@ -51,9 +51,19 @@ func (a *MetadataAnalyzer) Analyze() (*AnalysisReport, error) {
 
 	report.HiddenSize = int(getKVInt(a.file.KV, report.Architecture+".hidden_size", report.Architecture+".embedding_length"))
 
-	report.AttentionHeads = int(getKVInt(a.file.KV, report.Architecture+".attention.head_count", ""))
+	report.AttentionHeads = int(getKVInt(a.file.KV,
+		report.Architecture+".attention.head_count",
+		"gemma4.attention.head_count",
+		"llama.attention.head_count",
+		"qwen2.attention.head_count",
+		""))
 
-	kvHeads := getKVInt(a.file.KV, report.Architecture+".attention.head_count_kv", report.Architecture+".attention.kv_head_count")
+	kvHeads := getKVInt(a.file.KV,
+		report.Architecture+".attention.head_count_kv",
+		report.Architecture+".attention.kv_head_count",
+		"gemma4.attention.head_count_kv",
+		"gemma4.attention.kv_head_count",
+		"")
 	if kvHeads == 0 {
 		kvHeads = uint64(report.AttentionHeads)
 	}

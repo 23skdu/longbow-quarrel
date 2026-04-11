@@ -242,69 +242,30 @@ func DequantizeQ6K(data []byte, numElements int) []float32 {
 		}
 		block := data[blockOffset : blockOffset+blockSizeBytes]
 
-		// Q6_K layout (210 bytes):
-		// - qs: 128 bytes (256 * 4 bits) - low 4 bits
-		// - qh: 64 bytes (256 * 2 bits) - high 2 bits
-		// - scales: 16 bytes (16 8-bit scales)
-		// - d: f16 (super-scale)
-		// Wait. standard k-quants Q6_K:
-		// ql (128)
-		// qh (64)
-		// scales (16) (int8)
-		// d (f16)
-		// Total 128+64+16+2 = 210.
-
-		// Logic from k_quants.c:
-		// const uint8_t * ql = (const uint8_t *) x->ql;
-		// const uint8_t * qh = (const uint8_t *) x->qh;
-		// const int8_t  * sc = (const int8_t  *) x->scales;
-		// float d = GGML_FP16_TO_FP32(x->d);
-
 		qs := block[0:128]
 		qh := block[128:192]
 		scales := block[192:208]
 		d := Float16ToFloat32(binary.LittleEndian.Uint16(block[208:210]))
 
-		for l := 0; l < 16; l++ {
-			// scale = d * sc[l]
-			s := d * float32(int8(scales[l]))
+		base := i * 256
 
-			for k := 0; k < 16; k++ {
-				idx := l*16 + k
+		for si := 0; si < 2; si++ {
+			scOff := si * 8
+			n := si * 128
+			for l := 0; l < 32; l++ {
+				is := l / 16
+				qhOff := si * 32
 
-				// low 4 bits from qs
-				// qs[j] has 2 weights (low nibble, high nibble)?
-				// No, qs is 128 bytes for 256 weights. 2 weights per byte.
-				// weight j: if j%2==0 low 4 bits, else high 4 bits?
-				// standard packing:
-				// ql[j]: weights 2*j and 2*j+1.
-				// w[2*j] = ql[j] & 0xF
-				// w[2*j+1] = ql[j] >> 4
+				q1 := int8((qs[l+0]&0xF)|(((qh[l+qhOff]>>0)&3)<<4)) - 32
+				q2 := int8((qs[l+32]&0xF)|(((qh[l+qhOff]>>2)&3)<<4)) - 32
+				q3 := int8((qs[l+0]>>4)|(((qh[l+qhOff]>>4)&3)<<4)) - 32
+				q4 := int8((qs[l+32]>>4)|(((qh[l+qhOff]>>6)&3)<<4)) - 32
 
-				byteIdx := idx / 2
-				qsByte := qs[byteIdx]
-				var q4 uint8
-				if idx%2 == 0 {
-					q4 = qsByte & 0x0F
-				} else {
-					q4 = (qsByte & 0xF0) >> 4
-				}
-
-				// high 2 bits from qh
-				// qh is 64 bytes for 256 weights. 4 weights per byte.
-				// weights j, j+1, j+2, j+3 encoded in qh[j/4]?
-				// w[4*j]   : bits 0,1
-				// w[4*j+1] : bits 2,3
-				// ...
-				qhByte := qh[idx/4]
-				shift := (idx % 4) * 2
-				q2 := (qhByte >> shift) & 0x03
-
-				// Combined 6 bits
-				q := int8((q2 << 4) | q4)
-
-				// val = s * (q - 32)
-				out[i*256+idx] = s * (float32(q) - 32.0)
+				yIdx := base + n + l
+				out[yIdx+0] = d * float32(int8(scales[scOff+is*2+0])) * float32(q1)
+				out[yIdx+32] = d * float32(int8(scales[scOff+is*2+1])) * float32(q2)
+				out[yIdx+64] = d * float32(int8(scales[scOff+is*2+2])) * float32(q3)
+				out[yIdx+96] = d * float32(int8(scales[scOff+is*2+3])) * float32(q4)
 			}
 		}
 	}

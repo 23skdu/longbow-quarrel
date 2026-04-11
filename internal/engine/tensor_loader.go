@@ -236,6 +236,10 @@ func (tl *TensorLoader) mapLayerWeight(mt *device.Tensor, layerIdx int, suffix s
 		w.FfnUp[layerIdx] = mt
 	case "ffn_norm.weight":
 		w.FfnNorm[layerIdx] = mt
+	case "attn_q_norm.weight":
+		w.AttnQNorm[layerIdx] = mt
+	case "attn_k_norm.weight":
+		w.AttnKNorm[layerIdx] = mt
 	case "ssm_a", "ssm_d", "ssm_conv1d.weight", "ssm_conv1d.bias",
 		"ssm_dt.weight", "ssm_dt.bias", "ssm_norm.weight", "ssm_norm.bias",
 		"ssm_out.weight", "ssm_in.weight":

@@ -84,3 +84,27 @@ func float32ToFloat16(f float32) uint16 {
 		return uint16((sign << 15) | (uint32(newExp) << 10) | (mant >> 13))
 	}
 }
+
+func TestQ6KDequantization(t *testing.T) {
+	block := make([]byte, 210)
+
+	d := float32ToFloat16(1.0)
+	binary.LittleEndian.PutUint16(block[208:210], d)
+
+	for i := 0; i < 128; i++ {
+		block[i] = 0
+	}
+	for i := 128; i < 192; i++ {
+		block[i] = 0
+	}
+	for i := 0; i < 16; i++ {
+		block[192+i] = 32
+	}
+
+	result := DequantizeQ6K(block, 256)
+	if len(result) != 256 {
+		t.Fatalf("Expected 256 weights, got %d", len(result))
+	}
+
+	t.Logf("Q6K Test result[0] = %f, result[128] = %f", result[0], result[128])
+}

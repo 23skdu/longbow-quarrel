@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
 	"runtime"
 	"strings"
 	"time"
@@ -345,6 +346,12 @@ func (e *metalEngine) loadModel(path string) error {
 		return err
 	}
 	e.model = f
+
+	// Direct lookup from KV
+	archVal := f.KV["general.architecture"]
+	embVal := f.KV["gemma4.embedding_length"]
+	headVal := f.KV["gemma4.attention.head_count"]
+	fmt.Fprintf(os.Stderr, "ENGINE: KV arch=%T(%v) emb=%T(%v) head=%T(%v)\n", archVal, embVal, headVal, embVal, headVal, headVal)
 	tok, err := tokenizer.NewFromGGUF(f)
 	if err != nil {
 		logger.Log.Warn("Failed to initialize tokenizer from GGUF", "error", err)
@@ -356,28 +363,48 @@ func (e *metalEngine) loadModel(path string) error {
 
 	// Read Metadata
 	// Block Count
-	if val, ok := getKV(f, "llama.block_count", "qwen3moe.block_count"); ok {
+	if val, ok := getKV(f,
+		"llama.block_count",
+		"qwen3moe.block_count",
+		"gemma4.block_count",
+		"qwen2.block_count",
+	); ok {
 		e.config.Layers = int(toFloat64(val)) // GGUF numbers can be various types
 	} else {
 		e.config.Layers = 1 // Default for test
 	}
 
 	// Embedding Dim
-	if val, ok := getKV(f, "llama.embedding_length", "qwen3moe.embedding_length"); ok {
+	if val, ok := getKV(f,
+		"llama.embedding_length",
+		"gemma4.embedding_length",
+		"qwen2.embedding_length",
+	); ok {
 		e.config.Dim = int(toFloat64(val))
 	}
+	logger.Log.Info("DEBUG KV", "gemma4_emb", f.KV["gemma4.embedding_length"], "gemma4_head", f.KV["gemma4.attention.head_count"], "general_arch", f.KV["general.architecture"])
 	logger.Log.Info("Model dimensions loaded", "dim", e.config.Dim)
 
 	// Heads
-	if val, ok := getKV(f, "llama.attention.head_count", "qwen3moe.attention.head_count"); ok {
+	if val, ok := getKV(f,
+		"llama.attention.head_count",
+		"gemma4.attention.head_count",
+		"qwen2.attention.head_count",
+	); ok {
 		e.config.Heads = int(toFloat64(val))
 	} else {
+		logger.Log.Debug("failed to get attention.head_count", "KV", f.KV)
 		return errors.New("missing attention.head_count")
 	}
 	logger.Log.Info("Model head count loaded", "heads", e.config.Heads)
 
 	// Hidden Dim (FFN context)
-	if val, ok := getKV(f, "llama.feed_forward_length", "qwen3moe.feed_forward_length"); ok {
+	if val, ok := getKV(f,
+		"llama.feed_forward_length",
+		"qwen3moe.feed_forward_length",
+		"gemma4.feed_forward_length",
+		"qwen2.feed_forward_length",
+	); ok {
 		e.config.HiddenDim = int(toFloat64(val))
 	}
 	if e.config.HiddenDim == 0 {
@@ -386,7 +413,12 @@ func (e *metalEngine) loadModel(path string) error {
 	logger.Log.Info("Model hidden dim loaded", "hidden_dim", e.config.HiddenDim)
 
 	// KV Heads (GQA)
-	if val, ok := getKV(f, "llama.attention.head_count_kv", "qwen3moe.attention.head_count_kv"); ok {
+	if val, ok := getKV(f,
+		"llama.attention.head_count_kv",
+		"qwen3moe.attention.head_count_kv",
+		"gemma4.attention.head_count_kv",
+		"gemma4.attention.kv_head_count",
+	); ok {
 		// Handle array case specifically for models like Nemotron-3-Nano
 		if arr, ok := val.([]interface{}); ok {
 			maxVal := 0
@@ -419,7 +451,12 @@ func (e *metalEngine) loadModel(path string) error {
 	logger.Log.Info("Model head dim calculated", "head_dim", e.config.HeadDim)
 
 	// Seq Len (Context)
-	if val, ok := getKV(f, "llama.context_length", "qwen3moe.context_length"); ok {
+	if val, ok := getKV(f,
+		"llama.context_length",
+		"qwen3moe.context_length",
+		"gemma4.context_length",
+		"qwen2.context_length",
+	); ok {
 		e.config.SeqLen = int(toFloat64(val))
 	} else {
 		e.config.SeqLen = 2048 // default
@@ -427,7 +464,13 @@ func (e *metalEngine) loadModel(path string) error {
 	logger.Log.Info("Model sequence length loaded", "seq_len", e.config.SeqLen)
 
 	// RoPE Freq
-	if val, ok := getKV(f, "llama.rope.freq_base", "qwen3moe.rope.freq_base"); ok {
+	if val, ok := getKV(f,
+		"llama.rope.freq_base",
+		"qwen3moe.rope.freq_base",
+		"gemma4.rope.freq_base",
+		"gemma4.rope.freq_base_swa",
+		"qwen2.rope.freq_base",
+	); ok {
 		e.config.RopeTheta = float32(toFloat64(val))
 		logger.Log.Info("Model RoPE theta loaded", "theta", e.config.RopeTheta)
 	} else {
@@ -645,6 +688,8 @@ func (e *metalEngine) loadModel(path string) error {
 	e.weights.FfnDown = make([]*device.Tensor, layers)
 	e.weights.FfnUp = make([]*device.Tensor, layers)
 	e.weights.FfnNorm = make([]*device.Tensor, layers)
+	e.weights.AttnQNorm = make([]*device.Tensor, layers)
+	e.weights.AttnKNorm = make([]*device.Tensor, layers)
 	e.weights.Mamba = make([]*MambaWeights, layers) // Initialize Mamba/SSM layer storage
 
 	// Initialize MOE weight containers if MOE architecture detected
@@ -782,6 +827,16 @@ func (e *metalEngine) loadModel(path string) error {
 
 		case gguf.GGMLTypeQ4_K_S: // 99 Unused
 			mt = e.ctx.NewTensor(rows, cols) // fallback
+		case gguf.GGMLTypeQ5_0:
+			// Type 6 (Q5_0). Dequantize to F16 for use in engine
+			f32Data := gguf.DequantizeQ5_0(t.Data, numElements)
+			mt = e.ctx.NewTensorWithType(rows, cols, device.DataTypeF16)
+			mt.LoadFrom(f32Data)
+		case gguf.GGMLTypeQ5_K:
+			// Type 13 (Q5_K). Dequantize to F16 for use in engine (use Q5_0 as fallback)
+			f32Data := gguf.DequantizeQ5_0(t.Data, numElements)
+			mt = e.ctx.NewTensorWithType(rows, cols, device.DataTypeF16)
+			mt.LoadFrom(f32Data)
 		default:
 			continue
 		}
@@ -1321,6 +1376,7 @@ func (e *metalEngine) inferInternal(inputTokens []int, tokensToGenerate int, sam
 			ffnGate := e.weights.FfnGate[l]
 			ffnUp := e.weights.FfnUp[l]
 			ffnDown := e.weights.FfnDown[l]
+
 			view := e.cache.Get(e.SeqIDStr(seq.ID), l)
 			kCache := view.K
 			vCache := view.V
@@ -1667,6 +1723,14 @@ func (e *metalEngine) inferInternal(inputTokens []int, tokensToGenerate int, sam
 			}
 
 			if samplerConfig.DebugActivations {
+				// Before layer: capture input
+				inputBefore := currentF32.ToHost()
+				var inputSum float64
+				for _, v := range inputBefore {
+					inputSum += float64(v)
+				}
+				fmt.Printf("DEBUG: Before Layer %d, input sum=%f\n", l, inputSum)
+				currentF32.ScanMax(fmt.Sprintf("[Pos %d] Layer %d Input", cachePos, l))
 				currentF32.ScanMax(fmt.Sprintf("[Pos %d] Layer %d Output", cachePos, l))
 			}
 		}

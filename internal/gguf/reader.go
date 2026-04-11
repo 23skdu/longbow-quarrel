@@ -64,14 +64,19 @@ func LoadFile(path string) (*GGUFFile, error) {
 
 	file.Header.TensorCount = binary.LittleEndian.Uint64(data[offset:])
 	offset += 8
+	fmt.Fprintf(os.Stderr, "HEADERS %d %d\n", file.Header.TensorCount, file.Header.KVCount)
+	if file.Header.KVCount > 1000000 {
+		panic("invalid KVCount")
+	}
 	file.Header.KVCount = binary.LittleEndian.Uint64(data[offset:])
 	offset += 8
 
-	fmt.Fprintf(os.Stderr, "GGUF: Version=%d, Tensors=%d, KV=%d\n", file.Header.Version, file.Header.TensorCount, file.Header.KVCount)
+	fmt.Fprintf(os.Stderr, "GGUF: Version=%d, Tensors=%d, KV=%d (checking path)\n", file.Header.Version, file.Header.TensorCount, file.Header.KVCount)
 
 	// Ollama format stores KV pairs at the END of the file, not at the beginning
 	// If KVCount is 0, search for tokenizer data at the end
 	if file.Header.KVCount == 0 {
+		fmt.Fprintf(os.Stderr, "READER: using ollama path (KVCount=0)\n")
 		// Search for "tokenizer.ggml.tokens" in the file
 		tokenizerIdx := bytes.Index(data, []byte("tokenizer.ggml.tokens"))
 		if tokenizerIdx > 0 {
@@ -134,6 +139,7 @@ func LoadFile(path string) (*GGUFFile, error) {
 		}
 	} else {
 		// Standard GGUF format - read KV pairs from beginning
+		fmt.Fprintf(os.Stderr, "READER: standard path, KVCount=%d\n", file.Header.KVCount)
 		for i := uint64(0); i < file.Header.KVCount; i++ {
 			k, n, err := readString(data, offset)
 			if err != nil {
@@ -151,6 +157,10 @@ func LoadFile(path string) (*GGUFFile, error) {
 			offset += n
 
 			file.KV[k] = val
+
+			if k == "general.architecture" || k == "gemma4.attention.head_count" || k == "gemma4.embedding_length" {
+				fmt.Fprintf(os.Stderr, "READER: loaded KV %s = %v (type %T)\n", k, val, val)
+			}
 		}
 	}
 
