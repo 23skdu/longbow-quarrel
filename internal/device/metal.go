@@ -84,6 +84,8 @@ void Metal_TurboQuant_Decode(MetalContextRef ctx, MetalBufferRef input,
                               int offQJL, MetalBufferRef output,
                               int offOut, MetalBufferRef scaleIn,
                               int offScale, int blockSize, int qjlRows, int numBlocks);
+
+void Metal_FlashAttention2_F16(MetalContextRef ctx, MetalBufferRef q, MetalBufferRef k_cache, MetalBufferRef v_cache, MetalBufferRef output, int num_heads, int kv_heads, int headDim, int seq_len, int block_size, MetalBufferRef block_table);
 */
 import "C"
 import (
@@ -118,6 +120,9 @@ var MaxGPUMemory int64 = DefaultMaxMemoryMetal
 //go:embed kernels.metal
 var kernelsSource string
 
+//go:embed kernel_flash_attention.metal
+var flashKernelsSource string
+
 // Context holds the Metal connection and tensor pool
 type Context struct {
 	ref    C.MetalContextRef
@@ -131,7 +136,8 @@ type Context struct {
 }
 
 func NewContext() *Context {
-	cSrc := C.CString(kernelsSource)
+	combinedSrc := kernelsSource + "\n" + flashKernelsSource
+	cSrc := C.CString(combinedSrc)
 	defer C.free(unsafe.Pointer(cSrc))
 
 	ref := C.Metal_Init(cSrc)

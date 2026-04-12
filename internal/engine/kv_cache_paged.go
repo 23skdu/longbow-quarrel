@@ -272,7 +272,14 @@ func (c *PagedKVCache) Update(seqID string, layer, pos int, k, v *device.Tensor)
 		return fmt.Errorf("physical position %d exceeds total KV cache capacity %d", physPos, capacity)
 	}
 
-	k.StoreKV(v, kTarget, vTarget, physPos, c.kvHeads, c.headDim, capacity)
+	// Dynamic KV Cache Quantization downcast (FP8/INT8)
+	if kTarget.DataType() == device.DataTypeINT8 || kTarget.DataType() == device.DataTypeFP8 {
+		// Mock: Downcast directly using StoreKVQuantized wrapper (to be added in tensor.go)
+		k.StoreKVQuantized(v, kTarget, vTarget, physPos, c.kvHeads, c.headDim, capacity)
+	} else {
+		// Default FP16 Store
+		k.StoreKV(v, kTarget, vTarget, physPos, c.kvHeads, c.headDim, capacity)
+	}
 
 	// Metrics
 	// ... (Simplification: just track bytes)

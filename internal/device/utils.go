@@ -26,6 +26,8 @@ const (
 	DataTypeMXFP4  DataType = 8
 	DataTypeTQ1_0  DataType = 9
 	DataTypeTQ2_0  DataType = 10
+	DataTypeFP8    DataType = 11
+	DataTypeINT8   DataType = 12
 )
 
 // Reference implementation of Float32 <-> Float16
