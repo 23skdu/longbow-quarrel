@@ -1,7 +1,9 @@
 package gguf
 
 import (
+	"encoding/binary"
 	"fmt"
+	"math"
 	"testing"
 )
 
@@ -134,6 +136,103 @@ func TestQuantizationDequantization(t *testing.T) {
 }
 
 func QuantizeWeightsToQ3K(weights []float32, numElements int) ([]byte, error) {
-	// Placeholder implementation - Q3_K quantization not yet implemented
-	return nil, fmt.Errorf("not implemented")
+	if numElements%256 != 0 {
+		return nil, fmt.Errorf("QuantizeWeightsToQ3K: numElements %d must be multiple of 256", numElements)
+	}
+
+	numBlocks := numElements / 256
+	blockBytes := 88
+	out := make([]byte, numBlocks*blockBytes)
+
+	for i := 0; i < numBlocks; i++ {
+		blockStart := i * 256
+		blockWeights := weights[blockStart : blockStart+256]
+
+		var d float32 = 0
+		for _, w := range blockWeights {
+			absW := float32(math.Abs(float64(w)))
+			if absW > d {
+				d = absW
+			}
+		}
+		if d == 0 {
+			d = 1.0
+		}
+
+		blockOffset := i * blockBytes
+		binary.LittleEndian.PutUint16(out[blockOffset:blockOffset+2], Float32ToFloat16(d))
+
+		scales := out[blockOffset+2 : blockOffset+10]
+		qs := out[blockOffset+10 : blockOffset+blockBytes]
+
+		var sc [8]uint8
+		for g := 0; g < 8; g++ {
+			groupStart := g * 32
+			groupEnd := groupStart + 32
+
+			var groupMin, groupMax float32 = blockWeights[groupStart], blockWeights[groupStart]
+			for _, w := range blockWeights[groupStart:groupEnd] {
+				if w < groupMin {
+					groupMin = w
+				}
+				if w > groupMax {
+					groupMax = w
+				}
+			}
+
+			rangeVal := groupMax - groupMin
+			if rangeVal == 0 {
+				rangeVal = d
+			}
+
+			sc[g] = uint8(math.Round(float64(rangeVal / d * 7.0)))
+			if sc[g] == 0 {
+				sc[g] = 1
+			}
+		}
+
+		scales[0] = sc[0] | (sc[1] << 3)
+		scales[1] = sc[2] | (sc[3] << 3)
+		scales[2] = sc[4] | (sc[5] << 3)
+		scales[3] = sc[6] | (sc[7] << 3)
+		scales[4] = 0
+		scales[5] = 0
+		scales[6] = 0
+		scales[7] = 0
+
+		for g := 0; g < 8; g++ {
+			groupStart := g * 32
+
+			groupMinVal := float32(0)
+			for _, w := range blockWeights[groupStart : groupStart+32] {
+				if w < groupMinVal {
+					groupMinVal = w
+				}
+			}
+
+			D := d * float32(sc[g]) / 7.0
+			if D == 0 {
+				D = 1.0
+			}
+			offset := -groupMinVal
+
+			for j := 0; j < 32; j++ {
+				w := blockWeights[groupStart+j]
+
+				q := int8(math.Round(float64((w + offset) / D)))
+				if q > 7 {
+					q = 7
+				}
+				if q < 0 {
+					q = 0
+				}
+
+				qsIdx := g*10 + j/4
+				shift := (j % 4) * 2
+				qs[qsIdx] = (qs[qsIdx] & ^(0x03 << shift)) | (uint8(q)&0x03)<<shift
+			}
+		}
+	}
+
+	return out, nil
 }
