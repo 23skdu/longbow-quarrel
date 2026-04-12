@@ -59,7 +59,7 @@ func main() {
 	mux.Handle("/readyz", handlers.ReadyzHandler())
 	mux.Handle("/version", handlers.VersionHandler())
 	mux.Handle("/metrics", loggingMiddleware.Middleware(http.HandlerFunc(promhttp.Handler().ServeHTTP)))
-	
+
 	mux.HandleFunc("/debug/pprof/", pprof.Index)
 	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
 	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
@@ -77,6 +77,9 @@ func main() {
 	apiMux.Handle("/generate", authMiddleware.Authenticate(handlers.GenerateHandler(cfg)))
 	apiMux.Handle("/stream", authMiddleware.Authenticate(handlers.StreamHandler(cfg)))
 	apiMux.Handle("/hotswap", authMiddleware.Authenticate(handlers.HotSwapHandler(cfg)))
+	apiMux.Handle("/v1/chat/completions", authMiddleware.Authenticate(handlers.OpenAIChatCompletionsHandler(cfg)))
+	apiMux.Handle("/v1/completions", authMiddleware.Authenticate(handlers.OpenAICompletionsHandler(cfg)))
+	apiMux.Handle("/v1/models", authMiddleware.Authenticate(handlers.OpenAIModelsHandler(cfg)))
 	mux.Handle("/api/", loggingMiddleware.Middleware(corsMiddleware.Middleware(apiMux.ServeHTTP)))
 
 	mux.Handle("/", handlers.IndexHandler())

@@ -498,7 +498,6 @@ func (e *cudaEngine) forward(token int, pos int, allTokens []int) ([]float32, er
 	gemma4FullRoPETheta := e.config.Gemma4FullRoPETheta
 	gemma4SlidingHeadDim := e.config.Gemma4SlidingHeadDim
 	gemma4FullHeadDim := e.config.Gemma4FullHeadDim
-	_ = gemma4SlidingWindowSize // Suppress unused warning
 
 	for layer := 0; layer < e.config.Layers; layer++ {
 		attnNormW, err := e.getDequantedWeight(fmt.Sprintf("blk.%d.attn_norm.weight", layer))
