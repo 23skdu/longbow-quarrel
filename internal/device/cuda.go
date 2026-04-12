@@ -8,6 +8,7 @@ package device
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cublas_v2.h>
+#include <cuda_bf16.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -19,6 +20,12 @@ typedef enum {
     CUDA_DTYPE_Q4_K = 4,
     CUDA_DTYPE_Q6_K = 5
 } CUDADataType;
+
+extern void cudaProfilerStart();
+extern void cudaProfilerStop();
+extern cudaError_t cudaEventCreate(cudaEvent_t *event);
+extern cudaError_t cudaEventRecord(cudaEvent_t event, cudaStream_t stream);
+extern cudaError_t cudaStreamWaitEvent(cudaStream_t stream, cudaEvent_t event, unsigned int flags);
 
 extern void cudaDequantQ8_0(cudaStream_t stream, void* src, void* dst, int numElements);
 extern void cudaDequantQ8_0ToBF16(cudaStream_t stream, void* src, void* dst, int numElements);
@@ -774,6 +781,62 @@ func (c *CUDAContext) LinearF16(input, weight *CUDATensor) (*CUDATensor, error) 
 	return output, nil
 }
 
+func (c *CUDAContext) LinearF16TensorCore(input, weight *CUDATensor) (*CUDATensor, error) {
+	output, err := c.NewTensor(input.rows, weight.cols, DataTypeF16)
+	if err != nil {
+		return nil, err
+	}
+
+	var alpha, beta float32 = 1.0, 0.0
+	alphaPtr := unsafe.Pointer(&alpha)
+	betaPtr := unsafe.Pointer(&beta)
+
+	status := C.cublasGemmEx(
+		c.handle,
+		C.CUBLAS_OP_N, C.CUBLAS_OP_N,
+		C.int(weight.cols), C.int(input.rows), C.int(weight.rows),
+		alphaPtr,
+		weight.devPtr, C.CUDA_R_16F, C.int(weight.cols),
+		input.devPtr, C.CUDA_R_16F, C.int(input.cols),
+		betaPtr,
+		output.devPtr, C.CUDA_R_16F, C.int(output.cols),
+		C.CUDA_C_16F,
+		C.CUBLAS_GEMM_DEFAULT_TENSOR_OP,
+	)
+
+	if status != 0 {
+		fmt.Printf("cublasGemmEx (Tensor Core) failed with status: %d, falling back\n", status)
+		return c.LinearF16(input, weight)
+	}
+
+	return output, nil
+}
+
+func (c *CUDAContext) StartProfiling(name string) {
+	C.cudaProfilerStart()
+}
+
+func (c *CUDAContext) StopProfiling() {
+	C.cudaProfilerStop()
+}
+
+func (c *CUDAContext) CreateEvent() (unsafe.Pointer, error) {
+	var event C.cudaEvent_t
+	err := C.cudaEventCreate(&event)
+	if err != C.cudaSuccess {
+		return nil, fmt.Errorf("cudaEventCreate failed: %d", err)
+	}
+	return unsafe.Pointer(event), nil
+}
+
+func (c *CUDAContext) RecordEvent(event unsafe.Pointer) {
+	C.cudaEventRecord(C.cudaEvent_t(event), c.stream)
+}
+
+func (c *CUDAContext) WaitEvent(event unsafe.Pointer) {
+	C.cudaStreamWaitEvent(c.stream, C.cudaEvent_t(event), 0)
+}
+
 func (c *CUDAContext) MatmulF16(input *CUDATensor, weight *CUDATensor) (*CUDATensor, error) {
 	return c.LinearF16(input, weight)
 }
@@ -1094,6 +1157,26 @@ func (m *CUDAModel) GetDequantedWeight(name string) (*CUDATensor, error) {
 
 	w.Dequanted = d
 	return d, nil
+}
+
+func (m *CUDAModel) GetWeightTensor(name string) (*CUDATensor, error) {
+	w, ok := m.Weights[name]
+	if !ok {
+		return nil, fmt.Errorf("weight not found: %s", name)
+	}
+
+	if w.DevPtr == nil {
+		return nil, fmt.Errorf("weight %s has no GPU allocation", name)
+	}
+
+	return &CUDATensor{
+		ctx:       m.Ctx,
+		rows:      w.Rows,
+		cols:      w.Cols,
+		sizeBytes: w.DataBytes,
+		devPtr:    w.DevPtr,
+		ggmlType:  w.GGMLType,
+	}, nil
 }
 
 func (m *CUDAModel) GetEmbedding(token int) ([]float32, error) {

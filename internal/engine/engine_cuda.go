@@ -333,9 +333,12 @@ func (e *cudaEngine) Close() {
 }
 
 func (e *cudaEngine) getDequantedWeight(name string) (*device.CUDATensor, error) {
+	e.mu.RLock()
 	if cached, ok := e.dequantizedCache[name]; ok && cached != nil {
+		e.mu.RUnlock()
 		return cached, nil
 	}
+	e.mu.RUnlock()
 
 	d, err := e.cuda.GetDequantedWeight(name)
 	if err != nil {
@@ -343,7 +346,10 @@ func (e *cudaEngine) getDequantedWeight(name string) (*device.CUDATensor, error)
 		return nil, err
 	}
 
+	e.mu.Lock()
 	e.dequantizedCache[name] = d
+	e.mu.Unlock()
+
 	return d, nil
 }
 
@@ -543,9 +549,20 @@ func (e *cudaEngine) forward(token int, pos int, allTokens []int) ([]float32, er
 			continue
 		}
 
-		q := e.matmul(hidden, qW.ToHostF32())
-		k := e.matmul(hidden, kW.ToHostF32())
-		v := e.matmul(hidden, vW.ToHostF32())
+		var q, k, v []float32
+		q, _ = e.matmulGPU(hidden, fmt.Sprintf("blk.%d.attn_q.weight", layer))
+		k, _ = e.matmulGPU(hidden, fmt.Sprintf("blk.%d.attn_k.weight", layer))
+		v, _ = e.matmulGPU(hidden, fmt.Sprintf("blk.%d.attn_v.weight", layer))
+
+		if q == nil {
+			q = e.matmul(hidden, qW.ToHostF32())
+		}
+		if k == nil {
+			k = e.matmul(hidden, kW.ToHostF32())
+		}
+		if v == nil {
+			v = e.matmul(hidden, vW.ToHostF32())
+		}
 
 		// Gemma4: Apply Q/K normalization after projection
 		if isGemma4 {
@@ -562,11 +579,12 @@ func (e *cudaEngine) forward(token int, pos int, allTokens []int) ([]float32, er
 
 			// Determine if this is a sliding window or full attention layer
 			isSlidingWindowLayer := (layer % 6) != 5
+			gemma4PartialFactor := e.config.Gemma4PartialRoPEFactor
 			if isSlidingWindowLayer {
 				currentHeadDim := gemma4SlidingHeadDim
 				currentTheta := gemma4SlidingRoPETheta
-				e.applyRoPE(q, pos, int(currentTheta), currentHeadDim)
-				e.applyRoPE(k, pos, int(currentTheta), currentHeadDim)
+				e.applyRoPEWithFactor(q, pos, int(currentTheta), currentHeadDim, gemma4PartialFactor)
+				e.applyRoPEWithFactor(k, pos, int(currentTheta), currentHeadDim, gemma4PartialFactor)
 			} else {
 				// Full attention layer - use full RoPE theta but standard dim
 				currentHeadDim := gemma4FullHeadDim
@@ -599,23 +617,50 @@ func (e *cudaEngine) forward(token int, pos int, allTokens []int) ([]float32, er
 			log.Printf("DEBUG: before attention: q3d[0][0:5]=%v, k3d[0][0:5]=%v, v3d[0][0:5]=%v", q3d[0][:5], k3d[0][:5], v3d[0][:5])
 		}
 
-		attnOut := e.attention(q3d, k3d, v3d, kCache, vCache, pos, heads, kvHeads, headDim, e.config.SeqLen)
+		var attnOut []float32
+		attnWindowSize := 0
+		if isGemma4 {
+			isSlidingWindowLayer := (layer % 6) != 5
+			if isSlidingWindowLayer {
+				attnWindowSize = gemma4SlidingWindowSize
+			}
+		}
+		if attnWindowSize > 0 {
+			attnOut = e.attentionWithWindow(q3d, k3d, v3d, kCache, vCache, pos, heads, kvHeads, headDim, e.config.SeqLen, attnWindowSize)
+		} else {
+			attnOut = e.attention(q3d, k3d, v3d, kCache, vCache, pos, heads, kvHeads, headDim, e.config.SeqLen)
+		}
 		if attnOut == nil {
 			attnOut = e.attentionFallback(q3d, k3d, v3d)
 		}
 
 		// Debug: after attention
 		if token == 0 && pos == 0 && layer == 0 {
-			log.Printf("DEBUG: after attention: attnOut[0:5]=%v", attnOut[:5])
+			sum := float32(0)
+			for i := 0; i < min(10, len(attnOut)); i++ {
+				sum += attnOut[i]
+			}
+			log.Printf("DEBUG: after attention: attnOut sum=%f, first5=%v", sum, attnOut[:5])
 		}
 
-		oWHost := oW.ToHostF32()
-		attnProj := e.matmul(attnOut, oWHost)
+		attnProj, _ := e.matmulGPU(attnOut, fmt.Sprintf("blk.%d.attn_output.weight", layer))
+		if attnProj == nil {
+			oWHost := oW.ToHostF32()
+			attnProj = e.matmul(attnOut, oWHost)
+		}
 
 		// Debug: after proj
 		if token == 0 && pos == 0 && layer == 0 {
-			log.Printf("DEBUG: after proj: attnProj[0:5]=%v", attnProj[:5])
-			log.Printf("DEBUG: before add: hidden[0:5]=%v", hidden[:5])
+			sum := float32(0)
+			for i := 0; i < min(10, len(attnProj)); i++ {
+				sum += attnProj[i]
+			}
+			log.Printf("DEBUG: after proj: attnProj sum=%f, first5=%v", sum, attnProj[:5])
+			hiddenSum := float32(0)
+			for i := 0; i < min(10, len(hidden)); i++ {
+				hiddenSum += hidden[i]
+			}
+			log.Printf("DEBUG: before add: hidden sum=%f, first5=%v", hiddenSum, hidden[:5])
 		}
 
 		for i := range hidden {
@@ -631,8 +676,16 @@ func (e *cudaEngine) forward(token int, pos int, allTokens []int) ([]float32, er
 			ffnNorm := ffnNormW.ToHostF32()
 			hidden = e.rmsnorm(hidden, ffnNorm, eps)
 
-			ffnGate := e.matmul(hidden, ffnGateW.ToHostF32())
-			ffnUp := e.matmul(hidden, ffnUpW.ToHostF32())
+			var ffnGate, ffnUp, ffnDown []float32
+			ffnGate, _ = e.matmulGPU(hidden, fmt.Sprintf("blk.%d.ffn_gate.weight", layer))
+			ffnUp, _ = e.matmulGPU(hidden, fmt.Sprintf("blk.%d.ffn_up.weight", layer))
+
+			if ffnGate == nil {
+				ffnGate = e.matmul(hidden, ffnGateW.ToHostF32())
+			}
+			if ffnUp == nil {
+				ffnUp = e.matmul(hidden, ffnUpW.ToHostF32())
+			}
 
 			for i := range ffnGate {
 				ffnGate[i] = ffnGate[i] / (1 + float32(math.Exp(float64(-ffnGate[i]))))
@@ -642,7 +695,10 @@ func (e *cudaEngine) forward(token int, pos int, allTokens []int) ([]float32, er
 				ffnUp[i] *= ffnGate[i]
 			}
 
-			ffnDown := e.matmul(ffnUp, ffnDownW.ToHostF32())
+			ffnDown, _ = e.matmulGPU(ffnUp, fmt.Sprintf("blk.%d.ffn_down.weight", layer))
+			if ffnDown == nil {
+				ffnDown = e.matmul(ffnUp, ffnDownW.ToHostF32())
+			}
 			for i := range hidden {
 				hidden[i] += ffnDown[i]
 			}
@@ -782,9 +838,6 @@ func (e *cudaEngine) matmul(a, b []float32) []float32 {
 
 	result := make([]float32, aRows*bCols)
 
-	// b is [bRows, bCols] = [hidden_dim, vocab_size]
-	// We need: result[j] = sum(a[i] * b[i*bCols + j])
-	// This is: result[j] = sum(a[i] * b[i][j])
 	for i := 0; i < aCols; i++ {
 		for j := 0; j < bCols; j++ {
 			result[j] += a[i] * b[i*bCols+j]
@@ -794,12 +847,129 @@ func (e *cudaEngine) matmul(a, b []float32) []float32 {
 	return result
 }
 
+func (e *cudaEngine) matmulGPU(inputData []float32, weightName string) ([]float32, error) {
+	if e.cuda == nil || e.cuda.Ctx == nil {
+		return nil, fmt.Errorf("CUDA context not available")
+	}
+
+	weightTensor, err := e.cuda.GetWeightTensor(weightName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get weight tensor: %w", err)
+	}
+
+	inputRows := 1
+	inputCols := len(inputData)
+	weightRows := weightTensor.Rows()
+
+	if inputCols != weightRows {
+		return nil, fmt.Errorf("matmul dimension mismatch: input cols=%d, weight rows=%d", inputCols, weightRows)
+	}
+
+	inputTensor, err := e.cuda.Ctx.NewTensorFP32(inputRows, inputCols)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create input tensor: %w", err)
+	}
+	defer inputTensor.Free()
+
+	if err := inputTensor.LoadFrom(inputData); err != nil {
+		return nil, fmt.Errorf("failed to load input data: %w", err)
+	}
+
+	outputTensor, err := e.cuda.Ctx.LinearF16(inputTensor, weightTensor)
+	if err != nil {
+		return nil, fmt.Errorf("failed to run GPU matmul: %w", err)
+	}
+	defer outputTensor.Free()
+
+	e.cuda.Ctx.Synchronize()
+
+	return outputTensor.ToHostF32(), nil
+}
+
+func (e *cudaEngine) attentionGPU(q, k, v []float32, kCache, vCache *device.CUDATensor, pos, heads, kvHeads, headDim, seqLen, windowSize int) ([]float32, error) {
+	if e.cuda == nil || e.cuda.Ctx == nil {
+		return nil, fmt.Errorf("CUDA context not available")
+	}
+
+	numHeads := heads
+	dim := headDim
+	batch := 1
+	seqLenQ := 1
+	kvSeqLen := pos + 1
+	scale := float32(1.0 / math.Sqrt(float64(dim)))
+
+	qTensor, err := e.cuda.Ctx.NewTensorFP32(batch*numHeads, headDim)
+	if err != nil {
+		return nil, err
+	}
+	defer qTensor.Free()
+	qTensor.LoadFrom(q)
+
+	kTensor, err := e.cuda.Ctx.NewTensorFP32(batch*kvHeads, headDim)
+	if err != nil {
+		return nil, err
+	}
+	defer kTensor.Free()
+	kTensor.LoadFrom(k)
+
+	vTensor, err := e.cuda.Ctx.NewTensorFP32(batch*kvHeads, headDim)
+	if err != nil {
+		return nil, err
+	}
+	defer vTensor.Free()
+	vTensor.LoadFrom(v)
+
+	outTensor, err := e.cuda.Ctx.NewTensorFP32(batch*numHeads, headDim)
+	if err != nil {
+		return nil, err
+	}
+	defer outTensor.Free()
+
+	useCache := 0
+	if kCache != nil && vCache != nil {
+		useCache = 1
+	}
+
+	e.cuda.Ctx.FusedAttention(qTensor, kTensor, vTensor, outTensor, kCache, vCache, batch, numHeads, seqLenQ, kvSeqLen, headDim, scale, useCache)
+	e.cuda.Ctx.Synchronize()
+
+	return outTensor.ToHostF32(), nil
+}
+
+func (e *cudaEngine) applyRoPEGPU(tensor []float32, pos int, theta float32, headDim int) error {
+	if e.cuda == nil || e.cuda.Ctx == nil {
+		return fmt.Errorf("CUDA context not available")
+	}
+
+	tensorGPU, err := e.cuda.Ctx.NewTensorFP32(1, len(tensor))
+	if err != nil {
+		return err
+	}
+	defer tensorGPU.Free()
+	tensorGPU.LoadFrom(tensor)
+
+	posIds := []int{pos}
+	e.cuda.Ctx.FusedRoPE(tensorGPU, posIds, 1, 1, 1, headDim, theta)
+	e.cuda.Ctx.Synchronize()
+
+	copy(tensor, tensorGPU.ToHostF32())
+	return nil
+}
+
 func (e *cudaEngine) applyRoPE(tensor []float32, pos int, theta, dim int) {
+	e.applyRoPEWithFactor(tensor, pos, theta, dim, 1.0)
+}
+
+func (e *cudaEngine) applyRoPEWithFactor(tensor []float32, pos int, theta, dim int, partialFactor float32) {
 	if len(tensor)%2 != 0 {
 		return
 	}
 
 	numHeads := len(tensor) / (dim * 2)
+	actualDim := dim
+	if partialFactor < 1.0 {
+		actualDim = int(float32(dim) * partialFactor)
+	}
 
 	for h := 0; h < numHeads; h++ {
 		offset := h * dim * 2
@@ -807,9 +977,14 @@ func (e *cudaEngine) applyRoPE(tensor []float32, pos int, theta, dim int) {
 			idx1 := offset + i
 			idx2 := offset + i + 1
 
-			freq := float32(float64(pos) / math.Pow(float64(theta), float64(i)/float64(dim)))
-			cos := float32(math.Cos(float64(freq)))
-			sin := float32(math.Sin(float64(freq)))
+			var freq float64
+			if i < actualDim {
+				freq = float64(pos) / math.Pow(float64(theta), float64(i)/float64(dim))
+			} else {
+				freq = float64(pos) / math.Pow(float64(theta), float64(actualDim)/float64(dim)-1.0)
+			}
+			cos := float32(math.Cos(freq))
+			sin := float32(math.Sin(freq))
 
 			x1 := tensor[idx1]
 			x2 := tensor[idx2]
@@ -836,7 +1011,7 @@ func (e *cudaEngine) storeKV(kCache, vCache *device.CUDATensor, pos int, k, v []
 	// This is a no-op since we don't have GPU access from Go currently
 }
 
-func (e *cudaEngine) attention(q, k, v [][]float32, kCache, vCache *device.CUDATensor, pos, heads, kvHeads, headDim, seqLen int) []float32 {
+func (e *cudaEngine) attentionWithWindow(q, k, v [][]float32, kCache, vCache *device.CUDATensor, pos, heads, kvHeads, headDim, seqLen, windowSize int) []float32 {
 	if len(q) == 0 || len(k) == 0 || len(v) == 0 {
 		return nil
 	}
@@ -846,18 +1021,21 @@ func (e *cudaEngine) attention(q, k, v [][]float32, kCache, vCache *device.CUDAT
 	scale := float32(1.0 / math.Sqrt(float64(dim)))
 
 	seqLenK := pos + 1
+	actualWindowSize := seqLenK
+	if windowSize > 0 && windowSize < seqLenK {
+		actualWindowSize = windowSize
+	}
+
 	allK := make([][]float32, kvHeads)
 	allV := make([][]float32, kvHeads)
 
 	for h := 0; h < kvHeads; h++ {
 		allK[h] = make([]float32, seqLenK*dim)
 		allV[h] = make([]float32, seqLenK*dim)
-		for i := 0; i < seqLenK-1; i++ {
+		for i := 0; i < seqLenK; i++ {
 			copy(allK[h][i*dim:(i+1)*dim], k[h])
 			copy(allV[h][i*dim:(i+1)*dim], v[h])
 		}
-		copy(allK[h][(seqLenK-1)*dim:seqLenK*dim], k[h])
-		copy(allV[h][(seqLenK-1)*dim:seqLenK*dim], v[h])
 	}
 
 	attn := make([][]float32, numHeads)
@@ -865,15 +1043,21 @@ func (e *cudaEngine) attention(q, k, v [][]float32, kCache, vCache *device.CUDAT
 		attn[h] = make([]float32, dim)
 	}
 
-	scores := make([]float32, seqLenK)
+	scores := make([]float32, actualWindowSize)
 
 	for h := 0; h < numHeads; h++ {
 		kvH := h / (numHeads / kvHeads)
 
-		for i := 0; i < seqLenK; i++ {
+		startIdx := 0
+		if seqLenK > actualWindowSize {
+			startIdx = seqLenK - actualWindowSize
+		}
+
+		for i := 0; i < actualWindowSize; i++ {
+			srcIdx := startIdx + i
 			var dot float32 = 0
 			for d := 0; d < dim; d++ {
-				dot += q[h][d] * allK[kvH][i*dim+d]
+				dot += q[h][d] * allK[kvH][srcIdx*dim+d]
 			}
 			scores[i] = dot * scale
 		}
@@ -899,9 +1083,10 @@ func (e *cudaEngine) attention(q, k, v [][]float32, kCache, vCache *device.CUDAT
 		}
 
 		for d := 0; d < dim; d++ {
-			var out float32
-			for i := 0; i < seqLenK; i++ {
-				out += scores[i] * allV[kvH][i*dim+d]
+			var out float32 = 0
+			for i := 0; i < actualWindowSize; i++ {
+				srcIdx := startIdx + i
+				out += scores[i] * allV[kvH][srcIdx*dim+d]
 			}
 			attn[h][d] = out
 		}
@@ -911,8 +1096,11 @@ func (e *cudaEngine) attention(q, k, v [][]float32, kCache, vCache *device.CUDAT
 	for h := 0; h < numHeads; h++ {
 		copy(result[h*dim:(h+1)*dim], attn[h])
 	}
-
 	return result
+}
+
+func (e *cudaEngine) attention(q, k, v [][]float32, kCache, vCache *device.CUDATensor, pos, heads, kvHeads, headDim, seqLen int) []float32 {
+	return e.attentionWithWindow(q, k, v, kCache, vCache, pos, heads, kvHeads, headDim, seqLen, 0)
 }
 
 func (e *cudaEngine) attentionFallback(q, k, v [][]float32) []float32 {
