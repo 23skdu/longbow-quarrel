@@ -1007,8 +1007,41 @@ func (e *cudaEngine) storeKV(kCache, vCache *device.CUDATensor, pos int, k, v []
 	if kCache == nil || vCache == nil || len(k) == 0 || len(k[0]) == 0 {
 		return
 	}
-	// Store current k/v to GPU cache at position
-	// This is a no-op since we don't have GPU access from Go currently
+
+	if e.cuda == nil || e.cuda.Ctx == nil {
+		return
+	}
+
+	heads := len(k)
+	headDim := len(k[0])
+
+	kFlat := make([]float32, heads*headDim)
+	for h := 0; h < heads; h++ {
+		copy(kFlat[h*headDim:(h+1)*headDim], k[h])
+	}
+
+	vFlat := make([]float32, heads*headDim)
+	for h := 0; h < heads; h++ {
+		copy(vFlat[h*headDim:(h+1)*headDim], v[h])
+	}
+
+	kTemp, err := e.cuda.Ctx.NewTensorFP32(heads, headDim)
+	if err != nil {
+		return
+	}
+	defer kTemp.Free()
+	_ = kTemp.LoadFrom(kFlat)
+
+	vTemp, err := e.cuda.Ctx.NewTensorFP32(heads, headDim)
+	if err != nil {
+		return
+	}
+	defer vTemp.Free()
+	_ = vTemp.LoadFrom(vFlat)
+
+	e.cuda.Ctx.CopyF16(kTemp, kCache)
+	e.cuda.Ctx.CopyF16(vTemp, vCache)
+	e.cuda.Ctx.Synchronize()
 }
 
 func (e *cudaEngine) attentionWithWindow(q, k, v [][]float32, kCache, vCache *device.CUDATensor, pos, heads, kvHeads, headDim, seqLen, windowSize int) []float32 {

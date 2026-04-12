@@ -90,7 +90,7 @@ func TestCUDACoherenceWrapping(t *testing.T) {
 		t.Skip("Skipping coherence test in short mode")
 	}
 
-	t.Skip("CUDA engine not implemented - this is a placeholder for CUDA coherence tests")
+	t.Skip("CUDA coherence test needs real model - skip for now")
 }
 
 func TestCUDAMultiTokenCoherence(t *testing.T) {
@@ -98,7 +98,7 @@ func TestCUDAMultiTokenCoherence(t *testing.T) {
 		t.Skip("Skipping coherence test in short mode")
 	}
 
-	t.Skip("CUDA engine not implemented - this is a placeholder for CUDA coherence tests")
+	t.Skip("CUDA coherence test needs real model - skip for now")
 }
 
 func TestCUDASelfConsistency(t *testing.T) {
@@ -106,5 +106,5 @@ func TestCUDASelfConsistency(t *testing.T) {
 		t.Skip("Skipping coherence test in short mode")
 	}
 
-	t.Skip("CUDA engine not implemented - this is a placeholder for CUDA coherence tests")
+	t.Skip("CUDA coherence test needs real model - skip for now")
 }
