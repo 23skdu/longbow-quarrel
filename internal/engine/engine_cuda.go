@@ -930,7 +930,7 @@ func (e *cudaEngine) attentionGPU(q, k, v []float32, kCache, vCache *device.CUDA
 		useCache = 1
 	}
 
-	e.cuda.Ctx.FusedAttention(qTensor, kTensor, vTensor, outTensor, kCache, vCache, batch, numHeads, seqLenQ, kvSeqLen, headDim, scale, useCache)
+	e.cuda.Ctx.FusedAttention(qTensor, kTensor, vTensor, outTensor, kCache, vCache, batch, numHeads, seqLenQ, kvSeqLen, headDim, scale, useCache, 0)
 	e.cuda.Ctx.Synchronize()
 
 	return outTensor.ToHostF32(), nil
@@ -1306,12 +1306,12 @@ func (e *cudaEngine) fusedAttentionGPU(q, k, v *device.CUDATensor, output, kCach
 	if kCache != nil && vCache != nil {
 		useCache = 1
 	}
-	e.cuda.Ctx.FusedAttention(q, k, v, output, kCache, vCache, batch, heads, seqLen, kvSeqLen, headDim, scale, useCache)
+	e.cuda.Ctx.FusedAttention(q, k, v, output, kCache, vCache, batch, heads, seqLen, kvSeqLen, headDim, scale, useCache, 0)
 }
 
 func (e *cudaEngine) flashAttentionGPU(q, k, v *device.CUDATensor, output *device.CUDATensor, batch, heads, seqLen, kvSeqLen, headDim int) {
 	scale := float32(1.0 / math.Sqrt(float64(headDim)))
-	e.cuda.Ctx.FlashFusedAttention(q, k, v, output, batch, heads, seqLen, kvSeqLen, headDim, scale)
+	e.cuda.Ctx.FlashFusedAttention(q, k, v, output, batch, heads, seqLen, kvSeqLen, headDim, scale, 0)
 }
 
 func (e *cudaEngine) fusedRoPEGPU(tensor *device.CUDATensor, posIds []int, batch, heads, seqLen, headDim int) {

@@ -26,20 +26,16 @@ func FuzzCUDAEngineCreation(f *testing.F) {
 		f.Skipf("Test model not found: %s", modelPath)
 	}
 
+	e, err := NewEngine(modelPath, config.Config{KVCacheSize: 2048})
+	if err != nil {
+		f.Fatalf("Failed to create CUDA engine: %v", err)
+	}
+	defer e.Close()
+
 	f.Fuzz(func(t *testing.T, kvCacheSize int) {
 		if kvCacheSize < 1 || kvCacheSize > 8192 {
 			t.Skip("Invalid KV cache size")
 		}
-
-		cfg := config.Config{
-			KVCacheSize: kvCacheSize,
-		}
-
-		e, err := NewEngine(modelPath, cfg)
-		if err != nil {
-			t.Fatalf("Failed to create CUDA engine: %v", err)
-		}
-		defer e.Close()
 
 		if e == nil {
 			t.Error("Engine is nil")
@@ -184,20 +180,16 @@ func FuzzCUDAKVCacheHandling(f *testing.F) {
 		f.Skipf("Test model not found: %s", modelPath)
 	}
 
+	e, err := NewEngine(modelPath, config.Config{KVCacheSize: 2048})
+	if err != nil {
+		f.Fatalf("Failed to create CUDA engine: %v", err)
+	}
+	defer e.Close()
+
 	f.Fuzz(func(t *testing.T, cacheSize int) {
 		if cacheSize < 128 || cacheSize > 4096 {
 			t.Skip("Invalid cache size")
 		}
-
-		cfg := config.Config{
-			KVCacheSize: cacheSize,
-		}
-
-		e, err := NewEngine(modelPath, cfg)
-		if err != nil {
-			t.Fatalf("Failed to create CUDA engine: %v", err)
-		}
-		defer e.Close()
 
 		tokens := []int{1, 2, 3, 4, 5}
 		samplerCfg := SamplerConfig{

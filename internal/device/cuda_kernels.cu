@@ -622,7 +622,7 @@ __global__ void fused_attention_kernel(
     const float* __restrict__ kCache,  // [batch, heads, seqLen, headDim] or nullptr
     const float* __restrict__ vCache,  // [batch, heads, seqLen, headDim] or nullptr
     int batch, int heads, int seqLen, int kvSeqLen, int headDim,
-    float scale, int useCache) {
+    float scale, int useCache, int windowSize) {
 
     int bh = blockIdx.x;
     int head = bh % heads;
@@ -647,8 +647,9 @@ __global__ void fused_attention_kernel(
     // Compute attention scores against K (with optional caching)
     int totalKV = kvSeqLen;
     float maxScore = -INFINITY;
+    int windowStart = (windowSize > 0 && windowSize < pos) ? pos - windowSize : 0;
 
-    for (int t = 0; t < totalKV; t++) {
+    for (int t = windowStart; t < pos + 1; t++) {
         float score = 0.0f;
         int kOffset;
         if (useCache && kCache) {
@@ -671,7 +672,7 @@ __global__ void fused_attention_kernel(
 
     // Second pass: softmax and weighted sum with V
     float sum = 0.0f;
-    for (int t = 0; t < totalKV; t++) {
+    for (int t = windowStart; t < pos + 1; t++) {
         float score = 0.0f;
         int kOffset, vOffset;
         if (useCache && kCache) {
@@ -704,7 +705,7 @@ __global__ void fused_attention_kernel(
     float invSum = 1.0f / (sum + 1e-8f);
     for (int d = tid; d < headDim; d += blockDim.x) {
         float val = 0.0f;
-        for (int t = 0; t < totalKV; t++) {
+        for (int t = windowStart; t < pos + 1; t++) {
             int vOffset;
             if (useCache && vCache) {
                 vOffset = ((batchIdx * heads + head) * kvSeqLen + t) * headDim;
@@ -907,7 +908,7 @@ __global__ void flash_fused_attention_kernel(
     const float* __restrict__ v,       // [batch, heads, kvSeqLen, headDim]
     float* __restrict__ output,        // [batch, heads, seqLen, headDim]
     int batch, int heads, int seqLen, int kvSeqLen, int headDim,
-    float scale) {
+    float scale, int windowSize) {
 
     int bh = blockIdx.x;
     int head = bh % heads;
@@ -938,7 +939,9 @@ __global__ void flash_fused_attention_kernel(
 
     // First pass: compute max score
     float threadMax = -INFINITY;
-    for (int t = 0; t < kvSeqLen; t += 32) {
+    int windowStart = (windowSize > 0 && windowSize < pos) ? pos - windowSize : 0;
+    int windowEnd = pos + 1;
+    for (int t = windowStart; t < windowEnd; t += 32) {
         int kOffset = ((batchIdx * heads + head) * kvSeqLen + t) * headDim;
 
         float score = 0.0f;
@@ -947,7 +950,7 @@ __global__ void flash_fused_attention_kernel(
         }
         score *= scale;
 
-        if (t + laneId < kvSeqLen && score > threadMax) {
+        if (t + laneId < windowEnd && score > threadMax) {
             threadMax = score;
         }
     }
@@ -964,7 +967,7 @@ __global__ void flash_fused_attention_kernel(
     }
 
     float threadSum = 0.0f;
-    for (int t = 0; t < kvSeqLen; t++) {
+    for (int t = windowStart; t < windowEnd; t++) {
         int kOffset = ((batchIdx * heads + head) * kvSeqLen + t) * headDim;
         int vOffset = ((batchIdx * heads + head) * kvSeqLen + t) * headDim;
 
@@ -1032,7 +1035,7 @@ extern "C" {
         void* output,
         const void* kCache, const void* vCache,
         int batch, int heads, int seqLen, int kvSeqLen, int headDim,
-        float scale, int useCache) {
+        float scale, int useCache, int windowSize) {
 
         dim3 grid(batch * heads * seqLen);
         dim3 block(256, 1);
@@ -1041,7 +1044,7 @@ extern "C" {
         fused_attention_kernel<<<grid, block, sharedSize, stream>>>(
             (const float*)q, (const float*)k, (const float*)v,
             (float*)output, (const float*)kCache, (const float*)vCache,
-            batch, heads, seqLen, kvSeqLen, headDim, scale, useCache);
+            batch, heads, seqLen, kvSeqLen, headDim, scale, useCache, windowSize);
     }
 
     void cudaFlashFusedAttention(
@@ -1049,7 +1052,7 @@ extern "C" {
         const void* q, const void* k, const void* v,
         void* output,
         int batch, int heads, int seqLen, int kvSeqLen, int headDim,
-        float scale) {
+        float scale, int windowSize) {
 
         dim3 grid(batch * heads, seqLen);
         dim3 block(128);
@@ -1058,7 +1061,7 @@ extern "C" {
         flash_fused_attention_kernel<<<grid, block, sharedSize, stream>>>(
             (const float*)q, (const float*)k, (const float*)v,
             (float*)output,
-            batch, heads, seqLen, kvSeqLen, headDim, scale);
+            batch, heads, seqLen, kvSeqLen, headDim, scale, windowSize);
     }
 
     void cudaFusedRoPE(

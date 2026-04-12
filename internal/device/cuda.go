@@ -35,8 +35,8 @@ extern void cudaDequantQ6_K(cudaStream_t stream, void* src, void* dst, int numEl
 extern void cudaDequantQ6_KToBF16(cudaStream_t stream, void* src, void* dst, int numElements);
 
 // Fused kernel exports
-extern void cudaFusedAttention(cudaStream_t stream, const void* q, const void* k, const void* v, void* output, const void* kCache, const void* vCache, int batch, int heads, int seqLen, int kvSeqLen, int headDim, float scale, int useCache);
-extern void cudaFlashFusedAttention(cudaStream_t stream, const void* q, const void* k, const void* v, void* output, int batch, int heads, int seqLen, int kvSeqLen, int headDim, float scale);
+extern void cudaFusedAttention(cudaStream_t stream, const void* q, const void* k, const void* v, void* output, const void* kCache, const void* vCache, int batch, int heads, int seqLen, int kvSeqLen, int headDim, float scale, int useCache, int windowSize);
+extern void cudaFlashFusedAttention(cudaStream_t stream, const void* q, const void* k, const void* v, void* output, int batch, int heads, int seqLen, int kvSeqLen, int headDim, float scale, int windowSize);
 extern void cudaFusedRoPE(cudaStream_t stream, void* tensor, const int* posIds, int batch, int heads, int seqLen, int headDim, float theta);
 extern void cudaFusedSwiGLU(cudaStream_t stream, const void* input, const void* gateWeight, const void* upWeight, const void* downWeight, void* output, int batch, int dim, int hiddenDim);
 extern void cudaFusedMLP(cudaStream_t stream, const void* input, const void* gateWeight, const void* upWeight, const void* downWeight, void* output, int batch, int dim, int hiddenDim);
@@ -296,7 +296,7 @@ func (t *Tensor) StoreKV(v *Tensor, kCache, vCache *Tensor, pos, heads, headDim,
 		nil, nil, nil, nil, // Q, K, V, output not used for pure store
 		kCache.cudaPtr.devPtr, vCache.cudaPtr.devPtr,
 		1, C.int(heads), 1, C.int(pos+1), C.int(headDim),
-		1.0, 1) // useCache=1 signals store
+		1.0, 1, 0) // useCache=1 signals store, windowSize=0 for full attention
 }
 
 func (t *Tensor) storeKVTurbo(v *Tensor, kCache, vCache *Tensor, pos, heads, headDim, windowSize int) {
@@ -850,21 +850,21 @@ func (c *CUDAContext) ZeroF16(t *CUDATensor) {
 	C.cudaMemsetAsync(t.devPtr, 0, C.size_t(t.sizeBytes), c.stream)
 }
 
-func (c *CUDAContext) FusedAttention(q, k, v, output, kCache, vCache *CUDATensor, batch, heads, seqLen, kvSeqLen, headDim int, scale float32, useCache int) {
+func (c *CUDAContext) FusedAttention(q, k, v, output, kCache, vCache *CUDATensor, batch, heads, seqLen, kvSeqLen, headDim int, scale float32, useCache, windowSize int) {
 	C.cudaFusedAttention(
 		c.stream,
 		q.devPtr, k.devPtr, v.devPtr, output.devPtr,
 		kCache.devPtr, vCache.devPtr,
 		C.int(batch), C.int(heads), C.int(seqLen), C.int(kvSeqLen), C.int(headDim),
-		C.float(scale), C.int(useCache))
+		C.float(scale), C.int(useCache), C.int(windowSize))
 }
 
-func (c *CUDAContext) FlashFusedAttention(q, k, v, output *CUDATensor, batch, heads, seqLen, kvSeqLen, headDim int, scale float32) {
+func (c *CUDAContext) FlashFusedAttention(q, k, v, output *CUDATensor, batch, heads, seqLen, kvSeqLen, headDim int, scale float32, windowSize int) {
 	C.cudaFlashFusedAttention(
 		c.stream,
 		q.devPtr, k.devPtr, v.devPtr, output.devPtr,
 		C.int(batch), C.int(heads), C.int(seqLen), C.int(kvSeqLen), C.int(headDim),
-		C.float(scale))
+		C.float(scale), C.int(windowSize))
 }
 
 func (c *CUDAContext) FusedRoPE(tensor *CUDATensor, posIds []int, batch, heads, seqLen, headDim int, theta float32) {
