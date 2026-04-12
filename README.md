@@ -1,82 +1,81 @@
-
 <img width="2784" height="1536" alt="quarrel_logo" src="https://github.com/user-attachments/assets/e1ab45ae-f4de-4f68-91a5-fe931a720c21" />
 
-# longbow-quarrel
+# Longbow-Quarrel
 
-High-performance LLM inference engine written in Go with Metal GPU acceleration for Apple Silicon, with optional CUDA support for Linux.
+High-performance LLM inference engine written in Go with Metal GPU acceleration for Apple Silicon, with optional CUDA support for NVIDIA GPUs on Linux.
 
-## Supported Models
+## Features
 
-| Architecture | Status | Notes |
-|--------------|--------|-------|
-| Llama 3 / 3.1 | Supported | Full attention + sliding window |
-| Llama 3.2 | Supported | 1B-8B variants |
-| Mistral | Supported | Sliding window attention |
-| Gemma 4 | Beta | Hybrid attention (unit tests passing) |
-| Qwen2 | Supported | |
-| SmolLM2 | Supported | 135M/360M variants |
+### Model Support
+- **Architectures**: Llama 3/3.1/3.2, Mistral, Gemma 4, Qwen2, SmolLM2
+- **Quantizations**: Q4_K, Q6_K, Q8_0, FP16, FP32 (via GGUF format)
 
-## Supported Quantizations
+### GPU Acceleration
+- **Metal**: Custom compute kernels for Apple Silicon (MatMul, RMSNorm, RoPE, SwiGLU, Attention)
+- **CUDA**: Fused kernels with cuDNN flash attention support
 
-| Type | Status | Use Case |
-|------|--------|----------|
-| Q4_K_M | Full acceleration | Default, best quality/size |
-| Q4_K_S | Full acceleration | Smaller models |
-| Q6_K | Full acceleration | Higher precision |
-| Q3_K | Full acceleration | Memory constrained |
-| IQ4_NL | Full acceleration | Improved 4-bit |
-| FP16 | Full acceleration | High quality |
-| FP32 | Supported | Reference |
+### Advanced Attention
+- Sliding window attention (Mistral 4096 tokens)
+- Gemma4 hybrid attention (5 sliding + 1 full per 6 layers)
+- Grouped Query Attention (GQA)
 
-## Performance
-
-- Custom Metal compute kernels (MatMul, RMSNorm, RoPE, SwiGLU, Attention, KV cache)
-- CUDA kernels for Linux deployment
-- Fused kernel optimizations (RMSNorm+Linear, attention scaling)
-- Sliding window attention for Mistral/Gemma4 architectures
-- Grouped Query Attention (GQA) support
-- Thread-safe async GPU dispatch with tensor pooling and memory budget
-
-## Technical Stack
-
-- **Language**: Go with CGO
-- **GPU**: Metal (macOS/Apple Silicon), CUDA (Linux/NVIDIA)
-- **Protocol**: HTTP/REST, WebSocket
-- **Metrics**: Prometheus export at `/metrics`
+### API
+- OpenAI-compatible endpoints (`/v1/chat/completions`, `/v1/completions`)
+- WebSocket streaming
+- Prometheus metrics at `/metrics`
 
 ## Quick Start
 
 ```bash
-# Run with Ollama model (macOS/Metal)
-go run -tags darwin,metal ./cmd/generate_text/main.go -model gemma4:e4b -prompt "Hello"
+# Run with GGUF model (macOS/Metal)
+go run -tags darwin,metal ./cmd/simple/main.go -model model.gguf -prompt "Hello"
 
-# Or with GGUF file
-./generate_text -model /path/to/model.gguf -prompt "Your prompt"
+# Run with Docker
+docker run ghcr.io/23skdu/longbow-quarrel:latest --model model.gguf -prompt "Hello"
+```
+
+## Benchmark
+
+```bash
+# Kernel benchmark
+./cmd/benchmark --mode kernel --size 4096
+
+# Inference benchmark  
+./cmd/benchmark --mode inference --model model.gguf --prompt "Your prompt"
 ```
 
 ## Testing
 
 ```bash
 # Unit tests
-go test -tags darwin,metal ./internal/device/...
+go test ./internal/device/...
 
-# Model loading tests
-go test -tags darwin,metal ./internal/engine/...
+# Engine tests
+go test ./internal/engine/...
 ```
 
-## Gemma4 Inference (In Progress)
+## Docker Images
 
-Gemma4 uses a hybrid attention mechanism requiring specific handling in the forward pass:
+| Image | Description |
+|-------|-------------|
+| `ghcr.io/23skdu/longbow-quarrel:latest` | Linux CPU (amd64) |
+| `ghcr.io/23skdu/longbow-quarrel:cuda-latest` | Linux CUDA (amd64) |
 
-1. **Q/K Normalization**: Apply `attn_q_norm` and `attn_k_norm` RMSNorm before Q/K projections
-2. **Hybrid Attention**: Per-layer switching between sliding window (local) and full attention (global)
-3. **Partial RoPE (p-RoPE)**: Apply rotation to only 25% of dimensions for full attention layers
+## Project Structure
 
-### Gemma4 Architecture Details
+```
+cmd/
+  simple/          # Simple CLI inference
+  benchmark/       # Performance benchmarking
+  webui/           # Web UI with API
+  quarrel/        # CUDA CLI (Linux only)
+internal/
+  engine/         # Inference engine
+  device/         # GPU backends (Metal, CUDA, CPU)
+  gguf/           # GGUF parsing
+  tokenizer/      # Tokenization
+```
 
-| Layer Type | Sliding Window | RoPE | Head Dim | KV Heads |
-|------------|----------------|------|----------|----------|
-| Sliding (5x) | 512 | Full (10K theta) | 256 | More |
-| Full (1x) | N/A | Partial (0.25, 1M theta) | 512 | Fewer |
+---
 
-Unit tests for Gemma4 operations are passing. Full inference integration requires implementing the hybrid attention pattern in the `Layer()` method.
+*See `docs/` for detailed documentation.*
