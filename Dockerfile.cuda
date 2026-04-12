@@ -28,10 +28,10 @@ RUN echo "INPUT(-lcudart)" > /usr/lib/x86_64-linux-gnu/libcuda.a && \
     ln -sf /usr/lib/x86_64-linux-gnu/libcuda.a /usr/lib/x86_64-linux-gnu/libcuda.so
 
 # Install a more recent Go version
-RUN wget -q https://go.dev/dl/go1.23.5.linux-amd64.tar.gz && \
+RUN wget -q https://go.dev/dl/go1.26.2.linux-amd64.tar.gz && \
     rm -rf /usr/local/go && \
-    tar -C /usr/local -xzf go1.23.5.linux-amd64.tar.gz && \
-    rm go1.23.5.linux-amd64.tar.gz
+    tar -C /usr/local -xzf go1.26.2.linux-amd64.tar.gz && \
+    rm go1.26.2.linux-amd64.tar.gz
 
 ENV PATH=/usr/local/go/bin:$PATH
 

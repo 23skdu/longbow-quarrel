@@ -1,5 +1,5 @@
 # Build stage for Linux (no Metal support)
-FROM golang:1.25-alpine AS linux-builder
+FROM golang:1.26-alpine AS linux-builder
 
 # Install build dependencies
 RUN apk add --no-cache build-base
@@ -21,7 +21,7 @@ FROM nvidia/cuda:12.4-devel-ubuntu22.04 AS cuda-builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    golang-1.25 git build-essential pkg-config \
+    golang-1.26 git build-essential pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
 ENV CUDA_PATH=/usr/local/cuda \
