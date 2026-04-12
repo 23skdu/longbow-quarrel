@@ -11,20 +11,37 @@
 # -----------------------------------------------------------------------------
 # Build Stage: CUDA Compilation
 # -----------------------------------------------------------------------------
-FROM nvidia/cuda:12.4-devel-ubuntu22.04 AS cuda-builder
+FROM nvidia/cuda:12.4.0-devel-ubuntu22.04 AS cuda-builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    golang-1.25 \
+    golang-go \
     git \
     build-essential \
     pkg-config \
+    wget \
+    libcudnn8-dev \
     && rm -rf /var/lib/apt/lists/*
+
+# Install CUDA stub library for linking
+RUN echo "INPUT(-lcudart)" > /usr/lib/x86_64-linux-gnu/libcuda.a && \
+    ln -sf /usr/lib/x86_64-linux-gnu/libcuda.a /usr/lib/x86_64-linux-gnu/libcuda.so
+
+# Install a more recent Go version
+RUN wget -q https://go.dev/dl/go1.23.5.linux-amd64.tar.gz && \
+    rm -rf /usr/local/go && \
+    tar -C /usr/local -xzf go1.23.5.linux-amd64.tar.gz && \
+    rm go1.23.5.linux-amd64.tar.gz
+
+ENV PATH=/usr/local/go/bin:$PATH
 
 # Set environment variables for CUDA
 ENV CUDA_PATH=/usr/local/cuda \
     PATH=/usr/local/cuda/bin:$PATH \
     GO111MODULE=on
+
+ENV CGO_LDFLAGS="-L/usr/local/cuda/lib64 -L/usr/lib/x86_64-linux-gnu -lcudart -lcublas -lcudnn" \
+    CGO_CFLAGS="-I/usr/local/cuda/include"
 
 WORKDIR /app
 
@@ -36,24 +53,17 @@ RUN go mod download
 COPY . .
 
 # Build with CUDA support
-# Uses Ollama's CUDA library path for compatibility
-ENV CGO_LDFLAGS="-L/usr/local/cuda/lib64 -L/usr/lib/x86_64-linux-gnu -lcudart -lcuda -lcublas -lcudnn"
-ENV CGO_CFLAGS="-I/usr/local/cuda/include"
-
 RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -tags cuda \
-    -ldflags "-linkmode=external -extldflags=-static" \
     -o quarrel-cuda ./cmd/quarrel
 
 # -----------------------------------------------------------------------------
 # Runtime Stage: Minimal CUDA Runtime
 # -----------------------------------------------------------------------------
-FROM nvidia/cuda:12.4-runtime-ubuntu22.04
+FROM nvidia/cuda:12.4.0-runtime-ubuntu22.04
 
-# Install minimal runtime dependencies
+# Install cuDNN runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libcuda1 \
-    libcublas-12-4 \
-    libcusparse-12-4 \
+    libcudnn8 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -62,13 +72,12 @@ WORKDIR /app
 COPY --from=cuda-builder /usr/local/cuda/lib64/libcudart.so* /usr/local/cuda/lib64/
 COPY --from=cuda-builder /usr/local/cuda/lib64/libcuda.so* /usr/lib/x86_64-linux-gnu/
 
-# Copy the CUDA binary
+# Copy the CUDA binary and kernels
 COPY --from=cuda-builder /app/quarrel-cuda ./quarrel
+COPY --from=cuda-builder /app/internal/device/libcuda_kernels.so /usr/local/lib/libcuda_kernels.so
 
-# Create symlinks for CUDA libraries
-RUN ln -sf libcudart.so.13.0.96 /usr/local/cuda/lib64/libcudart.so && \
-    ln -sf libcudart.so.13.0.96 /usr/local/cuda/lib64/libcudart.so.13 && \
-    ldconfig
+# Set library path
+ENV LD_LIBRARY_PATH=/usr/local/lib:/usr/local/cuda/lib64:/usr/lib/x86_64-linux-gnu
 
 # Set default command
 CMD ["./quarrel", "--help"]

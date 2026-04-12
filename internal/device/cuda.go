@@ -3,7 +3,7 @@
 package device
 
 /*
-#cgo linux,amd64 LDFLAGS: -L${SRCDIR} -lcuda_kernels -lcublas -lcudnn -lcudart -L/usr/lib/x86_64-linux-gnu -l:libcuda.so.1
+#cgo linux,amd64 LDFLAGS: -L${SRCDIR} -lcuda_kernels -lcublas -lcudnn -lcudart
 #cgo linux,amd64 CFLAGS: -I/usr/local/cuda/include -I${SRCDIR}
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
