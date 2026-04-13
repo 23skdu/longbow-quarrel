@@ -85,7 +85,7 @@ void Metal_TurboQuant_Decode(MetalWrapperRef ctx, MetalBufferRef input,
                               int offOut, MetalBufferRef scaleIn,
                               int offScale, int blockSize, int qjlRows, int numBlocks);
 
-void Metal_FlashAttention2_F16(MetalWrapperRef ctx, MetalBufferRef q, MetalBufferRef k_cache, MetalBufferRef v_cache, MetalBufferRef output, int num_heads, int kv_heads, int headDim, int seq_len, int block_size, MetalBufferRef block_table);
+void Metal_FlashAttention2_F16(MetalWrapperRef ctx, MetalBufferRef q, MetalBufferRef k_cache, MetalBufferRef v_cache, MetalBufferRef output, int num_heads, int kv_heads, int headDim, int seq_len, int block_size, MetalBufferRef block_table, int max_blocks_per_seq, int batchSize);
 void Metal_Linear_LoRA_Add_F16(MetalWrapperRef ctx, MetalBufferRef input, int offIn, MetalBufferRef A, int offA, MetalBufferRef B, int offB, MetalBufferRef output, int offOut, int M, int N, int K, float scale);
 void Metal_Vision_Patch_Embed_F32(MetalWrapperRef ctx, MetalBufferRef pixels, int offPixels, MetalBufferRef weights, int offW, MetalBufferRef output, int offOut, int patchSize, int visionDim, int numPatchesX);
 void Metal_AllReduce_F16(MetalWrapperRef ctx, MetalBufferRef data, int offset, int count);
@@ -1679,11 +1679,9 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		}
 
 		if blockTable != nil {
-			C.Metal_AttPaged_F16(t.ctx.ref, qPart.buf, C.int(qPart.Offset+offQ),
-				kCache.buf, C.int(kCache.Offset), vCache.buf, C.int(vCache.Offset),
-				attOut.buf, C.int(attOut.Offset+offAtt),
-				blockTable.buf, C.int(blockTable.Offset),
-				C.int(p), C.int(heads), C.int(kvHeads), C.int(headDim), C.int(blockSize), C.int(attnWindowSize))
+			// Optimized FlashAttention-2 for Paged Cache
+			maxBlocks := blockTable.Cols()
+			t.ctx.FlashAttention2(qPart.Slice(i, 1), kCache, vCache, attOut.Slice(i, 1), p, heads, kvHeads, headDim, blockSize, blockTable, maxBlocks, 1)
 		} else {
 			C.Metal_AttFused_F16(t.ctx.ref, qPart.buf, C.int(qPart.Offset+offQ),
 				kCache.buf, C.int(kCache.Offset), vCache.buf, C.int(vCache.Offset),
@@ -2717,11 +2715,19 @@ func (ctx *Context) TurboQuantDecode(input, rotationMatrix, scaleIn *Tensor, blo
 }
 */
 
-// AttentionPagedBatch performs paged attention across a batch of sequences
-func (ctx *Context) AttentionPagedBatch(q, kCache, vCache, output, batchPositions, blockTables *Tensor, maxBlocksPerSeq, heads, kvHeads, headDim, blockSize, batchSize int) {
+// FlashAttention2 executes the memory-fused FlashAttention-2 kernel for paged KV cache
+func (ctx *Context) FlashAttention2(q, kCache, vCache, output *Tensor, seqLen, numHeads, kvHeads, headDim, blockSize int, blockTable *Tensor, maxBlocksPerSeq, batchSize int) {
 	ctx.ExecMu.Lock()
 	defer ctx.ExecMu.Unlock()
-	C.Metal_AttPagedBatch_F16(ctx.ref, q.buf, C.int(q.Offset), kCache.buf, C.int(kCache.Offset), vCache.buf, C.int(vCache.Offset), output.buf, C.int(output.Offset), batchPositions.buf, C.int(batchPositions.Offset), blockTables.buf, C.int(blockTables.Offset), C.int(maxBlocksPerSeq), C.int(heads), C.int(kvHeads), C.int(headDim), C.int(blockSize), C.int(batchSize))
+	C.Metal_FlashAttention2_F16(ctx.ref, q.buf, kCache.buf, vCache.buf, output.buf,
+		C.int(numHeads), C.int(kvHeads), C.int(headDim), C.int(seqLen), C.int(blockSize),
+		blockTable.buf, C.int(maxBlocksPerSeq), C.int(batchSize))
+}
+
+// AttentionPagedBatch performs paged attention across a batch of sequences
+func (ctx *Context) AttentionPagedBatch(q, kCache, vCache, output, batchPositions, blockTables *Tensor, maxBlocksPerSeq, heads, kvHeads, headDim, blockSize, batchSize int) {
+	// Transition to FlashAttention2 for better performance
+	ctx.FlashAttention2(q, kCache, vCache, output, 1, heads, kvHeads, headDim, blockSize, blockTables, maxBlocksPerSeq, batchSize)
 }
 
 // StoreKVPagedBatch stores K and V projections for a batch of sequences into their respective physical blocks
@@ -2730,3 +2736,4 @@ func (ctx *Context) StoreKVPagedBatch(k, v, kCache, vCache, physicalPositions *T
 	defer ctx.ExecMu.Unlock()
 	C.Metal_StoreKVPagedBatch_F16(ctx.ref, k.buf, C.int(k.Offset), v.buf, C.int(v.Offset), kCache.buf, C.int(kCache.Offset), vCache.buf, C.int(vCache.Offset), physicalPositions.buf, C.int(physicalPositions.Offset), C.int(kvDim), C.int(batchSize))
 }
+

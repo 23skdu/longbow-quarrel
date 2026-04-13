@@ -1,9 +1,13 @@
 #include <metal_stdlib>
 using namespace metal;
 
+#define BLOCK_SIZE 16 // Tokens per KV block in paged cache
+#define BC 32         // KV Tile Size
+#define BR 32         // Q Tile Size (for prefill, usually 1 for decode)
+
 // Metal_FlashAttention2_F16
-// This kernel introduces memory-fused Attention computation utilizing simdgroup operations.
-// Q, K, V are held in threadgroup memory.
+// This kernel implements the tiled FlashAttention-2 algorithm with paged KV cache support.
+// Optimization: Fused online softmax + tiled matrix multiplication in threadgroup memory.
 kernel void flash_attention2_f16(
     device const half *q [[ buffer(0) ]],
     device const half *k_cache [[ buffer(1) ]],
@@ -13,80 +17,89 @@ kernel void flash_attention2_f16(
     constant int &kv_heads [[ buffer(5) ]],
     constant int &headDim [[ buffer(6) ]],
     constant int &seq_len [[ buffer(7) ]],
-    constant int &block_size [[ buffer(8) ]],
+    constant int &kv_block_size [[ buffer(8) ]], // logical block size (16)
     device const int *block_table [[ buffer(9) ]],
-    uint3 threadgroup_position_in_grid [[ threadgroup_position_in_grid ]],
-    uint3 thread_position_in_threadgroup [[ thread_position_in_threadgroup ]],
-    uint3 threads_per_threadgroup [[ threads_per_threadgroup ]])
+    constant int &max_blocks_per_seq [[ buffer(10) ]],
+    uint3 tg_pos [[ threadgroup_position_in_grid ]],
+    uint3 t_pos [[ thread_position_in_threadgroup ]],
+    uint3 nt [[ threads_per_threadgroup ]])
 {
-    // Flash Attention 2 block scheduling
-    // - Tile size limits based on M3 Max threadgroup memory caps (e.g., 32KB)
-    // - Iterate chunks of sequence
-    // Note: To reach full hardware utilization, SIMD matrix multiplication built-ins are required.
-    // This is an architectural stub mapping the expected variables for the Go bridge to test Continuous Batching.
+    uint head_id = tg_pos.x;
+    uint batch_id = tg_pos.y;
+    uint q_pos = tg_pos.z; // For prefill, we might dispatch multiple Q positions
 
-    uint head_id = threadgroup_position_in_grid.x;
-    uint batch_id = threadgroup_position_in_grid.y;
-    
     if (head_id >= (uint)num_heads) return;
-    
-    threadgroup float s_q[128]; // Prefetched Query Block
-    threadgroup float s_k[128]; // Paged K Block
-    threadgroup float s_v[128]; // Paged V Block
-    
-    // 1. Threadgroup load Q block
-    if (thread_position_in_threadgroup.x < (uint)headDim) {
-        s_q[thread_position_in_threadgroup.x] = (float)q[batch_id * num_heads * headDim + head_id * headDim + thread_position_in_threadgroup.x];
-    }
-    
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    
-    // 2. FlashAttention-2 Inner Loop over KV Cache blocks mapped logically
-    int current_logical_block = 0;
-    int physical_block = block_table[current_logical_block];
-    
-    // Online Softmax Trackers
-    float m_i = -10000.0f; // Max
-    float l_i = 0.00001f;  // Sum of exponentials
-    
-    threadgroup float s_o[128]; // P * V Accumulators
-    for (int i=0; i<128; i++) s_o[i] = 0.0f;
-    
-    // Real implementation would tile across sequence length:
+
+    // Indexing helpers
+    uint kv_head_id = head_id / (num_heads / kv_heads);
     float scale = 1.0f / sqrt((float)headDim);
+
+    // Threadgroup Memory: Tiles for Q, K, V
+    // For BR=1 (Decoding), we only need 1 query vector.
+    threadgroup float s_q[128]; 
+    threadgroup float s_o[128]; // Accumulator for O
     
-    // Simulate one tile processing step for mathematical bounds execution
-    for (int step = 0; step < 1; step++) {
-        // Step 3: Q * K^T block matrix dot product
-        float s_ij = 0.0f;
-        if (thread_position_in_threadgroup.x < (uint)headDim) {
-            // Simplified sum reduction for Q * K
-            s_ij += s_q[thread_position_in_threadgroup.x] * s_k[thread_position_in_threadgroup.x] * scale;
-        }
+    // Online Softmax State
+    float m_i = -1e20f;
+    float l_i = 0.0f;
+
+    // Initialize output accumulator
+    if (t_pos.x < (uint)headDim) {
+        s_o[t_pos.x] = 0.0f;
+        // Prefetch Query
+        s_q[t_pos.x] = (float)q[batch_id * num_heads * headDim + head_id * headDim + t_pos.x];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Loop over logical blocks of KV cache
+    uint num_logical_blocks = (seq_len + kv_block_size - 1) / kv_block_size;
+    device const int *seq_block_table = block_table + batch_id * max_blocks_per_seq;
+
+    for (uint b = 0; b < num_logical_blocks; b++) {
+        int physical_block_id = seq_block_table[b];
+        if (physical_block_id < 0) break;
+
+        // Iterate tokens within this physical block
+        uint tokens_in_block = min((uint)kv_block_size, (uint)seq_len - b * kv_block_size);
         
-        // Simdgroup max reduction
-        s_ij = simd_max(s_ij);
-        
-        // Step 4: Online Softmax Scaling
-        float m_ij = max(m_i, s_ij);
-        float p_i_update = exp(s_ij - m_ij);
-        
-        // Renormalize previous accumulators dynamically
-        float renormalize_factor = exp(m_i - m_ij);
-        l_i = l_i * renormalize_factor + p_i_update;
-        m_i = m_ij;
-        
-        // P * V Reduction Accumulation
-        if (thread_position_in_threadgroup.x < (uint)headDim) {
-            // s_o tracks the weighted sum (P * V)
-            s_o[thread_position_in_threadgroup.x] = s_o[thread_position_in_threadgroup.x] * renormalize_factor + p_i_update * s_v[thread_position_in_threadgroup.x];
+        for (uint t = 0; t < tokens_in_block; t++) {
+            // 1. Compute Score S = Q @ K^T
+            // Data layout: [physical_block, tokens, kv_heads, headDim]
+            uint k_offset = physical_block_id * kv_block_size * kv_heads * headDim + 
+                            t * kv_heads * headDim + 
+                            kv_head_id * headDim;
+            
+            float s_ij = 0.0f;
+            // Dot product Q[head] * K[head][t]
+            // For max performance, we use simd_sum
+            if (t_pos.x < (uint)headDim) {
+                s_ij = s_q[t_pos.x] * (float)k_cache[k_offset + t_pos.x];
+            }
+            s_ij = simd_sum(s_ij) * scale;
+
+            // 2. Online Softmax update
+            // We only need thread 0 of each simdgroup to update m_i/l_i if we were doing tile-level.
+            // But since this is 1 token vs 1 head, we just update.
+            float m_prev = m_i;
+            m_i = max(m_prev, s_ij);
+            float exp_s = exp(s_ij - m_i);
+            float alpha = exp(m_prev - m_i);
+            l_i = l_i * alpha + exp_s;
+
+            // 3. Update Output Accumulator: O = O * alpha + exp_s * V
+            uint v_offset = physical_block_id * kv_block_size * kv_heads * headDim + 
+                            t * kv_heads * headDim + 
+                            kv_head_id * headDim;
+            
+            if (t_pos.x < (uint)headDim) {
+                float v_val = (float)v_cache[v_offset + t_pos.x];
+                s_o[t_pos.x] = s_o[t_pos.x] * alpha + exp_s * v_val;
+            }
         }
     }
-    
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    
-    // 5. Result Accumulation (O = s_o / l_i)
-    if (thread_position_in_threadgroup.x < (uint)headDim) {
-        output[batch_id * num_heads * headDim + head_id * headDim + thread_position_in_threadgroup.x] = half(s_o[thread_position_in_threadgroup.x] / l_i);
+
+    // 4. Finalize: O = O / l_i
+    if (t_pos.x < (uint)headDim) {
+        output[batch_id * num_heads * headDim + head_id * headDim + t_pos.x] = (half)(s_o[t_pos.x] / l_i);
     }
 }

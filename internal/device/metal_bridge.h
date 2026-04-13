@@ -427,6 +427,13 @@ void Metal_StoreKVPagedBatch_F16(MetalWrapperRef ctx, MetalBufferRef k, int offK
 
 #endif
 
+void Metal_FlashAttention2_F16(MetalWrapperRef ctx, MetalBufferRef q,
+                               MetalBufferRef k_cache, MetalBufferRef v_cache,
+                               MetalBufferRef output, int num_heads,
+                               int kv_heads, int headDim, int seq_len,
+                               int block_size, MetalBufferRef block_table,
+                               int max_blocks_per_seq, int batchSize);
+
 void Metal_Linear_LoRA_Add_F16(MetalWrapperRef ctx, MetalBufferRef input, int offIn,
                                 MetalBufferRef A, int offA, MetalBufferRef B, int offB,
                                 MetalBufferRef output, int offOut, int M, int N, int K,

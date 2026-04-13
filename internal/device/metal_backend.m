@@ -92,6 +92,7 @@
 @property(strong) id<MTLComputePipelineState> pipelineAllReduce;
 @property(strong) id<MTLComputePipelineState> pipelineAttPagedBatch_F16;
 @property(strong) id<MTLComputePipelineState> pipelineStoreKVPagedBatch_F16;
+@property(strong) id<MTLComputePipelineState> pipelineFlashAttention2;
 @property(strong) id<MTLCommandBuffer> currentCommandBuffer;
 @property(strong) id<MTLComputeCommandEncoder> currentEncoder;
 @property(strong) id<MTLCommandBuffer> lastCommandBuffer;
@@ -293,6 +294,7 @@ MetalWrapperRef Metal_Init(const char *libSource) {
   ctx.pipelineLinearLoRA = loadPipeline(ctx, @"linear_lora_add_f16");
   ctx.pipelineVisionPatchEmbed = loadPipeline(ctx, @"vision_patch_embed_f32");
   ctx.pipelineAllReduce = loadPipeline(ctx, @"all_reduce_sum_f16");
+  ctx.pipelineFlashAttention2 = loadPipeline(ctx, @"flash_attention2_f16");
 
 #if __has_feature(objc_arc)
   return (__bridge_retained MetalWrapperRef)ctx;
@@ -2150,4 +2152,37 @@ void Metal_StoreKVPagedBatch_F16(MetalWrapperRef ctx, MetalBufferRef k, int offK
   [enc dispatchThreads:MTLSizeMake(kvDim, batchSize, 1)
       threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
   [mc barrier];
+}
+
+void Metal_FlashAttention2_F16(MetalWrapperRef ctx_ref, MetalBufferRef q,
+                               MetalBufferRef k_cache, MetalBufferRef v_cache,
+                               MetalBufferRef output, int num_heads,
+                               int kv_heads, int headDim, int seq_len,
+                               int block_size, MetalBufferRef block_table,
+                               int max_blocks_per_seq, int batchSize) {
+  @autoreleasepool {
+    MetalWrapper *mc = (__bridge MetalWrapper *)ctx_ref;
+    id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
+    [enc setComputePipelineState:mc.pipelineFlashAttention2];
+
+    [enc setBuffer:(__bridge id<MTLBuffer>)q offset:0 atIndex:0];
+    [enc setBuffer:(__bridge id<MTLBuffer>)k_cache offset:0 atIndex:1];
+    [enc setBuffer:(__bridge id<MTLBuffer>)v_cache offset:0 atIndex:2];
+    [enc setBuffer:(__bridge id<MTLBuffer>)output offset:0 atIndex:3];
+    [enc setBytes:&num_heads length:4 atIndex:4];
+    [enc setBytes:&kv_heads length:4 atIndex:5];
+    [enc setBytes:&headDim length:4 atIndex:6];
+    [enc setBytes:&seq_len length:4 atIndex:7];
+    [enc setBytes:&block_size length:4 atIndex:8];
+    [enc setBuffer:(__bridge id<MTLBuffer>)block_table offset:0 atIndex:9];
+    [enc setBytes:&max_blocks_per_seq length:4 atIndex:10];
+
+    // Grid: (heads, batch, 1)
+    MTLSize gridSize = MTLSizeMake(num_heads, batchSize, 1);
+    // Threadgroup matches HeadDim for efficient reduction
+    MTLSize threadGroupSize = MTLSizeMake(headDim, 1, 1);
+
+    [enc dispatchThreadgroups:gridSize threadsPerThreadgroup:threadGroupSize];
+    [mc barrier];
+  }
 }

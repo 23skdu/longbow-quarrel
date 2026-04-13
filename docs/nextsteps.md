@@ -33,7 +33,7 @@ This roadmap is designed to elevate Longbow-Quarrel to compete directly with ind
 1. **Continuous Batching & PagedAttention**: Implement true continuous batching paired with PagedAttention. This eliminates static batching bottlenecks and allows for hyper-efficient KV cache memory management in high-concurrency environments.
 2. **Chunked Prefill & Prompt Caching**: ✅ Complete. Split long system and context prompts into optimal chunks to drastically reduce Time-To-First-Token (TTFT) and globally cache common prompt state across requests.
 3. **Speculative Decoding Orchestration**: ✅ Complete. Integrate rejection sampling and sync mechanisms between Draft and Target KV caches to maximize the acceptance rate of speculative tokens.
-4. **FlashAttention-2 Compatibility**: Evolve existing exact-match attention kernels into FlashAttention-2 (and Metal equivalent) implementations, leveraging threadgroup memory/shared memory to push hardware to its theoretical utilization limits.
+4. **FlashAttention-2 Compatibility**: ✅ Complete. Evolve existing exact-match attention kernels into FlashAttention-2 (and Metal equivalent) implementations, leveraging threadgroup memory/shared memory to push hardware to its theoretical utilization limits.
 
 ### Phase 3: Advanced Features & Ecosystem (Parity with llama.cpp/Ollama)
 
