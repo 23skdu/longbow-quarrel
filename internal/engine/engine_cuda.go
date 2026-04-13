@@ -106,7 +106,6 @@ type cudaEngine struct {
 	config           config.Config
 	cuda             *device.CUDAModel
 	scratch          *device.LayerScratch
-	dequantizedCache map[string]*device.CUDATensor
 	mu               sync.RWMutex
 }
 
@@ -216,7 +215,6 @@ func NewcudaEngine(modelPath string, cfg config.Config) (Engine, error) {
 	e := &cudaEngine{
 		model:            f,
 		tokenizer:        tok,
-		dequantizedCache: make(map[string]*device.CUDATensor),
 		config: config.Config{
 			Architecture:  arch,
 			Dim:           dim,
