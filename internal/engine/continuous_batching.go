@@ -22,6 +22,8 @@ type InferenceRequest struct {
 
 	TokenCallback  func(int)
 	LogitsCallback func([]float32)
+
+	PrefillCompleted bool // Set when the full prompt has been ingested into KV cache
 }
 
 // RequestQueue handles thread-safe enqueuing and dequeuing of raw incoming requests.
@@ -86,17 +88,27 @@ func (cm *ContinuousBatchManager) Submit(req *InferenceRequest) {
 }
 
 // Step advances the state of the batching iteration, pulling from the waiting queue if resources permit.
-func (cm *ContinuousBatchManager) Step(maxBatchSize int, kvCache *PagedKVCache) ([]*Sequence, error) {
+func (cm *ContinuousBatchManager) Step(maxBatchSize int, kvCache *PagedKVCache, promptCache *PromptCache) ([]*Sequence, error) {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
+	const PrefillChunkSize = 512
 	availableSlots := maxBatchSize - len(cm.running)
 
 	// Pull new sequences into the prefill set if we have capacity
 	if availableSlots > 0 {
 		newReqs := cm.waitingQueue.PopUpTo(availableSlots)
 		for _, req := range newReqs {
-			// Allocate Sequence state
+			seqIDStr := fmt.Sprintf("seq-%d", req.ID)
+			
+			// 1. Check Prompt Cache for shared prefixes
+			var matchedCount int
+			var cachedBlocks []int32
+			if promptCache != nil {
+				matchedCount, cachedBlocks = promptCache.MatchPrefix(req.Prompt)
+			}
+			
+			// 2. Allocate Sequence state
 			seq := &Sequence{
 				ID:        req.ID,
 				PromptLen: len(req.Prompt),
@@ -106,12 +118,16 @@ func (cm *ContinuousBatchManager) Step(maxBatchSize int, kvCache *PagedKVCache) 
 				Result:    req.Result,
 				Err:       req.Err,
 				Pos:       0,
-				Status:    SequenceStatusRunning, // Immediate transition for prefill
+				Status:    SequenceStatusRunning,
 			}
-			// Attach callbacks from existing request if needed
-			// (Note: InferenceRequest should have these fields now)
 			seq.TokenCallback = req.TokenCallback
 			seq.LogitsCallback = req.LogitsCallback
+
+			// 3. If cache hit, adopt blocks and advance position
+			if matchedCount > 0 {
+				_ = kvCache.AttachPrefixBlocks(seqIDStr, cachedBlocks)
+				seq.Pos = matchedCount
+			}
 
 			cm.prefill[seq.ID] = seq
 		}
@@ -119,16 +135,36 @@ func (cm *ContinuousBatchManager) Step(maxBatchSize int, kvCache *PagedKVCache) 
 
 	// For the active step, gather what needs computation
 	var active []*Sequence
-	// 1. Prefill sequences (batch them or handle first)
+	
+	// Process prefill sequences (with chunking)
 	for id, seq := range cm.prefill {
-		active = append(active, seq)
-		delete(cm.prefill, id)
-		cm.running[id] = seq
+		// Calculate how many tokens to process this step
+		remainingPrompt := seq.PromptLen - seq.Pos
+		if remainingPrompt > 0 {
+			// Chunked prefill
+			toProcess := remainingPrompt
+			if toProcess > PrefillChunkSize {
+				toProcess = PrefillChunkSize
+			}
+			
+			// This sequence is active for this step
+			active = append(active, seq)
+			
+			// If we fully processed the prompt, move to running
+			if seq.Pos + toProcess >= seq.PromptLen {
+				seq.PrefillCompleted = true
+				delete(cm.prefill, id)
+				cm.running[id] = seq
+			}
+		} else {
+			// Already at decoding stage
+			delete(cm.prefill, id)
+			cm.running[id] = seq
+		}
 	}
 
-	// 2. Already running sequences
+	// Add already running sequences
 	for _, seq := range cm.running {
-		// Only add to active batch if not already added by prefill logic in this tick
 		found := false
 		for _, a := range active {
 			if a.ID == seq.ID {

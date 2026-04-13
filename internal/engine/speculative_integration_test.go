@@ -7,7 +7,7 @@ import (
 )
 
 type specMockEngine struct {
-	mockEngine
+	MockEngine
 	rollbackCalled bool
 }
 
@@ -21,8 +21,8 @@ func (e *specMockEngine) RollbackKV(seqID int, stepCount int) {
 }
 
 func TestSpeculativeManager_Coverage(t *testing.T) {
-	target := &specMockEngine{mockEngine: mockEngine{cfg: config.Config{MaxTokens: 10}}}
-	draft := &specMockEngine{mockEngine: mockEngine{}}
+	target := &specMockEngine{MockEngine: MockEngine{cfg: config.Config{MaxTokens: 10}}}
+	draft := &specMockEngine{MockEngine: MockEngine{}}
 	sm := NewSpeculativeManager(target, draft, 1)
 
 	t.Run("Initialize", func(t *testing.T) {

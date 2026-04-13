@@ -148,6 +148,7 @@ type Sequence struct {
 	Err            chan error
 	TokenCallback  func(int)
 	LogitsCallback func([]float32)
+	PrefillCompleted bool // Set when the full prompt has been ingested into KV cache
 	mu             sync.RWMutex
 }
 

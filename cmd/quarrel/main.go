@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+	"net"
 
 	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/device"
@@ -20,6 +21,7 @@ import (
 	"github.com/23skdu/longbow-quarrel/internal/ollama"
 	"github.com/23skdu/longbow-quarrel/internal/tokenizer"
 	"github.com/23skdu/longbow-quarrel/internal/metrics"
+	"github.com/23skdu/longbow-quarrel/internal/api"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -38,6 +40,7 @@ var (
 	topP         = flag.Float64("topp", 0.95, "Top-P sampling")
 	repPenalty   = flag.Float64("penalty", 1.1, "Repetition penalty")
 	streamOutput = flag.Bool("stream", false, "Stream tokens as they are generated")
+	flightAddr   = flag.String("flight", ":50051", "Address to serve Arrow Flight inference")
 )
 
 func main() {
@@ -130,6 +133,14 @@ func main() {
 		log.Fatalf("Failed to initialize engine: %v", err)
 	}
 	defer e.Close()
+
+	// Initialize and start Arrow Flight Server
+	flightServer := api.NewInferenceFlightServer(*flightAddr, e, tok)
+	go func() {
+		if err := flightServer.Serve(); err != nil {
+			logger.Log.Error("Flight server failed", "error", err)
+		}
+	}()
 
 	promptTokens := tok.Encode(*prompt)
 	fmt.Printf("Prompt tokens: %d\n", len(promptTokens))

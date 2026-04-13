@@ -20,6 +20,7 @@ type metalEngine struct {
 	weights      *LlamaWeights
 	cache        *PagedKVCache
 	BatchManager *ContinuousBatchManager
+	PromptCache  *PromptCache
 
 	// Quality Evaluation
 	qualityEval *QualityEvaluator

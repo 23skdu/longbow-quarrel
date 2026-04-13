@@ -5,7 +5,7 @@ import (
 	"github.com/23skdu/longbow-quarrel/internal/logger"
 )
 
-type mockEngine struct {
+type MockEngine struct {
 	cfg config.Config
 }
 
@@ -15,10 +15,10 @@ func init() {
 
 func NewMockEngine(modelPath string, cfg config.Config) (Engine, error) {
 	logger.Log.Info("Mock engine initialized", "model", modelPath)
-	return &mockEngine{cfg: cfg}, nil
+	return &MockEngine{cfg: cfg}, nil
 }
 
-func (e *mockEngine) Infer(tokens []int, count int, cfg SamplerConfig) ([]int, error) {
+func (e *MockEngine) Infer(tokens []int, count int, cfg SamplerConfig) ([]int, error) {
 	result := make([]int, count)
 	for i := range result {
 		result[i] = 42 // Mock token
@@ -26,13 +26,13 @@ func (e *mockEngine) Infer(tokens []int, count int, cfg SamplerConfig) ([]int, e
 	return result, nil
 }
 
-func (e *mockEngine) InferWithLogits(tokens []int, count int, cfg SamplerConfig) ([]int, []float32, error) {
+func (e *MockEngine) InferWithLogits(tokens []int, count int, cfg SamplerConfig) ([]int, []float32, error) {
 	tokens_gen, _ := e.Infer(tokens, count, cfg)
 	logits := make([]float32, 128) // Small mock vocab
 	return tokens_gen, logits, nil
 }
 
-func (e *mockEngine) InferWithCallback(tokens []int, count int, cfg SamplerConfig, callback func(token int)) ([]int, error) {
+func (e *MockEngine) InferWithCallback(tokens []int, count int, cfg SamplerConfig, callback func(token int)) ([]int, error) {
 	result := make([]int, count)
 	for i := range result {
 		result[i] = 42
@@ -43,7 +43,7 @@ func (e *mockEngine) InferWithCallback(tokens []int, count int, cfg SamplerConfi
 	return result, nil
 }
 
-func (e *mockEngine) InferWithCallbackLogits(tokens []int, count int, cfg SamplerConfig, tokenCallback func(int), logitsCallback func([]float32)) ([]int, error) {
+func (e *MockEngine) InferWithCallbackLogits(tokens []int, count int, cfg SamplerConfig, tokenCallback func(int), logitsCallback func([]float32)) ([]int, error) {
 	result := make([]int, count)
 	logits := make([]float32, 128)
 	for i := range result {
@@ -58,26 +58,26 @@ func (e *mockEngine) InferWithCallbackLogits(tokens []int, count int, cfg Sample
 	return result, nil
 }
 
-func (e *mockEngine) Config() config.Config {
+func (e *MockEngine) Config() config.Config {
 	return e.cfg
 }
 
-func (e *mockEngine) Close() {
+func (e *MockEngine) Close() {
 	logger.Log.Info("Mock engine closed")
 }
 
-func (e *mockEngine) SwapModel(modelPath string, cfg config.Config) error {
+func (e *MockEngine) SwapModel(modelPath string, cfg config.Config) error {
 	e.cfg = cfg
 	return nil
 }
 
-func (e *mockEngine) GetSeqCachePos(seqID int) int {
+func (e *MockEngine) GetSeqCachePos(seqID int) int {
 	return 0
 }
 
-func (e *mockEngine) ForwardDraft(tokens []int) ([][]float32, error) {
+func (e *MockEngine) ForwardDraft(tokens []int) ([][]float32, error) {
 	return nil, nil
 }
 
-func (e *mockEngine) RollbackKV(seqID int, stepCount int) {
+func (e *MockEngine) RollbackKV(seqID int, stepCount int) {
 }

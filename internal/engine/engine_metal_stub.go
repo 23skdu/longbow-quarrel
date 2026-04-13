@@ -9,7 +9,10 @@ import (
 
 // metalEngine is a no-op stub for platforms where Metal is not available.
 type metalEngine struct {
-	config config.Config
+	config       config.Config
+	cache        *PagedKVCache
+	BatchManager *ContinuousBatchManager
+	PromptCache  *PromptCache
 
 	// Lifespan Control (Stubbed)
 	stopChan chan struct{}

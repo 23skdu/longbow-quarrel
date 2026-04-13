@@ -6,6 +6,8 @@ import (
 	"io"
 	"net"
 
+	"github.com/23skdu/longbow-quarrel/internal/engine"
+	"github.com/23skdu/longbow-quarrel/internal/tokenizer"
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/flight"
@@ -19,44 +21,76 @@ type InferenceFlightServer struct {
 	flight.BaseFlightServer
 	allocator memory.Allocator
 	addr      string
+	engine    engine.Engine
+	tokenizer *tokenizer.Tokenizer
 }
 
 // NewInferenceFlightServer initializes the Arrow Flight generation server.
-func NewInferenceFlightServer(addr string) *InferenceFlightServer {
+func NewInferenceFlightServer(addr string, e engine.Engine, t *tokenizer.Tokenizer) *InferenceFlightServer {
 	return &InferenceFlightServer{
 		allocator: memory.NewGoAllocator(),
 		addr:      addr,
+		engine:    e,
+		tokenizer: t,
 	}
 }
 
 // DoGet streams generated tokens directly using Arrow Array formatting.
 func (s *InferenceFlightServer) DoGet(tckt *flight.Ticket, stream flight.FlightService_DoGetServer) error {
-	// The ticket contains the sequence ID / context to attach to.
-	// Schema: [token_id: int32, logits: list<float32>, metadata: string]
+	prompt := string(tckt.Ticket)
+	if prompt == "" {
+		prompt = "Continue training" // Default fallback
+	}
+
+	promptTokens := s.tokenizer.Encode(prompt)
+
+	// Metadata for GPU discovery
+	meta := arrow.NewMetadata([]string{"QUARREL:device_id"}, []string{"0"})
+
 	schema := arrow.NewSchema([]arrow.Field{
 		{Name: "token_id", Type: arrow.PrimitiveTypes.Int32},
 		{Name: "logits", Type: arrow.FixedSizeListOf(int32(10), arrow.PrimitiveTypes.Float32), Nullable: true},
-		{Name: "metadata", Type: arrow.BinaryTypes.String, Nullable: true},
-	}, nil)
+		{Name: "text", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, &meta)
 
 	writer := flight.NewRecordWriter(stream, ipc.WithSchema(schema))
 	defer writer.Close()
 
-	builder := array.NewRecordBuilder(s.allocator, schema)
-	defer builder.Release()
+	// Capture generated tokens into this channel
+	tokenChan := make(chan int, 128)
+	errChan := make(chan error, 1)
 
-	// Mock one record for coverage
-	tokenIDBuilder := builder.Field(0).(*array.Int32Builder)
-	tokenIDBuilder.Append(42)
-	
-	// Ensure all fields have same row count
-	builder.Field(1).(*array.FixedSizeListBuilder).AppendNull()
-	builder.Field(2).(*array.StringBuilder).AppendNull()
-	
-	rec := builder.NewRecord()
-	defer rec.Release()
-	
-	return writer.Write(rec)
+	go func() {
+		_, err := s.engine.InferWithCallback(promptTokens, 100, engine.SamplerConfig{Temperature: 0.7}, func(token int) {
+			tokenChan <- token
+		})
+		close(tokenChan)
+		errChan <- err
+	}()
+
+	for token := range tokenChan {
+		builder := array.NewRecordBuilder(s.allocator, schema)
+		
+		tokenIDBuilder := builder.Field(0).(*array.Int32Builder)
+		tokenIDBuilder.Append(int32(token))
+		
+		// Ensure all fields have same row count
+		builder.Field(1).(*array.FixedSizeListBuilder).AppendNull()
+		
+		textBuilder := builder.Field(2).(*array.StringBuilder)
+		textBuilder.Append(s.tokenizer.Decode([]int{token}))
+		
+		rec := builder.NewRecord()
+		err := writer.Write(rec)
+		rec.Release()
+		builder.Release()
+		
+		if err != nil {
+			return err
+		}
+	}
+
+	return <-errChan
 }
 
 
@@ -75,11 +109,13 @@ func (s *InferenceFlightServer) DoPut(stream flight.FlightService_DoPutServer) e
 
 // GetSchema returns the Arrow schema for the requested generation stream.
 func (s *InferenceFlightServer) GetSchema(ctx context.Context, desc *flight.FlightDescriptor) (*flight.SchemaResult, error) {
+	meta := arrow.NewMetadata([]string{"QUARREL:device_id"}, []string{"0"})
+
 	schema := arrow.NewSchema([]arrow.Field{
 		{Name: "token_id", Type: arrow.PrimitiveTypes.Int32},
 		{Name: "logits", Type: arrow.FixedSizeListOf(10, arrow.PrimitiveTypes.Float32), Nullable: true},
 		{Name: "metadata", Type: arrow.BinaryTypes.String, Nullable: true},
-	}, nil)
+	}, &meta)
 	return &flight.SchemaResult{
 		Schema: flight.SerializeSchema(schema, s.allocator),
 	}, nil

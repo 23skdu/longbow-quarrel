@@ -31,7 +31,7 @@ This roadmap is designed to elevate Longbow-Quarrel to compete directly with ind
 ### Phase 2: Performance & Concurrency (Parity with vLLM)
 
 1. **Continuous Batching & PagedAttention**: Implement true continuous batching paired with PagedAttention. This eliminates static batching bottlenecks and allows for hyper-efficient KV cache memory management in high-concurrency environments.
-2. **Chunked Prefill & Prompt Caching**: Split long system and context prompts into optimal chunks to drastically reduce Time-To-First-Token (TTFT) and globally cache common prompt state across requests.
+2. **Chunked Prefill & Prompt Caching**: ✅ Complete. Split long system and context prompts into optimal chunks to drastically reduce Time-To-First-Token (TTFT) and globally cache common prompt state across requests.
 3. **FlashAttention-2 Compatibility**: Evolve existing exact-match attention kernels into FlashAttention-2 (and Metal equivalent) implementations, leveraging threadgroup memory/shared memory to push hardware to its theoretical utilization limits.
 4. **TurboQuant KV Cache Compression**: Formally integrate the TurboQuant implementation (PolarQuant orthogonal rotation + QJLTransform 1-bit residual mapping) to drastically compress the context window capacity without sacrificing response coherence.
 

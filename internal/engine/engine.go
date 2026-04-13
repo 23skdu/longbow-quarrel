@@ -333,6 +333,7 @@ func NewMetalEngine(modelPath string, config config.Config) (Engine, error) {
 
 	e.TraceTracker = NewActivationTraceTracker(e.config.Layers)
 	e.BatchManager = NewContinuousBatchManager()
+	e.PromptCache = NewPromptCache()
 	
 	e.stopChan = make(chan struct{})
 	e.doneChan = make(chan struct{})
@@ -1353,7 +1354,7 @@ func (e *metalEngine) runBatchLoop() {
 		default:
 		}
 		// Pull active sequences from the manager
-		active, _ := e.BatchManager.Step(16, e.cache)
+		active, _ := e.BatchManager.Step(16, e.cache, e.PromptCache)
 		if len(active) == 0 {
 			time.Sleep(10 * time.Millisecond)
 			continue
@@ -1391,6 +1392,15 @@ func (e *metalEngine) runBatchLoop() {
 			}
 
 			// Check for completion
+			if seq.PrefillCompleted {
+				// We just finished prefill, cache the resulting blocks
+				blocks := e.cache.GetSequenceBlocks(fmt.Sprintf("seq-%d", seq.ID))
+				if blocks != nil {
+					e.PromptCache.Insert(seq.Tokens[:seq.PromptLen], blocks)
+				}
+				seq.PrefillCompleted = false // Only insert once
+			}
+
 			if token == 2 || len(seq.Tokens) >= seq.MaxTokens { // 2 = EOS
 				select {
 				case seq.Result <- seq.Tokens:

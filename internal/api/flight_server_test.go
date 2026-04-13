@@ -9,6 +9,8 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/flight"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"github.com/23skdu/longbow-quarrel/internal/engine"
+	"github.com/23skdu/longbow-quarrel/internal/tokenizer"
 )
 
 func TestInferenceFlightServer_DoGet(t *testing.T) {
@@ -19,7 +21,9 @@ func TestInferenceFlightServer_DoGet(t *testing.T) {
 	}
 
 	serverAddr := l.Addr().String()
-	server := NewInferenceFlightServer(serverAddr)
+	mockEngine := &engine.MockEngine{}
+	mockTok := &tokenizer.Tokenizer{}
+	server := NewInferenceFlightServer(serverAddr, mockEngine, mockTok)
 	
 	grpcServer := grpc.NewServer()
 	flight.RegisterFlightServiceServer(grpcServer, server)

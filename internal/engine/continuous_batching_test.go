@@ -31,7 +31,7 @@ func TestContinuousBatchManager_Lifecycle(t *testing.T) {
 
 	// 2. Step (Orchestration)
 	// We pass 0 blocks (dummy cache) just to check if it pulls from queue
-	active, _ := mgr.Step(4, nil)
+	active, _ := mgr.Step(4, nil, nil)
 	if len(active) != 1 {
 		t.Errorf("Expected 1 active sequence, got %d", len(active))
 	}
@@ -66,5 +66,5 @@ func TestContinuousBatchManager_AbortAll(t *testing.T) {
 func TestContinuousBatchManager_Preemption(t *testing.T) {
 	// Dummy for coverage
 	mgr := NewContinuousBatchManager()
-	mgr.Step(0, nil)
+	mgr.Step(0, nil, nil)
 }

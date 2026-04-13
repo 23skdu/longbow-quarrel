@@ -143,6 +143,27 @@ func (c *PagedKVCache) allocateBlock() (int32, error) {
 	return block, nil
 }
 
+// AttachPrefixBlocks maps existing physical blocks into a new sequence's block table.
+// This is used by the PromptCache to share pre-computed prefixes.
+func (c *PagedKVCache) AttachPrefixBlocks(seqID string, blocks []int32) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if _, exists := c.blockTables[seqID]; exists {
+		return fmt.Errorf("sequence %s already has a block table", seqID)
+	}
+
+	// Copy the blocks and increment ref counts
+	table := make([]int32, len(blocks))
+	for i, block := range blocks {
+		table[i] = block
+		c.blockRefs[block]++
+	}
+	c.blockTables[seqID] = table
+
+	return nil
+}
+
 // ForkSequence creates a new sequence ID that shares the block table of the source sequence ID.
 func (c *PagedKVCache) ForkSequence(src string, dst string) error {
 	c.mu.Lock()
@@ -165,6 +186,21 @@ func (c *PagedKVCache) ForkSequence(src string, dst string) error {
 	c.blockTables[dst] = dstTable
 
 	return nil
+}
+
+// GetSequenceBlocks returns the physical block IDs assigned to a sequence.
+func (c *PagedKVCache) GetSequenceBlocks(seqID string) []int32 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	table := c.blockTables[seqID]
+	if table == nil {
+		return nil
+	}
+	
+	blocks := make([]int32, len(table))
+	copy(blocks, table)
+	return blocks
 }
 
 // FreeSequence frees the block table for a sequence, decrementing block ref counts.
