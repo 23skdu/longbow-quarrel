@@ -14,7 +14,6 @@ import (
 	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/device"
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
-	"github.com/23skdu/longbow-quarrel/internal/metrics"
 	"github.com/23skdu/longbow-quarrel/internal/tokenizer"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -120,7 +119,7 @@ func NewcudaEngine(modelPath string, cfg config.Config) (Engine, error) {
 		arch = v
 	}
 
-	ctx, err := device.NewCUDAContext()
+	ctx, err := device.NewContext()
 	if err != nil {
 		f.Close()
 		cudaEngineFailed.WithLabelValues(arch, "context_creation_failed").Inc()
@@ -273,6 +272,14 @@ func (e *cudaEngine) SwapModel(newModelPath string, newConfig config.Config) err
 
 func (e *cudaEngine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig SamplerConfig) ([]int, error) {
 	return e.InferWithCallbackLogits(inputTokens, tokensToGenerate, samplerConfig, nil, nil)
+}
+
+func (e *cudaEngine) InferWithLogits(inputTokens []int, tokensToGenerate int, samplerConfig SamplerConfig) ([]int, []float32, error) {
+	var lastLogits []float32
+	result, err := e.InferWithCallbackLogits(inputTokens, tokensToGenerate, samplerConfig, nil, func(l []float32) {
+		lastLogits = l
+	})
+	return result, lastLogits, err
 }
 
 func (e *cudaEngine) InferWithCallback(inputTokens []int, tokensToGenerate int, samplerConfig SamplerConfig, callback func(int)) ([]int, error) {
@@ -567,11 +574,5 @@ func init() {
 	RegisterEngine("cuda", NewcudaEngine)
 }
 
-func getKV(f *gguf.GGUFFile, keys ...string) (interface{}, bool) {
-	for _, k := range keys {
-		if v, ok := f.KV[k]; ok {
-			return v, true
-		}
-	}
 	return nil, false
 }
