@@ -541,6 +541,9 @@ func (c *Context) NewTensorFP32Pooled(rows, cols int) *Tensor {
 
 func (c *Context) newTensorFP32Internal(rows, cols int) *Tensor {
 	sizeBytes := rows * cols * 4
+	if sizeBytes == 0 {
+		return &Tensor{ctx: c, sizeBytes: 0, rows: rows, cols: cols, dataType: DataTypeF32}
+	}
 	buf := C.Metal_Alloc(c.ref, C.longlong(sizeBytes))
 	if buf == nil {
 		panic("Metal_Alloc returned nil!")
@@ -766,6 +769,10 @@ func (t *Tensor) LoadFrom(data []float32) error {
 			fmt.Sprintf("data size %d does not match tensor size %d",
 				len(data), t.rows*t.cols),
 			"tensor_data")
+	}
+
+	if len(data) == 0 {
+		return nil
 	}
 
 	if t.dataType == DataTypeF32 {
@@ -1158,6 +1165,9 @@ func (t *Tensor) Linear(weight *Tensor) (*Tensor, error) {
 // LinearInto performs Linear using existing output tensor (scratch buffer)
 // Returns error if dimensions are incompatible
 func (t *Tensor) linearIntoInternal(weight *Tensor, out *Tensor, scale float32) {
+	if weight == nil || out == nil {
+		return
+	}
 	if t.dataType == DataTypeF32 {
 		t.linearF32IntoInternal(weight, out, scale)
 		return

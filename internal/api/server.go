@@ -107,6 +107,16 @@ func (s *Server) CompletionsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.Prompt == "" {
+		http.Error(w, "prompt is required", http.StatusBadRequest)
+		return
+	}
+
+	if s.Tokenizer == nil || s.Engine == nil {
+		http.Error(w, "Inference components not initialized", http.StatusServiceUnavailable)
+		return
+	}
+
 	tokens := s.Tokenizer.Encode(req.Prompt)
 	resTokens, err := s.Engine.Infer(tokens, req.MaxTokens, nil)
 	if err != nil {

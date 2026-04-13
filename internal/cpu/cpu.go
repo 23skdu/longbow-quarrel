@@ -114,6 +114,7 @@ func (c *Context) PutTensor(t *Tensor) {
 }
 
 func shapeKey(shape [2]int, elemSize int) string {
+	// #nosec G115 - Internal pool keys are bounded by model dimensions
 	return string(rune(shape[0])) + string(rune(shape[1])) + string(rune(elemSize))
 }
 

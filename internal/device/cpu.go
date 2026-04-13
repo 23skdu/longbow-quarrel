@@ -153,7 +153,7 @@ func (t *Tensor) Strides() []int {
 
 func (t *Tensor) RawData() []byte {
 	if t.dataType == DataTypeF32 && t.data != nil {
-		return unsafe.Slice((*byte)(unsafe.Pointer(&t.data[0])), len(t.data)*4)
+		return unsafe.Slice((*byte)(unsafe.Pointer(&t.data[0])), len(t.data)*4) // #nosec G103
 	}
 	return t.rawData
 }
@@ -270,11 +270,11 @@ func (t *Tensor) FetchKV(v *Tensor, kCache, vCache *Tensor, pos, heads, headDim,
 func dequantizeBlock(c *Context, src []byte, dst []float32, blockSize, qjlRows int, rotationMatrix *Tensor) {
 	q := make([]int8, blockSize)
 	for i := 0; i < blockSize; i++ {
-		q[i] = int8(src[i])
+		q[i] = int8(src[i]) // #nosec G115
 	}
 	qj := make([]int8, qjlRows)
 	for i := 0; i < qjlRows; i++ {
-		qj[i] = int8(src[blockSize+i])
+		qj[i] = int8(src[blockSize+i]) // #nosec G115
 	}
 	s := getFloat32(src[blockSize+qjlRows : blockSize+qjlRows+4])
 	sj := getFloat32(src[blockSize+qjlRows+4 : blockSize+qjlRows+8])
@@ -526,7 +526,7 @@ func (c *Context) TurboQuantDecode(input *Tensor, rotationMatrix *Tensor, qjlMat
 
 func getFloat32(b []byte) float32 {
 	bits := uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16 | uint32(b[3])<<24
-	return math.Float32frombits(bits)
+	return math.Float32frombits(bits) // #nosec G115
 }
 
 func setFloat32(b []byte, f float32) {

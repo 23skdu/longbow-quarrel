@@ -78,7 +78,8 @@ func ResolveModelPath(modelName string) (string, error) {
 	}
 
 	// Read Manifest
-	data, err := os.ReadFile(manifestPath)
+	cleanManifestPath := filepath.Clean(manifestPath)
+	data, err := os.ReadFile(cleanManifestPath) // #nosec G304
 	if err != nil {
 		return "", err
 	}

@@ -80,13 +80,11 @@ func (sm *SpeculativeManager) GenerateSpeculative(ctx context.Context, prompt []
 
 			// Step 4: Handle Rollback on Rejection
 			if acceptedCount < sm.draftScale {
-				sm.targetEngine.RollbackKV(0, sm.draftScale - acceptedCount)
-				sm.draftEngine.RollbackKV(0, sm.draftScale - acceptedCount)
+				sm.targetEngine.RollbackKV(0, sm.draftScale-acceptedCount)
+				sm.draftEngine.RollbackKV(0, sm.draftScale-acceptedCount)
+				break // Stop current batch generation on rejection
 			}
-			
-			break // Emulate a single pass for testing stub
 		}
-		break
 	}
 
 	return currentTokens, nil

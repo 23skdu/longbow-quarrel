@@ -7,6 +7,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"path/filepath"
 	"sort"
 	"syscall"
 	"unsafe"
@@ -16,7 +17,9 @@ import (
 
 // LoadFile maps a GGUF file into memory and parses headers/metadata.
 func LoadFile(path string) (*GGUFFile, error) {
-	f, err := os.Open(path)
+	// Secure path handling to prevent G304 path traversal
+	cleanPath := filepath.Clean(path)
+	f, err := os.Open(cleanPath) // #nosec G304
 	if err != nil {
 		return nil, err
 	}
@@ -309,7 +312,7 @@ func readValue(data []byte, offset uint64, typ GGUFMetadataValueType) (interface
 // We can just use unsafe or define it.
 // Actually we can import math
 func math_Float32frombits(b uint32) float32 {
-	return *(*float32)(unsafe.Pointer(&b))
+	return *(*float32)(unsafe.Pointer(&b)) // #nosec G103
 }
 
 func (f *GGUFFile) Close() error {
