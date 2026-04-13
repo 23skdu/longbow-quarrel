@@ -620,14 +620,6 @@ func (e *cudaEngine) forward(token int, pos int, allTokens []int) ([]float32, er
 		kCache := e.cuda.GetKCache(layer)
 		vCache := e.cuda.GetVCache(layer)
 
-		// Debug: before attention
-		if token == 0 && pos == 0 && layer == 0 {
-			q3d := e.viewAsTensor(q, heads, headDim)
-			k3d := e.viewAsTensor(k, kvHeads, headDim)
-			v3d := e.viewAsTensor(v, kvHeads, headDim)
-			log.Printf("DEBUG: before attention: q3d[0][0:5]=%v, k3d[0][0:5]=%v, v3d[0][0:5]=%v", q3d[0][:5], k3d[0][:5], v3d[0][:5])
-		}
-
 		var attnOut []float32
 		attnWindowSize := 0
 		if isGemma4 {
@@ -636,13 +628,10 @@ func (e *cudaEngine) forward(token int, pos int, allTokens []int) ([]float32, er
 				attnWindowSize = gemma4SlidingWindowSize
 			}
 		}
-		if attnWindowSize > 0 {
-			attnOut = e.attentionWithWindow(q3d, k3d, v3d, kCache, vCache, pos, heads, kvHeads, headDim, e.config.SeqLen, attnWindowSize)
-		} else {
-			attnOut = e.attention(q3d, k3d, v3d, kCache, vCache, pos, heads, kvHeads, headDim, e.config.SeqLen)
-		}
-		if attnOut == nil {
-			attnOut = e.attentionFallback(q3d, k3d, v3d)
+
+		attnOut, err = e.attentionGPU(q, k, v, kCache, vCache, pos, heads, kvHeads, headDim, e.config.SeqLen, attnWindowSize)
+		if err != nil {
+			return nil, fmt.Errorf("failed attention on GPU at layer %d: %w", layer, err)
 		}
 
 		// Debug: after attention
