@@ -66,7 +66,7 @@ type Context struct {
 	pool   *tensorPool
 }
 
-func (ctx *CUDAContext) DeviceID() int {
+func (ctx *Context) DeviceID() int {
 	return 0
 }
 
@@ -108,7 +108,7 @@ func NewContext() (*Context, error) {
 	return ctx, nil
 }
 
-func (ctx *CUDAContext) Free() {
+func (ctx *Context) Free() {
 	if ctx.Ctx != nil {
 		C.cudaStreamDestroy(ctx.Ctx)
 	}
@@ -117,7 +117,7 @@ func (ctx *CUDAContext) Free() {
 	}
 }
 
-func (ctx *CUDAContext) NewTensor(rows, cols int, dtype DataType) (*Tensor, error) {
+func (ctx *Context) NewTensor(rows, cols int, dtype DataType) (*Tensor, error) {
 	size := rows * cols
 	var bytes int
 	switch dtype {
@@ -339,7 +339,7 @@ type weight struct {
 	rows     int
 	cols     int
 	dataType DataType
-	ctx      *CUDAContext
+	ctx      *Context
 }
 
 type CUDAModel struct {

@@ -8,7 +8,7 @@ import (
 )
 
 func TestCUDA_StoreKV_TurboQuant(t *testing.T) {
-	ctx, err := NewCUDAContext()
+	ctx, err := NewContext()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,7 +37,7 @@ func TestCUDA_StoreKV_TurboQuant(t *testing.T) {
 	qjlData := make([]float32, qjlRows*headDim)
 	qjl.LoadFrom(qjlData)
 
-    globalCUDAContext = ctx
+    globalContext = ctx
     c := &Context{cudaCtx: ctx}
     c.TQRotation = &Tensor{ctx: c, cudaPtr: rot, rows: headDim, cols: headDim, dataType: DataTypeF32}
     c.TQQJL = &Tensor{ctx: c, cudaPtr: qjl, rows: qjlRows, cols: headDim, dataType: DataTypeF32}

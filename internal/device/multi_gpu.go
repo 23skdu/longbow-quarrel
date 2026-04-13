@@ -82,7 +82,7 @@ var defaultMultiGPUConfig = &MultiGPUConfig{
 type TensorParallelManager struct {
 	config    *MultiGPUConfig
 	devices   []int
-	contexts  map[int]*CUDAContext
+	contexts  map[int]*Context
 	ranks     []int
 	localRank int
 	worldSize int
@@ -112,7 +112,7 @@ func NewTensorParallelManager(config *MultiGPUConfig) (*TensorParallelManager, e
 	tp := &TensorParallelManager{
 		config:    config,
 		devices:   make([]int, 0, count),
-		contexts:  make(map[int]*CUDAContext),
+		contexts:  make(map[int]*Context),
 		ranks:     make([]int, count),
 		localRank: 0,
 		worldSize: count,
@@ -127,7 +127,7 @@ func NewTensorParallelManager(config *MultiGPUConfig) (*TensorParallelManager, e
 	return tp, nil
 }
 
-func (t *TensorParallelManager) GetContext(device int) (*CUDAContext, error) {
+func (t *TensorParallelManager) GetContext(device int) (*Context, error) {
 	t.mu.RLock()
 	if ctx, ok := t.contexts[device]; ok {
 		t.mu.RUnlock()
@@ -156,7 +156,7 @@ func (t *TensorParallelManager) GetContext(device int) (*CUDAContext, error) {
 	}
 	C.cublasSetStream(handle, stream)
 
-	ctx := &CUDAContext{
+	ctx := &Context{
 		Ctx:    stream,
 		Cublas: handle,
 		pool: &tensorPool{
@@ -258,7 +258,7 @@ type PipelineStage struct {
 	StartLayer   int
 	EndLayer     int
 	DeviceID     int
-	Context      *CUDAContext
+	Context      *Context
 	InputBuffer  *Tensor
 	OutputBuffer *Tensor
 	Weights      map[string]*Tensor

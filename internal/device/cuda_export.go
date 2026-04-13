@@ -11,8 +11,8 @@ func InitCUDA() (*Context, error) {
 	return NewContext()
 }
 
-// GetCUDAContext returns the global CUDA context
-func GetCUDAContext() *Context {
+// GetContext returns the global CUDA context
+func GetContext() *Context {
 	return globalContext
 }
 

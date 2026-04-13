@@ -7,7 +7,7 @@ import (
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
 )
 
-type CUDAContext struct {
+type Context struct {
 	device int
 }
 
@@ -19,7 +19,7 @@ type Tensor struct{}
 type CUDAWeight struct{}
 type CUDALayerScratch struct{}
 
-func NewCUDAContext() (*CUDAContext, error) {
+func NewContext() (*Context, error) {
 	return nil, fmt.Errorf("CUDA not supported on this platform")
 }
 
@@ -27,9 +27,9 @@ func CUDAAllocatedBytes() int64 {
 	return 0
 }
 
-func (c *CUDAContext) Free() {}
+func (c *Context) Free() {}
 
-func (c *CUDAContext) NewCUDAModel(f *gguf.GGUFFile, kvCache bool, maxSeqLen int) (*CUDAModel, error) {
+func (c *Context) NewCUDAModel(f *gguf.GGUFFile, kvCache bool, maxSeqLen int) (*CUDAModel, error) {
 	return nil, fmt.Errorf("CUDA not supported on this platform")
 }
 

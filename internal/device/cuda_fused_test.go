@@ -17,7 +17,7 @@ func float32ToBytes(f32 []float32) []byte {
 }
 
 func TestCUDARMSNorm(t *testing.T) {
-	ctx, err := NewCUDAContext()
+	ctx, err := NewContext()
 	if err != nil {
 		t.Fatalf("Failed to create CUDA context: %v", err)
 	}
@@ -52,7 +52,7 @@ func TestCUDARMSNorm(t *testing.T) {
 }
 
 func TestCUDASwiGLU(t *testing.T) {
-	ctx, err := NewCUDAContext()
+	ctx, err := NewContext()
 	if err != nil {
 		t.Fatalf("Failed to create CUDA context: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestCUDASwiGLU(t *testing.T) {
 }
 
 func TestCUDALayerScratch(t *testing.T) {
-	ctx, err := NewCUDAContext()
+	ctx, err := NewContext()
 	if err != nil {
 		t.Fatalf("Failed to create CUDA context: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestCUDALayerScratch(t *testing.T) {
 }
 
 func BenchmarkCUDAKernel(b *testing.B) {
-	ctx, err := NewCUDAContext()
+	ctx, err := NewContext()
 	if err != nil {
 		b.Fatalf("Failed to create CUDA context: %v", err)
 	}
