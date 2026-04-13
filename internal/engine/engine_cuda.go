@@ -434,7 +434,7 @@ func (e *cudaEngine) InferWithCallback(inputTokens []int, tokensToGenerate int, 
 		}
 
 		samplingStart := time.Now()
-		nextToken := sampler.Sample(logits)
+		nextToken := sampler.Sample(logits, allTokens)
 		cudaSamplingTime.WithLabelValues(e.config.Architecture).Observe(time.Since(samplingStart).Seconds())
 
 		allTokens = append(allTokens, nextToken)
@@ -1448,7 +1448,7 @@ func (e *cudaEngine) InferWithCallbackLogits(inputTokens []int, tokensToGenerate
 		}
 
 		samplingStart := time.Now()
-		nextToken := sampler.Sample(logits)
+		nextToken := sampler.Sample(logits, allTokens)
 		cudaSamplingTime.WithLabelValues(e.config.Architecture).Observe(time.Since(samplingStart).Seconds())
 
 		allTokens = append(allTokens, nextToken)
