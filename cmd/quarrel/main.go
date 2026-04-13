@@ -37,7 +37,7 @@ var (
 	temperature  = flag.Float64("temp", 0.7, "Temperature for sampling")
 	topK         = flag.Int("topk", 40, "Top-K sampling")
 	topP         = flag.Float64("topp", 0.95, "Top-P sampling")
-	repPenalty   = flag.Float64("penalty", 1.1, "Repetition penalty")
+	repPenalty   = flag.Float64("rep-penalty", 1.1, "Repetition penalty")
 	streamOutput = flag.Bool("stream", false, "Stream tokens as they are generated")
 	flightAddr   = flag.String("flight", ":50051", "Address to serve Arrow Flight inference")
 )

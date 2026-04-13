@@ -411,9 +411,11 @@ func (e *cudaEngine) InferWithCallback(inputTokens []int, tokensToGenerate int, 
 	allTokens = append(allTokens, inputTokens...)
 
 	layerStart := time.Now()
+	var logits []float32
+	var err error
 	for pos := 0; pos < inputLen; pos++ {
 		token := inputTokens[pos]
-		_, err := e.forward(token, pos, allTokens)
+		logits, err = e.forward(token, pos, allTokens)
 		if err != nil {
 			cudaEngineFailed.WithLabelValues(e.config.Architecture, "forward_failed").Inc()
 			return nil, fmt.Errorf("forward pass failed at position %d: %w", pos, err)
@@ -423,16 +425,7 @@ func (e *cudaEngine) InferWithCallback(inputTokens []int, tokensToGenerate int, 
 		layerStart = time.Now()
 	}
 
-	kvHits, kvMisses := 0, 0
-	pos := inputLen
-	for gen := 0; gen < tokensToGenerate && pos < seqLen-1; gen++ {
-		lastToken := allTokens[len(allTokens)-1]
-		logits, err := e.forward(lastToken, pos, allTokens)
-		if err != nil {
-			cudaEngineFailed.WithLabelValues(e.config.Architecture, "forward_failed").Inc()
-			return nil, fmt.Errorf("forward pass failed at position %d: %w", pos, err)
-		}
-
+	for gen := 0; gen < tokensToGenerate && len(allTokens) < seqLen; gen++ {
 		samplingStart := time.Now()
 		nextToken := sampler.Sample(logits, allTokens)
 		cudaSamplingTime.WithLabelValues(e.config.Architecture).Observe(time.Since(samplingStart).Seconds())
@@ -445,17 +438,17 @@ func (e *cudaEngine) InferWithCallback(inputTokens []int, tokensToGenerate int, 
 			callback(nextToken)
 		}
 
+		// Prepare logits for next iteration
+		currentPos := len(allTokens) - 1
+		logits, err = e.forward(nextToken, currentPos, allTokens)
+		if err != nil {
+			cudaEngineFailed.WithLabelValues(e.config.Architecture, "forward_failed").Inc()
+			return nil, fmt.Errorf("forward pass failed at generation step %d: %w", gen, err)
+		}
+
 		layerLatency := time.Since(layerStart).Seconds()
 		cudaLayerLatency.WithLabelValues(e.config.Architecture, fmt.Sprintf("gen_%d", gen)).Observe(layerLatency)
 		layerStart = time.Now()
-
-		if e.cuda != nil && e.cuda.KCache != nil && e.cuda.VCache != nil {
-			kvHits++
-		} else {
-			kvMisses++
-		}
-
-		pos++
 	}
 
 	elapsed := time.Since(startTime)
@@ -1421,9 +1414,11 @@ func (e *cudaEngine) InferWithCallbackLogits(inputTokens []int, tokensToGenerate
 	allTokens = append(allTokens, inputTokens...)
 
 	layerStart := time.Now()
+	var logits []float32
+	var err error
 	for pos := 0; pos < inputLen; pos++ {
 		token := inputTokens[pos]
-		_, err := e.forward(token, pos, allTokens)
+		logits, err = e.forward(token, pos, allTokens)
 		if err != nil {
 			cudaEngineFailed.WithLabelValues(e.config.Architecture, "forward_failed").Inc()
 			return nil, fmt.Errorf("forward pass failed at position %d: %w", pos, err)
@@ -1433,16 +1428,7 @@ func (e *cudaEngine) InferWithCallbackLogits(inputTokens []int, tokensToGenerate
 		layerStart = time.Now()
 	}
 
-	kvHits, kvMisses := 0, 0
-	pos := inputLen
-	for gen := 0; gen < tokensToGenerate && pos < seqLen-1; gen++ {
-		lastToken := allTokens[len(allTokens)-1]
-		logits, err := e.forward(lastToken, pos, allTokens)
-		if err != nil {
-			cudaEngineFailed.WithLabelValues(e.config.Architecture, "forward_failed").Inc()
-			return nil, fmt.Errorf("forward pass failed at position %d: %w", pos, err)
-		}
-
+	for gen := 0; gen < tokensToGenerate && len(allTokens) < seqLen; gen++ {
 		if logitsCallback != nil {
 			logitsCallback(logits)
 		}
@@ -1459,17 +1445,17 @@ func (e *cudaEngine) InferWithCallbackLogits(inputTokens []int, tokensToGenerate
 			tokenCallback(nextToken)
 		}
 
+		// Prepare logits for next iteration
+		currentPos := len(allTokens) - 1
+		logits, err = e.forward(nextToken, currentPos, allTokens)
+		if err != nil {
+			cudaEngineFailed.WithLabelValues(e.config.Architecture, "forward_failed").Inc()
+			return nil, fmt.Errorf("forward pass failed at generation step %d: %w", gen, err)
+		}
+
 		layerLatency := time.Since(layerStart).Seconds()
 		cudaLayerLatency.WithLabelValues(e.config.Architecture, fmt.Sprintf("gen_%d", gen)).Observe(layerLatency)
 		layerStart = time.Now()
-
-		if e.cuda != nil && e.cuda.KCache != nil && e.cuda.VCache != nil {
-			kvHits++
-		} else {
-			kvMisses++
-		}
-
-		pos++
 	}
 
 	elapsed := time.Since(startTime)
