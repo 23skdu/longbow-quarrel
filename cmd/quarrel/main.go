@@ -86,7 +86,7 @@ func main() {
 
 	fmt.Printf("\n=== Initializing CUDA Backend ===\n")
 
-	ctx, err := device.NewCUDAContext()
+	ctx, err := device.NewContext()
 	if err != nil {
 		log.Fatalf("Failed to create CUDA context: %v", err)
 	}
