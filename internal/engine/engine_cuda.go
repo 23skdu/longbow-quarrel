@@ -562,7 +562,6 @@ func (e *cudaEngine) forward(token int, pos int, allTokens []int) ([]float32, er
 		}
 
 		var q, k, v []float32
-		var err error
 		q, err = e.matmulGPU(hidden, fmt.Sprintf("blk.%d.attn_q.weight", layer))
 		if err != nil {
 			return nil, fmt.Errorf("failed to project q: %w", err)
@@ -688,7 +687,6 @@ func (e *cudaEngine) forward(token int, pos int, allTokens []int) ([]float32, er
 			hidden = e.rmsnorm(hidden, ffnNorm, eps)
 
 			var ffnGate, ffnUp, ffnDown []float32
-			var err error
 			ffnGate, err = e.matmulGPU(hidden, fmt.Sprintf("blk.%d.ffn_gate.weight", layer))
 			if err != nil {
 				return nil, fmt.Errorf("failed to project ffn_gate: %w", err)
