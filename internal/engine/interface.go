@@ -14,11 +14,11 @@ type Engine interface {
 	Config() config.Config
 	Close()
 	SwapModel(modelPath string, cfg config.Config) error
-	GetSeqCachePos(seqID int) int
+	GetSeqCachePos(seqID string) int
 
 	// Speculative Decoding Primitives
 	ForwardDraft(tokens []int) ([][]float32, error)
-	RollbackKV(seqID int, stepCount int)
+	RollbackKV(seqID string, newPos int) error
 }
 
 // EngineCreator defines the factory function for creating an engine

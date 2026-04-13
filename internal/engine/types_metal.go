@@ -21,6 +21,8 @@ type metalEngine struct {
 	cache        *PagedKVCache
 	BatchManager *ContinuousBatchManager
 	PromptCache  *PromptCache
+	DraftEngine  Engine
+	SpeculativeMgr *SpeculativeManager
 
 	// Quality Evaluation
 	qualityEval *QualityEvaluator
@@ -71,8 +73,13 @@ func (e *metalEngine) Model() *gguf.GGUFFile {
 	return e.model
 }
 
-func (e *metalEngine) GetSeqCachePos(seqID int) int {
-	if seq, ok := e.SeqMgr.GetSequence(uint64(seqID)); ok {
+func (e *metalEngine) GetSeqCachePos(seqID string) int {
+	var id uint64
+	_, err := fmt.Sscanf(seqID, "seq-%d", &id)
+	if err != nil {
+		return 0
+	}
+	if seq, ok := e.SeqMgr.GetSequence(id); ok {
 		seq.mu.RLock()
 		defer seq.mu.RUnlock()
 		return seq.Pos

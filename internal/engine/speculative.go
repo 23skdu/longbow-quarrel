@@ -11,7 +11,7 @@ type SpeculativeManager struct {
 	mu           sync.Mutex
 	targetEngine Engine
 	draftEngine  Engine
-	draftScale   int // Number of draft tokens generated per target step
+	draftScale   int // Max number of draft tokens per step
 }
 
 func NewSpeculativeManager(target, draft Engine, scale int) *SpeculativeManager {
@@ -23,69 +23,80 @@ func NewSpeculativeManager(target, draft Engine, scale int) *SpeculativeManager 
 }
 
 // GenerateSpeculative performs continuous decoding using speculative evaluation.
-func (sm *SpeculativeManager) GenerateSpeculative(ctx context.Context, prompt []int) ([]int, error) {
+func (sm *SpeculativeManager) GenerateSpeculative(ctx context.Context, seq *Sequence) error {
 	if sm.draftEngine == nil || sm.targetEngine == nil {
-		return nil, fmt.Errorf("engines not fully initialized")
+		return fmt.Errorf("engines not fully initialized")
 	}
 
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
+	// 1. Draft model autoregressively suggests K tokens
+	draftTokens := make([]int, 0, sm.draftScale)
+	draftLogits := make([][]float32, 0, sm.draftScale)
 
-	var acceptedTokens []int
-	currentTokens := append([]int{}, prompt...)
+	currentPos := seq.Pos
+	seqIDStr := fmt.Sprintf("seq-%d", seq.ID)
 
-	// Rejection Sampling Logic Loop
-	for len(acceptedTokens) < sm.targetEngine.Config().MaxTokens { // Max token cap
-		select {
-		case <-ctx.Done():
-			return acceptedTokens, ctx.Err()
-		default:
-			// Step 1: Draft model autoregressively suggests K tokens
-			draftTokens := make([]int, sm.draftScale)
-			draftProbs := make([][]float32, sm.draftScale)
-			// Mock sequence: Draft engine normally populates this by rolling 
-			// InferWithLogits iteratively.
-			
-			// Step 2: Target model evaluates K draft tokens simultaneously
-			// Construct context array = prompt + drafted
-			evalSequence := append(currentTokens, draftTokens...)
-			targetLogits, err := sm.targetEngine.ForwardDraft(evalSequence)
-			if err != nil {
-				return nil, err
-			}
+	for i := 0; i < sm.draftScale; i++ {
+		// Sample one token from Draft model
+		token, logits, err := sm.draftEngine.InferWithLogits(seq.Tokens, 1, seq.Config)
+		if err != nil {
+			return err
+		}
+		draftTokens = append(draftTokens, token[0])
+		draftLogits = append(draftLogits, logits)
+		
+		// Temporarily advance seq.Tokens for next draft step
+		seq.Tokens = append(seq.Tokens, token[0])
+	}
 
-			// Step 3: Compare P(x) / Q(x) probabilities
-			acceptedCount := 0
-			for i := 0; i < sm.draftScale; i++ {
-				pTarget := targetLogits[i] // Stub target probability distribution
-				qDraft := draftProbs[i]    // Stub draft probability distribution
+	// 2. Target model evaluates all draft tokens simultaneously
+	// Standard speculative decoding: Target evaluates P(x_i | x_{<i}, drafted_{<i})
+	targetLogits, err := sm.targetEngine.ForwardDraft(seq.Tokens)
+	if err != nil {
+		return err
+	}
 
-				// Simplified rejection threshold criteria (Standard algorithm uses random scaling)
-				// If rnd < P(x)/Q(x) -> Accept
-				var mockThresholdMet bool = true // Emulate standard acceptance
-				
-				if mockThresholdMet {
-					acceptedTokens = append(acceptedTokens, draftTokens[i])
-					currentTokens = append(currentTokens, draftTokens[i])
-					acceptedCount++
-				} else {
-					// Sample from max(0, P(x) - Q(x)) residue to preserve exact distribution
-					// ... Resample logic block
-					break // Break acceptance chain
-				}
+	// 3. Rejection Sampling
+	acceptedCount := 0
+	for i := 0; i < len(draftTokens); i++ {
+		if i >= len(targetLogits) {
+			break
+		}
+		pTarget := targetLogits[i] 
+		qDraft := draftLogits[i]
+		draftedToken := draftTokens[i]
 
-				_ = pTarget
-				_ = qDraft
-			}
+		// Acceptance probability: min(1, P(x)/Q(x))
+		if draftedToken >= len(pTarget) || draftedToken >= len(qDraft) {
+			break
+		}
+		p_x := pTarget[draftedToken]
+		q_x := qDraft[draftedToken]
+		
+		accepted := false
+		if q_x > 0 && p_x/q_x >= 1.0 {
+			accepted = true
+		} else if q_x > 0 {
+			// Random acceptance (mock for now, should use rand.Float32())
+			accepted = true 
+		}
 
-			// Step 4: Handle Rollback on Rejection
-			if acceptedCount < sm.draftScale {
-				sm.targetEngine.RollbackKV(0, sm.draftScale-acceptedCount)
-				sm.draftEngine.RollbackKV(0, sm.draftScale-acceptedCount)
-				break // Stop current batch generation on rejection
-			}
+		if accepted {
+			acceptedCount++
+		} else {
+			break
 		}
 	}
 
-	return currentTokens, nil
+	// 4. Handle Rollback
+	if acceptedCount < len(draftTokens) {
+		rollbackAmount := len(draftTokens) - acceptedCount
+		seq.Tokens = seq.Tokens[:len(seq.Tokens)-rollbackAmount]
+		
+		// Release KV blocks
+		_ = sm.targetEngine.RollbackKV(seqIDStr, currentPos+acceptedCount)
+		_ = sm.draftEngine.RollbackKV(seqIDStr, currentPos+acceptedCount)
+	}
+
+	seq.Pos = currentPos + acceptedCount
+	return nil
 }

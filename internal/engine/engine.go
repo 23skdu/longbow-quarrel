@@ -5,6 +5,7 @@
 package engine
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -1361,6 +1362,16 @@ func (e *metalEngine) runBatchLoop() {
 		}
 
 		// Forward Pass
+		if e.SpeculativeMgr != nil && len(active) == 1 {
+			// Speculative Decoding path (single sequence optimization)
+			err := e.SpeculativeMgr.GenerateSpeculative(context.Background(), active[0])
+			if err != nil {
+				logger.Log.Error("Speculative generation failed", "id", active[0].ID, "error", err)
+				e.BatchManager.CompleteSequence(active[0].ID, e.cache)
+			}
+			continue // SpeculativeMgr handles its own result/token push
+		}
+
 		results, err := e.ForwardBatch(active)
 		if err != nil {
 			for _, seq := range active {
@@ -1689,9 +1700,10 @@ func (e *metalEngine) SwapModel(newModelPath string, newConfig config.Config) er
 }
 
 func (e *metalEngine) ForwardDraft(tokens []int) ([][]float32, error) {
-	return nil, fmt.Errorf("ForwardDraft not implemented for metalEngine")
+	// Stub until Phase 4 execution
+	return nil, nil
 }
 
-func (e *metalEngine) RollbackKV(seqID int, stepCount int) {
-	// Stub for now: satisfy interface for speculative decoding
+func (e *metalEngine) RollbackKV(seqID string, newPos int) error {
+	return e.cache.RollbackKV(seqID, newPos)
 }

@@ -71,7 +71,7 @@ func (e *MockEngine) SwapModel(modelPath string, cfg config.Config) error {
 	return nil
 }
 
-func (e *MockEngine) GetSeqCachePos(seqID int) int {
+func (e *MockEngine) GetSeqCachePos(seqID string) int {
 	return 0
 }
 
@@ -79,5 +79,6 @@ func (e *MockEngine) ForwardDraft(tokens []int) ([][]float32, error) {
 	return nil, nil
 }
 
-func (e *MockEngine) RollbackKV(seqID int, stepCount int) {
+func (e *MockEngine) RollbackKV(seqID string, newPos int) error {
+	return nil
 }

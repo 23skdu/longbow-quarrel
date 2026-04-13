@@ -203,6 +203,36 @@ func (c *PagedKVCache) GetSequenceBlocks(seqID string) []int32 {
 	return blocks
 }
 
+// RollbackKV reverts a sequence to a previous position, potentially freeing blocks.
+func (c *PagedKVCache) RollbackKV(seqID string, newPos int) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	table, exists := c.blockTables[seqID]
+	if !exists {
+		return fmt.Errorf("sequence %s not found for rollback", seqID)
+	}
+
+	newLastBlockIdx := newPos / c.blockSize
+	
+	// If the new position is in a block that's already in the table, 
+	// we just prune the table of any blocks BEYOND that logical block index.
+	if newLastBlockIdx < len(table)-1 {
+		// Prune trailing blocks
+		toFree := table[newLastBlockIdx+1:]
+		for _, block := range toFree {
+			c.blockRefs[block]--
+			if c.blockRefs[block] <= 0 {
+				c.freeBlocks = append(c.freeBlocks, block)
+				c.blockRefs[block] = 0
+			}
+		}
+		c.blockTables[seqID] = table[:newLastBlockIdx+1]
+	}
+
+	return nil
+}
+
 // FreeSequence frees the block table for a sequence, decrementing block ref counts.
 func (c *PagedKVCache) FreeSequence(seqID string) {
 	c.mu.Lock()

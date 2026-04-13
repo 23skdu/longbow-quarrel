@@ -172,7 +172,7 @@ func (e *CPUEngine) Config() config.Config {
 	return e.config
 }
 
-func (e *CPUEngine) GetSeqCachePos(seqID int) int {
+func (e *CPUEngine) GetSeqCachePos(seqID string) int {
 	// CPU engine doesn't have a sophisticated KV cache yet
 	return 0
 }
@@ -368,6 +368,7 @@ func (e *CPUEngine) ForwardDraft(tokens []int) ([][]float32, error) {
 	return nil, fmt.Errorf("ForwardDraft not implemented for CPUEngine")
 }
 
-func (e *CPUEngine) RollbackKV(seqID int, stepCount int) {
+func (e *CPUEngine) RollbackKV(seqID string, newPos int) error {
 	// Stub for now: satisfy interface
+	return nil
 }
