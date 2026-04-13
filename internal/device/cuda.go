@@ -172,6 +172,34 @@ func (t *Tensor) ZeroInit() {
 func (t *Tensor) Dims() []int       { return []int{t.rows, t.cols} }
 func (t *Tensor) Strides() []int    { return []int{t.cols, 1} }
 func (t *Tensor) ToHost() []float32 { return t.Data() }
+func (t *Tensor) ToHostF32() []float32 {
+	if t.cudaPtr == nil {
+		return nil
+	}
+	return t.cudaPtr.ToHostF32()
+}
+func (t *Tensor) ToHostFP16() []uint16 {
+	if t.cudaPtr == nil {
+		return nil
+	}
+	return t.cudaPtr.ToHostFP16()
+}
+func (t *Tensor) NumElements() int { return t.rows * t.cols }
+func (t *Tensor) BufferID() uintptr {
+	if t.cudaPtr == nil {
+		return 0
+	}
+	return t.cudaPtr.BufferID()
+}
+func (t *Tensor) LoadFrom(data []float32) error {
+	if t.cudaPtr == nil {
+		return fmt.Errorf("cudaPtr is nil")
+	}
+	return t.cudaPtr.LoadFrom(data)
+}
+func (t *Tensor) LoadFromF32(data []float32) {
+	_ = t.LoadFrom(data)
+}
 
 type Context struct {
 	device  int
@@ -722,21 +750,14 @@ func (t *CUDATensor) ReturnToPool() {
 	t.ctx.pool[key] = append(t.ctx.pool[key], t)
 }
 
-func (t *CUDATensor) ToHostF16AsF32() []float32 {
+func (t *CUDATensor) ToHostFP16() []uint16 {
 	n := t.rows * t.cols
 	if n == 0 {
 		return nil
 	}
 	hostData := make([]uint16, n)
 	C.cudaMemcpy(unsafe.Pointer(&hostData[0]), t.devPtr, C.size_t(n*2), C.cudaMemcpyDeviceToHost)
-
-	// Convert to float32
-	result := make([]float32, n)
-	for i, v := range hostData {
-		result[i] = math.Float32frombits(uint32(v) << 16) // Very crude half-to-float approximation for signs
-		// Better: use a proper half-to-float conversion if needed
-	}
-	return result
+	return hostData
 }
 
 func (t *CUDATensor) ToHostF32() []float32 {
