@@ -59,7 +59,7 @@ import (
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
 )
 
-// DataType and Float16 utils are provided by utils.go
+var globalCUDAContext *CUDAContext
 
 type CUDAContext struct {
 	Ctx    C.cudaStream_t
@@ -68,7 +68,7 @@ type CUDAContext struct {
 }
 
 func (ctx *CUDAContext) DeviceID() int {
-	return 0 // Placeholder
+	return 0
 }
 
 type Tensor struct {
@@ -97,13 +97,15 @@ func NewCUDAContext() (*CUDAContext, error) {
 	}
 	C.cublasSetStream(handle, stream)
 
-	return &CUDAContext{
+	ctx := &CUDAContext{
 		Ctx:    stream,
 		Cublas: handle,
 		pool: &tensorPool{
 			free: make(map[int][]*Tensor),
 		},
-	}, nil
+	}
+	globalCUDAContext = ctx
+	return ctx, nil
 }
 
 func (ctx *CUDAContext) Free() {
@@ -318,7 +320,8 @@ func (ctx *CUDAContext) NewCUDAModel(f *gguf.GGUFFile, preDequantize bool, kvCac
 		Weights: make(map[string]*weight),
 	}
 
-	for name, tensor := range f.Tensors {
+	for _, tensor := range f.Tensors {
+		name := tensor.Name
 		rows := int(tensor.Dimensions[0])
 		cols := 1
 		if len(tensor.Dimensions) > 1 {
@@ -332,17 +335,17 @@ func (ctx *CUDAContext) NewCUDAModel(f *gguf.GGUFFile, preDequantize bool, kvCac
 		case gguf.GGMLTypeF32:
 			f32Data := make([]float32, numElements)
 			for i := 0; i < numElements; i++ {
-				f32Data[i] = math.Float32frombits(binary.LittleEndian.Uint32(tensor.HostData[i*4:]))
+				f32Data[i] = math.Float32frombits(binary.LittleEndian.Uint32(tensor.Data[i*4:]))
 			}
 			hostFP16 = Float32SliceToFloat16(f32Data)
 		case gguf.GGMLTypeQ8_0:
-			f32Data := gguf.DequantizeQ8_0(tensor.HostData, numElements)
+			f32Data := gguf.DequantizeQ8_0(tensor.Data, numElements)
 			hostFP16 = Float32SliceToFloat16(f32Data)
 		case gguf.GGMLTypeQ4_K:
-			f32Data := gguf.DequantizeQ4K(tensor.HostData, numElements)
+			f32Data := gguf.DequantizeQ4K(tensor.Data, numElements)
 			hostFP16 = Float32SliceToFloat16(f32Data)
 		case gguf.GGMLTypeQ6_K:
-			f32Data := gguf.DequantizeQ6K(tensor.HostData, numElements)
+			f32Data := gguf.DequantizeQ6K(tensor.Data, numElements)
 			hostFP16 = Float32SliceToFloat16(f32Data)
 		default:
 			C.cudaFree(dPtr)
@@ -468,4 +471,28 @@ func Float32SliceToFloat16(data []float32) []uint16 {
 		res[i] = Float32ToFloat16(v)
 	}
 	return res
+}
+
+func GetDeviceCount() (int, error) {
+	var count C.int
+	if err := C.cudaGetDeviceCount(&count); err != 0 {
+		return 0, fmt.Errorf("cudaGetDeviceCount failed: %v", err)
+	}
+	return int(count), nil
+}
+
+func GetDeviceName(device int) string {
+	var prop C.struct_cudaDeviceProp
+	if err := C.cudaGetDeviceProperties(&prop, C.int(device)); err != 0 {
+		return "Unknown"
+	}
+	return C.GoString(&prop.name[0])
+}
+
+func GetDeviceMemory(device int) (int64, error) {
+	var prop C.struct_cudaDeviceProp
+	if err := C.cudaGetDeviceProperties(&prop, C.int(device)); err != 0 {
+		return 0, fmt.Errorf("cudaGetDeviceProperties failed: %v", err)
+	}
+	return int64(prop.totalGlobalMem), nil
 }
