@@ -11,7 +11,6 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
-	"net"
 
 	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/device"
