@@ -47,6 +47,14 @@ func (e *metalEngine) SwapModel(modelPath string, cfg config.Config) error {
 	return errors.New("metal engine not available on this platform")
 }
 
+func (e *metalEngine) Config() config.Config {
+	return e.config
+}
+
+func (e *metalEngine) GetSeqCachePos(seqID string) int {
+	return 0
+}
+
 func (e *metalEngine) initKVCache() error {
 	return nil
 }
@@ -63,8 +71,8 @@ func (e *metalEngine) ForwardDraft(tokens []int) ([][]float32, error) {
 	return nil, errors.New("metal engine not available on this platform")
 }
 
-func (e *metalEngine) RollbackKV(seqID int, stepCount int) {
-	// No-op
+func (e *metalEngine) RollbackKV(seqID string, newPos int) error {
+	return nil
 }
 
 func (e *metalEngine) InferString(prompt string, tokensToGenerate int) (string, error) {

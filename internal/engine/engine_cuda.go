@@ -1380,14 +1380,11 @@ func (e *cudaEngine) InferWithCallbackLogits(inputTokens []int, tokensToGenerate
 	pos := inputLen
 	for gen := 0; gen < tokensToGenerate && pos < seqLen-1; gen++ {
 		lastToken := allTokens[len(allTokens)-1]
-		log.Printf("DEBUG: Generation loop iter %d: lastToken=%d, pos=%d, allTokens len=%d", gen, lastToken, pos, len(allTokens))
 		logits, err := e.forward(lastToken, pos, allTokens)
 		if err != nil {
 			cudaEngineFailed.WithLabelValues(e.config.Architecture, "forward_failed").Inc()
 			return nil, fmt.Errorf("forward pass failed at position %d: %w", pos, err)
 		}
-
-		log.Printf("DEBUG: After forward call, logits len=%d, first5=%v", len(logits), logits[:5])
 
 		if logitsCallback != nil {
 			logitsCallback(logits)
@@ -1440,6 +1437,14 @@ func (e *cudaEngine) InferWithCallbackLogits(inputTokens []int, tokensToGenerate
 	return result, nil
 }
 
-func (e *cudaEngine) GetSeqCachePos(seqID int) int {
+func (e *cudaEngine) GetSeqCachePos(seqID string) int {
 	return 0
+}
+
+func (e *cudaEngine) ForwardDraft(tokens []int) ([][]float32, error) {
+	return nil, fmt.Errorf("ForwardDraft not implemented for CUDA engine")
+}
+
+func (e *cudaEngine) RollbackKV(seqID string, newPos int) error {
+	return nil
 }
