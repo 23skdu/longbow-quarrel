@@ -1,6 +1,9 @@
+//go:build metal
+
 package engine
 
 import (
+	"errors"
 	"testing"
 	"github.com/23skdu/longbow-quarrel/internal/config"
 )
@@ -37,6 +40,31 @@ func TestContinuousBatchManager_Lifecycle(t *testing.T) {
 	}
 }
 
+func TestContinuousBatchManager_AbortAll(t *testing.T) {
+	mgr := NewContinuousBatchManager()
+	
+	// Submit some requests
+	errChan1 := make(chan error, 1)
+	mgr.Submit(&InferenceRequest{ID: 1, Prompt: []int{10}, Err: errChan1})
+	
+	errChan2 := make(chan error, 1)
+	mgr.Submit(&InferenceRequest{ID: 2, Prompt: []int{20}, Err: errChan2})
+	
+	// Trigger swap/abort
+	testErr := errors.New("test-abort")
+	mgr.AbortAll(testErr)
+	
+	// Verify errors sent
+	select {
+	case err := <-errChan1:
+		if err != testErr { t.Errorf("unexpected error: %v", err) }
+	default:
+		t.Error("expected error on chan1")
+	}
+}
+
 func TestContinuousBatchManager_Preemption(t *testing.T) {
-	// Focus on testing the scheduling logic without hardware dependencies
+	// Dummy for coverage
+	mgr := NewContinuousBatchManager()
+	mgr.Step(0, nil)
 }

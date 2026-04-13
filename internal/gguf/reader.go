@@ -261,7 +261,7 @@ func readValue(data []byte, offset uint64, typ GGUFMetadataValueType) (interface
 	case GGUFMetadataValueTypeUint8:
 		return data[offset], 1, nil
 	case GGUFMetadataValueTypeInt8:
-		return int8(data[offset]), 1, nil
+		return int8(data[offset]), 1, nil // #nosec G115
 	case GGUFMetadataValueTypeUint16:
 		return binary.LittleEndian.Uint16(data[offset:]), 2, nil
 	case GGUFMetadataValueTypeInt16:

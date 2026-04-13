@@ -3,7 +3,6 @@ package gguf
 import (
 	"fmt"
 	"testing"
-	"time"
 )
 
 type BenchmarkResult struct {
@@ -16,36 +15,6 @@ type BenchmarkResult struct {
 	MBPerSec      float64
 }
 
-func runBenchmark(name string, fn func(), numElements int, numRuns int) BenchmarkResult {
-	// Warmup
-	for i := 0; i < 3; i++ {
-		fn()
-	}
-
-	var totalTime int64
-	for i := 0; i < numRuns; i++ {
-		start := time.Now()
-		fn()
-		totalTime += time.Since(start).Nanoseconds()
-	}
-
-	avgTime := totalTime / int64(numRuns)
-	opsPerSec := float64(1e9) / float64(avgTime)
-	
-	// Calculate MB/s (assuming float32 = 4 bytes)
-	bytesProcessed := numElements * 4
-	mbPerSec := float64(bytesProcessed) * opsPerSec / 1e6
-
-	return BenchmarkResult{
-		Name:          name,
-		NumElements:   numElements,
-		NumRuns:       numRuns,
-		TotalTimeNS:   totalTime,
-		TimePerRunNS:  avgTime,
-		OpsPerSec:     opsPerSec,
-		MBPerSec:      mbPerSec,
-	}
-}
 
 func BenchmarkQuantizeQ4K_256(b *testing.B) {
 	src := make([]float32, 256)

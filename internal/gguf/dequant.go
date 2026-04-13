@@ -258,10 +258,10 @@ func DequantizeQ6K(data []byte, numElements int) []float32 {
 				q4 := int8((qs[l+32]>>4)|(((qh[l+qhOff]>>6)&3)<<4)) - 32 // #nosec G115
 
 				yIdx := base + n + l
-				out[yIdx+0] = d * float32(int8(scales[scOff+is*2+0])) * float32(q1)
-				out[yIdx+32] = d * float32(int8(scales[scOff+is*2+1])) * float32(q2)
-				out[yIdx+64] = d * float32(int8(scales[scOff+is*2+2])) * float32(q3)
-				out[yIdx+96] = d * float32(int8(scales[scOff+is*2+3])) * float32(q4)
+				out[yIdx+0] = d * float32(int8(scales[scOff+is*2+0])) * float32(q1)  // #nosec G115
+				out[yIdx+32] = d * float32(int8(scales[scOff+is*2+1])) * float32(q2) // #nosec G115
+				out[yIdx+64] = d * float32(int8(scales[scOff+is*2+2])) * float32(q3) // #nosec G115
+				out[yIdx+96] = d * float32(int8(scales[scOff+is*2+3])) * float32(q4) // #nosec G115
 			}
 		}
 	}

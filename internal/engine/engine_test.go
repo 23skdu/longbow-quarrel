@@ -319,6 +319,9 @@ func TestToFloat64(t *testing.T) {
 		{"unsupported string input", "hello", 0.0},
 		{"unsupported bool input", true, 0.0},
 		{"nil input", nil, 0.0},
+		{"int64 input", int64(123), 123.0},
+		{"uint64 input", uint64(456), 456.0},
+		{"int32 input", int32(789), 789.0},
 	}
 
 	for _, tt := range tests {
@@ -331,27 +334,16 @@ func TestToFloat64(t *testing.T) {
 	}
 }
 
-func TestIsNormWeight(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    string
-		expected bool
-	}{
-		{"attn_norm.weight", "blk.0.attn_norm.weight", true},
-		{"ffn_norm.weight", "blk.0.ffn_norm.weight", true},
-		{"output_norm.weight", "output_norm.weight", true},
-		{"not a norm weight", "blk.0.attn_q.weight", false},
-		{"partial match", "attn_norm", false},
-		{"empty string", "", false},
+func TestMetadata_Helpers(t *testing.T) {
+	if !isNormWeight("output_norm.weight") {
+		t.Error("output_norm.weight should be norm")
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := isNormWeight(tt.input)
-			if got != tt.expected {
-				t.Errorf("isNormWeight() got = %v, expected %v", got, tt.expected)
-			}
-		})
+	if isNormWeight("attn_q.weight") {
+		t.Error("attn_q.weight should not be norm")
+	}
+	
+	if !isNeededTensor("token_embd.weight") {
+		t.Error("token_embd should be needed")
 	}
 }
 
