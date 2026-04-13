@@ -1158,6 +1158,10 @@ func (m *CUDAModel) GetDequantedWeight(name string) (*CUDATensor, error) {
 	switch w.GGMLType {
 	case gguf.GGMLTypeQ8_0:
 		resultData = gguf.DequantizeQ8_0(w.HostData, numElements)
+	case gguf.GGMLTypeQ5_0:
+		resultData = gguf.DequantizeQ5_0(w.HostData, numElements)
+	case gguf.GGMLTypeQ4_0:
+		resultData = gguf.DequantizeQ4_0(w.HostData, numElements)
 	case gguf.GGMLTypeQ4_K:
 		resultData = gguf.DequantizeQ4K(w.HostData, numElements)
 	case gguf.GGMLTypeQ6_K:
