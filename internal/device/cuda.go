@@ -761,27 +761,55 @@ func (t *CUDATensor) ToHostFP16() []uint16 {
 }
 
 func (t *CUDATensor) ToHostF32() []float32 {
-	result := make([]float32, t.rows*t.cols)
+	numElements := t.rows * t.cols
+	result := make([]float32, numElements)
 
 	if len(t.HostData) > 0 {
-		numElements := t.rows * t.cols
-		for i := 0; i < numElements; i++ {
-			offset := i * 4
-			if offset+4 <= len(t.HostData) {
-				result[i] = math.Float32frombits(binary.LittleEndian.Uint32(t.HostData[offset : offset+4]))
+		if t.dataType == DataTypeF32 {
+			for i := 0; i < numElements; i++ {
+				offset := i * 4
+				if offset+4 <= len(t.HostData) {
+					result[i] = math.Float32frombits(binary.LittleEndian.Uint32(t.HostData[offset : offset+4]))
+				}
+			}
+		} else if t.dataType == DataTypeF16 {
+			for i := 0; i < numElements; i++ {
+				offset := i * 2
+				if offset+2 <= len(t.HostData) {
+					v16 := binary.LittleEndian.Uint16(t.HostData[offset : offset+2])
+					result[i] = Float16ToFloat32(v16)
+				}
 			}
 		}
 		return result
 	}
 
-	C.cudaMemcpyAsync(unsafe.Pointer(&result[0]), t.devPtr, C.size_t(t.rows*t.cols*4), C.cudaMemcpyDeviceToHost, t.ctx.stream)
-	t.ctx.Synchronize()
+	if t.dataType == DataTypeF16 {
+		temp := make([]uint16, numElements)
+		C.cudaMemcpyAsync(unsafe.Pointer(&temp[0]), t.devPtr, C.size_t(numElements*2), C.cudaMemcpyDeviceToHost, t.ctx.stream)
+		t.ctx.Synchronize()
+		for i, v := range temp {
+			result[i] = Float16ToFloat32(v)
+		}
+	} else {
+		C.cudaMemcpyAsync(unsafe.Pointer(&result[0]), t.devPtr, C.size_t(numElements*4), C.cudaMemcpyDeviceToHost, t.ctx.stream)
+		t.ctx.Synchronize()
+	}
+
 	return result
 }
 
 func (t *CUDATensor) LoadFrom(data []float32) error {
-	size := len(data) * 4
-	C.cudaMemcpyAsync(t.devPtr, unsafe.Pointer(&data[0]), C.size_t(size), C.cudaMemcpyHostToDevice, t.ctx.stream)
+	if t.dataType == DataTypeF16 {
+		temp := make([]uint16, len(data))
+		for i, v := range data {
+			temp[i] = Float32ToFloat16(v)
+		}
+		C.cudaMemcpyAsync(t.devPtr, unsafe.Pointer(&temp[0]), C.size_t(len(temp)*2), C.cudaMemcpyHostToDevice, t.ctx.stream)
+	} else {
+		size := len(data) * 4
+		C.cudaMemcpyAsync(t.devPtr, unsafe.Pointer(&data[0]), C.size_t(size), C.cudaMemcpyHostToDevice, t.ctx.stream)
+	}
 	return nil
 }
 

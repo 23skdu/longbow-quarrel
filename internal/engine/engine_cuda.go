@@ -874,7 +874,7 @@ func (e *cudaEngine) matmulGPU(inputData []float32, weightName string) ([]float3
 		return nil, fmt.Errorf("matmul dimension mismatch: input cols=%d, weight rows=%d", inputCols, weightRows)
 	}
 
-	inputTensor, err := e.cuda.Ctx.NewTensorFP32(inputRows, inputCols)
+	inputTensor, err := e.cuda.Ctx.NewTensor(inputRows, inputCols, device.DataTypeF16)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create input tensor: %w", err)
 	}
