@@ -907,28 +907,28 @@ func (e *cudaEngine) attentionGPU(q, k, v []float32, kCache, vCache *device.CUDA
 	kvSeqLen := pos + 1
 	scale := float32(1.0 / math.Sqrt(float64(dim)))
 
-	qTensor, err := e.cuda.Ctx.NewTensorFP32(batch*numHeads, headDim)
+	qTensor, err := e.cuda.Ctx.NewTensor(batch*numHeads, headDim, device.DataTypeF16)
 	if err != nil {
 		return nil, err
 	}
 	defer qTensor.Free()
 	qTensor.LoadFrom(q)
 
-	kTensor, err := e.cuda.Ctx.NewTensorFP32(batch*kvHeads, headDim)
+	kTensor, err := e.cuda.Ctx.NewTensor(batch*kvHeads, headDim, device.DataTypeF16)
 	if err != nil {
 		return nil, err
 	}
 	defer kTensor.Free()
 	kTensor.LoadFrom(k)
 
-	vTensor, err := e.cuda.Ctx.NewTensorFP32(batch*kvHeads, headDim)
+	vTensor, err := e.cuda.Ctx.NewTensor(batch*kvHeads, headDim, device.DataTypeF16)
 	if err != nil {
 		return nil, err
 	}
 	defer vTensor.Free()
 	vTensor.LoadFrom(v)
 
-	outTensor, err := e.cuda.Ctx.NewTensorFP32(batch*numHeads, headDim)
+	outTensor, err := e.cuda.Ctx.NewTensor(batch*numHeads, headDim, device.DataTypeF16)
 	if err != nil {
 		return nil, err
 	}
@@ -939,7 +939,7 @@ func (e *cudaEngine) attentionGPU(q, k, v []float32, kCache, vCache *device.CUDA
 		useCache = 1
 	}
 
-	e.cuda.Ctx.FusedAttention(qTensor, kTensor, vTensor, outTensor, kCache, vCache, batch, numHeads, seqLenQ, kvSeqLen, headDim, scale, useCache, 0)
+	e.cuda.Ctx.FusedAttention(qTensor, kTensor, vTensor, outTensor, kCache, vCache, batch, numHeads, seqLenQ, kvSeqLen, headDim, scale, useCache, windowSize)
 	e.cuda.Ctx.Synchronize()
 
 	return outTensor.ToHostF32(), nil
