@@ -7,22 +7,6 @@ import (
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
 )
 
-type Context struct {
-	device int
-}
-
-type CUDAModel struct {
-	KCache []*Tensor
-}
-
-type Tensor struct{}
-type CUDAWeight struct{}
-type CUDALayerScratch struct{}
-
-func NewContext() (*Context, error) {
-	return nil, fmt.Errorf("CUDA not supported on this platform")
-}
-
 func CUDAAllocatedBytes() int64 {
 	return 0
 }

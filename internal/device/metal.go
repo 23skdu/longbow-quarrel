@@ -766,7 +766,22 @@ func (t *Tensor) ReturnToPool() {
 	t.ctx.mu.Unlock()
 }
 
-func (t *Tensor) LoadFrom(data []float32) error {
+func (t *Tensor) LoadFrom(data interface{}) error {
+	switch d := data.(type) {
+	case []float32:
+		if len(d) != t.rows*t.cols {
+			return fmt.Errorf("LoadFrom: size mismatch: expected %d, got %d", t.rows*t.cols, len(d))
+		}
+		t.LoadFromF32(d)
+		return nil
+	case []byte:
+		return t.LoadFromRaw(d)
+	default:
+		return fmt.Errorf("unsupported data type for LoadFrom: %T", data)
+	}
+}
+
+func (t *Tensor) LoadFromF32(data []float32) error {
 	t.ctx.ExecMu.Lock()
 	defer t.ctx.ExecMu.Unlock()
 	if len(data) != t.rows*t.cols {

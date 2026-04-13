@@ -1,4 +1,4 @@
-//go:build (!darwin || !metal) && (!linux || !cuda)
+//go:build !cuda && !metal
 
 package device
 
@@ -320,12 +320,18 @@ func (t *Tensor) ToHostFP16() []uint16 {
 	return res
 }
 
-func (t *Tensor) LoadFrom(data []float32) error {
-	if len(data) != len(t.data) {
-		return fmt.Errorf("LoadFrom: size mismatch: %d != %d", len(data), len(t.data))
+func (t *Tensor) LoadFrom(data interface{}) error {
+	switch d := data.(type) {
+	case []float32:
+		if len(d) != t.NumElements() {
+			return fmt.Errorf("LoadFrom: size mismatch: %d != %d", len(d), t.NumElements())
+		}
+		copy(t.data, d)
+	case []byte:
+		return t.LoadFromRaw(d)
+	default:
+		return fmt.Errorf("unsupported data type for LoadFrom: %T", data)
 	}
-	copy(t.data, data)
-	return nil
 }
 
 // LoadFromRaw copies raw bytes to the tensor (for F32 currently on CPU)
