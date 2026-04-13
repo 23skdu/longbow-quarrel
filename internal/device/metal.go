@@ -86,6 +86,9 @@ void Metal_TurboQuant_Decode(MetalContextRef ctx, MetalBufferRef input,
                               int offScale, int blockSize, int qjlRows, int numBlocks);
 
 void Metal_FlashAttention2_F16(MetalContextRef ctx, MetalBufferRef q, MetalBufferRef k_cache, MetalBufferRef v_cache, MetalBufferRef output, int num_heads, int kv_heads, int headDim, int seq_len, int block_size, MetalBufferRef block_table);
+void Metal_Linear_LoRA_Add_F16(MetalContextRef ctx, MetalBufferRef input, int offIn, MetalBufferRef A, int offA, MetalBufferRef B, int offB, MetalBufferRef output, int offOut, int M, int N, int K, float scale);
+void Metal_Vision_Patch_Embed_F32(MetalContextRef ctx, MetalBufferRef pixels, int offPixels, MetalBufferRef weights, int offW, MetalBufferRef output, int offOut, int patchSize, int visionDim, int numPatchesX);
+void Metal_AllReduce_F16(MetalContextRef ctx, MetalBufferRef data, int offset, int count);
 */
 import "C"
 import (
@@ -133,6 +136,12 @@ type Context struct {
 	// TurboQuant Global Matrices
 	TQRotation *Tensor
 	TQQJL      *Tensor
+}
+
+type LoRAWeight struct {
+	A     *Tensor
+	B     *Tensor
+	Scale float32
 }
 
 func NewContext() *Context {
@@ -674,6 +683,30 @@ func (c *Context) TurboQuantDecode(input *Tensor, rotationMatrix *Tensor, qjlMat
 		qjlMatrix.buf, C.int(qjlMatrix.Offset), output.buf, C.int(output.Offset),
 		scaleIn.buf, C.int(scaleIn.Offset),
 		C.int(blockSize), C.int(qjlRows), C.int(numBlocks))
+}
+
+func (c *Context) LinearLoRAAdd(input *Tensor, A *Tensor, B *Tensor, output *Tensor, scale float32) {
+	c.ExecMu.Lock()
+	defer c.ExecMu.Unlock()
+	M := input.rows
+	K := input.cols
+	N := output.cols
+	// R is implied by A.rows or B.cols depending on layout. 
+	// Our kernel expects A as [R, K] and B as [N, R]
+	C.Metal_Linear_LoRA_Add_F16(c.ref, input.buf, C.int(input.Offset), A.buf, C.int(A.Offset), B.buf, C.int(B.Offset), output.buf, C.int(output.Offset), C.int(M), C.int(N), C.int(K), C.float(scale))
+}
+
+func (c *Context) VisionPatchEmbed(pixels *Tensor, weights *Tensor, output *Tensor, patchSize, visionDim, numPatchesX int) {
+	c.ExecMu.Lock()
+	defer c.ExecMu.Unlock()
+	C.Metal_Vision_Patch_Embed_F32(c.ref, pixels.buf, C.int(pixels.Offset), weights.buf, C.int(weights.Offset), output.buf, C.int(output.Offset), C.int(patchSize), C.int(visionDim), C.int(numPatchesX))
+}
+
+func (c *Context) AllReduce(data *Tensor) {
+	c.ExecMu.Lock()
+	defer c.ExecMu.Unlock()
+	count := data.rows * data.cols
+	C.Metal_AllReduce_F16(c.ref, data.buf, C.int(data.Offset), C.int(count))
 }
 
 // NewTensorPooled attempts to reuse tensor from pool (defaults to F16)
@@ -1528,7 +1561,8 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 	pos, heads, kvHeads, headDim int, ropeTheta, eps float32, hiddenDim, ctxLen, windowSize int, globalScale float32, debug bool, precisionMode int,
 	blockTable *Tensor, blockSize int, kvStore func(k, v *Tensor),
 	gemma4QNorm, gemma4KNorm *Tensor,
-	gemma4Config config.Gemma4Config) {
+	gemma4Config config.Gemma4Config,
+	loraQ, loraK, loraV, loraO *LoRAWeight) {
 
 	// Use scratch buffers instead of allocating
 	normed := scratch.Normed
@@ -1571,8 +1605,17 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 		qInput := normed
 		kInput := normed
 		qInput.linearIntoInternal(q, qPart, globalScale)
+		if loraQ != nil {
+			t.ctx.LinearLoRAAdd(qInput, loraQ.A, loraQ.B, qPart, loraQ.Scale)
+		}
 		kInput.linearIntoInternal(k, kPart, globalScale)
+		if loraK != nil {
+			t.ctx.LinearLoRAAdd(kInput, loraK.A, loraK.B, kPart, loraK.Scale)
+		}
 		normed.linearIntoInternal(v, vPart, globalScale)
+		if loraV != nil {
+			t.ctx.LinearLoRAAdd(normed, loraV.A, loraV.B, vPart, loraV.Scale)
+		}
 	}
 
 	// Gemma4 Q/K normalization is applied here if enabled (currently disabled)
@@ -1635,6 +1678,9 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 	resAtt := scratch.ResAtt
 	t0_attn_out := time.Now()
 	attOut.LinearInto(o, resAtt, globalScale)
+	if loraO != nil {
+		t.ctx.LinearLoRAAdd(attOut, loraO.A, loraO.B, resAtt, loraO.Scale)
+	}
 	metrics.RecordKernelDuration("Layer_AttnOut", time.Since(t0_attn_out))
 
 	// 7. Residual Add 1

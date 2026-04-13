@@ -1435,7 +1435,8 @@ func (e *metalEngine) inferInternal(inputTokens []int, tokensToGenerate int, sam
 							panic(err)
 						}
 					},
-					gemma4QNorm, gemma4KNorm, gemma4Config)
+					gemma4QNorm, gemma4KNorm, gemma4Config,
+					nil, nil, nil, nil) // No LoRAs active by default
 
 				// 2. MOE Part
 				// Need to apply FFN Norm first
@@ -1459,7 +1460,8 @@ func (e *metalEngine) inferInternal(inputTokens []int, tokensToGenerate int, sam
 							panic(err)
 						}
 					},
-					gemma4QNorm, gemma4KNorm, gemma4Config)
+					gemma4QNorm, gemma4KNorm, gemma4Config,
+					nil, nil, nil, nil) // No LoRAs active by default
 			}
 
 			// Log layer activation details if enabled

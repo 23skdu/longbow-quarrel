@@ -2977,3 +2977,91 @@ kernel void softmax_f32(
         out_row[i] /= sum;
     }
 }
+
+// Multi-LoRA Fused Kernel
+// Computes out += (B * (A * input)) * scale
+// input: [M, K], A: [K, R], B: [N, R], out: [M, N]
+kernel void linear_lora_add_f16(
+    device const half *input [[ buffer(0) ]],
+    device const half *A [[ buffer(1) ]],
+    device const half *B [[ buffer(2) ]],
+    device half *output [[ buffer(3) ]],
+    constant int &M [[ buffer(4) ]],
+    constant int &N [[ buffer(5) ]],
+    constant int &K [[ buffer(6) ]],
+    constant int &R [[ buffer(7) ]],
+    constant float &scale [[ buffer(8) ]],
+    uint3 qid [[ thread_position_in_grid ]]) 
+{
+    uint row = qid.y; // Row in input (batch/seq)
+    uint col = qid.x; // Col in output (dimOut)
+    
+    if (row >= (uint)M || col >= (uint)N) return;
+    
+    // 1. Compute intermediate rank vector r = A * input
+    // This part is redundant if done per-thread. Ideally, we'd compute rank vector once per row.
+    // For simplicity in the stub/fused version:
+    float acc_lora = 0.0f;
+    for (int r = 0; r < R; r++) {
+        float rank_val = 0.0f;
+        for (int k = 0; k < K; k++) {
+            rank_val += (float)input[row * K + k] * (float)A[r * K + k];
+        }
+        acc_lora += rank_val * (float)B[col * R + r];
+    }
+    
+    output[row * N + col] += (half)(acc_lora * scale);
+}
+
+// VLM Patch Embedding
+// Takes a normalized image and projects it into patch embeddings.
+// pixels: [C, H, W], out: [num_patches, vision_dim]
+kernel void vision_patch_embed_f32(
+    device const float *pixels [[ buffer(0) ]],
+    device const float *weight [[ buffer(1) ]],
+    device float *output [[ buffer(2) ]],
+    constant int &patch_size [[ buffer(3) ]],
+    constant int &vision_dim [[ buffer(4) ]],
+    constant int &num_patches_x [[ buffer(5) ]],
+    uint3 qid [[ thread_position_in_grid ]])
+{
+    uint patch_idx = qid.y;
+    uint dim_idx = qid.x;
+    
+    if (patch_idx >= (uint)(num_patches_x * num_patches_x) || dim_idx >= (uint)vision_dim) return;
+    
+    int px = patch_idx % num_patches_x;
+    int py = patch_idx / num_patches_x;
+    
+    float acc = 0.0f;
+    int weight_offset = dim_idx * patch_size * patch_size * 3;
+    
+    for (int c = 0; c < 3; c++) {
+        for (int y = 0; y < patch_size; y++) {
+            for (int x = 0; x < patch_size; x++) {
+                int img_x = px * patch_size + x;
+                int img_y = py * patch_size + y;
+                // pixel[c, img_y, img_x]
+                float p = pixels[(c * 224 * 224) + (img_y * 224) + img_x];
+                float w = weight[weight_offset + (c * patch_size * patch_size) + (y * patch_size) + x];
+                acc += p * w;
+            }
+        }
+    }
+    
+    output[patch_idx * vision_dim + dim_idx] = acc;
+}
+
+// Multi-GPU AllReduce
+// Sums multiple input buffers into a single output buffer
+// bufs: [num_devices, count]
+kernel void all_reduce_sum_f16(
+    device const half *input_0 [[ buffer(0) ]],
+    device const half *input_1 [[ buffer(1) ]],
+    device half *output [[ buffer(2) ]],
+    constant int &count [[ buffer(3) ]],
+    uint qid [[ thread_position_in_grid ]])
+{
+    if (qid >= (uint)count) return;
+    output[qid] = input_0[qid] + input_1[qid];
+}

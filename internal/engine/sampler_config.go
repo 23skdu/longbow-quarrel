@@ -1,5 +1,7 @@
 package engine
 
+import "github.com/23skdu/longbow-quarrel/internal/sampler"
+
 type SamplerConfig struct {
 	Temperature      float64
 	TopK             int
@@ -9,4 +11,5 @@ type SamplerConfig struct {
 	DebugActivations bool
 	QualityMode      bool
 	SequenceID       uint64
+	Grammar          *sampler.Grammar
 }

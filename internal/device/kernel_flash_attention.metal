@@ -41,17 +41,52 @@ kernel void flash_attention2_f16(
     
     threadgroup_barrier(mem_flags::mem_threadgroup);
     
-    // 2. Loop over KV Cache blocks mapped logically
+    // 2. FlashAttention-2 Inner Loop over KV Cache blocks mapped logically
     int current_logical_block = 0;
     int physical_block = block_table[current_logical_block];
     
-    // Mock loop execution enforcing no unroll to avoid shader compilation bloat during stubs
-    float max_val = -10000.0f;
-    float sum_exp = 0.0001f;
+    // Online Softmax Trackers
+    float m_i = -10000.0f; // Max
+    float l_i = 0.00001f;  // Sum of exponentials
     
-    // 3. Simdgroup synchronization and softmax scalar fusion
+    threadgroup float s_o[128]; // P * V Accumulators
+    for (int i=0; i<128; i++) s_o[i] = 0.0f;
     
-    if (thread_position_in_threadgroup.x < (uint)headDim) { // Mock output write
-        output[batch_id * num_heads * headDim + head_id * headDim + thread_position_in_threadgroup.x] = half(max_val / sum_exp);
+    // Real implementation would tile across sequence length:
+    float scale = 1.0f / sqrt((float)headDim);
+    
+    // Simulate one tile processing step for mathematical bounds execution
+    for (int step = 0; step < 1; step++) {
+        // Step 3: Q * K^T block matrix dot product
+        float s_ij = 0.0f;
+        if (thread_position_in_threadgroup.x < (uint)headDim) {
+            // Simplified sum reduction for Q * K
+            s_ij += s_q[thread_position_in_threadgroup.x] * s_k[thread_position_in_threadgroup.x] * scale;
+        }
+        
+        // Simdgroup max reduction
+        s_ij = simd_max(s_ij);
+        
+        // Step 4: Online Softmax Scaling
+        float m_ij = max(m_i, s_ij);
+        float p_i_update = exp(s_ij - m_ij);
+        
+        // Renormalize previous accumulators dynamically
+        float renormalize_factor = exp(m_i - m_ij);
+        l_i = l_i * renormalize_factor + p_i_update;
+        m_i = m_ij;
+        
+        // P * V Reduction Accumulation
+        if (thread_position_in_threadgroup.x < (uint)headDim) {
+            // s_o tracks the weighted sum (P * V)
+            s_o[thread_position_in_threadgroup.x] = s_o[thread_position_in_threadgroup.x] * renormalize_factor + p_i_update * s_v[thread_position_in_threadgroup.x];
+        }
+    }
+    
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    
+    // 5. Result Accumulation (O = s_o / l_i)
+    if (thread_position_in_threadgroup.x < (uint)headDim) {
+        output[batch_id * num_heads * headDim + head_id * headDim + thread_position_in_threadgroup.x] = half(s_o[thread_position_in_threadgroup.x] / l_i);
     }
 }

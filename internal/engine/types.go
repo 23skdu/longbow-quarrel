@@ -422,6 +422,12 @@ type metalEngine struct {
 
 	// Hot-swapping
 	mu sync.RWMutex
+
+	// Advanced Features
+	LoRA *LoRAManager
+	VLM  interface {
+		Encode(imageData []byte) (*device.Tensor, error)
+	}
 }
 
 func (e *metalEngine) Ctx() *device.Context {

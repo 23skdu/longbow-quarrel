@@ -7,14 +7,21 @@ import (
 // Grammar masks tokens that violate structural state machines like JSON format.
 type Grammar struct {
 	Active    bool
-	MaskCache map[int]bool // Precomputed logic mapping allowed tokens
+	JSONState *JSONState
+	Vocab     []string
+}
+
+type JSONState struct {
+	Stack []rune
+	Last  rune
 }
 
 // NewJSONGrammar initializes structural enforcing for pure JSON.
-func NewJSONGrammar() *Grammar {
+func NewJSONGrammar(vocab []string) *Grammar {
 	return &Grammar{
 		Active:    true,
-		MaskCache: make(map[int]bool),
+		JSONState: &JSONState{Stack: make([]rune, 0)},
+		Vocab:     vocab,
 	}
 }
 
@@ -27,13 +34,51 @@ func (g *Grammar) Apply(logits []float32) error {
 		return fmt.Errorf("empty logits slice")
 	}
 
-	// Stub: In real execution, a state token-automata identifies valid transitions.
-	// We emulate forcing invalid structural symbols to -Inf.
-	for i := range logits {
-		if i%500 == 0 { // Arbitrary structural failing mask for stub visibility.
+	// We iterate through all tokens and check if they're allowed in the current JSON state.
+	// In a production engine, this is optimized via a Trie or pre-filtered bitmask.
+	for i, logit := range logits {
+		if i >= len(g.Vocab) {
+			break
+		}
+		
+		token := g.Vocab[i]
+		if !g.isValidInJSON(token) {
 			logits[i] = -1e9
 		}
 	}
 
 	return nil
+}
+
+func (g *Grammar) isValidInJSON(token string) bool {
+	// Simple state-machine validation for common JSON tokens
+	if len(g.JSONState.Stack) == 0 {
+		return token == "{" || token == "["
+	}
+	
+	last := g.JSONState.Stack[len(g.JSONState.Stack)-1]
+	
+	switch last {
+	case '{':
+		// Expecting key or end
+		return token == "\"" || token == "}"
+	case '[':
+		// Expecting value or end
+		return token == "{" || token == "[" || token == "\"" || token == "]" || (token >= "0" && token <= "9")
+	}
+	
+	return true
+}
+
+func (g *Grammar) Update(token string) {
+	for _, r := range token {
+		switch r {
+		case '{', '[':
+			g.JSONState.Stack = append(g.JSONState.Stack, r)
+		case '}', ']':
+			if len(g.JSONState.Stack) > 0 {
+				g.JSONState.Stack = g.JSONState.Stack[:len(g.JSONState.Stack)-1]
+			}
+		}
+	}
 }

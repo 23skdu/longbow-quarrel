@@ -411,3 +411,16 @@ void Metal_Attention_TQ_Values_F16(MetalContextRef ctx, MetalBufferRef probabili
 #endif
 
 #endif
+
+void Metal_Linear_LoRA_Add_F16(MetalContextRef ctx, MetalBufferRef input, int offIn,
+                                MetalBufferRef A, int offA, MetalBufferRef B, int offB,
+                                MetalBufferRef output, int offOut, int M, int N, int K,
+                                float scale);
+
+void Metal_Vision_Patch_Embed_F32(MetalContextRef ctx, MetalBufferRef pixels, int offPixels,
+                                  MetalBufferRef weights, int offW, MetalBufferRef output,
+                                  int offOut, int patchSize, int visionDim, int numPatchesX);
+
+// Multi-GPU Collective Operations
+void Metal_AllReduce_F16(MetalContextRef ctx, MetalBufferRef data, int offset, int count);
+void Metal_AllGather_F16(MetalContextRef ctx, MetalBufferRef input, int offIn, MetalBufferRef output, int offOut, int count);
