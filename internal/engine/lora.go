@@ -35,7 +35,7 @@ func NewLoRAManager() *LoRAManager {
 }
 
 // LoadAdapter parses LoRA weights from a GGUF file into VRAM.
-func (lm *LoRAManager) LoadAdapter(ctx *device.Context, path string, id string) error {
+func (lm *LoRAManager) LoadAdapter(ctx *device.CUDAContext, path string, id string) error {
 	f, err := gguf.LoadFile(path)
 	if err != nil {
 		return fmt.Errorf("failed to load lora file: %w", err)
@@ -95,16 +95,16 @@ func (lm *LoRAManager) LoadAdapter(ctx *device.Context, path string, id string) 
 		// Upload A
 		weight.A = ctx.NewTensorWithType(r, dimIn, device.DataTypeF16)
 		if tA.Type == gguf.GGMLTypeF16 {
-			_ = weight.A.LoadFromRaw(tA.Data)
+			_ = weight.A.LoadFrom(tA.Data)
 		} else {
 			// Convert F32 to F16 if needed
 			// For now, assume F16
-			_ = weight.A.LoadFromRaw(tA.Data) 
+			_ = weight.A.LoadFrom(tA.Data) 
 		}
 
 		// Upload B
 		weight.B = ctx.NewTensorWithType(dimOut, r, device.DataTypeF16)
-		_ = weight.B.LoadFromRaw(tB.Data)
+		_ = weight.B.LoadFrom(tB.Data)
 
 		adapter.Weights[base] = weight
 	}

@@ -548,6 +548,11 @@ func (s *Sampler) Sample(logits []float32, history []int) int {
 	return 0
 }
 
+func (e *cudaEngine) ForwardDraft(tokens []int) ([][]float32, error) {
+	// Stub for speculative decoding support
+	return nil, nil
+}
+
 func init() {
 	RegisterEngine("cuda", NewcudaEngine)
 }
