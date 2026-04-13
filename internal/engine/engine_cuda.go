@@ -978,29 +978,14 @@ func (e *cudaEngine) applyRoPE(tensor []float32, pos int, theta, dim int) {
 	e.applyRoPEWithFactor(tensor, pos, theta, dim, 1.0)
 }
 
-func (e *cudaEngine) applyRoPEWithFactor(tensor []float32, pos int, theta, dim int, partialFactor float32) {
-	if len(tensor)%2 != 0 {
-		return
-	}
-
-	numHeads := len(tensor) / (dim * 2)
-	actualDim := dim
-	if partialFactor < 1.0 {
-		actualDim = int(float32(dim) * partialFactor)
-	}
-
+	halfDim := dim / 2
 	for h := 0; h < numHeads; h++ {
-		offset := h * dim * 2
-		for i := 0; i < dim; i += 2 {
+		offset := h * dim
+		for i := 0; i < halfDim; i++ {
 			idx1 := offset + i
-			idx2 := offset + i + 1
+			idx2 := offset + i + halfDim
 
-			var freq float64
-			if i < actualDim {
-				freq = float64(pos) / math.Pow(float64(theta), float64(i)/float64(dim))
-			} else {
-				freq = float64(pos) / math.Pow(float64(theta), float64(actualDim)/float64(dim)-1.0)
-			}
+			freq := float64(pos) * math.Pow(float64(theta), -2.0*float64(i)/float64(dim))
 			cos := float32(math.Cos(freq))
 			sin := float32(math.Sin(freq))
 
@@ -1230,15 +1215,54 @@ func NewSampler(config SamplerConfig) *Sampler {
 	}
 }
 
-func (s *Sampler) Sample(logits []float32) int {
+func (s *Sampler) applyRepetitionPenalty(logits []float32, history []int) {
+	if len(history) == 0 || s.config.RepPenalty <= 1.0 {
+		return
+	}
+
+	seen := make(map[int]bool)
+	// Penalize tokens seen in the last 64 positions
+	start := 0
+	if len(history) > 64 {
+		start = len(history) - 64
+	}
+	for _, tokenID := range history[start:] {
+		if seen[tokenID] {
+			continue
+		}
+		seen[tokenID] = true
+		if tokenID < len(logits) {
+			if logits[tokenID] > 0 {
+				logits[tokenID] /= float32(s.config.RepPenalty)
+			} else {
+				logits[tokenID] *= float32(s.config.RepPenalty)
+			}
+		}
+	}
+}
+
+func (s *Sampler) Sample(logits []float32, history []int) int {
 	if len(logits) == 0 {
 		return 0
 	}
 
-	if s.config.Temperature > 0 {
-		for i := range logits {
-			logits[i] = float32(float64(logits[i]) / s.config.Temperature)
+	s.applyRepetitionPenalty(logits, history)
+
+	// Temperature=0: Greedy
+	if s.config.Temperature <= 0 {
+		maxIdx := 0
+		maxVal := logits[0]
+		for i, v := range logits {
+			if v > maxVal {
+				maxVal = v
+				maxIdx = i
+			}
 		}
+		return maxIdx
+	}
+
+	for i := range logits {
+		logits[i] = float32(float64(logits[i]) / s.config.Temperature)
 	}
 
 	topK := s.config.TopK
@@ -1259,6 +1283,14 @@ func (s *Sampler) Sample(logits []float32) int {
 	sort.Slice(scored, func(i, j int) bool {
 		return scored[i].score > scored[j].score
 	})
+
+	// Log top 5 candidates for debugging
+	log.Printf("DEBUG Sampling: top5: [%d:%.2f %d:%.2f %d:%.2f %d:%.2f %d:%.2f]",
+		scored[0].token, scored[0].score,
+		scored[1].token, scored[1].score,
+		scored[2].token, scored[2].score,
+		scored[3].token, scored[3].score,
+		scored[4].token, scored[4].score)
 
 	topKScore := scored[0].token
 	if topK > 1 && topK < len(scored) {
