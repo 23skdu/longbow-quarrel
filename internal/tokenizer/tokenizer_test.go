@@ -1,4 +1,4 @@
-//go:build darwin && metal
+
 
 package tokenizer
 

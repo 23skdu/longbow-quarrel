@@ -1,4 +1,6 @@
-//go:build darwin && metal
+//go:build metal
+
+
 
 package engine
 
@@ -151,6 +153,43 @@ func (cm *ContinuousBatchManager) CompleteSequence(id uint64, kvCache *PagedKVCa
 	delete(cm.running, id)
 	delete(cm.prefill, id)
 	
-	seqIDStr := fmt.Sprintf("seq-%d", id)
-	kvCache.FreeSequence(seqIDStr)
+	if kvCache != nil {
+		seqIDStr := fmt.Sprintf("seq-%d", id)
+		kvCache.FreeSequence(seqIDStr)
+	}
+}
+
+// AbortAll notifies all tracks (waiting, prefill, running) with the given error and clears state.
+func (cm *ContinuousBatchManager) AbortAll(err error) {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+
+	// 1. Abort Waiting Queue
+	cm.waitingQueue.mu.Lock()
+	for _, req := range cm.waitingQueue.requests {
+		select {
+		case req.Err <- err:
+		default:
+		}
+	}
+	cm.waitingQueue.requests = nil
+	cm.waitingQueue.mu.Unlock()
+
+	// 2. Abort Running
+	for _, seq := range cm.running {
+		select {
+		case seq.Err <- err:
+		default:
+		}
+	}
+	cm.running = make(map[uint64]*Sequence)
+
+	// 3. Abort Prefill
+	for _, seq := range cm.prefill {
+		select {
+		case seq.Err <- err:
+		default:
+		}
+	}
+	cm.prefill = make(map[uint64]*Sequence)
 }

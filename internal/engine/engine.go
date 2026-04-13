@@ -1,4 +1,6 @@
-//go:build darwin && metal
+//go:build metal
+
+
 
 package engine
 
@@ -17,6 +19,10 @@ import (
 	"github.com/23skdu/longbow-quarrel/internal/logger"
 	"github.com/23skdu/longbow-quarrel/internal/metrics"
 	"github.com/23skdu/longbow-quarrel/internal/tokenizer"
+)
+
+var (
+	ErrModelSwapped = errors.New("inference interrupted: engine model was swapped")
 )
 
 // NewQualityEvaluator creates a new quality evaluator
@@ -325,18 +331,19 @@ func NewMetalEngine(modelPath string, config config.Config) (Engine, error) {
 		SeqMgr:    NewSequenceManager(),
 	}
 
+	e.TraceTracker = NewActivationTraceTracker(e.config.Layers)
+	e.BatchManager = NewContinuousBatchManager()
+	
+	e.stopChan = make(chan struct{})
+	e.doneChan = make(chan struct{})
+
 	if err := e.loadModel(modelPath); err != nil {
 		ctx.Free()
 		return nil, err
 	}
 
-	e.TraceTracker = NewActivationTraceTracker(e.config.Layers)
-	e.BatchManager = NewContinuousBatchManager()
 	e.cache = &PagedKVCache{}
 	e.cache.Init(ctx, e.config)
-
-	e.stopChan = make(chan struct{})
-	e.doneChan = make(chan struct{})
 
 	go e.runBatchLoop()
 
@@ -1440,10 +1447,11 @@ func (e *metalEngine) initKVCache() error {
 	e.cache = pagedCache
 
 	// Initialize Batch Manager
-	e.BatchManager = NewContinuousBatchManager()
+	if e.BatchManager == nil {
+		e.BatchManager = NewContinuousBatchManager()
+	}
 
-	// Start background batch loop
-	go e.runBatchLoop()
+	// Loop management moved to NewMetalEngine and SwapModel
 
 	return nil
 }
@@ -1538,6 +1546,8 @@ func (e *metalEngine) GetEmbedding(token int) ([]float32, error) {
 	return emb.ToHost(), nil
 }
 
+
+
 // GetEmbeddings returns embedding vectors for multiple tokens
 func (e *metalEngine) GetEmbeddings(tokens []int) ([][]float32, error) {
 	embeddings := make([][]float32, len(tokens))
@@ -1624,31 +1634,45 @@ func (e *metalEngine) SwapModel(newModelPath string, newConfig config.Config) er
 		metrics.RecordModelHotSwap(time.Since(startTime), success)
 	}()
 
+	// 1. Signal background loop to stop
+	if e.stopChan != nil {
+		close(e.stopChan)
+		<-e.doneChan // Wait for loop to exit completely
+	}
+
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	// Free existing cache and weights
+	// 2. Abort all active sequences to prevent caller deadlocks
+	if e.BatchManager != nil {
+		e.BatchManager.AbortAll(ErrModelSwapped)
+	}
+
+	// 3. Free existing cache and weights
 	if e.cache != nil {
 		e.cache.Free()
+		e.cache = nil
 	}
 	if e.weights != nil {
 		e.weights.Free()
+		e.weights = nil
 	}
 
-	// Create new fresh weights struct
-	e.weights = &LlamaWeights{
-		AttnQNorm: make([]*device.Tensor, e.config.Layers),
-		AttnKNorm: make([]*device.Tensor, e.config.Layers),
-	}
-
-	// Update config
+	// 4. Update config
 	e.config = newConfig
-	e.config.KVCacheSize = newConfig.KVCacheSize
 
-	// Load the new model
+	// 5. Pre-allocate weights container for metadata detection
+	e.weights = &LlamaWeights{}
+
+	// 6. Load the new model
 	if err := e.loadModel(newModelPath); err != nil {
 		return err
 	}
+
+	// 7. Restart background loop
+	e.stopChan = make(chan struct{})
+	e.doneChan = make(chan struct{})
+	go e.runBatchLoop()
 
 	success = true
 	return nil

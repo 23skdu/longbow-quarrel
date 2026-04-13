@@ -13,6 +13,9 @@ import (
 
 // detectMambaLayers determines the Mamba layer pattern from model metadata
 func (e *metalEngine) detectMambaLayers(f *gguf.GGUFFile, log logger.Logger) {
+	if e.weights == nil {
+		return
+	}
 	arch := e.config.Architecture
 
 	// Check for explicit Mamba layer pattern in metadata

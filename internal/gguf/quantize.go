@@ -138,7 +138,7 @@ func QuantizeWeightsToQ4K(weights []float32, numElements int) ([]byte, error) {
 				}
 			}
 
-			D := d * float32(sc[g]) / 15.0
+			D := d * float32(sc[g]) / 225.0
 			offset := -groupMinVal
 
 			for j := 0; j < 32; j++ {

@@ -27,41 +27,37 @@ func DequantizeQ4K(data []byte, numElements int) []float32 {
 		blockData := data[blockOffset : blockOffset+blockSizeBytes]
 
 		d := Float16ToFloat32(binary.LittleEndian.Uint16(blockData[0:2]))
-		dmin := Float16ToFloat32(binary.LittleEndian.Uint16(blockData[2:4]))
+		// dmin is not used in the updated group-level scaling math
+		_ = Float16ToFloat32(binary.LittleEndian.Uint16(blockData[2:4]))
 
 		scales := blockData[4:16]
 		qs := blockData[16:144]
 
-		var sc [8]uint8
-		var m [8]uint8
-
-		for j := 0; j < 8; j++ {
-			sc[j] = scales[j] & 63
-			m[j] = scales[j+4] & 63
+		sc := [8]uint8{
+			scales[0] & 63, scales[1] & 63, scales[2] & 63, scales[3] & 63,
+			scales[8] & 0x0F, scales[9] & 0x0F, scales[10] & 0x0F, scales[11] & 0x0F,
 		}
-		for j := 8; j < 12; j++ {
-			sc[j-4] = (scales[j] & 0xF) | ((scales[j-8] >> 6) << 4)
-			m[j-4] = (scales[j] >> 4) | ((scales[j-4] >> 6) << 4)
+		m := [8]uint8{
+			scales[4] & 63, scales[5] & 63, scales[6] & 63, scales[7] & 63,
+			scales[8] >> 4, scales[9] >> 4, scales[10] >> 4, scales[11] >> 4,
 		}
 
 		var D [8]float32
-		var M [8]float32
 
 		for j := 0; j < 8; j++ {
-			D[j] = d * float32(sc[j])
-			M[j] = dmin * float32(m[j])
+			D[j] = d * float32(sc[j]) / 225.0
 		}
 
 		baseIdx := i * BlockSizeQ4K
 		for j := 0; j < 8; j++ {
-			dj := D[j]
-			mj := M[j]
+			step := D[j]
+			mj := float32(m[j])
 			qsOffset := j * 16
 			idxBase := baseIdx + j*32
 			for k := 0; k < 16; k++ {
 				b := qs[qsOffset+k]
-				out[idxBase+k] = dj*float32(b&0xF) - mj
-				out[idxBase+k+16] = dj*float32(b>>4) - mj
+				out[idxBase+k] = step * (float32(b&0xF) - mj)
+				out[idxBase+k+16] = step * (float32(b>>4) - mj)
 			}
 		}
 	}
@@ -414,6 +410,61 @@ func DequantizeQ5_0(data []byte, numElements int) []float32 {
 
 			out[i*blockSize+j] = d * (float32(val0) - 16.0)
 			out[i*blockSize+j+16] = d * (float32(val1) - 16.0)
+		}
+	}
+	return out
+}
+
+// DequantizeBlock is a dispatcher that dequantizes a single block of data based on its GGMLType.
+func DequantizeBlock(data []byte, dst []float32, dataType GGMLType) {
+	switch dataType {
+	case GGMLTypeF32:
+		for i := 0; i < len(dst); i++ {
+			if (i+1)*4 <= len(data) {
+				dst[i] = math.Float32frombits(binary.LittleEndian.Uint32(data[i*4 : (i+1)*4]))
+			}
+		}
+	case GGMLTypeF16:
+		for i := 0; i < len(dst); i++ {
+			if (i+1)*2 <= len(data) {
+				dst[i] = Float16ToFloat32(binary.LittleEndian.Uint16(data[i*2 : (i+1)*2]))
+			}
+		}
+	case GGMLTypeQ4_K:
+		res := DequantizeQ4K(data, len(dst))
+		copy(dst, res)
+	case GGMLTypeQ6_K:
+		res := DequantizeQ6K(data, len(dst))
+		copy(dst, res)
+	case GGMLTypeQ8_0:
+		res := DequantizeQ80(data, len(dst))
+		copy(dst, res)
+	case GGMLTypeQ5_0:
+		res := DequantizeQ5_0(data, len(dst))
+		copy(dst, res)
+	default:
+		// Fallback or panic for unsupported types in tests
+		panic(fmt.Sprintf("DequantizeBlock: unsupported type %v", dataType))
+	}
+}
+
+func DequantizeQ80(data []byte, numElements int) []float32 {
+	const blockSize = 32
+	const blockSizeBytes = 34
+	if numElements%blockSize != 0 {
+		return make([]float32, numElements)
+	}
+	numBlocks := numElements / blockSize
+	out := make([]float32, numElements)
+	for i := 0; i < numBlocks; i++ {
+		off := i * blockSizeBytes
+		if off+blockSizeBytes > len(data) {
+			break
+		}
+		d := Float16ToFloat32(binary.LittleEndian.Uint16(data[off : off+2]))
+		qs := data[off+2 : off+34]
+		for j := 0; j < 32; j++ {
+			out[i*blockSize+j] = d * float32(int8(qs[j]))
 		}
 	}
 	return out
