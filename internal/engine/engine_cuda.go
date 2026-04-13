@@ -978,6 +978,12 @@ func (e *cudaEngine) applyRoPE(tensor []float32, pos int, theta, dim int) {
 	e.applyRoPEWithFactor(tensor, pos, theta, dim, 1.0)
 }
 
+func (e *cudaEngine) applyRoPEWithFactor(tensor []float32, pos int, theta, dim int, partialFactor float32) {
+	if len(tensor)%2 != 0 {
+		return
+	}
+
+	numHeads := len(tensor) / dim
 	halfDim := dim / 2
 	for h := 0; h < numHeads; h++ {
 		offset := h * dim
