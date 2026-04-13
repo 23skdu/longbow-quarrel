@@ -42,6 +42,10 @@ extern void cudaFusedSwiGLU(cudaStream_t stream, const void* input, const void* 
 extern void cudaFusedMLP(cudaStream_t stream, const void* input, const void* gateWeight, const void* upWeight, const void* downWeight, void* output, int batch, int dim, int hiddenDim);
 extern void cudaFusedRMSNormAdd(cudaStream_t stream, const void* input, const void* hidden, const void* weight, void* output, int batch, int dim, float eps);
 
+extern void cudaAdd(float* a, float* b, float* out, int size, cudaStream_t stream);
+extern void cudaRMSNorm(float* input, float* weight, float* output, int rows, int cols, float eps, cudaStream_t stream);
+extern void cudaSwiGLU(float* gate, float* up, float* output, int size, cudaStream_t stream);
+
 // TurboQuant kernel exports
 extern void cudaTurboQuantPolarQuant(cudaStream_t stream, const float* input, const float* rotationMatrix, int8_t* quantized, float* scaleOut, float* residual, int n, int bits);
 extern void cudaTurboQuantQJLTransform(cudaStream_t stream, const float* residual, const float* signMatrix, int8_t* quantized, float* scaleOut, int rows, int cols);
