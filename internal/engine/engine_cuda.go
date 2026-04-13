@@ -574,5 +574,3 @@ func init() {
 	RegisterEngine("cuda", NewcudaEngine)
 }
 
-	return nil, false
-}
