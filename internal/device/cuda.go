@@ -74,7 +74,6 @@ const (
 type CUDAContext struct {
 	Ctx    C.cudaStream_t
 	Cublas C.cublasHandle_t
-	CuDNN  C.cudnnHandle_t
 	pool   *tensorPool
 }
 
