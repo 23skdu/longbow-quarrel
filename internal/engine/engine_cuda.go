@@ -161,39 +161,58 @@ func NewcudaEngine(modelPath string, cfg config.Config) (Engine, error) {
 	}
 
 	heads := 32
-	if v, ok := f.KV["llama.attention.head_count"].(uint32); ok {
-		heads = int(v)
+	if val, ok := getKV(f, "llama.attention.head_count", "gemma4.attention.head_count", "qwen2.attention.head_count", "qwen3moe.attention.head_count"); ok {
+		heads = int(toFloat64(val))
+	}
+
+	kvHeads := heads
+	if val, ok := getKV(f, "llama.attention.head_count_kv", "gemma4.attention.head_count_kv", "gemma4.attention.kv_head_count", "qwen3moe.attention.head_count_kv"); ok {
+		if arr, ok := val.([]interface{}); ok {
+			maxVal := 0
+			for _, v := range arr {
+				iv := int(toFloat64(v))
+				if iv > maxVal {
+					maxVal = iv
+				}
+			}
+			kvHeads = maxVal
+		} else {
+			kvHeads = int(toFloat64(val))
+		}
+	}
+	if kvHeads <= 0 {
+		kvHeads = heads
 	}
 
 	dim := 2048
-	if v, ok := f.KV["llama.embedding_length"].(uint32); ok {
-		dim = int(v)
+	if val, ok := getKV(f, "llama.embedding_length", "gemma4.embedding_length", "qwen2.embedding_length", "qwen3moe.embedding_length"); ok {
+		dim = int(toFloat64(val))
 	}
 
 	headDim := dim / heads
 	hiddenDim := dim * 4
-	if v, ok := f.KV["llama.feed_forward_length"].(uint32); ok {
-		hiddenDim = int(v)
+	if val, ok := getKV(f, "llama.feed_forward_length", "gemma4.feed_forward_length", "qwen2.feed_forward_length", "qwen3moe.feed_forward_length"); ok {
+		hiddenDim = int(toFloat64(val))
 	}
 
 	ropeTheta := 10000.0
-	if v, ok := f.KV["llama.rope.freq_base"].(float64); ok {
-		ropeTheta = v
+	if val, ok := getKV(f, "llama.rope.freq_base", "qwen3moe.rope.freq_base", "gemma4.rope.freq_base", "qwen2.rope.freq_base"); ok {
+		ropeTheta = toFloat64(val)
 	}
 
 	eps := float32(1e-5)
-	if v, ok := f.KV["llama.attention.layer_norm_rms_epsilon"].(float64); ok {
-		eps = float32(v)
+	if val, ok := getKV(f, "llama.attention.layer_norm_rms_epsilon", "qwen3moe.attention.layer_norm_rms_epsilon", "gemma4.attention.layer_norm_rms_epsilon"); ok {
+		eps = float32(toFloat64(val))
 	}
 
 	seqLen := 2048
-	if v, ok := f.KV["llama.context_length"].(uint32); ok {
-		seqLen = int(v)
+	if val, ok := getKV(f, "llama.context_length", "qwen3moe.context_length", "gemma4.context_length", "qwen2.context_length"); ok {
+		seqLen = int(toFloat64(val))
 	}
 
 	log.Printf("=== CUDA Engine ===")
 	log.Printf("Architecture: %s", arch)
-	log.Printf("Layers: %d, Dim: %d, Heads: %d, HeadDim: %d", layers, dim, heads, headDim)
+	log.Printf("Layers: %d, Dim: %d, Heads: %d, HeadDim: %d, KVHeads: %d", layers, dim, heads, headDim, kvHeads)
 	log.Printf("Vocab: %d, HiddenDim: %d", vocabSize, hiddenDim)
 	log.Printf("RoPE Theta: %.0f, Eps: %e", ropeTheta, eps)
 	log.Printf("GPU Memory: %.1f MB", float64(device.CUDAAllocatedBytes())/1e6)
@@ -214,7 +233,7 @@ func NewcudaEngine(modelPath string, cfg config.Config) (Engine, error) {
 			HiddenDim:     hiddenDim,
 			Layers:        layers,
 			Heads:         heads,
-			KVHeads:       heads,
+			KVHeads:       kvHeads,
 			HeadDim:       headDim,
 			VocabSize:     vocabSize,
 			SeqLen:        seqLen,
@@ -241,7 +260,7 @@ func NewcudaEngine(modelPath string, cfg config.Config) (Engine, error) {
 
 	qNormDim := 512
 	kNormDim := 512
-	e.scratch = ctx.NewLayerScratch(seqLen, dim, hiddenDim, heads, heads, headDim, seqLen, vocabSize, qNormDim, kNormDim)
+	e.scratch = ctx.NewLayerScratch(seqLen, dim, hiddenDim, heads, kvHeads, headDim, seqLen, vocabSize, qNormDim, kNormDim)
 
 	return e, nil
 }
