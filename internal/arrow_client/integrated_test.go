@@ -8,6 +8,9 @@ import (
 	"time"
 
 	"github.com/23skdu/longbow-quarrel/internal/api"
+	"github.com/23skdu/longbow-quarrel/internal/config"
+	"github.com/23skdu/longbow-quarrel/internal/engine"
+	"github.com/23skdu/longbow-quarrel/internal/tokenizer"
 )
 
 func TestArrowIntegration_Suite(t *testing.T) {
@@ -21,7 +24,12 @@ func TestArrowIntegration_Suite(t *testing.T) {
 	var port int
 	fmt.Sscanf(portStr, "%d", &port)
 
-	server := api.NewInferenceFlightServer(addr)
+	mockEngine, _ := engine.NewMockEngine("", config.Config{})
+	mockTokenizer := &tokenizer.Tokenizer{
+		Vocab:  map[string]int{" ": 0, "test": 1},
+		Tokens: []string{" ", "test"},
+	}
+	server := api.NewInferenceFlightServer(addr, mockEngine, mockTokenizer)
 	
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

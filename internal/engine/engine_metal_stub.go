@@ -8,6 +8,10 @@ import (
 )
 
 // metalEngine is a no-op stub for platforms where Metal is not available.
+type PagedKVCache struct{}
+type ContinuousBatchManager struct{}
+type InferenceRequest struct{}
+
 type metalEngine struct {
 	config       config.Config
 	cache        *PagedKVCache

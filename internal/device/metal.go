@@ -77,6 +77,7 @@ void Metal_ZeroBufferGPU(MetalWrapperRef ctx, MetalBufferRef buf, int offset, in
 
 void Metal_Copy_F32_F16(MetalWrapperRef ctx, MetalBufferRef src, int oS, MetalBufferRef dst, int oD, int n);
 void Metal_Copy_F16_F32(MetalWrapperRef ctx, MetalBufferRef src, int oS, MetalBufferRef dst, int oD, int n);
+void Metal_Copy_F32(MetalWrapperRef ctx, MetalBufferRef src, int oS, MetalBufferRef dst, int oD, int n);
 
 void Metal_TurboQuant_Decode(MetalWrapperRef ctx, MetalBufferRef input,
                               int offInput, MetalBufferRef rotationMatrix,
@@ -85,8 +86,8 @@ void Metal_TurboQuant_Decode(MetalWrapperRef ctx, MetalBufferRef input,
                               int offOut, MetalBufferRef scaleIn,
                               int offScale, int blockSize, int qjlRows, int numBlocks);
 
-void Metal_FlashAttention2_F16(MetalWrapperRef ctx, MetalBufferRef q, MetalBufferRef k_cache, MetalBufferRef v_cache, MetalBufferRef output, int num_heads, int kv_heads, int headDim, int seq_len, int block_size, MetalBufferRef block_table, int max_blocks_per_seq, int batchSize);
-void Metal_Linear_LoRA_Add_F16(MetalWrapperRef ctx, MetalBufferRef input, int offIn, MetalBufferRef A, int offA, MetalBufferRef B, int offB, MetalBufferRef output, int offOut, int M, int N, int K, float scale);
+void Metal_FlashAttention2_F16(MetalWrapperRef ctx, MetalBufferRef q, MetalBufferRef k_cache, MetalBufferRef v_cache, MetalBufferRef output, int num_heads, int kv_heads, int headDim, MetalBufferRef seq_lens, int block_size, MetalBufferRef block_table, int max_blocks_per_seq, MetalBufferRef token_to_seq, int batchSize);
+void Metal_Linear_LoRA_Add_F16(MetalWrapperRef ctx, MetalBufferRef input, int offIn, MetalBufferRef A, int offA, MetalBufferRef B, int offB, MetalBufferRef output, int offOut, int M, int N, int K, int R, float scale);
 void Metal_Vision_Patch_Embed_F32(MetalWrapperRef ctx, MetalBufferRef pixels, int offPixels, MetalBufferRef weights, int offW, MetalBufferRef output, int offOut, int patchSize, int visionDim, int numPatchesX);
 void Metal_AllReduce_F16(MetalWrapperRef ctx, MetalBufferRef data, int offset, int count);
 */
@@ -697,15 +698,19 @@ func (c *Context) TurboQuantDecode(input *Tensor, rotationMatrix *Tensor, qjlMat
 		C.int(blockSize), C.int(qjlRows), C.int(numBlocks))
 }
 
-func (c *Context) LinearLoRAAdd(input *Tensor, A *Tensor, B *Tensor, output *Tensor, scale float32) {
+func (c *Context) LinearLoRAAdd(input, A, B, output *Tensor, scale float32) {
+	if A == nil || B == nil {
+		return
+	}
 	c.ExecMu.Lock()
 	defer c.ExecMu.Unlock()
+
+	// M = input rows, N = output cols, K = input cols, R = rank
 	M := input.rows
-	K := input.cols
 	N := output.cols
-	// R is implied by A.rows or B.cols depending on layout. 
-	// Our kernel expects A as [R, K] and B as [N, R]
-	C.Metal_Linear_LoRA_Add_F16(c.ref, input.buf, C.int(input.Offset), A.buf, C.int(A.Offset), B.buf, C.int(B.Offset), output.buf, C.int(output.Offset), C.int(M), C.int(N), C.int(K), C.float(scale))
+	K := input.cols
+	R := A.rows // A is [Rank, DimIn]
+	C.Metal_Linear_LoRA_Add_F16(c.ref, input.buf, C.int(input.Offset), A.buf, C.int(A.Offset), B.buf, C.int(B.Offset), output.buf, C.int(output.Offset), C.int(M), C.int(N), C.int(K), C.int(R), C.float(scale))
 }
 
 func (c *Context) VisionPatchEmbed(pixels *Tensor, weights *Tensor, output *Tensor, patchSize, visionDim, numPatchesX int) {
@@ -1680,8 +1685,17 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 
 		if blockTable != nil {
 			// Optimized FlashAttention-2 for Paged Cache
+			// For single token case, create a temporary position tensor
 			maxBlocks := blockTable.Cols()
-			t.ctx.FlashAttention2(qPart.Slice(i, 1), kCache, vCache, attOut.Slice(i, 1), p, heads, kvHeads, headDim, blockSize, blockTable, maxBlocks, 1)
+			pPos := t.ctx.NewTensorFP32(1, 1)
+			pPos.LoadFrom([]float32{float32(p)})
+			pSeq := t.ctx.NewTensorFP32(1, 1)
+			pSeq.LoadFrom([]float32{0})
+			
+			t.ctx.FlashAttention2(qPart.Slice(i, 1), kCache, vCache, attOut.Slice(i, 1), pPos, heads, kvHeads, headDim, blockSize, blockTable, maxBlocks, pSeq, 1)
+			
+			pPos.Free()
+			pSeq.Free()
 		} else {
 			C.Metal_AttFused_F16(t.ctx.ref, qPart.buf, C.int(qPart.Offset+offQ),
 				kCache.buf, C.int(kCache.Offset), vCache.buf, C.int(vCache.Offset),
@@ -1800,8 +1814,8 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 // LayerBatch executes a full transformer layer for a batch of sequences
 func (t *Tensor) LayerBatch(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, kCache, vCache *Tensor,
 	scratch *LayerScratch,
-	batchPositions, blockTables *Tensor, maxBlocksPerSeq int,
-	heads, kvHeads, headDim int, ropeTheta, eps float32, hiddenDim, blockSize, batchSize int, globalScale float32,
+	tokenPositions, tokenToSeqMapping, blockTables *Tensor, maxBlocksPerSeq int,
+	heads, kvHeads, headDim int, ropeTheta, eps float32, hiddenDim, blockSize, numTokens int, globalScale float32,
 	kvStoreBatch func(k, v *Tensor)) {
 
 	if attnNorm == nil || q == nil || k == nil || v == nil || o == nil {
@@ -1813,7 +1827,7 @@ func (t *Tensor) LayerBatch(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate
 	// 1. RMSNorm (Batched)
 	t0_rmsnorm1 := time.Now()
 	C.Metal_RMSNorm_F16(t.ctx.ref, t.buf, C.int(t.Offset), attnNorm.buf, C.int(attnNorm.Offset),
-		normed.buf, C.int(normed.Offset), C.int(batchSize), C.int(t.cols), C.float(eps))
+		normed.buf, C.int(normed.Offset), C.int(numTokens), C.int(t.cols), C.float(eps))
 	metrics.RecordKernelDuration("LayerBatch_RMSNorm1", time.Since(t0_rmsnorm1))
 
 	// 2. QKV Projections (Batched)
@@ -1825,36 +1839,31 @@ func (t *Tensor) LayerBatch(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate
 		C.Metal_RMSNormQKV_Q4K_F16(t.ctx.ref, t.buf, C.int(t.Offset), attnNorm.buf, C.int(attnNorm.Offset),
 			q.buf, C.int(q.Offset), k.buf, C.int(k.Offset), v.buf, C.int(v.Offset),
 			qPart.buf, C.int(qPart.Offset), kPart.buf, C.int(kPart.Offset), vPart.buf, C.int(vPart.Offset),
-			C.int(t.cols), C.int(q.rows), C.int(k.rows), C.float(eps), C.float(globalScale), C.int(batchSize))
+			C.int(t.cols), C.int(q.rows), C.int(k.rows), C.float(eps), C.float(globalScale), C.int(numTokens))
 	} else if q.dataType == DataTypeQ6K && k.dataType == DataTypeQ6K && v.dataType == DataTypeQ6K {
 		C.Metal_RMSNormQKV_Q6K_F16(t.ctx.ref, t.buf, C.int(t.Offset), attnNorm.buf, C.int(attnNorm.Offset),
 			q.buf, C.int(q.Offset), k.buf, C.int(k.Offset), v.buf, C.int(v.Offset),
 			qPart.buf, C.int(qPart.Offset), kPart.buf, C.int(kPart.Offset), vPart.buf, C.int(vPart.Offset),
-			C.int(t.cols), C.int(q.rows), C.int(k.rows), C.float(eps), C.float(globalScale), C.int(batchSize))
+			C.int(t.cols), C.int(q.rows), C.int(k.rows), C.float(eps), C.float(globalScale), C.int(numTokens))
 	} else {
 		normed.linearIntoInternal(q, qPart, globalScale)
 		normed.linearIntoInternal(k, kPart, globalScale)
 		normed.linearIntoInternal(v, vPart, globalScale)
 	}
 
-	// 3. RoPE (Batched)
-	// For continuous batching, we need a specialized batched RoPE kernel if positions are disjoint.
-	// For now, we iterate if needed, or assume caller provides positions.
-	// TODO: Implement Metal_RoPE_Batch_F16
-	for i := 0; i < batchSize; i++ {
-		// Single-position RoPE for each row
-		qPart.Slice(i, 1).ropeInternal(0, heads, headDim, 1, ropeTheta)
-		kPart.Slice(i, 1).ropeInternal(0, kvHeads, headDim, 1, ropeTheta)
-	}
+	// 3. RoPE (Batched Ragged)
+	// We pass the token-specific positions directly to RoPE
+	qPart.ropeInternal(tokenPositions, heads, headDim, numTokens, ropeTheta)
+	kPart.ropeInternal(tokenPositions, kvHeads, headDim, numTokens, ropeTheta)
 
 	// 4. Store K/V (Batched Paged)
 	if kvStoreBatch != nil {
 		kvStoreBatch(kPart, vPart)
 	}
 
-	// 5. Attention (Batched Paged)
+	// 5. Attention (Batched Paged Ragged)
 	attOut := scratch.AttOut
-	t.ctx.AttentionPagedBatch(qPart, kCache, vCache, attOut, batchPositions, blockTables, maxBlocksPerSeq, heads, kvHeads, headDim, blockSize, batchSize)
+	t.ctx.AttentionPagedBatch(qPart, kCache, vCache, attOut, tokenPositions, blockTables, maxBlocksPerSeq, heads, kvHeads, headDim, blockSize, tokenToSeqMapping, numTokens)
 
 	// 6. Projections & Residual 1
 	resAtt := scratch.ResAtt
@@ -1864,7 +1873,7 @@ func (t *Tensor) LayerBatch(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate
 	// 7. FFN Part (Batched)
 	normedFFN := scratch.NormedFFN
 	C.Metal_RMSNorm_F16(t.ctx.ref, t.buf, C.int(t.Offset), ffnNorm.buf, C.int(ffnNorm.Offset),
-		normedFFN.buf, C.int(normedFFN.Offset), C.int(batchSize), C.int(t.cols), C.float(eps))
+		normedFFN.buf, C.int(normedFFN.Offset), C.int(numTokens), C.int(t.cols), C.float(eps))
 
 	gatePart := scratch.GatePart
 	upPart := scratch.UpPart
@@ -1873,15 +1882,20 @@ func (t *Tensor) LayerBatch(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate
 
 	// SwiGLU Fused
 	C.Metal_SwiGLU_F16(t.ctx.ref, upPart.buf, C.int(upPart.Offset), gatePart.buf, C.int(gatePart.Offset),
-		scratch.SwiOut.buf, C.int(scratch.SwiOut.Offset), C.int(batchSize), C.int(hiddenDim))
+		scratch.SwiOut.buf, C.int(scratch.SwiOut.Offset), C.int(numTokens), C.int(hiddenDim))
 
 	resFFN := scratch.ResFFN
 	scratch.SwiOut.linearIntoInternal(ffnDown, resFFN, globalScale)
 	t.AddInPlace(resFFN)
 }
 
-func (t *Tensor) ropeInternal(posOffset, heads, headDim, seqLen int, ropeTheta float32) {
-	C.Metal_RoPE_F16(t.ctx.ref, t.buf, C.int(t.Offset), 1, C.int(seqLen), C.int(heads), C.int(headDim), C.int(posOffset), C.float(ropeTheta))
+func (t *Tensor) ropeInternal(pos interface{}, heads, headDim, seqLen int, ropeTheta float32) {
+	switch p := pos.(type) {
+	case int:
+		C.Metal_RoPE_F16(t.ctx.ref, t.buf, C.int(t.Offset), 1, C.int(seqLen), C.int(heads), C.int(headDim), C.int(p), C.float(ropeTheta))
+	case *Tensor:
+		C.Metal_RoPE_Ragged_F16(t.ctx.ref, t.buf, C.int(t.Offset), p.buf, C.int(seqLen), C.int(heads), C.int(headDim), C.float(ropeTheta))
+	}
 }
 
 func (t *Tensor) RoPE(posOffset, headDim, numHeads, seqLen int, ropeTheta float32) {
@@ -2426,6 +2440,17 @@ func (t *Tensor) CopyToF16_Into(dest *Tensor) error {
 	return nil
 }
 
+func (t *Tensor) CopyF32Into(dest *Tensor) error {
+	if t.rows != dest.rows || t.cols != dest.cols {
+		return NewValidationError("CopyF32Into",
+			fmt.Sprintf("dimension mismatch: src[%d,%d] != dest[%d,%d]",
+				t.rows, t.cols, dest.rows, dest.cols),
+			"copy_dims")
+	}
+	C.Metal_Copy_F32(t.ctx.ref, t.buf, C.int(t.Offset), dest.buf, C.int(dest.Offset), C.int(t.rows*t.cols))
+	return nil
+}
+
 func (t *Tensor) ToF32InPlace(res *Tensor) {
 	C.Metal_Copy_F16_F32(t.ctx.ref, t.buf, C.int(t.Offset), res.buf, C.int(res.Offset), C.int(t.rows*t.cols))
 }
@@ -2716,18 +2741,17 @@ func (ctx *Context) TurboQuantDecode(input, rotationMatrix, scaleIn *Tensor, blo
 */
 
 // FlashAttention2 executes the memory-fused FlashAttention-2 kernel for paged KV cache
-func (ctx *Context) FlashAttention2(q, kCache, vCache, output *Tensor, seqLen, numHeads, kvHeads, headDim, blockSize int, blockTable *Tensor, maxBlocksPerSeq, batchSize int) {
+func (ctx *Context) FlashAttention2(q, kCache, vCache, output *Tensor, seqLens *Tensor, numHeads, kvHeads, headDim, blockSize int, blockTable *Tensor, maxBlocksPerSeq int, tokenToSeq *Tensor, batchSize int) {
 	ctx.ExecMu.Lock()
 	defer ctx.ExecMu.Unlock()
 	C.Metal_FlashAttention2_F16(ctx.ref, q.buf, kCache.buf, vCache.buf, output.buf,
-		C.int(numHeads), C.int(kvHeads), C.int(headDim), C.int(seqLen), C.int(blockSize),
-		blockTable.buf, C.int(maxBlocksPerSeq), C.int(batchSize))
+		C.int(numHeads), C.int(kvHeads), C.int(headDim), seqLens.buf, C.int(blockSize),
+		blockTable.buf, C.int(maxBlocksPerSeq), tokenToSeq.buf, C.int(batchSize))
 }
 
 // AttentionPagedBatch performs paged attention across a batch of sequences
-func (ctx *Context) AttentionPagedBatch(q, kCache, vCache, output, batchPositions, blockTables *Tensor, maxBlocksPerSeq, heads, kvHeads, headDim, blockSize, batchSize int) {
-	// Transition to FlashAttention2 for better performance
-	ctx.FlashAttention2(q, kCache, vCache, output, 1, heads, kvHeads, headDim, blockSize, blockTables, maxBlocksPerSeq, batchSize)
+func (ctx *Context) AttentionPagedBatch(q, kCache, vCache, output, tokenPositions, blockTables *Tensor, maxBlocksPerSeq, heads, kvHeads, headDim, blockSize int, tokenToSeq *Tensor, batchSize int) {
+	ctx.FlashAttention2(q, kCache, vCache, output, tokenPositions, heads, kvHeads, headDim, blockSize, blockTables, maxBlocksPerSeq, tokenToSeq, batchSize)
 }
 
 // StoreKVPagedBatch stores K and V projections for a batch of sequences into their respective physical blocks

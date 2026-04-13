@@ -474,16 +474,39 @@ kernel void rope_f16(device half *x [[ buffer(0) ]],
     int lane = gid.x % (headDim / 2);
     
     if (lane < headDim/2) {
-        // Neox Rotation (Half)
         int half_dim = headDim / 2;
-        
         int idx0 = lane;
         int idx1 = lane + half_dim;
         
-        // Calculate theta
-        // theta = (pos + token_idx) * base^(-2*i/d)
-        // i = idx0
         float theta_i = (float)(pos + (int)gid.y) * pow(ropeTheta, -2.0f * (float)idx0 / (float)headDim);
+        float sin_theta = sin(theta_i);
+        float cos_theta = cos(theta_i);
+
+        device half *dx = x + gid.y * numHeads * headDim + h * headDim;
+        float x0 = (float)dx[idx0];
+        float x1 = (float)dx[idx1];
+
+        dx[idx0] = (half)(x0 * cos_theta - x1 * sin_theta);
+        dx[idx1] = (half)(x0 * sin_theta + x1 * cos_theta);
+    }
+}
+
+kernel void rope_ragged_f16(device half *x [[ buffer(0) ]],
+                           device const float *positions [[ buffer(1) ]],
+                           constant int &headDim [[ buffer(2) ]],
+                           constant float &ropeTheta [[ buffer(3) ]],
+                           constant int &numHeads [[ buffer(4) ]],
+                           uint2 gid [[ thread_position_in_grid ]]) {
+    int h = gid.x / (headDim / 2);
+    int lane = gid.x % (headDim / 2);
+    
+    if (lane < headDim/2) {
+        int half_dim = headDim / 2;
+        int idx0 = lane;
+        int idx1 = lane + half_dim;
+        
+        float pos = positions[gid.y];
+        float theta_i = pos * pow(ropeTheta, -2.0f * (float)idx0 / (float)headDim);
         float sin_theta = sin(theta_i);
         float cos_theta = cos(theta_i);
 
@@ -881,13 +904,18 @@ kernel void copy_f16(device const half *src [[ buffer(0) ]], device half *dst [[
     dst[qid] = src[qid];
 }
 
+kernel void copy_f32_to_f16(device const float *src [[ buffer(0) ]], device half *dst [[ buffer(1) ]], uint qid [[ thread_position_in_grid ]]) {
+    dst[qid] = (half)src[qid];
+}
+
 kernel void copy_f16_to_f32(device const half *src [[ buffer(0) ]], device float *dst [[ buffer(1) ]], uint qid [[ thread_position_in_grid ]]) {
     dst[qid] = (float)src[qid];
 }
 
-kernel void copy_f32_to_f16(device const float *src [[ buffer(0) ]], device half *dst [[ buffer(1) ]], uint qid [[ thread_position_in_grid ]]) {
-    dst[qid] = safe_half(src[qid]);
+kernel void copy_f32(device const float *src [[ buffer(0) ]], device float *dst [[ buffer(1) ]], uint qid [[ thread_position_in_grid ]]) {
+    dst[qid] = src[qid];
 }
+
 
 // ==========================================
 // Utility Kernels

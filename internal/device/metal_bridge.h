@@ -88,6 +88,10 @@ void Metal_RoPE_F16(MetalWrapperRef ctx, MetalBufferRef data, int offData,
                     int batchSize, int seqLen, int numHeads, int headDim,
                     int posOffset, float ropeTheta);
 
+void Metal_RoPE_Ragged_F16(MetalWrapperRef ctx, MetalBufferRef data, int offData,
+                           MetalBufferRef positions, int numTokens, int numHeads,
+                           int headDim, float ropeTheta);
+
 void Metal_SwiGLU_F16(MetalWrapperRef ctx, MetalBufferRef inputVal, int offVal,
                       MetalBufferRef inputGate, int offGate,
                       MetalBufferRef output, int offOut, int n, int interSize);
@@ -260,6 +264,9 @@ void Metal_Copy_F16_F32(MetalWrapperRef ctx, MetalBufferRef src, int oS,
 void Metal_Copy_F32_F16(MetalWrapperRef ctx, MetalBufferRef src, int oS,
                         MetalBufferRef dst, int oD, int n);
 
+void Metal_Copy_F32(MetalWrapperRef ctx, MetalBufferRef src, int oS,
+                    MetalBufferRef dst, int oD, int n);
+
 void Metal_SwiGLU_F32(MetalWrapperRef ctx, MetalBufferRef iV, int oV,
                       MetalBufferRef iG, int oG, MetalBufferRef o, int oO,
                       int n, int iS);
@@ -430,13 +437,14 @@ void Metal_StoreKVPagedBatch_F16(MetalWrapperRef ctx, MetalBufferRef k, int offK
 void Metal_FlashAttention2_F16(MetalWrapperRef ctx, MetalBufferRef q,
                                MetalBufferRef k_cache, MetalBufferRef v_cache,
                                MetalBufferRef output, int num_heads,
-                               int kv_heads, int headDim, int seq_len,
+                               int kv_heads, int headDim, MetalBufferRef seq_lens,
                                int block_size, MetalBufferRef block_table,
-                               int max_blocks_per_seq, int batchSize);
+                               int max_blocks_per_seq, MetalBufferRef token_to_seq,
+                               int batchSize);
 
 void Metal_Linear_LoRA_Add_F16(MetalWrapperRef ctx, MetalBufferRef input, int offIn,
                                 MetalBufferRef A, int offA, MetalBufferRef B, int offB,
-                                MetalBufferRef output, int offOut, int M, int N, int K,
+                                MetalBufferRef output, int offOut, int M, int N, int K, int R,
                                 float scale);
 
 void Metal_Vision_Patch_Embed_F32(MetalWrapperRef ctx, MetalBufferRef pixels, int offPixels,

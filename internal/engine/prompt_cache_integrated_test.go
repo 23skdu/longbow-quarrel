@@ -1,3 +1,5 @@
+//go:build metal
+
 package engine
 
 import (
@@ -36,12 +38,12 @@ func TestPromptCache_Integration(t *testing.T) {
 
 	// Step 1: Prefill (First request)
 	active, _ := eng.BatchManager.Step(16, eng.cache, eng.PromptCache)
-	if len(active) != 1 {
-		t.Fatalf("expected 1 active sequence, got %d", len(active))
+	if active == nil || len(active.Sequences) != 1 {
+		t.Fatalf("expected 1 active sequence, got %v", active)
 	}
 	
 	// Simulate engine processing and marking completed
-	seq := active[0]
+	seq := active.Sequences[0]
 	seq.Pos = seq.PromptLen
 	seq.PrefillCompleted = true
 
@@ -60,11 +62,11 @@ func TestPromptCache_Integration(t *testing.T) {
 
 	// Step 2: Prefill (Second request) - SHOULD MATCH CACHE
 	active2, _ := eng.BatchManager.Step(16, eng.cache, eng.PromptCache)
-	if len(active2) != 2 { // Request 1 (decoding) + Request 2 (prefill)
-		t.Fatalf("expected 2 active sequences, got %d", len(active2))
+	if active2 == nil || len(active2.Sequences) != 2 { // Request 1 (decoding) + Request 2 (prefill)
+		t.Fatalf("expected 2 active sequences, got %v", active2)
 	}
 
-	for _, s := range active2 {
+	for _, s := range active2.Sequences {
 		if s.ID == 2 {
 			if s.Pos != 5 {
 				t.Errorf("expected sequence 2 to start at pos 5 (cached), got %d", s.Pos)

@@ -328,6 +328,22 @@ func (t *Tensor) LoadFrom(data []float32) error {
 	return nil
 }
 
+// LoadFromRaw copies raw bytes to the tensor (for F32 currently on CPU)
+func (t *Tensor) LoadFromRaw(data []byte) error {
+	if len(data) > t.SizeBytes() {
+		return fmt.Errorf("LoadFromRaw: data size %d exceeds tensor size %d", len(data), t.SizeBytes())
+	}
+	if t.dataType == DataTypeF32 {
+		// Copy bytes to float32 slice
+		ptr := unsafe.Pointer(&t.data[0])
+		byteSlice := unsafe.Slice((*byte)(ptr), len(t.data)*4)
+		copy(byteSlice, data)
+	} else if t.rawData != nil {
+		copy(t.rawData, data)
+	}
+	return nil
+}
+
 func (t *Tensor) StoreKV(v *Tensor, kCache, vCache *Tensor, pos, heads, headDim, windowSize int) {
 	// Standard contiguous cache layout: [windowSize, heads, headDim]
 	off := (pos % windowSize) * heads * headDim

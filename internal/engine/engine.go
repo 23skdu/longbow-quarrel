@@ -5,7 +5,6 @@
 package engine
 
 import (
-	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -26,297 +25,6 @@ var (
 	ErrModelSwapped = errors.New("inference interrupted: engine model was swapped")
 )
 
-// NewQualityEvaluator creates a new quality evaluator
-func NewQualityEvaluator(t *tokenizer.Tokenizer) *QualityEvaluator {
-	return &QualityEvaluator{tokenizer: t}
-}
-
-// NewQualityEvaluatorSimple creates a quality evaluator without tokenizer (for basic metrics)
-func NewQualityEvaluatorSimple() *QualityEvaluator {
-	return &QualityEvaluator{tokenizer: nil}
-}
-
-// PerplexityResult holds perplexity calculation results
-type PerplexityResult struct {
-	Perplexity  float64
-	TotalTokens int
-	AvgLogProb  float64
-}
-
-// CalculatePerplexity computes perplexity for a sequence of tokens
-func (qe *QualityEvaluator) CalculatePerplexity(tokens []int) PerplexityResult {
-	if len(tokens) < 2 {
-		return PerplexityResult{Perplexity: 1.0, TotalTokens: len(tokens), AvgLogProb: 0.0}
-	}
-
-	// Simplified perplexity calculation
-	totalLogProb := 0.0
-	validTokens := 0
-
-	for i := 1; i < len(tokens); i++ {
-		logProb := -0.5 - 0.1*float64(i%3)
-		totalLogProb += logProb
-		validTokens++
-	}
-
-	avgLogProb := totalLogProb / float64(validTokens)
-	perplexity := math.Exp(-avgLogProb)
-
-	return PerplexityResult{
-		Perplexity:  perplexity,
-		TotalTokens: validTokens,
-		AvgLogProb:  avgLogProb,
-	}
-}
-
-// BLEUScore holds BLEU evaluation results
-type BLEUScore struct {
-	BLEU1     float64
-	BLEU2     float64
-	BLEU3     float64
-	BLEU4     float64
-	Precision []float64
-}
-
-// CalculateBLEU computes BLEU score between candidate and reference texts
-func (qe *QualityEvaluator) CalculateBLEU(candidate, reference string) BLEUScore {
-	if qe.tokenizer == nil {
-		// Simple character-based BLEU for testing without tokenizer
-		return qe.calculateBLEUSimple(candidate, reference)
-	}
-
-	candTokens := qe.tokenizer.Encode(candidate)
-	refTokens := qe.tokenizer.Encode(reference)
-
-	// Simplified BLEU calculation for n-grams 1-4
-	maxN := 4
-	precisions := make([]float64, maxN)
-
-	for n := 1; n <= maxN; n++ {
-		candNGrams := getNGrams(candTokens, n)
-		refNGrams := getNGrams(refTokens, n)
-
-		// Count matching n-grams
-		matches := 0
-		for candNGram := range candNGrams {
-			if refNGrams[candNGram] > 0 {
-				matches++
-			}
-		}
-
-		// Calculate precision
-		if len(candNGrams) > 0 {
-			precisions[n-1] = float64(matches) / float64(len(candNGrams))
-		} else {
-			precisions[n-1] = 0.0
-		}
-	}
-
-	// Calculate BLEU scores (simplified geometric mean)
-	bleu1 := precisions[0]
-	bleu2 := math.Sqrt(precisions[0] * precisions[1])
-	bleu3 := math.Pow(precisions[0]*precisions[1]*precisions[2], 1.0/3.0)
-	bleu4 := math.Pow(precisions[0]*precisions[1]*precisions[2]*precisions[3], 1.0/4.0)
-
-	// Apply brevity penalty (simplified)
-	bp := 1.0
-	if len(candTokens) < len(refTokens) {
-		bp = math.Exp(1.0 - float64(len(refTokens))/float64(len(candTokens)))
-	}
-
-	return BLEUScore{
-		BLEU1:     bleu1 * bp,
-		BLEU2:     bleu2 * bp,
-		BLEU3:     bleu3 * bp,
-		BLEU4:     bleu4 * bp,
-		Precision: precisions,
-	}
-}
-
-// ROUGEScore holds ROUGE evaluation results
-type ROUGEScore struct {
-	ROUGE1_F1 float64
-	ROUGE2_F1 float64
-	ROUGEL_F1 float64
-	Precision float64
-	Recall    float64
-	F1        float64
-}
-
-// CalculateROUGE computes ROUGE score between candidate and reference texts
-func (qe *QualityEvaluator) CalculateROUGE(candidate, reference string) ROUGEScore {
-	if qe.tokenizer == nil {
-		// Simple character-based ROUGE for testing without tokenizer
-		return qe.calculateROUGESimple(candidate, reference)
-	}
-
-	candTokens := qe.tokenizer.Encode(candidate)
-	refTokens := qe.tokenizer.Encode(reference)
-
-	// Calculate unigram overlap (ROUGE-1)
-	candUnigrams := make(map[int]int)
-	refUnigrams := make(map[int]int)
-
-	for _, token := range candTokens {
-		candUnigrams[token]++
-	}
-	for _, token := range refTokens {
-		refUnigrams[token]++
-	}
-
-	unigramMatches := 0
-	for token, count := range candUnigrams {
-		if refCount, exists := refUnigrams[token]; exists {
-			unigramMatches += min(count, refCount)
-		}
-	}
-
-	precision := float64(unigramMatches) / float64(len(candTokens))
-	recall := float64(unigramMatches) / float64(len(refTokens))
-	f1 := 2.0 * precision * recall / (precision + recall)
-
-	if math.IsNaN(f1) {
-		f1 = 0.0
-	}
-
-	return ROUGEScore{
-		ROUGE1_F1: f1,
-		ROUGE2_F1: 0.0, // Simplified - would need bigram calculation
-		ROUGEL_F1: f1,  // Simplified - using unigram as approximation
-		Precision: precision,
-		Recall:    recall,
-		F1:        f1,
-	}
-}
-
-// calculateBLEUSimple provides a basic character-based BLEU calculation for testing
-func (qe *QualityEvaluator) calculateBLEUSimple(candidate, reference string) BLEUScore {
-	if candidate == reference {
-		// Perfect match
-		return BLEUScore{
-			BLEU1:     1.0,
-			BLEU2:     1.0,
-			BLEU3:     1.0,
-			BLEU4:     1.0,
-			Precision: []float64{1.0, 1.0, 1.0, 1.0},
-		}
-	}
-
-	// Simple n-gram matching at character level
-	maxN := 4
-	precisions := make([]float64, maxN)
-
-	candChars := []rune(candidate)
-	refChars := []rune(reference)
-
-	for n := 1; n <= maxN; n++ {
-		candNGrams := getCharNGrams(candChars, n)
-		refNGrams := getCharNGrams(refChars, n)
-
-		matches := 0
-		for candNGram := range candNGrams {
-			if refNGrams[candNGram] > 0 {
-				matches++
-			}
-		}
-
-		if len(candNGrams) > 0 {
-			precisions[n-1] = float64(matches) / float64(len(candNGrams))
-		} else {
-			precisions[n-1] = 0.0
-		}
-	}
-
-	// Calculate BLEU scores
-	bleu1 := precisions[0]
-	bleu2 := math.Sqrt(precisions[0] * precisions[1])
-	bleu3 := math.Pow(precisions[0]*precisions[1]*precisions[2], 1.0/3.0)
-	bleu4 := math.Pow(precisions[0]*precisions[1]*precisions[2]*precisions[3], 1.0/4.0)
-
-	// Brevity penalty
-	bp := 1.0
-	if len(candidate) < len(reference) {
-		bp = math.Exp(1.0 - float64(len(reference))/float64(len(candidate)))
-	}
-
-	return BLEUScore{
-		BLEU1:     bleu1 * bp,
-		BLEU2:     bleu2 * bp,
-		BLEU3:     bleu3 * bp,
-		BLEU4:     bleu4 * bp,
-		Precision: precisions,
-	}
-}
-
-// Helper functions for n-gram calculation
-func getNGrams(tokens []int, n int) map[string]int {
-	nGrams := make(map[string]int)
-	for i := 0; i <= len(tokens)-n; i++ {
-		key := fmt.Sprintf("%v", tokens[i:i+n])
-		nGrams[key]++
-	}
-	return nGrams
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-// calculateROUGESimple provides a basic character-based ROUGE calculation for testing
-func (qe *QualityEvaluator) calculateROUGESimple(candidate, reference string) ROUGEScore {
-	candChars := []rune(candidate)
-	refChars := []rune(reference)
-
-	// Create character frequency maps
-	candUnigrams := make(map[rune]int)
-	refUnigrams := make(map[rune]int)
-
-	for _, char := range candChars {
-		candUnigrams[char]++
-	}
-	for _, char := range refChars {
-		refUnigrams[char]++
-	}
-
-	// Calculate matches
-	unigramMatches := 0
-	for char, count := range candUnigrams {
-		if refCount, exists := refUnigrams[char]; exists {
-			unigramMatches += min(count, refCount)
-		}
-	}
-
-	precision := float64(unigramMatches) / float64(len(candChars))
-	recall := float64(unigramMatches) / float64(len(refChars))
-	f1 := 2.0 * precision * recall / (precision + recall)
-
-	if math.IsNaN(f1) {
-		f1 = 0.0
-	}
-
-	return ROUGEScore{
-		ROUGE1_F1: f1,
-		ROUGE2_F1: 0.0, // Not implemented for character-level
-		ROUGEL_F1: f1,  // Same as ROUGE-1 for character level
-		Precision: precision,
-		Recall:    recall,
-		F1:        f1,
-	}
-}
-
-// Helper function for character n-gram extraction
-func getCharNGrams(chars []rune, n int) map[string]int {
-	nGrams := make(map[string]int)
-	for i := 0; i <= len(chars)-n; i++ {
-		key := string(chars[i : i+n])
-		nGrams[key]++
-	}
-	return nGrams
-}
-
 func init() {
 	RegisterEngine("metal", NewMetalEngine)
 }
@@ -330,6 +38,7 @@ func NewMetalEngine(modelPath string, config config.Config) (Engine, error) {
 		weights:   &LlamaWeights{},
 		ActLogger: NewActivationLogger(),
 		SeqMgr:    NewSequenceManager(),
+		LoRA:      NewLoRAManager(),
 	}
 
 	e.TraceTracker = NewActivationTraceTracker(e.config.Layers)
@@ -1251,99 +960,197 @@ func (e *metalEngine) InferWithCallback(inputTokens []int, tokensToGenerate int,
 	return e.inferInternal(inputTokens, tokensToGenerate, samplerConfig, callback, nil)
 }
 
-func (e *metalEngine) ForwardBatch(batch []*Sequence) ([]*device.Tensor, error) {
-	batchSize := len(batch)
+func (e *metalEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, error) {
+	batchSize := len(desc.Sequences)
+	numTokens := len(desc.Tokens)
 	if batchSize == 0 {
 		return nil, nil
 	}
 
-	// 1. Assemble input tokens
-	inputTokens := make([]int, batchSize)
-	for i, seq := range batch {
-		inputTokens[i] = seq.Tokens[len(seq.Tokens)-1]
-	}
-
-	// 2. Lookup Embeddings
+	// 1. Lookup Embeddings for all packed tokens
 	if e.weights.TokenEmb == nil {
 		return nil, fmt.Errorf("missing embedding weights")
 	}
-	inputT := e.weights.TokenEmb.EmbeddingLookupBatch(inputTokens, 1.0)
+	inputT := e.weights.TokenEmb.EmbeddingLookupBatch(desc.Tokens, 1.0)
 	defer inputT.Free()
 
-	// 3. Scratch Allocation
+	// 2. Scratch Allocation
+	// Note: We allocate scratch based on numTokens (ragged)
 	qNormDim := 512
 	kNormDim := 512
-	scratch := e.ctx.NewLayerScratch(batchSize, e.config.Dim, e.config.HiddenDim,
+	scratch := e.ctx.NewLayerScratch(numTokens, e.config.Dim, e.config.HiddenDim,
 		e.config.Heads, e.config.KVHeads, e.config.HeadDim, e.config.SeqLen, e.config.VocabSize, qNormDim, kNormDim)
 	defer scratch.Free()
 
-	// 4. Batch Metadata
+	// 3. Metadata for Paged Cache (Resource-aware)
 	seqIDs := make([]string, batchSize)
-	positions := make([]int, batchSize)
-	for i, seq := range batch {
+	for i, seq := range desc.Sequences {
 		seqIDs[i] = fmt.Sprintf("seq-%d", seq.ID)
-		positions[i] = seq.Pos
 	}
 
-	current := inputT // Already F16
-	defer current.Free()
+	// 3.1 Token-specific metadata for RoPE and Attention
+	tokenPosData := make([]float32, numTokens)
+	tokenSeqData := make([]float32, numTokens)
+	for i, seqIdx := range desc.TokenToSeq {
+		// Calculate internal offset within the sequence's current chunk
+		// This is tricky: we need the relative position from the chunk start.
+		// Actually, desc.TokenToSeq and desc.Offsets tell us.
+		chunkStartTokenIdx := desc.Offsets[seqIdx]
+		offsetInChunk := i - chunkStartTokenIdx
+		tokenPosData[i] = float32(desc.ContextLens[seqIdx] + offsetInChunk)
+		tokenSeqData[i] = float32(seqIdx)
+	}
 
-	// 5. Transformer Layers
+	tokenPositions := e.ctx.NewTensorFP32(1, numTokens)
+	tokenPositions.LoadFrom(tokenPosData)
+	defer tokenPositions.Free()
+
+	tokenToSeq := e.ctx.NewTensorFP32(1, numTokens)
+	tokenToSeq.LoadFrom(tokenSeqData)
+	defer tokenToSeq.Free()
+
+	current := inputT
+	// 4. Transformer Layers
 	for l := 0; l < e.config.Layers; l++ {
-		if e.weights.AttnNorm[l] == nil {
-			continue // Skip incomplete layers in test models
-		}
-		view := e.cache.GetBatch(seqIDs, positions, l)
+		// Use positions at the START of this chunk (ContextLens) to get Block Tables
+		view := e.cache.GetBatch(seqIDs, desc.ContextLens, l)
 		
-		// e.weights.LoadLayer(l) // If we had lazy loading
-
 		current.LayerBatch(l,
 			e.weights.AttnNorm[l], e.weights.AttnQ[l], e.weights.AttnK[l], e.weights.AttnV[l], e.weights.AttnO[l],
 			e.weights.FfnNorm[l], e.weights.FfnGate[l], e.weights.FfnUp[l], e.weights.FfnDown[l],
 			view.KPools[l], view.VPools[l],
 			scratch,
-			view.BatchPositions, view.BlockTables, view.MaxBlocks,
+			tokenPositions, tokenToSeq, view.BlockTables, view.MaxBlocks,
 			e.config.Heads, e.config.KVHeads, e.config.HeadDim,
 			e.config.RopeTheta, e.config.Eps, e.config.HiddenDim,
-			view.BlockSize, batchSize, 1.0,
+			view.BlockSize, numTokens, 1.0,
 			func(k, v *device.Tensor) {
+				// k/v here are [numTokens, kvDim]
+				// We need to update the paged cache for each token's position
 				updateItems := make([]struct {
 					SeqID string
 					Pos   int
 					K     *device.Tensor
 					V     *device.Tensor
-				}, batchSize)
-				for i := range batch {
-					updateItems[i].SeqID = seqIDs[i]
-					updateItems[i].Pos = positions[i]
-					updateItems[i].K = k.Slice(i, 1)
-					updateItems[i].V = v.Slice(i, 1)
+				}, numTokens)
+				
+				tokenIdx := 0
+				for i := range desc.Sequences {
+					chunkLen := 1
+					if i < len(desc.Offsets)-1 {
+						chunkLen = desc.Offsets[i+1] - desc.Offsets[i]
+					} else {
+						chunkLen = numTokens - desc.Offsets[i]
+					}
+					
+					for j := 0; j < chunkLen; j++ {
+						updateItems[tokenIdx].SeqID = seqIDs[i]
+						updateItems[tokenIdx].Pos = desc.ContextLens[i] + j
+						updateItems[tokenIdx].K = k.Slice(tokenIdx, 1)
+						updateItems[tokenIdx].V = v.Slice(tokenIdx, 1)
+						tokenIdx++
+					}
 				}
 				e.cache.UpdateBatch(l, updateItems)
 			})
+
+		// Apply LoRA to this layer's projections if active
+		e.applyLoRA(l, current, scratch, desc)
 
 		view.BlockTables.Free()
 		view.BatchPositions.Free()
 	}
 
-	// 6. Final Norm & Projection
-	if e.weights.OutputNorm == nil || e.weights.Output == nil {
-		return nil, fmt.Errorf("missing final output weights")
-	}
+	// 5. Final Output
 	normed := current.RMSNorm(e.weights.OutputNorm, e.config.Eps)
 	defer normed.Free()
 
-	// logits [BatchSize, VocabSize]
-	logits := e.ctx.NewTensorWithType(batchSize, e.config.VocabSize, device.DataTypeF32)
-	normed.LinearInto(e.weights.Output, logits, 1.0)
+	// logits [numTokens, VocabSize]
+	logitsAll := e.ctx.NewTensorWithType(numTokens, e.config.VocabSize, device.DataTypeF32)
+	normed.LinearInto(e.weights.Output, logitsAll, 1.0)
+	defer logitsAll.Free()
 
+	// 6. Extract Logits for the LAST token of each sequence in the batch
 	results := make([]*device.Tensor, batchSize)
-	for i := 0; i < batchSize; i++ {
-		results[i] = logits.Slice(i, 1)
+	for i := range desc.Sequences {
+		lastTokenIdx := 0
+		if i < len(desc.Offsets)-1 {
+			lastTokenIdx = desc.Offsets[i+1] - 1
+		} else {
+			lastTokenIdx = numTokens - 1
+		}
+		
+		// Copy single row to a new tensor
+		row := logitsAll.Slice(lastTokenIdx, 1)
+		rowCopy := e.ctx.NewTensorWithType(1, e.config.VocabSize, device.DataTypeF32)
+		row.CopyF32Into(rowCopy)
+		results[i] = rowCopy
 	}
-	logits.Free()
 
 	return results, nil
+}
+
+func (e *metalEngine) applyLoRA(layerIdx int, input *device.Tensor, scratch *device.LayerScratch, desc *BatchDescriptor) {
+	// Group tokens by adapter
+	adapterToTokens := make(map[string][]int)
+	for i, seqIdx := range desc.TokenToSeq {
+		adapterID := desc.AdapterIDs[seqIdx]
+		if adapterID != "" {
+			adapterToTokens[adapterID] = append(adapterToTokens[adapterID], i)
+		}
+	}
+
+	if len(adapterToTokens) == 0 {
+		return
+	}
+
+	// For each adapter, apply it to the corresponding projection results
+	for adapterID, tokenIndices := range adapterToTokens {
+		// 1. Attention Projections (Input: scratch.Normed)
+		e.applyLoRAtoLayer(adapterID, fmt.Sprintf("blk.%d.attn_q", layerIdx), scratch.Normed, scratch.QPart, tokenIndices)
+		e.applyLoRAtoLayer(adapterID, fmt.Sprintf("blk.%d.attn_k", layerIdx), scratch.Normed, scratch.KPart, tokenIndices)
+		e.applyLoRAtoLayer(adapterID, fmt.Sprintf("blk.%d.attn_v", layerIdx), scratch.Normed, scratch.VPart, tokenIndices)
+
+		// 2. Attention Output (Input: scratch.AttOut)
+		e.applyLoRAtoLayer(adapterID, fmt.Sprintf("blk.%d.attn_output", layerIdx), scratch.AttOut, scratch.ResAtt, tokenIndices)
+
+		// 3. FFN Projections (Input: scratch.NormedFFN)
+		e.applyLoRAtoLayer(adapterID, fmt.Sprintf("blk.%d.ffn_gate", layerIdx), scratch.NormedFFN, scratch.GatePart, tokenIndices)
+		e.applyLoRAtoLayer(adapterID, fmt.Sprintf("blk.%d.ffn_up", layerIdx), scratch.NormedFFN, scratch.UpPart, tokenIndices)
+
+		// 4. FFN Output (Input: scratch.SwiOut - derived from gate/up)
+		// swiOut is usually temp, but we might need to apply lora to ResFFN
+		e.applyLoRAtoLayer(adapterID, fmt.Sprintf("blk.%d.ffn_down", layerIdx), scratch.SwiOut, scratch.ResFFN, tokenIndices)
+	}
+}
+
+func (e *metalEngine) applyLoRAtoLayer(adapterID, name string, input, output *device.Tensor, tokenIndices []int) {
+	w, ok := e.LoRA.GetWeights(adapterID, name)
+	if !ok {
+		return
+	}
+
+	// LoRA kernel expects F16. If input is F32 (e.g., SwiOut), convert it.
+	var finalInput *device.Tensor
+	isTempInput := false
+	if input.DataType() == device.DataTypeF32 {
+		finalInput = e.ctx.NewTensorPooled(input.Rows(), input.Cols())
+		input.CopyToF16_Into(finalInput)
+		isTempInput = true
+	} else {
+		finalInput = input
+	}
+	
+	// Slice the rows of input and output that belong to this adapter
+	for _, rowIdx := range tokenIndices {
+		rowIn := finalInput.Slice(rowIdx, 1)
+		rowOut := output.Slice(rowIdx, 1)
+		e.ctx.LinearLoRAAdd(rowIn, w.A, w.B, rowOut, w.Alpha/float32(w.Rank))
+	}
+
+	if isTempInput {
+		finalInput.ReturnToPool()
+	}
 }
 
 func (e *metalEngine) runBatchLoop() {
@@ -1354,27 +1161,17 @@ func (e *metalEngine) runBatchLoop() {
 			return
 		default:
 		}
-		// Pull active sequences from the manager
-		active, _ := e.BatchManager.Step(16, e.cache, e.PromptCache)
-		if len(active) == 0 {
+		// Pull active sequences from the manager (desc contains packed tokens)
+		desc, _ := e.BatchManager.Step(16, e.cache, e.PromptCache)
+		if desc == nil || len(desc.Sequences) == 0 {
 			time.Sleep(10 * time.Millisecond)
 			continue
 		}
 
 		// Forward Pass
-		if e.SpeculativeMgr != nil && len(active) == 1 {
-			// Speculative Decoding path (single sequence optimization)
-			err := e.SpeculativeMgr.GenerateSpeculative(context.Background(), active[0])
-			if err != nil {
-				logger.Log.Error("Speculative generation failed", "id", active[0].ID, "error", err)
-				e.BatchManager.CompleteSequence(active[0].ID, e.cache)
-			}
-			continue // SpeculativeMgr handles its own result/token push
-		}
-
-		results, err := e.ForwardBatch(active)
+		results, err := e.ForwardBatch(desc)
 		if err != nil {
-			for _, seq := range active {
+			for _, seq := range desc.Sequences {
 				select {
 				case seq.Err <- err:
 				default:
@@ -1384,7 +1181,7 @@ func (e *metalEngine) runBatchLoop() {
 		}
 
 		// Sampling & Update
-		for i, seq := range active {
+		for i, seq := range desc.Sequences {
 			logits := results[i].ToHostF32()
 			results[i].Free()
 
@@ -1395,8 +1192,18 @@ func (e *metalEngine) runBatchLoop() {
 			sampler := NewSampler(seq.Config)
 			token := sampler.Sample(logits, seq.Tokens)
 
+			// Update Sequence State
+			// Important: If we were prefilling, we consumed multiple tokens.
+			// But Sampling only happens for the LAST token of the chunk.
+			chunkLen := 1
+			if i < len(desc.Offsets)-1 {
+				chunkLen = desc.Offsets[i+1] - desc.Offsets[i]
+			} else {
+				chunkLen = len(desc.Tokens) - desc.Offsets[i]
+			}
+
 			seq.Tokens = append(seq.Tokens, token)
-			seq.Pos++
+			seq.Pos += chunkLen // Advance by number of tokens processed
 
 			if seq.TokenCallback != nil {
 				seq.TokenCallback(token)
@@ -1409,10 +1216,10 @@ func (e *metalEngine) runBatchLoop() {
 				if blocks != nil {
 					e.PromptCache.Insert(seq.Tokens[:seq.PromptLen], blocks)
 				}
-				seq.PrefillCompleted = false // Only insert once
+				seq.PrefillCompleted = false
 			}
 
-			if token == 2 || len(seq.Tokens) >= seq.MaxTokens { // 2 = EOS
+			if token == 2 || len(seq.Tokens) >= seq.MaxTokens {
 				select {
 				case seq.Result <- seq.Tokens:
 				default:

@@ -16,21 +16,23 @@ kernel void flash_attention2_f16(
     constant int &num_heads [[ buffer(4) ]],
     constant int &kv_heads [[ buffer(5) ]],
     constant int &headDim [[ buffer(6) ]],
-    constant int &seq_len [[ buffer(7) ]],
+    device const int *seq_lens [[ buffer(7) ]],
     constant int &kv_block_size [[ buffer(8) ]], // logical block size (16)
     device const int *block_table [[ buffer(9) ]],
     constant int &max_blocks_per_seq [[ buffer(10) ]],
+    device const int *token_to_seq [[ buffer(11) ]],
     uint3 tg_pos [[ threadgroup_position_in_grid ]],
     uint3 t_pos [[ thread_position_in_threadgroup ]],
     uint3 nt [[ threads_per_threadgroup ]])
 {
     uint head_id = tg_pos.x;
     uint batch_id = tg_pos.y;
-    uint q_pos = tg_pos.z; // For prefill, we might dispatch multiple Q positions
+    uint q_pos = tg_pos.z; 
 
     if (head_id >= (uint)num_heads) return;
 
-    // Indexing helpers
+    int seq_len = seq_lens[batch_id];
+    int logical_seq_id = token_to_seq[batch_id];
     uint kv_head_id = head_id / (num_heads / kv_heads);
     float scale = 1.0f / sqrt((float)headDim);
 
@@ -53,7 +55,7 @@ kernel void flash_attention2_f16(
 
     // Loop over logical blocks of KV cache
     uint num_logical_blocks = (seq_len + kv_block_size - 1) / kv_block_size;
-    device const int *seq_block_table = block_table + batch_id * max_blocks_per_seq;
+    device const int *seq_block_table = block_table + logical_seq_id * max_blocks_per_seq;
 
     for (uint b = 0; b < num_logical_blocks; b++) {
         int physical_block_id = seq_block_table[b];

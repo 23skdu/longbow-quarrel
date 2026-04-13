@@ -21,6 +21,7 @@ type metalEngine struct {
 	cache        *PagedKVCache
 	BatchManager *ContinuousBatchManager
 	PromptCache  *PromptCache
+	LoRA         *LoRAManager
 	DraftEngine  Engine
 	SpeculativeMgr *SpeculativeManager
 

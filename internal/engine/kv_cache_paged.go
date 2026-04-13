@@ -143,6 +143,20 @@ func (c *PagedKVCache) allocateBlock() (int32, error) {
 	return block, nil
 }
 
+// FreeBlocksCount returns the number of physical blocks currently available in the pool.
+func (c *PagedKVCache) FreeBlocksCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.freeBlocks)
+}
+
+// HasCapacityFor checks if the cache can accommodate a requested number of tokens.
+func (c *PagedKVCache) HasCapacityFor(numTokens int) bool {
+	blocksNeeded := (numTokens + c.blockSize - 1) / c.blockSize
+	// Require at least 2 extra blocks of headroom to prevent immediate stall
+	return c.FreeBlocksCount() >= (blocksNeeded + 2)
+}
+
 // AttachPrefixBlocks maps existing physical blocks into a new sequence's block table.
 // This is used by the PromptCache to share pre-computed prefixes.
 func (c *PagedKVCache) AttachPrefixBlocks(seqID string, blocks []int32) error {

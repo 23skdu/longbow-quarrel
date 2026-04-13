@@ -30,11 +30,21 @@ func TestContinuousBatchManager_Lifecycle(t *testing.T) {
 	}
 
 	// 2. Step (Orchestration)
-	// We pass 0 blocks (dummy cache) just to check if it pulls from queue
-	active, _ := mgr.Step(4, nil, nil)
-	if len(active) != 1 {
-		t.Errorf("Expected 1 active sequence, got %d", len(active))
+	// We pass enough blocks to admit the sequence
+	desc, _ := mgr.Step(4, nil, nil)
+	if desc == nil || len(desc.Sequences) != 1 {
+		t.Errorf("Expected 1 sequence in descriptor, got %v", desc)
+		return
 	}
+	
+	if len(desc.Tokens) != 3 {
+		t.Errorf("Expected 3 tokens (prefill), got %d", len(desc.Tokens))
+	}
+	
+	if len(desc.TokenToSeq) != 3 {
+		t.Errorf("Expected 3 mappings, got %d", len(desc.TokenToSeq))
+	}
+
 	if mgr.waitingQueue.Depth() != 0 {
 		t.Errorf("Expected queue depth 0 after step, got %d", mgr.waitingQueue.Depth())
 	}
