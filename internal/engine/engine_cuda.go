@@ -613,9 +613,6 @@ func (e *cudaEngine) forward(token int, pos int, allTokens []int) ([]float32, er
 		ffnUpW, _ := e.getDequantedWeight(fmt.Sprintf("blk.%d.ffn_up.weight", layer))
 		ffnDownW, _ := e.getDequantedWeight(fmt.Sprintf("blk.%d.ffn_down.weight", layer))
 
-		q3d := e.viewAsTensor(q, heads, headDim)
-		k3d := e.viewAsTensor(k, kvHeads, headDim)
-		v3d := e.viewAsTensor(v, kvHeads, headDim)
 
 		kCache := e.cuda.GetKCache(layer)
 		vCache := e.cuda.GetVCache(layer)
