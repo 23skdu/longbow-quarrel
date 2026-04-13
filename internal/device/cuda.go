@@ -951,6 +951,33 @@ func (c *CUDAContext) FusedMLP(input, gateWeight, upWeight, downWeight, output *
 		C.int(batch), C.int(dim), C.int(hiddenDim))
 }
 
+func (c *CUDAContext) RMSNorm(input, weight, output *CUDATensor, rows, cols int, eps float32) {
+	C.cudaRMSNorm(
+		(*C.float)(input.devPtr),
+		(*C.float)(weight.devPtr),
+		(*C.float)(output.devPtr),
+		C.int(rows), C.int(cols), C.float(eps),
+		c.stream)
+}
+
+func (c *CUDAContext) Add(a, b, out *CUDATensor, size int) {
+	C.cudaAdd(
+		(*C.float)(a.devPtr),
+		(*C.float)(b.devPtr),
+		(*C.float)(out.devPtr),
+		C.int(size),
+		c.stream)
+}
+
+func (c *CUDAContext) SwiGLU(gate, up, output *CUDATensor, size int) {
+	C.cudaSwiGLU(
+		(*C.float)(gate.devPtr),
+		(*C.float)(up.devPtr),
+		(*C.float)(output.devPtr),
+		C.int(size),
+		c.stream)
+}
+
 func (c *CUDAContext) FusedRMSNormAdd(input, hidden, weight, output *CUDATensor, batch, dim int, eps float32) {
 	C.cudaFusedRMSNormAdd(
 		c.stream,
@@ -1075,11 +1102,6 @@ func (c *CUDAContext) NewCUDAModel(f *gguf.GGUFFile, kvCache bool, maxSeqLen int
 	for _, t := range f.Tensors {
 		name := t.Name
 
-		numElements := uint64(1)
-		for _, d := range t.Dimensions {
-			numElements *= d
-		}
-
 		rows := int(t.Dimensions[0])
 		cols := 1
 		for d := 1; d < len(t.Dimensions); d++ {
@@ -1090,49 +1112,71 @@ func (c *CUDAContext) NewCUDAModel(f *gguf.GGUFFile, kvCache bool, maxSeqLen int
 			continue
 		}
 
-		fmt.Printf("GGUF: Found tensor %s (Type: %v, Dims: [%d %d], Elements: %d)\n", name, t.Type, rows, cols, numElements)
-
-		dataBytes := int(t.SizeBytes())
-		var devPtr unsafe.Pointer
-
-		if dataBytes > 0 {
-			result := C.cudaMalloc(&devPtr, C.size_t(dataBytes))
-			if result != C.cudaSuccess {
-				fmt.Printf("cudaMalloc failed for %s: %v (trying %d bytes)\n", name, result, dataBytes)
-			} else {
-				srcPtr := unsafe.Pointer(uintptr(unsafe.Pointer(&f.Data[0])) + uintptr(t.Offset))
-				C.cudaMemcpyAsync(devPtr, srcPtr, C.size_t(dataBytes), C.cudaMemcpyHostToDevice, c.stream)
-				cudaTraceAlloc(int64(dataBytes))
+		numElements := rows * cols
+		
+		// Dequantize host-side first
+		var fp32Data []float32
+		switch t.Type {
+		case gguf.GGMLTypeQ8_0:
+			fp32Data = gguf.DequantizeQ8_0(t.Data, numElements)
+		case gguf.GGMLTypeQ5_0:
+			fp32Data = gguf.DequantizeQ5_0(t.Data, numElements)
+		case gguf.GGMLTypeQ4_0:
+			fp32Data = gguf.DequantizeQ4_0(t.Data, numElements)
+		case gguf.GGMLTypeQ4_K:
+			fp32Data = gguf.DequantizeQ4K(t.Data, numElements)
+		case gguf.GGMLTypeQ6_K:
+			fp32Data = gguf.DequantizeQ6K(t.Data, numElements)
+		case gguf.GGMLTypeF32:
+			fp32Data = make([]float32, numElements)
+			for i := 0; i < numElements; i++ {
+				offset := i * 4
+				if offset+4 <= len(t.Data) {
+					fp32Data[i] = math.Float32frombits(binary.LittleEndian.Uint32(t.Data[offset : offset+4]))
+				}
 			}
-		}
-
-		if dataBytes > 0 {
-			result := C.cudaMalloc(&devPtr, C.size_t(dataBytes))
-			if result != C.cudaSuccess {
-				fmt.Printf("cudaMalloc failed for %s: %v (trying %d bytes)\n", name, result, dataBytes)
-			} else {
-				C.cudaMemcpyAsync(devPtr, unsafe.Pointer(&t.Data[0]), C.size_t(dataBytes), C.cudaMemcpyHostToDevice, c.stream)
-				cudaTraceAlloc(int64(dataBytes))
+		case gguf.GGMLTypeF16:
+			fp32Data = make([]float32, numElements)
+			for i := 0; i < numElements; i++ {
+				offset := i * 2
+				if offset+2 <= len(t.Data) {
+					fp16 := binary.LittleEndian.Uint16(t.Data[offset : offset+2])
+					fp32Data[i] = Float16ToFloat32(fp16)
+				}
 			}
-		}
-
-		if _, exists := m.Weights[name]; exists {
+		default:
+			fmt.Printf("Warning: skipping unsupported tensor %s type %v\n", name, t.Type)
 			continue
 		}
+
+		// Convert to FP16 for GPU
+		fp16Data := make([]uint16, numElements)
+		for i, v := range fp32Data {
+			fp16Data[i] = Float32ToFloat16(v)
+		}
+
+		dataBytes := numElements * 2 // FP16
+		var devPtr unsafe.Pointer
+		result := C.cudaMalloc(&devPtr, C.size_t(dataBytes))
+		if result != C.cudaSuccess {
+			fmt.Printf("cudaMalloc failed for %s: %v (trying %d bytes)\n", name, result, dataBytes)
+			continue
+		}
+
+		C.cudaMemcpy(devPtr, unsafe.Pointer(&fp16Data[0]), C.size_t(dataBytes), C.cudaMemcpyHostToDevice)
+		cudaTraceAlloc(int64(dataBytes))
 
 		m.Weights[name] = &CUDAWeight{
 			Name:      name,
 			Rows:      rows,
 			Cols:      cols,
-			GGMLType:  t.Type,
+			GGMLType:  gguf.GGMLTypeF16, // Now stored as F16 on GPU
 			DevPtr:    devPtr,
-			HostData:  make([]byte, dataBytes),
 			DataBytes: dataBytes,
 		}
-		copy(m.Weights[name].HostData, t.Data)
 	}
 
-	fmt.Printf("Loaded %d tensors total\n", len(m.Weights))
+	fmt.Printf("Loaded and dequantized %d tensors to GPU FP16\n", len(m.Weights))
 
 	c.Synchronize()
 
@@ -1245,7 +1289,19 @@ func (m *CUDAModel) GetWeightTensor(name string) (*CUDATensor, error) {
 	}, nil
 }
 
-func (m *CUDAModel) GetEmbedding(token int) ([]float32, error) {
+func (m *CUDAModel) GetEmbeddingTensor(token int) (*CUDATensor, error) {
+	embWeight, err := m.GetWeightTensor("token_embd.weight")
+	if err != nil {
+		return nil, err
+	}
+	tokenEmb := m.Ctx.NewTensorPooled(1, embWeight.rows)
+	offset := uintptr(token) * uintptr(embWeight.rows) * 2
+	srcPtr := unsafe.Pointer(uintptr(embWeight.devPtr) + offset)
+	C.cudaMemcpy(tokenEmb.devPtr, srcPtr, C.size_t(embWeight.rows*2), C.cudaMemcpyDeviceToDevice)
+	return tokenEmb, nil
+}
+
+func (m *CUDAModel) GetEmbedding_OLD(token int) ([]float32, error) {
 	emb, ok := m.GetWeight("token_embd.weight")
 	if !ok {
 		return nil, fmt.Errorf("embedding weight not found")
@@ -1330,181 +1386,9 @@ func (m *CUDAModel) GetVCache(layer int) *CUDATensor {
 	return m.VCache[layer]
 }
 
-func (m *CUDAModel) GetEmbeddingQ5_0(token int, emb *CUDAWeight) ([]float32, error) {
-	dim := emb.Rows
-	result := make([]float32, dim)
-	data := emb.HostData
 
-	blockSize := 32
-	blockBytes := 38
-	numBlocks := dim / blockSize
-	bytesPerToken := numBlocks * blockBytes
 
-	if len(data) < (token+1)*bytesPerToken {
-		return nil, fmt.Errorf("embedding data too small for token %d", token)
-	}
 
-	tokenOffset := token * bytesPerToken
-	for blk := 0; blk < numBlocks; blk++ {
-		blockOffset := tokenOffset + blk*blockBytes
-		if blockOffset+blockBytes > len(data) {
-			break
-		}
-
-		scale := Float16ToFloat32(binary.LittleEndian.Uint16(data[blockOffset : blockOffset+2]))
-		qs := data[blockOffset+4 : blockOffset+36]
-
-		for j := 0; j < blockSize; j++ {
-			var qval int8
-			if j < 16 {
-				qval = int8(qs[j/2] & 0xF)
-				if qval > 7 {
-					qval -= 16
-				}
-			} else {
-				qval = int8((qs[(j-16)/2] >> 4) & 0xF)
-				if qval > 7 {
-					qval -= 16
-				}
-			}
-			result[blk*blockSize+j] = scale * float32(qval)
-		}
-	}
-
-	return result, nil
-}
-
-func (m *CUDAModel) GetEmbeddingQ4_0(token int, emb *CUDAWeight) ([]float32, error) {
-	dim := emb.Rows
-	result := make([]float32, dim)
-	data := emb.HostData
-
-	blockSize := 32
-	blockBytes := 20
-	numBlocks := dim / blockSize
-	bytesPerToken := numBlocks * blockBytes
-
-	if len(data) < (token+1)*bytesPerToken {
-		return nil, fmt.Errorf("embedding data too small for token %d", token)
-	}
-
-	tokenOffset := token * bytesPerToken
-	for blk := 0; blk < numBlocks; blk++ {
-		blockOffset := tokenOffset + blk*blockBytes
-		if blockOffset+blockBytes > len(data) {
-			break
-		}
-
-		scale := Float16ToFloat32(binary.LittleEndian.Uint16(data[blockOffset : blockOffset+2]))
-		qs := data[blockOffset+2 : blockOffset+18]
-
-		for j := 0; j < blockSize; j++ {
-			var qval int8
-			if j < 16 {
-				qval = int8(qs[j/2] & 0xF)
-				if qval > 7 {
-					qval -= 16
-				}
-			} else {
-				qval = int8((qs[(j-16)/2] >> 4) & 0xF)
-				if qval > 7 {
-					qval -= 16
-				}
-			}
-			result[blk*blockSize+j] = scale * float32(qval)
-		}
-	}
-
-	return result, nil
-}
-
-func (m *CUDAModel) GetEmbeddingQ6_K(token int, emb *CUDAWeight) ([]float32, error) {
-	dim := emb.Rows
-	result := make([]float32, dim)
-	data := emb.HostData
-
-	blockSize := 256
-	blockBytes := 210
-	numBlocks := dim / blockSize
-	bytesPerToken := numBlocks * blockBytes
-
-	if len(data) < (token+1)*bytesPerToken {
-		return nil, fmt.Errorf("embedding data too small for token %d", token)
-	}
-
-	tokenOffset := token * bytesPerToken
-	for blk := 0; blk < numBlocks; blk++ {
-		blockOffset := tokenOffset + blk*blockBytes
-		if blockOffset+blockBytes > len(data) {
-			break
-		}
-
-		d := Float16ToFloat32(binary.LittleEndian.Uint16(data[blockOffset : blockOffset+2]))
-		scales := data[blockOffset+4 : blockOffset+20]
-		qs := data[blockOffset+20 : blockOffset+212]
-
-		var D [8]float32
-		for j := 0; j < 8; j++ {
-			D[j] = d * float32(scales[j]&63)
-		}
-
-		for j := 0; j < blockSize; j++ {
-			qsIdx := j/16*12 + (j%16)/4
-			qbit := (j % 4) * 2
-			qval := (int8(qs[qsIdx]>>qbit) & 3)
-			if qval > 1 {
-				qval -= 4
-			}
-			result[blk*blockSize+j] = D[j/32] * float32(qval)
-		}
-	}
-
-	return result, nil
-}
-
-func (m *CUDAModel) GetEmbeddingQ4_K(token int, emb *CUDAWeight) ([]float32, error) {
-	dim := emb.Rows
-	result := make([]float32, dim)
-	data := emb.HostData
-
-	blockSize := 256
-	blockBytes := 176
-	numBlocks := dim / blockSize
-	bytesPerToken := numBlocks * blockBytes
-
-	if len(data) < (token+1)*bytesPerToken {
-		return nil, fmt.Errorf("embedding data too small for token %d", token)
-	}
-
-	tokenOffset := token * bytesPerToken
-	for blk := 0; blk < numBlocks; blk++ {
-		blockOffset := tokenOffset + blk*blockBytes
-		if blockOffset+blockBytes > len(data) {
-			break
-		}
-
-		d := Float16ToFloat32(binary.LittleEndian.Uint16(data[blockOffset : blockOffset+2]))
-		dmin := Float16ToFloat32(binary.LittleEndian.Uint16(data[blockOffset+2 : blockOffset+4]))
-		scales := data[blockOffset+4 : blockOffset+20]
-		qs := data[blockOffset+20 : blockOffset+148]
-
-		var D [8]float32
-		var M [8]float32
-		for j := 0; j < 8; j++ {
-			D[j] = d * float32(scales[j]&63)
-			M[j] = dmin * float32((scales[j+8] & 63))
-		}
-
-		for j := 0; j < blockSize; j++ {
-			q := (j/32)*16 + (j%32)/2
-			bit := (j % 2) * 4
-			qval := (int8((qs[q]>>bit)&0xF) - 8)
-			result[blk*blockSize+j] = D[j/32]*float32(qval&0xF) - M[j/32]
-		}
-	}
-
-	return result, nil
-}
 
 func (ctx *CUDAContext) TurboQuantPolarQuant(input, rotationMatrix []float32, n, bits int) (quantized []int8, scale float32, residual []float32) {
 	quantized = make([]int8, n)
