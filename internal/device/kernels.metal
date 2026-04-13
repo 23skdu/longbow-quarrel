@@ -2230,6 +2230,110 @@ kernel void att_paged_f16(device const half *q [[ buffer(0) ]],
     }
 }
 
+kernel void att_paged_batch_f16(device const half *q [[ buffer(0) ]],
+                               device const half *k_cache [[ buffer(1) ]],
+                               device const half *v_cache [[ buffer(2) ]],
+                               device half *output [[ buffer(3) ]],
+                               device const int *batch_positions [[ buffer(4) ]],
+                               constant int &num_heads [[ buffer(5) ]],
+                               constant int &kv_heads [[ buffer(6) ]],
+                               constant int &headDim [[ buffer(7) ]],
+                               constant int &block_size [[ buffer(8) ]],
+                               device const int *block_tables [[ buffer(9) ]],
+                               constant int &max_blocks_per_seq [[ buffer(10) ]],
+                               uint3 tid [[ thread_position_in_threadgroup ]],
+                               uint3 nthreads [[ threads_per_threadgroup ]],
+                               uint3 group_id [[ threadgroup_position_in_grid ]]) {
+    uint h = group_id.x; // head index
+    uint b = group_id.y; // batch index
+    if (h >= (uint)num_heads) return;
+    
+    uint kvh = h / (num_heads / kv_heads);
+    float scale = 1.0f / sqrt((float)headDim);
+    int pos = batch_positions[b];
+    
+    device const half *mq = q + (b * num_heads + h) * headDim;
+    device const int *seq_block_table = block_tables + b * max_blocks_per_seq;
+    
+    uint nt = nthreads.x;
+    threadgroup float s_mem[4096]; // Capacity for scores
+    
+    int effective_len = pos + 1;
+    if (effective_len > 4096) effective_len = 4096;
+
+    // 1. Parallel score calculation
+    for (int t = tid.x; t < effective_len; t += nt) {
+        int logical_block = t / block_size;
+        int block_offset = t % block_size;
+        int physical_block = seq_block_table[logical_block];
+        
+        int kv_dim = kv_heads * headDim;
+        int block_stride = block_size * kv_dim;
+        
+        device const half *mk = k_cache + physical_block * block_stride + block_offset * kv_dim + kvh * headDim;
+        float d = 0;
+        for (int i = 0; i < headDim; i++) d += (float)mq[i] * (float)mk[i];
+        s_mem[t] = d * scale;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // 2. Softmax Max
+    threadgroup float tg_mv = -10000.0f;
+    float l_mv = -10000.0f;
+    for (int i = (int)tid.x; i < effective_len; i += (int)nt) {
+        if (s_mem[i] > l_mv) l_mv = s_mem[i];
+    }
+    l_mv = simd_max(l_mv);
+    if (tid.x == 0) tg_mv = l_mv; // Simplified reduction for brevity
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float mv = tg_mv;
+
+    // 3. Softmax Sum
+    threadgroup float tg_se = 0.0f;
+    float l_se = 0;
+    for (int i = (int)tid.x; i < effective_len; i += (int)nt) {
+        float e = exp(s_mem[i] - mv);
+        s_mem[i] = e;
+        l_se += e;
+    }
+    l_se = my_simd_sum(l_se);
+    if (tid.x == 0) tg_se = l_se;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float se = tg_se;
+    if (se == 0) se = 1e-6f;
+
+    // 4. Result accumulation
+    if (tid.x < (uint)headDim) {
+        float r = 0;
+        int kv_dim = kv_heads * headDim;
+        int block_stride = block_size * kv_dim;
+        for (int t = 0; t < effective_len; t++) {
+            int logical_block = t / block_size;
+            int block_offset = t % block_size;
+            int physical_block = seq_block_table[logical_block];
+            device const half *mv_ptr = v_cache + physical_block * block_stride + block_offset * kv_dim + kvh * headDim + tid.x;
+            r += (s_mem[t] / se) * (float)*mv_ptr;
+        }
+        output[(b * num_heads + h) * headDim + tid.x] = safe_half(r);
+    }
+}
+
+kernel void store_kv_paged_batch_f16(device const half *k [[ buffer(0) ]],
+                                    device const half *v [[ buffer(1) ]],
+                                    device half *k_cache [[ buffer(2) ]],
+                                    device half *v_cache [[ buffer(3) ]],
+                                    device const int *physical_positions [[ buffer(4) ]],
+                                    constant int &kv_dim [[ buffer(5) ]],
+                                    uint2 gid [[ thread_position_in_grid ]]) {
+    uint row = gid.y; // batch index
+    uint col = gid.x; // kv_dim index
+    if (col >= (uint)kv_dim) return;
+    
+    int phys_pos = physical_positions[row];
+    k_cache[phys_pos * kv_dim + col] = k[row * kv_dim + col];
+    v_cache[phys_pos * kv_dim + col] = v[row * kv_dim + col];
+}
+
 // ==========================================
 // Mamba / SSM Kernels
 // ==========================================

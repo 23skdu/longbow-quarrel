@@ -36,7 +36,7 @@ func (g *Grammar) Apply(logits []float32) error {
 
 	// We iterate through all tokens and check if they're allowed in the current JSON state.
 	// In a production engine, this is optimized via a Trie or pre-filtered bitmask.
-	for i, logit := range logits {
+	for i := range logits {
 		if i >= len(g.Vocab) {
 			break
 		}

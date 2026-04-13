@@ -141,6 +141,14 @@ func NewTensor(name string, data []float32) *Tensor {
 	}
 }
 
+func (t *Tensor) SizeBytes() int { return t.sizeBytes }
+func (t *Tensor) RawData() []byte {
+	if t.cudaPtr != nil && len(t.cudaPtr.HostData) > 0 {
+		return t.cudaPtr.HostData
+	}
+	return nil
+}
+
 func (t *Tensor) Rows() int { return t.rows }
 func (t *Tensor) Cols() int { return t.cols }
 func (t *Tensor) Free() {
@@ -174,6 +182,13 @@ type Context struct {
 	// TurboQuant Global Matrices
 	TQRotation *Tensor
 	TQQJL      *Tensor
+
+	// Performance Counters (Hotpath)
+	ArrowBytesProcessed atomic.Int64
+}
+
+func (c *Context) DeviceID() int {
+	return c.device
 }
 
 func (c *Context) Synchronize() {
@@ -1151,7 +1166,7 @@ func (m *CUDAModel) GetDequantedWeight(name string) (*CUDATensor, error) {
 		rows:      w.Rows,
 		cols:      w.Cols,
 		sizeBytes: numElements * 4,
-		HostData:  float32SliceToBytes(resultData),
+		HostData:  Float32SliceToBytes(resultData),
 		ggmlType:  w.GGMLType,
 	}
 

@@ -43,6 +43,16 @@ type PagedKVCache struct {
 	initialized bool
 }
 
+// BatchCacheView represents a view across multiple sequences in the paged cache
+type BatchCacheView struct {
+	KPools         []*device.Tensor
+	VPools         []*device.Tensor
+	BlockTables    *device.Tensor // Concatenated block tables [BatchSize, MaxBlocks]
+	BatchPositions *device.Tensor // Current positions [BatchSize]
+	MaxBlocks      int
+	BlockSize      int
+}
+
 // Init initializes the paged cache
 func (c *PagedKVCache) Init(ctx *device.Context, config config.Config) error {
 	c.ctx = ctx
@@ -289,6 +299,70 @@ func (c *PagedKVCache) Update(seqID string, layer, pos int, k, v *device.Tensor)
 	return nil
 }
 
+// UpdateBatch updates multiple sequences in a single GPU operation
+func (c *PagedKVCache) UpdateBatch(layer int, items []struct {
+	SeqID string
+	Pos   int
+	K     *device.Tensor
+	V     *device.Tensor
+}) error {
+	if !c.initialized {
+		return fmt.Errorf("cache not initialized")
+	}
+
+	batchSize := len(items)
+	if batchSize == 0 {
+		return nil
+	}
+
+	c.mu.Lock()
+	physPositions := make([]int32, batchSize)
+
+	for i, item := range items {
+		logicalBlockIdx := item.Pos / c.blockSize
+		blockOffset := item.Pos % c.blockSize
+
+		table, exists := c.blockTables[item.SeqID]
+		if !exists {
+			table = make([]int32, 0)
+		}
+
+		if logicalBlockIdx == len(table) {
+			phys, err := c.allocateBlock()
+			if err != nil {
+				c.mu.Unlock()
+				return err
+			}
+			table = append(table, phys)
+			c.blockTables[item.SeqID] = table
+		}
+
+		physPositions[i] = table[logicalBlockIdx]*int32(c.blockSize) + int32(blockOffset)
+	}
+	c.mu.Unlock()
+
+	// Load physical positions to device
+	ppDevice := c.ctx.NewTensorFP32(1, batchSize)
+	defer ppDevice.Free()
+	ppF32 := make([]float32, batchSize)
+	for i, p := range physPositions {
+		ppF32[i] = float32(p)
+	}
+	ppDevice.LoadFrom(ppF32)
+
+	kTarget := c.kPools[layer]
+	vTarget := c.vPools[layer]
+
+	// Simplified: We assume for now the batching logic handles the packing of k/v into batch tensors.
+	// In the final loop, K/V will be [Batch, KVHeads, HeadDim].
+	kBatch := items[0].K
+	vBatch := items[0].V
+
+	c.ctx.StoreKVPagedBatch(kBatch, vBatch, kTarget, vTarget, ppDevice, c.kvHeads*c.headDim, batchSize)
+
+	return nil
+}
+
 // Get returns the CacheView for a specific layer.
 // Since block tables are per-sequence, we will pass the sequence ID.
 func (c *PagedKVCache) Get(seqID string, layer int) CacheView {
@@ -330,6 +404,55 @@ func (c *PagedKVCache) Get(seqID string, layer int) CacheView {
 		V:          c.vPools[layer],
 		BlockTable: tableDevice,
 		BlockSize:  c.blockSize,
+	}
+}
+
+// GetBatch returns a BatchCacheView for a set of sequences
+func (c *PagedKVCache) GetBatch(seqIDs []string, positions []int, layer int) BatchCacheView {
+	if !c.initialized {
+		return BatchCacheView{}
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	batchSize := len(seqIDs)
+	maxBlocks := 0
+	for _, id := range seqIDs {
+		if len(c.blockTables[id]) > maxBlocks {
+			maxBlocks = len(c.blockTables[id])
+		}
+	}
+	if maxBlocks < 1 {
+		maxBlocks = 1
+	}
+
+	// Pack block tables into a single tensor [BatchSize, MaxBlocks]
+	btData := make([]float32, batchSize*maxBlocks)
+	for i, id := range seqIDs {
+		table := c.blockTables[id]
+		for j, block := range table {
+			btData[i*maxBlocks+j] = float32(block)
+		}
+	}
+
+	btDevice := c.ctx.NewTensorFP32(batchSize, maxBlocks)
+	btDevice.LoadFrom(btData)
+
+	posData := make([]float32, batchSize)
+	for i, p := range positions {
+		posData[i] = float32(p)
+	}
+	posDevice := c.ctx.NewTensorFP32(1, batchSize)
+	posDevice.LoadFrom(posData)
+
+	return BatchCacheView{
+		KPools:         c.kPools,
+		VPools:         c.vPools,
+		BlockTables:    btDevice,
+		BatchPositions: posDevice,
+		MaxBlocks:      maxBlocks,
+		BlockSize:      c.blockSize,
 	}
 }
 

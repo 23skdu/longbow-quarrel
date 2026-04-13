@@ -1,3 +1,5 @@
+//go:build darwin && metal
+
 package engine
 
 import (
@@ -13,6 +15,9 @@ type InferenceRequest struct {
 	Config    SamplerConfig
 	Result    chan []int
 	Err       chan error
+
+	TokenCallback  func(int)
+	LogitsCallback func([]float32)
 }
 
 // RequestQueue handles thread-safe enqueuing and dequeuing of raw incoming requests.
@@ -75,7 +80,7 @@ func (cm *ContinuousBatchManager) Step(maxBatchSize int, kvCache *PagedKVCache) 
 	defer cm.mu.Unlock()
 
 	availableSlots := maxBatchSize - len(cm.running)
-	
+
 	// Pull new sequences into the prefill set if we have capacity
 	if availableSlots > 0 {
 		newReqs := cm.waitingQueue.PopUpTo(availableSlots)
@@ -84,27 +89,49 @@ func (cm *ContinuousBatchManager) Step(maxBatchSize int, kvCache *PagedKVCache) 
 			seq := &Sequence{
 				ID:        req.ID,
 				PromptLen: len(req.Prompt),
+				MaxTokens: req.MaxTokens,
+				Tokens:    append([]int{}, req.Prompt...),
+				Config:    req.Config,
+				Result:    req.Result,
+				Err:       req.Err,
 				Pos:       0,
-				Status:    SequenceStatusPending,
+				Status:    SequenceStatusRunning, // Immediate transition for prefill
 			}
-			
-			// Under continuous batching PagedAttention, we don't need a single fat contiguous allocation.
-			// We check block capacity on the fly. We'll simply prime the sequence state.
+			// Attach callbacks from existing request if needed
+			// (Note: InferenceRequest should have these fields now)
+			seq.TokenCallback = req.TokenCallback
+			seq.LogitsCallback = req.LogitsCallback
+
 			cm.prefill[seq.ID] = seq
 		}
 	}
 
 	// For the active step, gather what needs computation
 	var active []*Sequence
-	for _, seq := range cm.running {
+	// 1. Prefill sequences (batch them or handle first)
+	for id, seq := range cm.prefill {
 		active = append(active, seq)
+		delete(cm.prefill, id)
+		cm.running[id] = seq
 	}
-	for _, seq := range cm.prefill {
-		active = append(active, seq)
+
+	// 2. Already running sequences
+	for _, seq := range cm.running {
+		// Only add to active batch if not already added by prefill logic in this tick
+		found := false
+		for _, a := range active {
+			if a.ID == seq.ID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			active = append(active, seq)
+		}
 	}
 
 	if len(active) == 0 {
-		return nil, fmt.Errorf("no active sequences")
+		return nil, nil // No active sequences is a valid idle state
 	}
 
 	return active, nil

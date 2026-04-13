@@ -1,3 +1,5 @@
+//go:build darwin && metal
+
 package vlm
 
 import (
@@ -34,7 +36,7 @@ func (v *VisionEncoder) Encode(imageData []byte) (*device.Tensor, error) {
 	}
 
 	reader := bytes.NewReader(imageData)
-	img, _, err := image.Decode(reader)
+	_, _, err := image.Decode(reader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode image: %w", err)
 	}

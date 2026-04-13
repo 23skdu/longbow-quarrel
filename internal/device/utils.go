@@ -5,8 +5,8 @@ package device
 // build tags, CGO references, or dependencies on Metal/CUDA-specific headers.
 
 import (
-	"encoding/binary"
 	"math"
+	"unsafe"
 )
 
 type DataType int
@@ -93,10 +93,9 @@ func Float16ToFloat32(f uint16) float32 {
 	return math.Float32frombits((sign << 31) | (newExp << 23) | (mant << 13))
 }
 
-func float32SliceToBytes(f32 []float32) []byte {
-	result := make([]byte, len(f32)*4)
-	for i, v := range f32 {
-		binary.LittleEndian.PutUint32(result[i*4:], math.Float32bits(v))
+func Float32SliceToBytes(s []float32) []byte {
+	if len(s) == 0 {
+		return nil
 	}
-	return result
+	return unsafe.Slice((*byte)(unsafe.Pointer(&s[0])), len(s)*4)
 }

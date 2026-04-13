@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"math"
 	"os"
-	"runtime"
 	"strings"
 	"time"
 
@@ -332,6 +331,11 @@ func NewMetalEngine(modelPath string, config config.Config) (Engine, error) {
 	}
 
 	e.TraceTracker = NewActivationTraceTracker(e.config.Layers)
+	e.BatchManager = NewContinuousBatchManager()
+	e.cache = &PagedKVCache{}
+	e.cache.Init(ctx, config)
+
+	go e.runBatchLoop()
 
 	return e, nil
 }
@@ -1260,554 +1264,194 @@ func (e *metalEngine) InferWithCallback(inputTokens []int, tokensToGenerate int,
 	return e.inferInternal(inputTokens, tokensToGenerate, samplerConfig, callback, nil)
 }
 
-func (e *metalEngine) inferInternal(inputTokens []int, tokensToGenerate int, samplerConfig SamplerConfig, tokenCallback func(int), logitsCallback func([]float32)) ([]int, error) {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-
-	// Validation
-	if len(inputTokens) == 0 {
-		return nil, errors.New("empty input tokens")
+func (e *metalEngine) ForwardBatch(batch []*Sequence) ([]*device.Tensor, error) {
+	batchSize := len(batch)
+	if batchSize == 0 {
+		return nil, nil
 	}
 
-	// Sequence management
-	var seq *Sequence
-	if samplerConfig.SequenceID != 0 {
-		// Use existing sequence
-		var ok bool
-		seq, ok = e.SeqMgr.GetSequence(samplerConfig.SequenceID)
-		if !ok {
-			return nil, errors.New("invalid sequence ID")
-		}
-	} else {
-		// Create new sequence
-		seq = e.SeqMgr.NewSequence(len(inputTokens))
+	// 1. Assemble input tokens
+	inputTokens := make([]int, batchSize)
+	for i, seq := range batch {
+		inputTokens[i] = seq.Tokens[len(seq.Tokens)-1]
 	}
 
-	// Enable activation logging if requested
-	if samplerConfig.DebugActivations {
-		promptText := fmt.Sprintf("tokens:%v", inputTokens) // Simple representation for now
-		e.ActLogger.Enable(promptText, inputTokens)
-	}
+	// 2. Lookup Embeddings
+	// Note: EmbeddingLookupBatch should handle [BatchSize, Dim]
+	inputT := e.weights.TokenEmb.EmbeddingLookupBatch(inputTokens, 1.0)
+	defer inputT.Free()
 
-	// Phase 1: Prefill (Process all tokens except last one, generating KV cache)
-	if e.model == nil {
-		return nil, errors.New("no model loaded")
-	}
-
-	// Validate critical weights are loaded
-	if e.weights.TokenEmb == nil {
-		return nil, errors.New("token embedding weights not loaded")
-	}
-	if e.weights.OutputNorm == nil {
-		return nil, errors.New("token embedding weights not loaded")
-	}
-	if e.weights.Output == nil {
-		return nil, errors.New("token embedding weights not loaded")
-	}
-
-	// Validate input tokens are within vocab range
-	for i, token := range inputTokens {
-		if token < 0 || token >= e.weights.TokenEmb.Rows() {
-			return nil, fmt.Errorf("input token %d at position %d is out of vocab range [0, %d)", token, i, e.weights.TokenEmb.Rows())
-		}
-	}
-
-	// tStart := time.Now()
-	result := make([]int, 0, tokensToGenerate)
-
-	// Lock OS thread for AutoreleasePool consistency
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
-
-	sampler := NewSampler(samplerConfig)
-
-	// Main Generation Loop
-
-	// Create scratch buffers for the layer fusion
-	// New Scratch Buffer for Zero-Alloc	// Initialize scratch buffers (Heap backed, includes Logits)
-	qNormDim := 512 // Gemma4 full attention uses 512, sliding uses 256
+	// 3. Scratch Allocation
+	qNormDim := 512
 	kNormDim := 512
-	scratchBatch := 1 // Always use batch=1, the kernels will process whatever batch size the input has
-	scratch := e.ctx.NewLayerScratch(scratchBatch, e.config.Dim, e.config.HiddenDim,
+	scratch := e.ctx.NewLayerScratch(batchSize, e.config.Dim, e.config.HiddenDim,
 		e.config.Heads, e.config.KVHeads, e.config.HeadDim, e.config.SeqLen, e.config.VocabSize, qNormDim, kNormDim)
 	defer scratch.Free()
 
-	// Logits are in scratch.Logits
-	logits := scratch.Logits
-
-	// Phase 1: Prefill all input tokens
-	cachePos := e.GetSeqCachePos(int(seq.ID))
-	logger.Log.Debug("Start Inference", "seq_id", seq.ID, "cache_pos", cachePos)
-	logger.Log.Debug("starting prefill phase", "tokens", len(inputTokens), "is_gemma4", e.config.IsGemma4, "layers", e.config.Layers)
-	for i := 0; i < len(inputTokens); i++ {
-		// Autorelease Pool for this iteration
-		pool := e.ctx.AutoreleasePoolPush()
-
-		tToken := time.Now()
-		lastToken := inputTokens[i]
-		cachePos := e.GetSeqCachePos(int(seq.ID))
-
-		current := e.weights.TokenEmb.EmbeddingLookup(lastToken, e.GlobalScale)
-		if samplerConfig.DebugActivations || (i < 10) {
-			current.ScanMax(fmt.Sprintf("[Pos %d] Token %d Embedding", cachePos, lastToken))
-		}
-
-		// DEBUG: Print first 4 elements of embedding
-		e.ctx.Synchronize()
-		// embData := current.ToHost()
-		// fmt.Printf("DEBUG_EMB: Token %d (pos %d) first 4: %v\n", lastToken, i, embData[:4])
-
-		currentF32 := current.ToF32()
-		current.ReturnToPool() // Release F16
-
-		// Layers (Attention + FFN)
-		for l := 0; l < e.config.Layers; l++ {
-			if l == 0 && i == 0 {
-				logger.Log.Debug("layer info", "layer", 0, "is_gemma4", e.config.IsGemma4,
-					"has_qnorm", e.weights.AttnQNorm != nil && len(e.weights.AttnQNorm) > l && e.weights.AttnQNorm[l] != nil,
-					"has_knorm", e.weights.AttnKNorm != nil && len(e.weights.AttnKNorm) > l && e.weights.AttnKNorm[l] != nil)
-			}
-
-			attnNorm := e.weights.AttnNorm[l]
-			q := e.weights.AttnQ[l]
-			k := e.weights.AttnK[l]
-			v := e.weights.AttnV[l]
-			o := e.weights.AttnO[l]
-			ffnNorm := e.weights.FfnNorm[l]
-			ffnGate := e.weights.FfnGate[l]
-			ffnUp := e.weights.FfnUp[l]
-			ffnDown := e.weights.FfnDown[l]
-
-			view := e.cache.Get(e.SeqIDStr(seq.ID), l)
-			kCache := view.K
-			vCache := view.V
-
-			// Gemma4 Q/K normalization weights
-			var gemma4QNorm, gemma4KNorm *device.Tensor
-			var gemma4Config config.Gemma4Config
-			if e.config.IsGemma4 && e.weights.AttnQNorm != nil && len(e.weights.AttnQNorm) > l && e.weights.AttnQNorm[l] != nil && e.weights.AttnKNorm != nil && len(e.weights.AttnKNorm) > l && e.weights.AttnKNorm[l] != nil {
-				gemma4QNorm = e.weights.AttnQNorm[l]
-				gemma4KNorm = e.weights.AttnKNorm[l]
-				gemma4Config.IsGemma4 = true
-				gemma4Config.IsSlidingWindowLayer = (l % 6) != 5
-				gemma4Config.SlidingWindowSize = e.config.Gemma4SlidingWindowSize
-				gemma4Config.SlidingRoPETheta = e.config.Gemma4SlidingRoPETheta
-				gemma4Config.FullRoPETheta = e.config.Gemma4FullRoPETheta
-				gemma4Config.PartialRoPEFactor = e.config.Gemma4PartialRoPEFactor
-				gemma4Config.SlidingHeadDim = e.config.Gemma4SlidingHeadDim
-				gemma4Config.FullHeadDim = e.config.Gemma4FullHeadDim
-			}
-
-			if e.IsMambaLayer(l) {
-				mambaLayer := e.MambaLayers[l]
-				ssmState := e.SSMCache[l]
-
-				res, err := mambaLayer.Forward(currentF32, ssmState)
-				if err != nil {
-					panic(fmt.Errorf("layer %d mamba forward failed: %v", l, err))
-				}
-
-				// Add Residual (y = Mamba(Norm(x)) + x)
-				if err := currentF32.AddInPlace(res); err != nil {
-					// Check for type mismatch, try to fix
-					if res.DataType() != device.DataTypeF32 {
-						// Convert res to F32 (Host trip for now, slow but safe)
-						resF32 := e.ctx.NewTensorFP32(res.Rows(), res.Cols())
-						resF32.LoadFrom(res.ToHostF32()) // CopyFrom expects float32 slice
-						// Retry add
-						if err2 := currentF32.AddInPlace(resF32); err2 != nil {
-							panic(fmt.Errorf("layer %d residual add failed logic: %v", l, err2))
-						}
-					} else {
-						panic(fmt.Errorf("layer %d residual add failed: %v", l, err))
-					}
-				}
-			} else if e.IsMOELayer(l) {
-				// MOE Layer (Attention + MOE FFN)
-				// 1. Attention Part (passing nil for FFN up weight to skip FFN block in Layer method)
-				currentF32.Layer(l, attnNorm, q, k, v, o, ffnNorm, ffnGate, nil, ffnDown, kCache, vCache,
-					scratch, // Pass scratch
-					e.TraceTracker,
-					cachePos, e.config.Heads, e.config.KVHeads, e.config.HeadDim, e.config.RopeTheta, e.config.Eps, e.config.HiddenDim, e.config.SeqLen, e.config.WindowSize, e.GlobalScale, samplerConfig.DebugActivations, int(e.config.PrecisionMode),
-					view.BlockTable, view.BlockSize,
-					func(k *device.Tensor, v *device.Tensor) {
-						if err := e.cache.Update(e.SeqIDStr(seq.ID), l, cachePos, k, v); err != nil {
-							panic(err)
-						}
-					},
-					gemma4QNorm, gemma4KNorm, gemma4Config,
-					nil, nil, nil, nil) // No LoRAs active by default
-
-				// 2. MOE Part
-				// Need to apply FFN Norm first
-				normedFFN := currentF32.RMSNorm(ffnNorm, e.config.Eps)
-
-				// MOE Forward
-				moeOut := e.MOELayerForward(l, normedFFN)
-				normedFFN.Free()
-
-				// Add Residual (y = MOE(Norm(x)) + x)
-				currentF32.AddInPlace(moeOut)
-				moeOut.Free()
-			} else {
-				currentF32.Layer(l, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, kCache, vCache,
-					scratch, // Pass scratch
-					e.TraceTracker,
-					cachePos, e.config.Heads, e.config.KVHeads, e.config.HeadDim, e.config.RopeTheta, e.config.Eps, e.config.HiddenDim, e.config.SeqLen, e.config.WindowSize, e.GlobalScale, samplerConfig.DebugActivations, int(e.config.PrecisionMode),
-					view.BlockTable, view.BlockSize,
-					func(k *device.Tensor, v *device.Tensor) {
-						if err := e.cache.Update(e.SeqIDStr(seq.ID), l, cachePos, k, v); err != nil {
-							panic(err)
-						}
-					},
-					gemma4QNorm, gemma4KNorm, gemma4Config,
-					nil, nil, nil, nil) // No LoRAs active by default
-			}
-
-			// Log layer activation details if enabled
-			if e.ActLogger.IsEnabled() {
-				if e.config.DebugAttention {
-					scratch.QPart.ScanMax(fmt.Sprintf("[%d] Q", cachePos))
-					scratch.KPart.ScanMax(fmt.Sprintf("[%d] K", cachePos))
-					scratch.VPart.ScanMax(fmt.Sprintf("[%d] V", cachePos))
-					scratch.AttOut.ScanMax(fmt.Sprintf("[%d] Attention", cachePos))
-					scratch.AttOut.ScanMax(fmt.Sprintf("[%d] FFN", cachePos))
-				}
-				if e.config.DebugFFN {
-					scratch.QPart.ScanMax(fmt.Sprintf("[%d] Q", cachePos))
-					scratch.KPart.ScanMax(fmt.Sprintf("[%d] K", cachePos))
-					scratch.VPart.ScanMax(fmt.Sprintf("[%d] V", cachePos))
-					scratch.AttOut.ScanMax(fmt.Sprintf("[%d] FFN", cachePos))
-				}
-			}
-
-			// Log layer output if enabled OR if first token (for recovery analysis)
-			if samplerConfig.DebugActivations || (i == 0) {
-				currentF32.ScanMax(fmt.Sprintf("[Pos %d] Layer %d Output", cachePos, l))
-
-				// Track layer stats for first token
-				if i == 0 {
-					stats := currentF32.GetStats(16)
-					e.TraceTracker.RecordLayer(fmt.Sprintf("layer_%d", l), l, stats)
-				}
-			}
-		}
-
-		logger.Log.Debug("finished layers", "count", e.config.Layers)
-
-		// If this is the LAST prompt token, sample the first next token
-		if i == len(inputTokens)-1 {
-			logger.Log.Debug("starting final norm")
-			// Final Norm (F32 -> F16)
-			// Debug Output Norm Weights
-			if i == 0 {
-				e.weights.OutputNorm.ScanMax("Output Norm Weights")
-				e.weights.Output.ScanMax("Output Weights")
-			}
-
-			// Debug: check currentF32 before final norm
-			if samplerConfig.DebugActivations {
-				currentF32.ScanMax(fmt.Sprintf("Layer %d Final Input (before norm)", i))
-			}
-
-			// Check for and handle Inf/NaN values before final norm
-			if infInfo := currentF32.ScanForNaN(fmt.Sprintf("Layer %d Pre-Final Norm", i), 5); infInfo.HasInf || infInfo.HasNaN() {
-				logger.Log.Warn("NaN detected in pre-final norm, clamping", "count", infInfo.Count, "inf_count", infInfo.InfCount)
-				// Clamp extreme values to prevent RMSNorm issues
-				hostData := currentF32.ToHost()
-				for j := range hostData {
-					if math.IsInf(float64(hostData[j]), 0) {
-						// Replace Inf with a large but finite value
-						if hostData[j] > 0 {
-							hostData[j] = 1e6
-						} else {
-							hostData[j] = -1e6
-						}
-					} else if math.IsNaN(float64(hostData[j])) {
-						hostData[j] = 0.0 // Replace NaN with zero
-					}
-					// Also clamp extremely large values
-					if hostData[j] > 1e6 {
-						hostData[j] = 1e6
-					} else if hostData[j] < -1e6 {
-						hostData[j] = -1e6
-					}
-				}
-				logger.Log.Debug("creating cleanTensor")
-				// Load cleaned data back
-				cleanTensor := e.ctx.NewTensorFP32(currentF32.Rows(), currentF32.Cols())
-				cleanTensor.LoadFromF32(hostData)
-				logger.Log.Debug("running RMSNorm on cleanTensor")
-				// Use cleaned tensor for RMSNorm
-				cleanTensor.RMSNormFP32_ToF16_Into(e.weights.OutputNorm, e.config.Eps, scratch.Normed)
-				logger.Log.Debug("RMSNorm complete, synchronizing")
-				e.ctx.Synchronize()
-				logger.Log.Debug("synchronize complete")
-				cleanTensor.ReturnToPool()
-			} else {
-				currentF32.RMSNormFP32_ToF16_Into(e.weights.OutputNorm, e.config.Eps, scratch.Normed)
-				e.ctx.Synchronize()
-			}
-
-			// Debug: check normed output
-			if samplerConfig.DebugActivations {
-				scratch.Normed.ScanMax(fmt.Sprintf("Layer %d Final Norm Output", i))
-			}
-
-			// Check for NaN in normalized output
-			if nanInfo := scratch.Normed.ScanForNaN("Final Norm", 5); nanInfo.HasNaN() {
-				logger.Log.Error("NaN detected in Final Norm", "count", nanInfo.Count, "positions", nanInfo.Positions)
-			}
-
-			// Output Head (F16 -> F32 Logits)
-			// scratch.Normed contains result. Use it.
-			logger.Log.Debug("before LinearToFP32_Into", "normed_rows", scratch.Normed.Rows(), "normed_cols", scratch.Normed.Cols(), "output_rows", e.weights.Output.Rows(), "output_cols", e.weights.Output.Cols())
-			scratch.Normed.LinearToFP32_Into(e.weights.Output, logits)
-			logger.Log.Debug("after LinearToFP32_Into")
-			e.ctx.Synchronize()
-			logger.Log.Debug("after synchronize")
-			e.ctx.Synchronize()
-
-			logitsData := logits.ToHost()
-
-			nextToken := sampler.Sample(logitsData, inputTokens)
-
-			// Log logits if enabled
-			if e.ActLogger.IsEnabled() {
-				// We need to pass nil or a default list if we removed expectedTokens definition
-				e.ActLogger.LogLogits(logitsData, nil)
-			}
-
-			result = append(result, nextToken)
-
-			if logitsCallback != nil {
-				logitsCallback(logitsData)
-			}
-
-			// Call streaming callback if provided
-			if tokenCallback != nil {
-				tokenCallback(nextToken)
-			}
-		}
-
-		currentF32.ReturnToPool()
-
-		// Increment CachePos after processing the token
-		e.IncSeqCachePos(seq.ID)
-		metrics.RecordInference(1, time.Since(tToken))
-		e.ctx.AutoreleasePoolPop(pool)
+	// 4. Batch Metadata
+	seqIDs := make([]string, batchSize)
+	positions := make([]int, batchSize)
+	for i, seq := range batch {
+		seqIDs[i] = fmt.Sprintf("seq-%d", seq.ID)
+		positions[i] = seq.Pos
 	}
 
-	// Phase 2: Generation loop (remaining tokens)
-	for i := 1; i < tokensToGenerate; i++ {
-		// Autorelease Pool for this iteration
-		pool := e.ctx.AutoreleasePoolPush()
+	current := inputT // Already F16
+	defer current.Free()
 
-		tToken := time.Now()
-		lastToken := result[len(result)-1]
+	// 5. Transformer Layers
+	for l := 0; l < e.config.Layers; l++ {
+		view := e.cache.GetBatch(seqIDs, positions, l)
+		
+		// e.weights.LoadLayer(l) // If we had lazy loading
 
-		if lastToken < 0 || lastToken >= e.weights.TokenEmb.Rows() {
-			return nil, fmt.Errorf("token %d is out of vocab range", lastToken)
-		}
-
-		cachePos := e.GetSeqCachePos(int(seq.ID))
-
-		current := e.weights.TokenEmb.EmbeddingLookup(lastToken, e.GlobalScale)
-
-		currentF32 := current.ToF32()
-		current.ReturnToPool() // Release F16 embedding
-
-		// Layers (Attention + FFN)
-		for l := 0; l < e.config.Layers; l++ {
-			logger.Log.Debug("Layer Precision Info", "layer", l, "dim", e.config.Dim, "mode", e.config.PrecisionMode)
-
-			attnNorm := e.weights.AttnNorm[l]
-			q := e.weights.AttnQ[l]
-			k := e.weights.AttnK[l]
-			v := e.weights.AttnV[l]
-			o := e.weights.AttnO[l]
-			ffnNorm := e.weights.FfnNorm[l]
-			ffnGate := e.weights.FfnGate[l]
-			ffnUp := e.weights.FfnUp[l]
-			ffnDown := e.weights.FfnDown[l]
-
-			view := e.cache.Get(e.SeqIDStr(seq.ID), l)
-			kCache := view.K
-			vCache := view.V
-
-			// Gemma4 Q/K normalization weights (generation phase)
-			var gemma4QNorm, gemma4KNorm *device.Tensor
-			var gemma4ConfigGen config.Gemma4Config
-			if e.config.IsGemma4 && e.weights.AttnQNorm != nil && len(e.weights.AttnQNorm) > l && e.weights.AttnQNorm[l] != nil {
-				gemma4QNorm = e.weights.AttnQNorm[l]
-				gemma4KNorm = e.weights.AttnKNorm[l]
-				gemma4ConfigGen.IsGemma4 = true
-				gemma4ConfigGen.IsSlidingWindowLayer = (l % 6) != 5
-				gemma4ConfigGen.SlidingWindowSize = e.config.Gemma4SlidingWindowSize
-				gemma4ConfigGen.SlidingRoPETheta = e.config.Gemma4SlidingRoPETheta
-				gemma4ConfigGen.FullRoPETheta = e.config.Gemma4FullRoPETheta
-				gemma4ConfigGen.PartialRoPEFactor = e.config.Gemma4PartialRoPEFactor
-				gemma4ConfigGen.SlidingHeadDim = e.config.Gemma4SlidingHeadDim
-				gemma4ConfigGen.FullHeadDim = e.config.Gemma4FullHeadDim
-			}
-
-			if l == e.config.Layers-1 && i == 0 {
-				// ffnDown.ScanMax("Last Layer FFN Down Weight")
-				// fmt.Printf("DEBUG: Eps: %e\n", e.config.Eps)
-			}
-
-			// Layer now handles F32 currentF32, using mixed precision
-			if e.IsMambaLayer(l) {
-				mambaLayer := e.MambaLayers[l]
-				ssmState := e.SSMCache[l]
-
-				res, err := mambaLayer.Forward(currentF32, ssmState)
-				if err != nil {
-					panic(fmt.Errorf("layer %d mamba forward failed: %v", l, err))
+		current.LayerBatch(l,
+			e.weights.AttnNorm[l], e.weights.AttnQ[l], e.weights.AttnK[l], e.weights.AttnV[l], e.weights.AttnO[l],
+			e.weights.FfnNorm[l], e.weights.FfnGate[l], e.weights.FfnUp[l], e.weights.FfnDown[l],
+			view.KPools[l], view.VPools[l],
+			scratch,
+			view.BatchPositions, view.BlockTables, view.MaxBlocks,
+			e.config.Heads, e.config.KVHeads, e.config.HeadDim,
+			e.config.RopeTheta, e.config.Eps, e.config.HiddenDim,
+			view.BlockSize, batchSize, 1.0,
+			func(k, v *device.Tensor) {
+				updateItems := make([]struct {
+					SeqID string
+					Pos   int
+					K     *device.Tensor
+					V     *device.Tensor
+				}, batchSize)
+				for i := range batch {
+					updateItems[i].SeqID = seqIDs[i]
+					updateItems[i].Pos = positions[i]
+					updateItems[i].K = k.Slice(i, 1)
+					updateItems[i].V = v.Slice(i, 1)
 				}
+				e.cache.UpdateBatch(l, updateItems)
+			})
 
-				// Add Residual (y = Mamba(Norm(x)) + x)
-				if err := currentF32.AddInPlace(res); err != nil {
-					// Check for type mismatch, try to fix
-					if res.DataType() != device.DataTypeF32 {
-						// Convert res to F32 (Host trip for now, slow but safe)
-						resF32 := e.ctx.NewTensorFP32(res.Rows(), res.Cols())
-						resF32.LoadFrom(res.ToHostF32()) // CopyFrom expects float32 slice
-						// Retry add
-						if err2 := currentF32.AddInPlace(resF32); err2 != nil {
-							panic(fmt.Errorf("layer %d residual add failed logic: %v", l, err2))
-						}
-					} else {
-						panic(fmt.Errorf("layer %d residual add failed: %v", l, err))
-					}
-				}
-			} else if e.IsMOELayer(l) {
-				currentF32.Layer(l, attnNorm, q, k, v, o, ffnNorm, ffnGate, nil, ffnDown, kCache, vCache,
-					scratch,
-					e.TraceTracker,
-					cachePos, e.config.Heads, e.config.KVHeads, e.config.HeadDim, e.config.RopeTheta, e.config.Eps, e.config.HiddenDim, e.config.SeqLen, e.config.WindowSize, e.GlobalScale, samplerConfig.DebugActivations, int(e.config.PrecisionMode),
-					view.BlockTable, view.BlockSize,
-					func(k *device.Tensor, v *device.Tensor) {
-						if err := e.cache.Update(e.SeqIDStr(seq.ID), l, cachePos, k, v); err != nil {
-							panic(err)
-						}
-					},
-					gemma4QNorm, gemma4KNorm, gemma4ConfigGen)
-			} else {
-				currentF32.Layer(l, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, kCache, vCache,
-					scratch, // Pass scratch
-					e.TraceTracker,
-					cachePos, e.config.Heads, e.config.KVHeads, e.config.HeadDim, e.config.RopeTheta, e.config.Eps, e.config.HiddenDim, e.config.SeqLen, e.config.WindowSize, e.GlobalScale, samplerConfig.DebugActivations, int(e.config.PrecisionMode),
-					view.BlockTable, view.BlockSize,
-					func(k *device.Tensor, v *device.Tensor) {
-						if err := e.cache.Update(e.SeqIDStr(seq.ID), l, cachePos, k, v); err != nil {
-							panic(err)
-						}
-					},
-					gemma4QNorm, gemma4KNorm, gemma4ConfigGen)
-			}
-
-			// Log layer activation details if enabled (generation phase)
-			if e.ActLogger.IsEnabled() && i >= len(inputTokens)-1 {
-				qSample := GetSampleFromTensor(scratch.QPart.ToHost(), 10)
-				kSample := GetSampleFromTensor(scratch.KPart.ToHost(), 10)
-				vSample := GetSampleFromTensor(scratch.VPart.ToHost(), 10)
-
-				qMax := GetMaxFromTensor(scratch.QPart.ToHost())
-				kMax := GetMaxFromTensor(scratch.KPart.ToHost())
-				vMax := GetMaxFromTensor(scratch.VPart.ToHost())
-				attnMax := GetMaxFromTensor(scratch.AttOut.ToHost())
-				ffnMax := GetMaxFromTensor(currentF32.ToHost())
-
-				e.ActLogger.LogLayer(l, qMax, kMax, vMax, attnMax, ffnMax,
-					qSample, kSample, vSample,
-					scratch.QPart.ToHost(), scratch.KPart.ToHost(), scratch.VPart.ToHost(),
-					scratch.AttOut.ToHost(), currentF32.ToHost())
-			}
-
-			if samplerConfig.DebugActivations {
-				currentF32.ScanMax(fmt.Sprintf("[Pos %d] Layer %d Input", cachePos, l))
-				currentF32.ScanMax(fmt.Sprintf("[Pos %d] Layer %d Output", cachePos, l))
-			}
-		}
-
-		// Final Norm (F32 -> F16)
-		currentF32.RMSNormFP32_ToF16_Into(e.weights.OutputNorm, e.config.Eps, scratch.Normed)
-
-		// Output Head (F16 -> F32 Logits) - FIXED: Use same path as Phase 1
-		// Reuse pre-allocated logits buffer
-		// Output into scratch.Logits (which is 'logits')
-		scratch.Normed.LinearToFP32_Into(e.weights.Output, logits)
-
-		// Logic update: RMSNormFP32_ToF16_Into does NOT allocate.
-		// It writes to scratch.Normed.
-		// No need to ReturnToPool for scratch.Normed (it's persistent scratch).
-
-		// Logic update: RMSNormFP32_ToF16_Into does NOT allocate.
-		// It writes to scratch.Normed.
-		// No need to ReturnToPool for scratch.Normed (it's persistent scratch).
-
-		e.ctx.Synchronize()
-		logitsData := logits.ToHost()
-
-		currentF32.ReturnToPool()
-
-		// Construct full history for Repetition Penalty
-		// We need to include input tokens + generated tokens
-		fullHistory := make([]int, 0, len(inputTokens)+len(result))
-		fullHistory = append(fullHistory, inputTokens...)
-		fullHistory = append(fullHistory, result...)
-
-		maxIdx := sampler.Sample(logitsData, fullHistory)
-
-		if maxIdx == 128001 { // <|end_of_text|> in Llama 3
-			e.ctx.AutoreleasePoolPop(pool)
-			break
-		}
-
-		result = append(result, maxIdx)
-
-		if logitsCallback != nil {
-			logitsCallback(logitsData)
-		}
-
-		// Call streaming callback if provided
-		if tokenCallback != nil {
-			tokenCallback(maxIdx)
-		}
-		e.IncSeqCachePos(seq.ID)
-		metrics.RecordInference(1, time.Since(tToken))
-		e.ctx.AutoreleasePoolPop(pool)
+		view.BlockTables.Free()
+		view.BatchPositions.Free()
 	}
 
-	// Save activation log if enabled
-	if e.ActLogger.IsEnabled() {
-		err := e.ActLogger.SaveToFile("activation_debug.json")
+	// 6. Final Norm & Projection
+	normed := current.RMSNorm(e.weights.OutputNorm, e.config.Eps)
+	defer normed.Free()
+
+	// logits [BatchSize, VocabSize]
+	logits := e.ctx.NewTensorWithType(batchSize, e.config.VocabSize, device.DataTypeF32)
+	normed.LinearInto(e.weights.Output, logits, 1.0)
+
+	results := make([]*device.Tensor, batchSize)
+	for i := 0; i < batchSize; i++ {
+		results[i] = logits.Slice(i, 1)
+	}
+	logits.Free()
+
+	return results, nil
+}
+
+func (e *metalEngine) runBatchLoop() {
+	for {
+		// Pull active sequences from the manager
+		active, _ := e.BatchManager.Step(16, e.cache)
+		if len(active) == 0 {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+
+		// Forward Pass
+		results, err := e.ForwardBatch(active)
 		if err != nil {
-			logger.Log.Warn("Failed to save activation log", "error", err)
+			for _, seq := range active {
+				select {
+				case seq.Err <- err:
+				default:
+				}
+			}
+			continue
+		}
+
+		// Sampling & Update
+		for i, seq := range active {
+			logits := results[i].ToHostF32()
+			results[i].Free()
+
+			if seq.LogitsCallback != nil {
+				seq.LogitsCallback(logits)
+			}
+
+			sampler := NewSampler(seq.Config)
+			token := sampler.Sample(logits, seq.Tokens)
+
+			seq.Tokens = append(seq.Tokens, token)
+			seq.Pos++
+
+			if seq.TokenCallback != nil {
+				seq.TokenCallback(token)
+			}
+
+			// Check for completion
+			if token == 2 || len(seq.Tokens) >= seq.MaxTokens { // 2 = EOS
+				select {
+				case seq.Result <- seq.Tokens:
+				default:
+				}
+				e.BatchManager.CompleteSequence(seq.ID, e.cache)
+			}
 		}
 	}
+}
 
-	return result, nil
+func (e *metalEngine) inferInternal(inputTokens []int, tokensToGenerate int, samplerConfig SamplerConfig, tokenCallback func(int), logitsCallback func([]float32)) ([]int, error) {
+	// Create channels for async completion
+	resChan := make(chan []int, 1)
+	errChan := make(chan error, 1)
+
+	// Create and submit request
+	req := &InferenceRequest{
+		ID:             uint64(time.Now().UnixNano()),
+		Prompt:         inputTokens,
+		MaxTokens:      len(inputTokens) + tokensToGenerate,
+		Config:         samplerConfig,
+		Result:         resChan,
+		Err:            errChan,
+		TokenCallback:  tokenCallback,
+		LogitsCallback: logitsCallback,
+	}
+
+	e.BatchManager.Submit(req)
+
+	// Wait for completion (blocking call for sync API compatibility)
+	select {
+	case tokens := <-resChan:
+		// Return only the newly generated tokens
+		if len(tokens) > len(inputTokens) {
+			return tokens[len(inputTokens):], nil
+		}
+		return []int{}, nil
+	case err := <-errChan:
+		return nil, err
+	}
 }
 
 func (e *metalEngine) initKVCache() error {
-	// Determine Cache Strategy
-	// Determine Cache Strategy
-	// We now use SlidingWindowKVCache for ALL cases.
-	// If WindowSize is 0 (Full Context), SlidingWindowKVCache defaults to SeqLen size
-	// and handles the wrapping (circular buffer) automatically.
-	// This prevents crashes when context length is exceeded.
-
 	if err := e.initTurboQuant(); err != nil {
 		return err
 	}
 
-	cache := &SlidingWindowKVCache{}
-	if err := cache.Init(e.ctx, e.config); err != nil {
+	// Initialize Paged KV Cache
+	pagedCache := &PagedKVCache{}
+	if err := pagedCache.Init(e.ctx, e.config); err != nil {
 		return err
 	}
-	e.cache = cache
+	e.cache = pagedCache
+
+	// Initialize Batch Manager
+	e.BatchManager = NewContinuousBatchManager()
+
+	// Start background batch loop
+	go e.runBatchLoop()
 
 	return nil
 }
@@ -2011,4 +1655,12 @@ func (e *metalEngine) SwapModel(newModelPath string, newConfig config.Config) er
 
 	success = true
 	return nil
+}
+
+func (e *metalEngine) ForwardDraft(tokens []int) ([][]float32, error) {
+	return nil, fmt.Errorf("ForwardDraft not implemented for metalEngine")
+}
+
+func (e *metalEngine) RollbackKV(seqID int, stepCount int) {
+	// Stub for now: satisfy interface for speculative decoding
 }

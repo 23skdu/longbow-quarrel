@@ -90,6 +90,8 @@
 @property(strong) id<MTLComputePipelineState> pipelineLinearLoRA;
 @property(strong) id<MTLComputePipelineState> pipelineVisionPatchEmbed;
 @property(strong) id<MTLComputePipelineState> pipelineAllReduce;
+@property(strong) id<MTLComputePipelineState> pipelineAttPagedBatch_F16;
+@property(strong) id<MTLComputePipelineState> pipelineStoreKVPagedBatch_F16;
 @property(strong) id<MTLCommandBuffer> currentCommandBuffer;
 @property(strong) id<MTLComputeCommandEncoder> currentEncoder;
 @property(strong) id<MTLCommandBuffer> lastCommandBuffer;
@@ -174,7 +176,7 @@ void Metal_AutoreleasePoolPop(void *pool) {
 #endif
 }
 
-MetalContextRef Metal_Init(const char *libSource) {
+MetalWrapperRef Metal_Init(const char *libSource) {
   MetalWrapper *ctx = [[MetalWrapper alloc] init];
   ctx.device = MTLCreateSystemDefaultDevice();
   if (!ctx.device) {
@@ -219,6 +221,8 @@ MetalContextRef Metal_Init(const char *libSource) {
   ctx.pipelineAttValues_F16 = loadPipeline(ctx, @"att_values_f16");
   ctx.pipelineAttFused_F16 = loadPipeline(ctx, @"att_fused_f16");
   ctx.pipelineAttPaged_F16 = loadPipeline(ctx, @"att_paged_f16");
+  ctx.pipelineAttPagedBatch_F16 = loadPipeline(ctx, @"att_paged_batch_f16");
+  ctx.pipelineStoreKVPagedBatch_F16 = loadPipeline(ctx, @"store_kv_paged_batch_f16");
   ctx.pipelineScale_F16 = loadPipeline(ctx, @"scale_f16");
   ctx.pipelineRMSNormLinear_F16 = loadPipeline(ctx, @"rmsnorm_linear_f16");
   ctx.pipelineRMSNormQKV_F16 = loadPipeline(ctx, @"rmsnorm_qkv_f16");
@@ -291,13 +295,13 @@ MetalContextRef Metal_Init(const char *libSource) {
   ctx.pipelineAllReduce = loadPipeline(ctx, @"all_reduce_sum_f16");
 
 #if __has_feature(objc_arc)
-  return (__bridge_retained MetalContextRef)ctx;
+  return (__bridge_retained MetalWrapperRef)ctx;
 #else
-  return (MetalContextRef)ctx;
+  return (MetalWrapperRef)ctx;
 #endif
 }
 
-void Metal_Free(MetalContextRef ctx) {
+void Metal_Free(MetalWrapperRef ctx) {
 #if __has_feature(objc_arc)
   MetalWrapper *mc = (__bridge_transfer MetalWrapper *)ctx;
 #else
@@ -305,7 +309,7 @@ void Metal_Free(MetalContextRef ctx) {
 #endif
   [mc flush];
 }
-void Metal_Synchronize(MetalContextRef ctx) {
+void Metal_Synchronize(MetalWrapperRef ctx) {
 #if __has_feature(objc_arc)
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
 #else
@@ -313,7 +317,7 @@ void Metal_Synchronize(MetalContextRef ctx) {
 #endif
   [mc synchronize];
 }
-MetalBufferRef Metal_Alloc(MetalContextRef ctx, long long size) {
+MetalBufferRef Metal_Alloc(MetalWrapperRef ctx, long long size) {
 #if __has_feature(objc_arc)
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
 #else
@@ -332,7 +336,7 @@ MetalBufferRef Metal_Alloc(MetalContextRef ctx, long long size) {
 #endif
 }
 
-MetalBufferRef Metal_AllocPrivate(MetalContextRef ctx, long long size) {
+MetalBufferRef Metal_AllocPrivate(MetalWrapperRef ctx, long long size) {
 #if __has_feature(objc_arc)
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
 #else
@@ -350,7 +354,7 @@ MetalBufferRef Metal_AllocPrivate(MetalContextRef ctx, long long size) {
   return (MetalBufferRef)buf;
 #endif
 }
-void Metal_FreeBuffer(MetalContextRef ctx, MetalBufferRef buf) {
+void Metal_FreeBuffer(MetalWrapperRef ctx, MetalBufferRef buf) {
 #if __has_feature(objc_arc)
   id<MTLBuffer> b = (__bridge id<MTLBuffer>)buf;
 #else
@@ -362,7 +366,7 @@ void Metal_FreeBuffer(MetalContextRef ctx, MetalBufferRef buf) {
   b = nil;
 }
 // Heap Allocation
-void *Metal_NewHeap(MetalContextRef ctx, long long size) {
+void *Metal_NewHeap(MetalWrapperRef ctx, long long size) {
   MTLHeapDescriptor *desc = [MTLHeapDescriptor new];
   desc.size = size;
   desc.storageMode = MTLStorageModeShared; // CPU accessible
@@ -440,7 +444,7 @@ void Metal_ZeroBuffer(MetalBufferRef buf, int o, int s) {
   [b didModifyRange:NSMakeRange(o, s)];
 }
 
-void Metal_ZeroBufferGPU(MetalContextRef ctx, MetalBufferRef buf, int o,
+void Metal_ZeroBufferGPU(MetalWrapperRef ctx, MetalBufferRef buf, int o,
                          int s) {
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
   id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
@@ -456,7 +460,7 @@ void Metal_ZeroBufferGPU(MetalContextRef ctx, MetalBufferRef buf, int o,
   [enc dispatchThreads:gridSize threadsPerThreadgroup:groupSize];
 }
 
-void Metal_Embedding_F16(MetalContextRef ctx, MetalBufferRef weights, int offW,
+void Metal_Embedding_F16(MetalWrapperRef ctx, MetalBufferRef weights, int offW,
                          MetalBufferRef result, int offRes, int rowIdx,
                          int cols) {
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
@@ -471,7 +475,7 @@ void Metal_Embedding_F16(MetalContextRef ctx, MetalBufferRef weights, int offW,
   [mc barrier];
 }
 
-void Metal_DebugRoPEFreq(MetalContextRef ctx, MetalBufferRef output,
+void Metal_DebugRoPEFreq(MetalWrapperRef ctx, MetalBufferRef output,
                          int headDim, float theta, int pos) {
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
   id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
@@ -490,7 +494,7 @@ void Metal_DebugRoPEFreq(MetalContextRef ctx, MetalBufferRef output,
   [mc barrier];
 }
 
-void Metal_DebugDot(MetalContextRef ctx, MetalBufferRef a, MetalBufferRef b,
+void Metal_DebugDot(MetalWrapperRef ctx, MetalBufferRef a, MetalBufferRef b,
                     MetalBufferRef output, int dim) {
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
   id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
@@ -506,7 +510,7 @@ void Metal_DebugDot(MetalContextRef ctx, MetalBufferRef a, MetalBufferRef b,
   [mc barrier];
 }
 
-void Metal_Embedding_Q4K(MetalContextRef ctx, MetalBufferRef weights, int offW,
+void Metal_Embedding_Q4K(MetalWrapperRef ctx, MetalBufferRef weights, int offW,
                          MetalBufferRef result, int offRes, int rowIdx,
                          int cols, float scale) {
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
@@ -522,7 +526,7 @@ void Metal_Embedding_Q4K(MetalContextRef ctx, MetalBufferRef weights, int offW,
   [mc barrier];
 }
 
-void Metal_Embedding_Q4K_Optimized(MetalContextRef ctx, MetalBufferRef weights,
+void Metal_Embedding_Q4K_Optimized(MetalWrapperRef ctx, MetalBufferRef weights,
                                    int offW, MetalBufferRef result, int offRes,
                                    int rowIdx, int cols, float scale) {
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
@@ -539,7 +543,7 @@ void Metal_Embedding_Q4K_Optimized(MetalContextRef ctx, MetalBufferRef weights,
   [mc barrier];
 }
 
-void Metal_RMSNorm_F16(MetalContextRef ctx, MetalBufferRef input, int offIn,
+void Metal_RMSNorm_F16(MetalWrapperRef ctx, MetalBufferRef input, int offIn,
                        MetalBufferRef weight, int offWeight,
                        MetalBufferRef result, int offRes, int rows, int cols,
                        float eps) {
@@ -559,7 +563,7 @@ void Metal_RMSNorm_F16(MetalContextRef ctx, MetalBufferRef input, int offIn,
   [mc barrier];
 }
 
-void Metal_MatMul_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
+void Metal_MatMul_F16(MetalWrapperRef ctx, MetalBufferRef a, int offA,
                       bool transA, MetalBufferRef b, int offB, bool transB,
                       MetalBufferRef c, int offC, int M, int N, int K) {
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
@@ -576,7 +580,7 @@ void Metal_MatMul_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
   [mc barrier];
 }
 
-void Metal_MatMul_Q4K_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
+void Metal_MatMul_Q4K_F16(MetalWrapperRef ctx, MetalBufferRef a, int offA,
                           bool transA, MetalBufferRef b, int offB, bool transB,
                           MetalBufferRef c, int offC, int M, int N, int K,
                           float scale) {
@@ -596,7 +600,7 @@ void Metal_MatMul_Q4K_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
   [mc barrier];
 }
 
-void Metal_MatMul_Q3K_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
+void Metal_MatMul_Q3K_F16(MetalWrapperRef ctx, MetalBufferRef a, int offA,
                           bool transA, MetalBufferRef b, int offB, bool transB,
                           MetalBufferRef c, int offC, int M, int N, int K,
                           float scale) {
@@ -616,7 +620,7 @@ void Metal_MatMul_Q3K_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
   [mc barrier];
 }
 
-void Metal_MatMul_Q6K_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
+void Metal_MatMul_Q6K_F16(MetalWrapperRef ctx, MetalBufferRef a, int offA,
                           bool transA, MetalBufferRef b, int offB, bool transB,
                           MetalBufferRef c, int offC, int M, int N, int K,
                           float scale) {
@@ -634,7 +638,7 @@ void Metal_MatMul_Q6K_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
   [mc barrier];
 }
 
-void Metal_Add_F16(MetalContextRef ctx, MetalBufferRef a, int oA,
+void Metal_Add_F16(MetalWrapperRef ctx, MetalBufferRef a, int oA,
                    MetalBufferRef b, int oB, MetalBufferRef r, int oR,
                    int count) {
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
@@ -648,7 +652,7 @@ void Metal_Add_F16(MetalContextRef ctx, MetalBufferRef a, int oA,
   [mc barrier];
 }
 
-void Metal_Scale_F16(MetalContextRef ctx, MetalBufferRef x, int offX,
+void Metal_Scale_F16(MetalWrapperRef ctx, MetalBufferRef x, int offX,
                      float scale, MetalBufferRef result, int offRes,
                      int count) {
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
@@ -661,7 +665,7 @@ void Metal_Scale_F16(MetalContextRef ctx, MetalBufferRef x, int offX,
       threadsPerThreadgroup:MTLSizeMake(MIN(count, 256), 1, 1)];
   [mc barrier];
 }
-void Metal_RoPE_F16(MetalContextRef ctx, MetalBufferRef d, int oD, int b, int s,
+void Metal_RoPE_F16(MetalWrapperRef ctx, MetalBufferRef d, int oD, int b, int s,
                     int nh, int hd, int po, float rt) {
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
   id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
@@ -680,7 +684,7 @@ void Metal_RoPE_F16(MetalContextRef ctx, MetalBufferRef d, int oD, int b, int s,
   [mc barrier];
 }
 
-void Metal_SwiGLU_F16(MetalContextRef ctx, MetalBufferRef iV, int oV,
+void Metal_SwiGLU_F16(MetalWrapperRef ctx, MetalBufferRef iV, int oV,
                       MetalBufferRef iG, int oG, MetalBufferRef o, int oO,
                       int n, int iS) {
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
@@ -695,7 +699,7 @@ void Metal_SwiGLU_F16(MetalContextRef ctx, MetalBufferRef iV, int oV,
   [mc barrier];
 }
 
-void Metal_Softmax_F16(MetalContextRef ctx, MetalBufferRef i, int oI,
+void Metal_Softmax_F16(MetalWrapperRef ctx, MetalBufferRef i, int oI,
                        MetalBufferRef o, int oO, int rows, int cols) {
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
   id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
@@ -711,7 +715,7 @@ void Metal_Softmax_F16(MetalContextRef ctx, MetalBufferRef i, int oI,
   [mc barrier];
 }
 
-void Metal_StoreKV_F16(MetalContextRef ctx, MetalBufferRef k, int oK,
+void Metal_StoreKV_F16(MetalWrapperRef ctx, MetalBufferRef k, int oK,
                        MetalBufferRef v, int oV, MetalBufferRef kC, int oKC,
                        MetalBufferRef vC, int oVC, int p, int h, int hd,
                        int windowSize) {
@@ -732,7 +736,7 @@ void Metal_StoreKV_F16(MetalContextRef ctx, MetalBufferRef k, int oK,
 }
 
 // Granular Attention Steps for Debugging
-void Metal_AttScores_F16(MetalContextRef ctx, MetalBufferRef q, int oQ,
+void Metal_AttScores_F16(MetalWrapperRef ctx, MetalBufferRef q, int oQ,
                          MetalBufferRef kC, int oK, MetalBufferRef s, int oS,
                          int p, int nh, int kh, int hd, int ctxLen,
                          int windowSize) {
@@ -754,7 +758,7 @@ void Metal_AttScores_F16(MetalContextRef ctx, MetalBufferRef q, int oQ,
   [mc barrier];
 }
 
-void Metal_AttSoftmax_F16(MetalContextRef ctx, MetalBufferRef s, int oS, int p,
+void Metal_AttSoftmax_F16(MetalWrapperRef ctx, MetalBufferRef s, int oS, int p,
                           int nh, int ctxLen) {
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
   id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
@@ -768,7 +772,7 @@ void Metal_AttSoftmax_F16(MetalContextRef ctx, MetalBufferRef s, int oS, int p,
   [mc barrier];
 }
 
-void Metal_AttValues_F16(MetalContextRef ctx, MetalBufferRef s, int oS,
+void Metal_AttValues_F16(MetalWrapperRef ctx, MetalBufferRef s, int oS,
                          MetalBufferRef vC, int oV, MetalBufferRef r, int oR,
                          int p, int nh, int kh, int hd, int ctxLen,
                          int windowSize) {
@@ -791,7 +795,7 @@ void Metal_AttValues_F16(MetalContextRef ctx, MetalBufferRef s, int oS,
   [mc barrier];
 }
 
-void Metal_Attention_F16(MetalContextRef ctx, MetalBufferRef q, int oQ,
+void Metal_Attention_F16(MetalWrapperRef ctx, MetalBufferRef q, int oQ,
                          MetalBufferRef kC, int oK, MetalBufferRef vC, int oV,
                          MetalBufferRef r, int oR, MetalBufferRef s, int oS,
                          int p, int nh, int kh, int hd, int ctxLen,
@@ -803,13 +807,13 @@ void Metal_Attention_F16(MetalContextRef ctx, MetalBufferRef q, int oQ,
                       windowSize);
 }
 
-void Metal_CopyBufferToF32(MetalContextRef ctx, MetalBufferRef src, void *dst,
+void Metal_CopyBufferToF32(MetalWrapperRef ctx, MetalBufferRef src, void *dst,
                            int count) {
   id<MTLBuffer> buf = (__bridge id<MTLBuffer>)src;
   memcpy(dst, [buf contents], count * sizeof(float));
 }
 
-void Metal_RMSNormLinear_F16(MetalContextRef ctx, MetalBufferRef i, int oI,
+void Metal_RMSNormLinear_F16(MetalWrapperRef ctx, MetalBufferRef i, int oI,
                              MetalBufferRef nW, int oNW, MetalBufferRef w,
                              int oW, MetalBufferRef r, int oR, int iD, int oD,
                              float e, int batchSize) {
@@ -829,7 +833,7 @@ void Metal_RMSNormLinear_F16(MetalContextRef ctx, MetalBufferRef i, int oI,
   [mc barrier];
 }
 
-void Metal_RMSNormLinear_Q4K_F16(MetalContextRef ctx, MetalBufferRef input,
+void Metal_RMSNormLinear_Q4K_F16(MetalWrapperRef ctx, MetalBufferRef input,
                                  int offIn, MetalBufferRef normWeight,
                                  int offNormWeight, MetalBufferRef weight,
                                  int offWeight, MetalBufferRef result,
@@ -855,7 +859,7 @@ void Metal_RMSNormLinear_Q4K_F16(MetalContextRef ctx, MetalBufferRef input,
   [mc barrier];
 }
 
-void Metal_SwiGLULinear_Q4K_F16(MetalContextRef ctx, MetalBufferRef gateIn,
+void Metal_SwiGLULinear_Q4K_F16(MetalWrapperRef ctx, MetalBufferRef gateIn,
                                 int offGate, MetalBufferRef upIn, int offUp,
                                 MetalBufferRef weight, int offWeight,
                                 MetalBufferRef result, int offRes, int M, int N,
@@ -876,7 +880,7 @@ void Metal_SwiGLULinear_Q4K_F16(MetalContextRef ctx, MetalBufferRef gateIn,
   [mc barrier];
 }
 
-void Metal_RMSNormLinear_Q6K_F16(MetalContextRef ctx, MetalBufferRef input,
+void Metal_RMSNormLinear_Q6K_F16(MetalWrapperRef ctx, MetalBufferRef input,
                                  int offIn, MetalBufferRef normWeight,
                                  int offNormWeight, MetalBufferRef weight,
                                  int offWeight, MetalBufferRef result,
@@ -903,7 +907,7 @@ void Metal_RMSNormLinear_Q6K_F16(MetalContextRef ctx, MetalBufferRef input,
   [mc barrier];
 }
 
-void Metal_SwiGLULinear_Q6K_F16(MetalContextRef ctx, MetalBufferRef gateIn,
+void Metal_SwiGLULinear_Q6K_F16(MetalWrapperRef ctx, MetalBufferRef gateIn,
                                 int offGate, MetalBufferRef upIn, int offUp,
                                 MetalBufferRef weight, int offWeight,
                                 MetalBufferRef result, int offRes, int M, int N,
@@ -926,7 +930,7 @@ void Metal_SwiGLULinear_Q6K_F16(MetalContextRef ctx, MetalBufferRef gateIn,
 }
 
 void Metal_RMSNormQKV_Q6K_F16(
-    MetalContextRef ctx, MetalBufferRef input, int offIn,
+    MetalWrapperRef ctx, MetalBufferRef input, int offIn,
     MetalBufferRef normWeight, int offNormWeight, MetalBufferRef qWeight,
     int offQW, MetalBufferRef kWeight, int offKW, MetalBufferRef vWeight,
     int offVW, MetalBufferRef qOut, int offQO, MetalBufferRef kOut, int offKO,
@@ -958,7 +962,7 @@ void Metal_RMSNormQKV_Q6K_F16(
   [mc barrier];
 }
 
-void Metal_MambaConv1d_F16(MetalContextRef ctx, MetalBufferRef input, int offIn,
+void Metal_MambaConv1d_F16(MetalWrapperRef ctx, MetalBufferRef input, int offIn,
                            MetalBufferRef weight, int offW, MetalBufferRef bias,
                            int offB, MetalBufferRef state, int offS,
                            MetalBufferRef output, int offOut, int dim,
@@ -979,7 +983,7 @@ void Metal_MambaConv1d_F16(MetalContextRef ctx, MetalBufferRef input, int offIn,
   [mc barrier];
 }
 
-void Metal_MambaScan_F16(MetalContextRef ctx_ref, MetalBufferRef u, int offU,
+void Metal_MambaScan_F16(MetalWrapperRef ctx_ref, MetalBufferRef u, int offU,
                          MetalBufferRef h, int offH, MetalBufferRef A, int offA,
                          MetalBufferRef B, int offB, MetalBufferRef C, int offC,
                          MetalBufferRef D, int offD, MetalBufferRef dt,
@@ -1016,7 +1020,7 @@ void Metal_MambaScan_F16(MetalContextRef ctx_ref, MetalBufferRef u, int offU,
   }
 }
 
-void Metal_BatchedMatMul_F16(MetalContextRef ctx, MetalBufferRef a, int oA,
+void Metal_BatchedMatMul_F16(MetalWrapperRef ctx, MetalBufferRef a, int oA,
                              int sA, bool tA, MetalBufferRef b, int oB, int sB,
                              bool tB, MetalBufferRef c, int oC, int sC, int M,
                              int N, int K, int bC) {
@@ -1067,7 +1071,7 @@ void Metal_BatchedMatMul_F16(MetalContextRef ctx, MetalBufferRef a, int oA,
                  rightMatrix:matB
                 resultMatrix:matC];
 }
-void Metal_RMSNormQKV_F16(MetalContextRef ctx, MetalBufferRef input, int offIn,
+void Metal_RMSNormQKV_F16(MetalWrapperRef ctx, MetalBufferRef input, int offIn,
                           MetalBufferRef normWeight, int offNormWeight,
                           MetalBufferRef qWeight, int offQW,
                           MetalBufferRef kWeight, int offKW,
@@ -1099,7 +1103,7 @@ void Metal_RMSNormQKV_F16(MetalContextRef ctx, MetalBufferRef input, int offIn,
       threadsPerThreadgroup:MTLSizeMake(32, 4, 1)];
   [mc barrier];
 }
-void Metal_FusedFFN_F16(MetalContextRef ctx, MetalBufferRef input, int offIn,
+void Metal_FusedFFN_F16(MetalWrapperRef ctx, MetalBufferRef input, int offIn,
                         MetalBufferRef normWeight, int offNormWeight,
                         MetalBufferRef gateWeight, int offGW,
                         MetalBufferRef upWeight, int offUW,
@@ -1114,7 +1118,7 @@ void Metal_FusedFFN_F16(MetalContextRef ctx, MetalBufferRef input, int offIn,
 // FP32 Wrappers
 // ==========================================
 
-void Metal_RMSNorm_F32(MetalContextRef ctx, MetalBufferRef input, int offIn,
+void Metal_RMSNorm_F32(MetalWrapperRef ctx, MetalBufferRef input, int offIn,
                        MetalBufferRef weight, int offWeight,
                        MetalBufferRef result, int offRes, int rows, int cols,
                        float eps) {
@@ -1132,7 +1136,7 @@ void Metal_RMSNorm_F32(MetalContextRef ctx, MetalBufferRef input, int offIn,
   [mc barrier];
 }
 
-void Metal_Add_F32(MetalContextRef ctx, MetalBufferRef a, int oA,
+void Metal_Add_F32(MetalWrapperRef ctx, MetalBufferRef a, int oA,
                    MetalBufferRef b, int oB, MetalBufferRef r, int oR,
                    int count) {
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
@@ -1146,7 +1150,7 @@ void Metal_Add_F32(MetalContextRef ctx, MetalBufferRef a, int oA,
   [mc barrier];
 }
 
-void Metal_MatMul_Q4K_F32(MetalContextRef ctx, MetalBufferRef a, int offA,
+void Metal_MatMul_Q4K_F32(MetalWrapperRef ctx, MetalBufferRef a, int offA,
                           int transA, MetalBufferRef b, int offB, int transB,
                           MetalBufferRef c, int offC, int M, int N, int K,
                           float scale) {
@@ -1182,7 +1186,7 @@ void Metal_MatMul_Q4K_F32(MetalContextRef ctx, MetalBufferRef a, int offA,
   [mc barrier];
 }
 
-void Metal_MatMul_Q6K_F32(MetalContextRef ctx, MetalBufferRef a, int offA,
+void Metal_MatMul_Q6K_F32(MetalWrapperRef ctx, MetalBufferRef a, int offA,
                           int transA, MetalBufferRef b, int offB, int transB,
                           MetalBufferRef c, int offC, int M, int N, int K,
                           float scale) {
@@ -1211,7 +1215,7 @@ void Metal_MatMul_Q6K_F32(MetalContextRef ctx, MetalBufferRef a, int offA,
   [mc barrier];
 }
 
-void Metal_MatMul_Q4K_F32_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
+void Metal_MatMul_Q4K_F32_F16(MetalWrapperRef ctx, MetalBufferRef a, int offA,
                               MetalBufferRef b, int offB, MetalBufferRef c,
                               int offC, int M, int N, int K, float scale) {
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
@@ -1228,7 +1232,7 @@ void Metal_MatMul_Q4K_F32_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
   [mc barrier];
 }
 
-void Metal_MatMul_Q6K_F32_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
+void Metal_MatMul_Q6K_F32_F16(MetalWrapperRef ctx, MetalBufferRef a, int offA,
                               MetalBufferRef b, int offB, MetalBufferRef c,
                               int offC, int M, int N, int K, float scale) {
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
@@ -1245,7 +1249,7 @@ void Metal_MatMul_Q6K_F32_F16(MetalContextRef ctx, MetalBufferRef a, int offA,
   [mc barrier];
 }
 
-void Metal_SwiGLU_F32(MetalContextRef ctx, MetalBufferRef iV, int oV,
+void Metal_SwiGLU_F32(MetalWrapperRef ctx, MetalBufferRef iV, int oV,
                       MetalBufferRef iG, int oG, MetalBufferRef o, int oO,
                       int n, int iS) {
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
@@ -1260,7 +1264,7 @@ void Metal_SwiGLU_F32(MetalContextRef ctx, MetalBufferRef iV, int oV,
   [mc barrier];
 }
 
-void Metal_Copy_F16(MetalContextRef ctx, MetalBufferRef src, int oS,
+void Metal_Copy_F16(MetalWrapperRef ctx, MetalBufferRef src, int oS,
                     MetalBufferRef dst, int oD, int count) {
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
   id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
@@ -1271,7 +1275,7 @@ void Metal_Copy_F16(MetalContextRef ctx, MetalBufferRef src, int oS,
       threadsPerThreadgroup:MTLSizeMake(32, 4, 1)];
 }
 
-void Metal_Copy_F16_F32(MetalContextRef ctx, MetalBufferRef src, int oS,
+void Metal_Copy_F16_F32(MetalWrapperRef ctx, MetalBufferRef src, int oS,
                         MetalBufferRef dst, int oD, int n) {
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
   id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
@@ -1283,7 +1287,7 @@ void Metal_Copy_F16_F32(MetalContextRef ctx, MetalBufferRef src, int oS,
   [mc barrier];
 }
 
-void Metal_Copy_F32_F16(MetalContextRef ctx, MetalBufferRef src, int oS,
+void Metal_Copy_F32_F16(MetalWrapperRef ctx, MetalBufferRef src, int oS,
                         MetalBufferRef dst, int oD, int n) {
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
   id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
@@ -1296,7 +1300,7 @@ void Metal_Copy_F32_F16(MetalContextRef ctx, MetalBufferRef src, int oS,
 }
 
 // Weights: F16, Input: F16, Output: F32
-void Metal_MatMul_F16_F16_F32(MetalContextRef ctx, MetalBufferRef a, int offA,
+void Metal_MatMul_F16_F16_F32(MetalWrapperRef ctx, MetalBufferRef a, int offA,
                               MetalBufferRef b, int offB, MetalBufferRef c,
                               int offC, int M, int N, int K) {
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
@@ -1315,7 +1319,7 @@ void Metal_MatMul_F16_F16_F32(MetalContextRef ctx, MetalBufferRef a, int offA,
 }
 
 // Weights: F16, Input: F32, Output: F32
-void Metal_MatMul_F16_F32_F32(MetalContextRef ctx, MetalBufferRef a, int offA,
+void Metal_MatMul_F16_F32_F32(MetalWrapperRef ctx, MetalBufferRef a, int offA,
                               MetalBufferRef b, int offB, MetalBufferRef c,
                               int offC, int M, int N, int K) {
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
@@ -1332,7 +1336,7 @@ void Metal_MatMul_F16_F32_F32(MetalContextRef ctx, MetalBufferRef a, int offA,
   [mc barrier];
 }
 
-void Metal_AttFused_F16(MetalContextRef ctx, MetalBufferRef q, int oQ,
+void Metal_AttFused_F16(MetalWrapperRef ctx, MetalBufferRef q, int oQ,
                         MetalBufferRef kC, int oK, MetalBufferRef vC, int oV,
                         MetalBufferRef r, int oR, int p, int nh, int kh, int hd,
                         int windowSize, int maxCtxLen) {
@@ -1356,7 +1360,7 @@ void Metal_AttFused_F16(MetalContextRef ctx, MetalBufferRef q, int oQ,
 
 // FP32 FFN Bridge Functions for Small Models
 
-void Metal_LinearF16ToF32(MetalContextRef ctx, MetalBufferRef weight,
+void Metal_LinearF16ToF32(MetalWrapperRef ctx, MetalBufferRef weight,
                           int offWeight, MetalBufferRef input, int offInput,
                           MetalBufferRef output, int offOutput, int rows,
                           int dimIn, int dimOut) {
@@ -1373,7 +1377,7 @@ void Metal_LinearF16ToF32(MetalContextRef ctx, MetalBufferRef weight,
   [mc barrier];
 }
 
-void Metal_LinearF32ToF16(MetalContextRef ctx, MetalBufferRef weight,
+void Metal_LinearF32ToF16(MetalWrapperRef ctx, MetalBufferRef weight,
                           int offWeight, MetalBufferRef input, int offInput,
                           MetalBufferRef output, int offOutput, int rows,
                           int dimIn, int dimOut) {
@@ -1390,7 +1394,7 @@ void Metal_LinearF32ToF16(MetalContextRef ctx, MetalBufferRef weight,
   [mc barrier];
 }
 
-void Metal_RMSNorm_F32_F16(MetalContextRef ctx, MetalBufferRef input, int offIn,
+void Metal_RMSNorm_F32_F16(MetalWrapperRef ctx, MetalBufferRef input, int offIn,
                            MetalBufferRef weight, int offWeight,
                            MetalBufferRef result, int offRes, int rows,
                            int cols, float eps) {
@@ -1408,7 +1412,7 @@ void Metal_RMSNorm_F32_F16(MetalContextRef ctx, MetalBufferRef input, int offIn,
   [mc barrier];
 }
 
-void Metal_Add_F32_F16(MetalContextRef ctx, MetalBufferRef a, int oA,
+void Metal_Add_F32_F16(MetalWrapperRef ctx, MetalBufferRef a, int oA,
                        MetalBufferRef b, int oB, MetalBufferRef r, int oR,
                        int count) {
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
@@ -1424,7 +1428,7 @@ void Metal_Add_F32_F16(MetalContextRef ctx, MetalBufferRef a, int oA,
   [mc barrier];
 }
 
-void Metal_LinearQ6K_F16_F32(MetalContextRef ctx, MetalBufferRef weight,
+void Metal_LinearQ6K_F16_F32(MetalWrapperRef ctx, MetalBufferRef weight,
                              int offWeight, MetalBufferRef input, int offInput,
                              MetalBufferRef output, int offOutput, int rows,
                              int dimIn, int dimOut, float scale) {
@@ -1442,7 +1446,7 @@ void Metal_LinearQ6K_F16_F32(MetalContextRef ctx, MetalBufferRef weight,
   [mc barrier];
 }
 
-void Metal_LinearQ4K_F16_F32(MetalContextRef ctx, MetalBufferRef weight,
+void Metal_LinearQ4K_F16_F32(MetalWrapperRef ctx, MetalBufferRef weight,
                               int offWeight, MetalBufferRef input, int offInput,
                               MetalBufferRef output, int offOutput, int rows,
                               int dimIn, int dimOut, float scale) {
@@ -1460,7 +1464,7 @@ void Metal_LinearQ4K_F16_F32(MetalContextRef ctx, MetalBufferRef weight,
   [mc barrier];
 }
 
-void Metal_LinearQ4_0_F16(MetalContextRef ctx, MetalBufferRef weight,
+void Metal_LinearQ4_0_F16(MetalWrapperRef ctx, MetalBufferRef weight,
                           int offWeight, MetalBufferRef input, int offInput,
                           MetalBufferRef output, int offOutput, int rows,
                           int dimIn, int dimOut, float scale) {
@@ -1478,7 +1482,7 @@ void Metal_LinearQ4_0_F16(MetalContextRef ctx, MetalBufferRef weight,
   [mc barrier];
 }
 
-void Metal_LinearQ4_0_F32(MetalContextRef ctx, MetalBufferRef weight,
+void Metal_LinearQ4_0_F32(MetalWrapperRef ctx, MetalBufferRef weight,
                           int offWeight, MetalBufferRef input, int offInput,
                           MetalBufferRef output, int offOutput, int rows,
                           int dimIn, int dimOut, float scale) {
@@ -1496,7 +1500,7 @@ void Metal_LinearQ4_0_F32(MetalContextRef ctx, MetalBufferRef weight,
   [mc barrier];
 }
 
-void Metal_LinearQ8_0_F16(MetalContextRef ctx, MetalBufferRef weight,
+void Metal_LinearQ8_0_F16(MetalWrapperRef ctx, MetalBufferRef weight,
                           int offWeight, MetalBufferRef input, int offInput,
                           MetalBufferRef output, int offOutput, int rows,
                           int dimIn, int dimOut, float scale) {
@@ -1514,7 +1518,7 @@ void Metal_LinearQ8_0_F16(MetalContextRef ctx, MetalBufferRef weight,
   [mc barrier];
 }
 
-void Metal_LinearQ8_0_F32(MetalContextRef ctx, MetalBufferRef weight,
+void Metal_LinearQ8_0_F32(MetalWrapperRef ctx, MetalBufferRef weight,
                           int offWeight, MetalBufferRef input, int offInput,
                           MetalBufferRef output, int offOutput, int rows,
                           int dimIn, int dimOut, float scale) {
@@ -1532,7 +1536,7 @@ void Metal_LinearQ8_0_F32(MetalContextRef ctx, MetalBufferRef weight,
   [mc barrier];
 }
 
-void Metal_EmbeddingQ4_0_F16(MetalContextRef ctx, MetalBufferRef weights,
+void Metal_EmbeddingQ4_0_F16(MetalWrapperRef ctx, MetalBufferRef weights,
                              int offW, MetalBufferRef result, int offRes,
                              int rowIdx, int cols) {
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
@@ -1548,7 +1552,7 @@ void Metal_EmbeddingQ4_0_F16(MetalContextRef ctx, MetalBufferRef weights,
   [mc barrier];
 }
 
-void Metal_StoreKV_F16_Batch(MetalContextRef ctx, MetalBufferRef k, int offK,
+void Metal_StoreKV_F16_Batch(MetalWrapperRef ctx, MetalBufferRef k, int offK,
                              MetalBufferRef v, int offV, MetalBufferRef kC,
                              int offKC, MetalBufferRef vC, int offVC, int p,
                              int h, int hd, int windowSize, int batchSize) {
@@ -1570,7 +1574,7 @@ void Metal_StoreKV_F16_Batch(MetalContextRef ctx, MetalBufferRef k, int offK,
 }
 
 void Metal_RMSNormQKV_Q4K_F16(
-    MetalContextRef ctx, MetalBufferRef input, int offIn,
+    MetalWrapperRef ctx, MetalBufferRef input, int offIn,
     MetalBufferRef normWeight, int offNormWeight, MetalBufferRef qWeight,
     int offQW, MetalBufferRef kWeight, int offKW, MetalBufferRef vWeight,
     int offVW, MetalBufferRef qOut, int offQO, MetalBufferRef kOut, int offKO,
@@ -1602,7 +1606,7 @@ void Metal_RMSNormQKV_Q4K_F16(
   [mc barrier];
 }
 
-void Metal_AttPaged_F16(MetalContextRef ctx, MetalBufferRef q, int offQ,
+void Metal_AttPaged_F16(MetalWrapperRef ctx, MetalBufferRef q, int offQ,
                         MetalBufferRef kC, int offK, MetalBufferRef vC,
                         int offV, MetalBufferRef r, int offR,
                         MetalBufferRef blockTable, int offBT, int p, int nh,
@@ -1632,7 +1636,7 @@ void Metal_AttPaged_F16(MetalContextRef ctx, MetalBufferRef q, int offQ,
   [mc barrier];
 }
 
-void Metal_SiLU_F16(MetalContextRef ctx_ref, MetalBufferRef input, int offIn,
+void Metal_SiLU_F16(MetalWrapperRef ctx_ref, MetalBufferRef input, int offIn,
                     MetalBufferRef output, int offOut, int n) {
   @autoreleasepool {
     MetalWrapper *wrapper = (__bridge MetalWrapper *)ctx_ref;
@@ -1651,7 +1655,7 @@ void Metal_SiLU_F16(MetalContextRef ctx_ref, MetalBufferRef input, int offIn,
   }
 }
 
-void Metal_Slice_F16(MetalContextRef ctx_ref, MetalBufferRef input, int offIn,
+void Metal_Slice_F16(MetalWrapperRef ctx_ref, MetalBufferRef input, int offIn,
                      MetalBufferRef output, int offOut, int startCol,
                      int numCols, int totalCols, int rows) {
   @autoreleasepool {
@@ -1675,7 +1679,7 @@ void Metal_Slice_F16(MetalContextRef ctx_ref, MetalBufferRef input, int offIn,
   }
 }
 
-void Metal_Mul_F16(MetalContextRef ctx_ref, MetalBufferRef a, int offA,
+void Metal_Mul_F16(MetalWrapperRef ctx_ref, MetalBufferRef a, int offA,
                    MetalBufferRef b, int offB, MetalBufferRef result,
                    int offRes, int n) {
   @autoreleasepool {
@@ -1700,7 +1704,7 @@ void Metal_Mul_F16(MetalContextRef ctx_ref, MetalBufferRef a, int offA,
 // MOE (Mixture of Experts) Bridge Functions
 // ============================================================================
 
-void Metal_MOE_RouterLogits(MetalContextRef ctx_ref, MetalBufferRef input,
+void Metal_MOE_RouterLogits(MetalWrapperRef ctx_ref, MetalBufferRef input,
                             int offInput, MetalBufferRef gateWeight,
                             int offGateWeight, MetalBufferRef logits,
                             int offLogits, int batchSize, int dim,
@@ -1728,7 +1732,7 @@ void Metal_MOE_RouterLogits(MetalContextRef ctx_ref, MetalBufferRef input,
   }
 }
 
-void Metal_MOE_TopKSelection(MetalContextRef ctx_ref, MetalBufferRef logits,
+void Metal_MOE_TopKSelection(MetalWrapperRef ctx_ref, MetalBufferRef logits,
                              int offLogits, MetalBufferRef expertIndices,
                              int offIndices, MetalBufferRef expertWeights,
                              int offWeights, int batchSize, int numExperts,
@@ -1758,7 +1762,7 @@ void Metal_MOE_TopKSelection(MetalContextRef ctx_ref, MetalBufferRef logits,
   }
 }
 
-void Metal_MOE_ExpertForward(MetalContextRef ctx_ref, MetalBufferRef input,
+void Metal_MOE_ExpertForward(MetalWrapperRef ctx_ref, MetalBufferRef input,
                              int offInput, MetalBufferRef expertWeight,
                              int offWeight, MetalBufferRef expertIndices,
                              int offIndices, MetalBufferRef expertWeights,
@@ -1795,7 +1799,7 @@ void Metal_MOE_ExpertForward(MetalContextRef ctx_ref, MetalBufferRef input,
   }
 }
 
-void Metal_MOE_ExpertGateUpSwiGLU(MetalContextRef ctx_ref, MetalBufferRef input,
+void Metal_MOE_ExpertGateUpSwiGLU(MetalWrapperRef ctx_ref, MetalBufferRef input,
                                   int offInput, MetalBufferRef gateWeight,
                                   int offGate, MetalBufferRef upWeight,
                                   int offUp, MetalBufferRef expertIndices,
@@ -1834,7 +1838,7 @@ void Metal_MOE_ExpertGateUpSwiGLU(MetalContextRef ctx_ref, MetalBufferRef input,
   }
 }
 
-void Metal_TurboQuant_PolarQuant(MetalContextRef ctx_ref, MetalBufferRef input,
+void Metal_TurboQuant_PolarQuant(MetalWrapperRef ctx_ref, MetalBufferRef input,
                                   int offInput, MetalBufferRef rotationMatrix,
                                   int offRot, MetalBufferRef quantized,
                                   int offQuant, MetalBufferRef scaleOut,
@@ -1860,7 +1864,7 @@ void Metal_TurboQuant_PolarQuant(MetalContextRef ctx_ref, MetalBufferRef input,
   }
 }
 
-void Metal_TurboQuant_QJLTransform(MetalContextRef ctx_ref, MetalBufferRef residual,
+void Metal_TurboQuant_QJLTransform(MetalWrapperRef ctx_ref, MetalBufferRef residual,
                                     int offRes, MetalBufferRef signMatrix,
                                     int offSign, MetalBufferRef quantized,
                                     int offQuant, MetalBufferRef scaleOut,
@@ -1884,7 +1888,7 @@ void Metal_TurboQuant_QJLTransform(MetalContextRef ctx_ref, MetalBufferRef resid
   }
 }
 
-void Metal_TurboQuant_Encode(MetalContextRef ctx_ref, MetalBufferRef input,
+void Metal_TurboQuant_Encode(MetalWrapperRef ctx_ref, MetalBufferRef input,
                               int offInput, MetalBufferRef rotationMatrix,
                               int offRot, MetalBufferRef qjlMatrix,
                               int offQJL, MetalBufferRef output,
@@ -1913,7 +1917,7 @@ void Metal_TurboQuant_Encode(MetalContextRef ctx_ref, MetalBufferRef input,
   }
 }
 
-void Metal_TurboQuant_Decode(MetalContextRef ctx_ref, MetalBufferRef input,
+void Metal_TurboQuant_Decode(MetalWrapperRef ctx_ref, MetalBufferRef input,
                               int offInput, MetalBufferRef rotationMatrix,
                               int offRot, MetalBufferRef qjlMatrix,
                               int offQJL, MetalBufferRef output,
@@ -1940,7 +1944,7 @@ void Metal_TurboQuant_Decode(MetalContextRef ctx_ref, MetalBufferRef input,
   }
 }
 
-void Metal_Prepare_TQ_Query(MetalContextRef ctx_ref, MetalBufferRef q, int offQ,
+void Metal_Prepare_TQ_Query(MetalWrapperRef ctx_ref, MetalBufferRef q, int offQ,
                              MetalBufferRef rotationMatrix, int offRot,
                              MetalBufferRef qjlMatrix, int offQJL,
                              MetalBufferRef q_prime, int offQP,
@@ -1966,7 +1970,7 @@ void Metal_Prepare_TQ_Query(MetalContextRef ctx_ref, MetalBufferRef q, int offQ,
   }
 }
 
-void Metal_Attention_TQ_Scores_F16(MetalContextRef ctx_ref, MetalBufferRef q_prime, int offQP,
+void Metal_Attention_TQ_Scores_F16(MetalWrapperRef ctx_ref, MetalBufferRef q_prime, int offQP,
                                     MetalBufferRef q_double_prime, int offQDP,
                                     MetalBufferRef k_cache, int offKC,
                                     MetalBufferRef scores, int offS,
@@ -1996,7 +2000,7 @@ void Metal_Attention_TQ_Scores_F16(MetalContextRef ctx_ref, MetalBufferRef q_pri
   }
 }
 
-void Metal_Attention_TQ_Values_F16(MetalContextRef ctx_ref, MetalBufferRef probabilities, int offP,
+void Metal_Attention_TQ_Values_F16(MetalWrapperRef ctx_ref, MetalBufferRef probabilities, int offP,
                                     MetalBufferRef v_cache, int offVC,
                                     MetalBufferRef output, int offOut,
                                     int head_dim, int qjl_rows, int pos,
@@ -2022,84 +2026,128 @@ void Metal_Attention_TQ_Values_F16(MetalContextRef ctx_ref, MetalBufferRef proba
   }
 }
 
-void Metal_Linear_LoRA_Add_F16(MetalContextRef ctx, MetalBufferRef input, int offIn,
+void Metal_Linear_LoRA_Add_F16(MetalWrapperRef ctx, MetalBufferRef input, int offIn,
                                 MetalBufferRef A, int offA, MetalBufferRef B, int offB,
                                 MetalBufferRef output, int offOut, int M, int N, int K,
                                 float scale) {
     @autoreleasepool {
-        MetalContext *c = (__bridge MetalContext *)ctx;
-        id<MTLCommandBuffer> commandBuffer = [c->commandQueue commandBuffer];
-        id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
+        MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
+        id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
         
         uint32_t R = (uint32_t)K; // Assuming K for stub, but real logic uses rank R
-        // In the kernel we defined R as the last buffer
-        // ...
         
-        [encoder setComputePipelineState:c->pipelineLinearLoRA]; // Need to init this
-        [encoder setBuffer:(__bridge id<MTLBuffer>)input offset:offIn atIndex:0];
-        [encoder setBuffer:(__bridge id<MTLBuffer>)A offset:offA atIndex:1];
-        [encoder setBuffer:(__bridge id<MTLBuffer>)B offset:offB atIndex:2];
-        [encoder setBuffer:(__bridge id<MTLBuffer>)output offset:offOut atIndex:3];
-        [encoder setBytes:&M length:sizeof(int) atIndex:4];
-        [encoder setBytes:&N length:sizeof(int) atIndex:5];
-        [encoder setBytes:&K length:sizeof(int) atIndex:6];
-        [encoder setBytes:&R length:sizeof(int) atIndex:7];
-        [encoder setBytes:&scale length:sizeof(float) atIndex:8];
+        [enc setComputePipelineState:mc.pipelineLinearLoRA];
+        [enc setBuffer:(__bridge id<MTLBuffer>)input offset:offIn atIndex:0];
+        [enc setBuffer:(__bridge id<MTLBuffer>)A offset:offA atIndex:1];
+        [enc setBuffer:(__bridge id<MTLBuffer>)B offset:offB atIndex:2];
+        [enc setBuffer:(__bridge id<MTLBuffer>)output offset:offOut atIndex:3];
+        [enc setBytes:&M length:sizeof(int) atIndex:4];
+        [enc setBytes:&N length:sizeof(int) atIndex:5];
+        [enc setBytes:&K length:sizeof(int) atIndex:6];
+        [enc setBytes:&R length:sizeof(int) atIndex:7];
+        [enc setBytes:&scale length:sizeof(float) atIndex:8];
         
         MTLSize threadgroupSize = MTLSizeMake(16, 16, 1);
         MTLSize gridSize = MTLSizeMake((N + 15) / 16, (M + 15) / 16, 1);
         
-        [encoder dispatchThreadgroups:gridSize threadsPerThreadgroup:threadgroupSize];
-        [encoder endEncoding];
-        [commandBuffer commit];
+        [enc dispatchThreadgroups:gridSize threadsPerThreadgroup:threadgroupSize];
+        [mc barrier];
     }
 }
 
-void Metal_Vision_Patch_Embed_F32(MetalContextRef ctx, MetalBufferRef pixels, int offPixels,
+void Metal_Vision_Patch_Embed_F32(MetalWrapperRef ctx, MetalBufferRef pixels, int offPixels,
                                   MetalBufferRef weights, int offW, MetalBufferRef output,
                                   int offOut, int patchSize, int visionDim, int numPatchesX) {
     @autoreleasepool {
-        MetalContext *c = (__bridge MetalContext *)ctx;
-        id<MTLCommandBuffer> commandBuffer = [c->commandQueue commandBuffer];
-        id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
+        MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
+        id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
         
-        [encoder setComputePipelineState:c->pipelineVisionPatchEmbed];
-        [encoder setBuffer:(__bridge id<MTLBuffer>)pixels offset:offPixels atIndex:0];
-        [encoder setBuffer:(__bridge id<MTLBuffer>)weights offset:offW atIndex:1];
-        [encoder setBuffer:(__bridge id<MTLBuffer>)output offset:offOut atIndex:2];
-        [encoder setBytes:&patchSize length:sizeof(int) atIndex:3];
-        [encoder setBytes:&visionDim length:sizeof(int) atIndex:4];
-        [encoder setBytes:&numPatchesX length:sizeof(int) atIndex:5];
+        [enc setComputePipelineState:mc.pipelineVisionPatchEmbed];
+        [enc setBuffer:(__bridge id<MTLBuffer>)pixels offset:offPixels atIndex:0];
+        [enc setBuffer:(__bridge id<MTLBuffer>)weights offset:offW atIndex:1];
+        [enc setBuffer:(__bridge id<MTLBuffer>)output offset:offOut atIndex:2];
+        [enc setBytes:&patchSize length:sizeof(int) atIndex:3];
+        [enc setBytes:&visionDim length:sizeof(int) atIndex:4];
+        [enc setBytes:&numPatchesX length:sizeof(int) atIndex:5];
         
         int totalPatches = numPatchesX * numPatchesX;
         MTLSize gridSize = MTLSizeMake(visionDim, totalPatches, 1);
         MTLSize threadgroupSize = MTLSizeMake(32, 1, 1);
         
-        [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadgroupSize];
-        [encoder endEncoding];
-        [commandBuffer commit];
+        [enc dispatchThreads:gridSize threadsPerThreadgroup:threadgroupSize];
+        [mc barrier];
     }
 }
 
-void Metal_AllReduce_F16(MetalContextRef ctx, MetalBufferRef data, int offset, int count) {
+void Metal_AllReduce_F16(MetalWrapperRef ctx, MetalBufferRef data, int offset, int count) {
     @autoreleasepool {
-        MetalContext *c = (__bridge MetalContext *)ctx;
-        id<MTLCommandBuffer> commandBuffer = [c->commandQueue commandBuffer];
-        id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
+        MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
+        id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
         
-        [encoder setComputePipelineState:c->pipelineAllReduce];
-        [encoder setBuffer:(__bridge id<MTLBuffer>)data offset:offset atIndex:0];
+        [enc setComputePipelineState:mc.pipelineAllReduce];
+        [enc setBuffer:(__bridge id<MTLBuffer>)data offset:offset atIndex:0];
         // In a real multi-device scenario, we would use peer-to-peer buffers
         // For the single-device TP emulation:
-        [encoder setBuffer:(__bridge id<MTLBuffer>)data offset:offset atIndex:1]; 
-        [encoder setBuffer:(__bridge id<MTLBuffer>)data offset:offset atIndex:2];
-        [encoder setBytes:&count length:sizeof(int) atIndex:3];
+        [enc setBuffer:(__bridge id<MTLBuffer>)data offset:offset atIndex:1]; 
+        [enc setBuffer:(__bridge id<MTLBuffer>)data offset:offset atIndex:2];
+        [enc setBytes:&count length:sizeof(int) atIndex:3];
         
         MTLSize gridSize = MTLSizeMake(count, 1, 1);
         MTLSize threadgroupSize = MTLSizeMake(MIN(count, 1024), 1, 1);
         
-        [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadgroupSize];
-        [encoder endEncoding];
-        [commandBuffer commit];
+        [enc dispatchThreads:gridSize threadsPerThreadgroup:threadgroupSize];
+        [mc barrier];
     }
+}
+void Metal_AttPagedBatch_F16(MetalWrapperRef ctx, MetalBufferRef q, int offQ,
+                             MetalBufferRef kC, int offK, MetalBufferRef vC,
+                             int offV, MetalBufferRef r, int offR,
+                             MetalBufferRef batchPositions, int offBP,
+                             MetalBufferRef blockTables, int offBT,
+                             int maxBlocksPerSeq, int nh, int kh, int hd,
+                             int blockSize, int batchSize) {
+  MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
+  id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
+  [enc setComputePipelineState:mc.pipelineAttPagedBatch_F16];
+
+  [enc setBuffer:(__bridge id<MTLBuffer>)q offset:offQ atIndex:0];
+  [enc setBuffer:(__bridge id<MTLBuffer>)kC offset:offK atIndex:1];
+  [enc setBuffer:(__bridge id<MTLBuffer>)vC offset:offV atIndex:2];
+  [enc setBuffer:(__bridge id<MTLBuffer>)r offset:offR atIndex:3];
+  [enc setBuffer:(__bridge id<MTLBuffer>)batchPositions offset:offBP atIndex:4];
+  [enc setBytes:&nh length:sizeof(int) atIndex:5];
+  [enc setBytes:&kh length:sizeof(int) atIndex:6];
+  [enc setBytes:&hd length:sizeof(int) atIndex:7];
+  [enc setBytes:&blockSize length:sizeof(int) atIndex:8];
+  [enc setBuffer:(__bridge id<MTLBuffer>)blockTables offset:offBT atIndex:9];
+  [enc setBytes:&maxBlocksPerSeq length:sizeof(int) atIndex:10];
+
+  MTLSize threadGroupSize = MTLSizeMake(128, 1, 1);
+  MTLSize gridSize = MTLSizeMake(nh, batchSize, 1);
+
+  [enc dispatchThreadgroups:gridSize threadsPerThreadgroup:threadGroupSize];
+  [mc barrier];
+}
+
+void Metal_StoreKVPagedBatch_F16(MetalWrapperRef ctx, MetalBufferRef k, int offK,
+                                 MetalBufferRef v, int offV,
+                                 MetalBufferRef kCache, int offKC,
+                                 MetalBufferRef vCache, int offVC,
+                                 MetalBufferRef physicalPositions, int offPP,
+                                 int kvDim, int batchSize) {
+  MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
+  id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
+  [enc setComputePipelineState:mc.pipelineStoreKVPagedBatch_F16];
+
+  [enc setBuffer:(__bridge id<MTLBuffer>)k offset:offK atIndex:0];
+  [enc setBuffer:(__bridge id<MTLBuffer>)v offset:offV atIndex:1];
+  [enc setBuffer:(__bridge id<MTLBuffer>)kCache offset:offKC atIndex:2];
+  [enc setBuffer:(__bridge id<MTLBuffer>)vCache offset:offVC atIndex:3];
+  [enc setBuffer:(__bridge id<MTLBuffer>)physicalPositions offset:offPP
+          atIndex:4];
+  [enc setBytes:&kvDim length:sizeof(int) atIndex:5];
+
+  [enc dispatchThreads:MTLSizeMake(kvDim, batchSize, 1)
+      threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+  [mc barrier];
 }

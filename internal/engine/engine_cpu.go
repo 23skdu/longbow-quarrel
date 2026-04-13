@@ -48,13 +48,13 @@ func NewCPUEngine(modelPath string, cfg config.Config) (Engine, error) {
 
 	weights, err := loadCPUWeights(f)
 	if err != nil {
-		f.Close()
+		_ = f.Close()
 		return nil, fmt.Errorf("failed to load weights: %w", err)
 	}
 
 	tok, err := tokenizer.New(modelPath)
 	if err != nil {
-		f.Close()
+		_ = f.Close()
 		return nil, fmt.Errorf("failed to load tokenizer: %w", err)
 	}
 
@@ -238,7 +238,7 @@ func (e *CPUEngine) sample(tokens []int, cfg SamplerConfig) (int, error) {
 	probs := softmaxCPU(logits)
 
 	seed := cfg.Seed + int64(len(tokens))
-	r := rand.New(rand.NewSource(seed))
+	r := rand.New(rand.NewSource(seed)) // #nosec G404
 
 	return sampleFromDistCPU(probs, r), nil
 }
@@ -266,7 +266,7 @@ func (e *CPUEngine) Close() {
 		e.weights.Free()
 	}
 	if e.model != nil {
-		e.model.Close()
+		_ = e.model.Close()
 	}
 	logger.Log.Info("CPU engine closed")
 }
@@ -362,4 +362,12 @@ func sampleFromDistCPU(probs []float32, r *rand.Rand) int {
 		}
 	}
 	return len(probs) - 1
+}
+
+func (e *CPUEngine) ForwardDraft(tokens []int) ([][]float32, error) {
+	return nil, fmt.Errorf("ForwardDraft not implemented for CPUEngine")
+}
+
+func (e *CPUEngine) RollbackKV(seqID int, stepCount int) {
+	// Stub for now: satisfy interface
 }

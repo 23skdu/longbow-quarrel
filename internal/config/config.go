@@ -33,6 +33,7 @@ type Config struct {
 	HeadDim      int
 	VocabSize    int
 	SeqLen       int
+	MaxTokens    int
 	Eps          float32
 	RopeTheta    float32
 	WindowSize   int

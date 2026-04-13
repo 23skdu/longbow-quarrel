@@ -19,6 +19,7 @@ import (
 	"github.com/23skdu/longbow-quarrel/internal/logger"
 	"github.com/23skdu/longbow-quarrel/internal/ollama"
 	"github.com/23skdu/longbow-quarrel/internal/tokenizer"
+	"github.com/23skdu/longbow-quarrel/internal/metrics"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -100,6 +101,10 @@ func main() {
 		if err := http.ListenAndServe(*metricsAddr, nil); err != nil {
 		}
 	}()
+
+	// Start the background metrics flusher (hotpath-safe)
+	metricsFlusher := metrics.NewBgFlusher(5 * time.Second)
+	defer metricsFlusher.Stop()
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)

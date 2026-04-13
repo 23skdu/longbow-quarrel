@@ -1,11 +1,11 @@
 package api
 
 import (
-	"context"
 	"fmt"
 	"net"
 
 	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/flight"
 	"github.com/apache/arrow-go/v18/arrow/ipc"
 	"github.com/apache/arrow-go/v18/arrow/memory"
@@ -30,24 +30,28 @@ func NewInferenceFlightServer(addr string) *InferenceFlightServer {
 // DoGet streams generated tokens directly using Arrow Array formatting.
 func (s *InferenceFlightServer) DoGet(tckt *flight.Ticket, stream flight.FlightService_DoGetServer) error {
 	// The ticket contains the sequence ID / context to attach to.
-	// For MVP, we return a mock stream of generated tensors.
+	// Schema: [token_id: int32, logits: list<float32>, metadata: string]
 	schema := arrow.NewSchema([]arrow.Field{
 		{Name: "token_id", Type: arrow.PrimitiveTypes.Int32},
-		{Name: "logits", Type: arrow.FixedSizeListOf(int32(10), arrow.PrimitiveTypes.Float32)},
+		{Name: "logits", Type: arrow.FixedSizeListOf(int32(10), arrow.PrimitiveTypes.Float32), Nullable: true},
+		{Name: "metadata", Type: arrow.BinaryTypes.String, Nullable: true},
 	}, nil)
 
 	writer := flight.NewRecordWriter(stream, ipc.WithSchema(schema))
 	defer writer.Close()
 
-	// In real execution, this loop bridges Engine tokens to the RPC writer natively.
-	// We mocked generating 5 tokens here as proof-of-concept.
-	for i := 0; i < 5; i++ {
-		// Mock token generation logic hook
-		// token, tensor := engine.GenerateStep()
-	}
+	builder := array.NewRecordBuilder(s.allocator, schema)
+	defer builder.Release()
+
+	// In real execution, this would be tied to a generation channel.
+	// We'll prepare the builder and wait for token events.
+	// tokenIDBuilder := builder.Field(0).(*array.Int32Builder)
+	// logitsListBuilder := builder.Field(1).(*array.FixedSizeListBuilder)
+	// metadataBuilder := builder.Field(2).(*array.StringBuilder)
 
 	return nil
 }
+
 
 // Serve starts the gRPC Flight Server.
 func (s *InferenceFlightServer) Serve() error {

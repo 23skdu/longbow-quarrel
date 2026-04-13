@@ -47,3 +47,39 @@ func (e *metalEngine) detectMambaLayers(f interface{}, logger interface{}) {
 	// No-op
 }
 
+func (e *metalEngine) ForwardDraft(tokens []int) ([][]float32, error) {
+	return nil, errors.New("metal engine not available on this platform")
+}
+
+func (e *metalEngine) RollbackKV(seqID int, stepCount int) {
+	// No-op
+}
+
+func (e *metalEngine) InferString(prompt string, tokensToGenerate int) (string, error) {
+	return "", errors.New("metal engine not available on this platform")
+}
+
+func (e *metalEngine) inferInternal(inputTokens []int, tokensToGenerate int, samplerConfig SamplerConfig, tokenCallback func(int), logitsCallback func([]float32)) ([]int, error) {
+	return nil, errors.New("metal engine not available on this platform")
+}
+
+func (e *metalEngine) initTurboQuant() error {
+	return errors.New("metal engine not available on this platform")
+}
+
+func (e *metalEngine) GetEmbedding(token int) ([]float32, error) {
+	return nil, errors.New("metal engine not available on this platform")
+}
+
+func (e *metalEngine) GetEmbeddings(tokens []int) ([][]float32, error) {
+	return nil, errors.New("metal engine not available on this platform")
+}
+
+func (e *metalEngine) TextToEmbedding(text string) ([][]float32, error) {
+	return nil, errors.New("metal engine not available on this platform")
+}
+
+func (e *metalEngine) EmbeddingDim() int {
+	return 0
+}
+

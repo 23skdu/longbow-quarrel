@@ -3,8 +3,6 @@ package api
 import (
 	"encoding/json"
 	"net/http"
-	"runtime"
-	"sync/atomic"
 )
 
 // Server handles REST endpoints including orchestration health checks.

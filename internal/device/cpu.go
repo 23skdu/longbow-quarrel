@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"sync/atomic"
 
+	"unsafe"
+
 	"github.com/23skdu/longbow-quarrel/internal/simd"
 )
 
@@ -19,6 +21,13 @@ type Context struct {
 	// TurboQuant Global Matrices
 	TQRotation *Tensor
 	TQQJL      *Tensor
+
+	// Performance Counters (Hotpath)
+	ArrowBytesProcessed atomic.Int64
+}
+
+func AllocatedBytes() int64 {
+	return 0
 }
 
 func NewContext() *Context {
@@ -29,8 +38,12 @@ func NewContext() *Context {
 	}
 }
 
-func (c *Context) Device() int {
+func (c *Context) DeviceID() int {
 	return c.device
+}
+
+func (c *Context) Synchronize() {
+	// No-op for CPU
 }
 
 func (c *Context) Free() {
@@ -139,6 +152,9 @@ func (t *Tensor) Strides() []int {
 }
 
 func (t *Tensor) RawData() []byte {
+	if t.dataType == DataTypeF32 && t.data != nil {
+		return unsafe.Slice((*byte)(unsafe.Pointer(&t.data[0])), len(t.data)*4)
+	}
 	return t.rawData
 }
 

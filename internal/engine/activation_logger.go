@@ -115,7 +115,7 @@ func (al *ActivationLogger) SaveToFile(filename string) error {
 		return fmt.Errorf("failed to marshal JSON: %w", err)
 	}
 
-	err = os.WriteFile(filename, data, 0644)
+	err = os.WriteFile(filename, data, 0600)
 	if err != nil {
 		return fmt.Errorf("failed to write file: %w", err)
 	}

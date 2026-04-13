@@ -34,6 +34,6 @@ func FuzzStreamEmbeddings(f *testing.F) {
 
 		client, _ := NewFlightClient("localhost", 3000, "localhost", 3001)
 		// Try streaming (expect flight client not connected or successful return, but not panic)
-		_ = client.StreamEmbeddings(context.Background(), tensors, ids)
+		_ = client.StreamEmbeddings(context.Background(), tensors, ids, nil)
 	})
 }

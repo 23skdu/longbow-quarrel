@@ -8,29 +8,29 @@ package device
 #include <stdlib.h>
 void* Metal_AutoreleasePoolPush();
 void Metal_AutoreleasePoolPop(void* pool);
-void* Metal_NewHeap(MetalContextRef ctx, long long size);
+void* Metal_NewHeap(MetalWrapperRef ctx, long long size);
 MetalBufferRef Metal_NewBufferFromHeap(void* heap, long long size);
 void Metal_FreeHeap(void* heap);
-void Metal_LinearQ8_0_F16(MetalContextRef ctx, MetalBufferRef weight,
+void Metal_LinearQ8_0_F16(MetalWrapperRef ctx, MetalBufferRef weight,
                           int offWeight, MetalBufferRef input, int offInput,
                           MetalBufferRef output, int offOutput, int rows,
                           int dimIn, int dimOut, float scale);
-void Metal_LinearQ8_0_F32(MetalContextRef ctx, MetalBufferRef weight,
+void Metal_LinearQ8_0_F32(MetalWrapperRef ctx, MetalBufferRef weight,
                           int offWeight, MetalBufferRef input, int offInput,
                           MetalBufferRef output, int offOutput, int rows,
                           int dimIn, int dimOut, float scale);
-void Metal_RMSNormLinear_Q6K_F16(MetalContextRef ctx, MetalBufferRef input,
+void Metal_RMSNormLinear_Q6K_F16(MetalWrapperRef ctx, MetalBufferRef input,
                                  int offIn, MetalBufferRef normWeight,
                                  int offNormWeight, MetalBufferRef weight,
                                  int offWeight, MetalBufferRef result,
                                  int offRes, int M, int N, int K, float eps,
                                  float scale, int batchSize);
-void Metal_SwiGLULinear_Q6K_F16(MetalContextRef ctx, MetalBufferRef gateIn,
+void Metal_SwiGLULinear_Q6K_F16(MetalWrapperRef ctx, MetalBufferRef gateIn,
                                 int offGate, MetalBufferRef upIn, int offUp,
                                 MetalBufferRef weight, int offWeight,
                                 MetalBufferRef result, int offRes, int M, int N,
                                 int K, float scale);
-void Metal_RMSNormQKV_Q6K_F16(MetalContextRef ctx, MetalBufferRef input,
+void Metal_RMSNormQKV_Q6K_F16(MetalWrapperRef ctx, MetalBufferRef input,
                               int offIn, MetalBufferRef normWeight,
                               int offNormWeight, MetalBufferRef qWeight,
                               int offQW, MetalBufferRef kWeight, int offKW,
@@ -40,7 +40,7 @@ void Metal_RMSNormQKV_Q6K_F16(MetalContextRef ctx, MetalBufferRef input,
                               MetalBufferRef vOut, int offVO, int dimIn,
                               int qDim, int kvDim, float eps, float scale,
                               int batchSize);
-void Metal_MOE_ExpertGateUpSwiGLU(MetalContextRef ctx, MetalBufferRef input,
+void Metal_MOE_ExpertGateUpSwiGLU(MetalWrapperRef ctx, MetalBufferRef input,
                                   int offInput, MetalBufferRef gateWeight,
                                   int offGate, MetalBufferRef upWeight,
                                   int offUp, MetalBufferRef expertIndices,
@@ -48,18 +48,18 @@ void Metal_MOE_ExpertGateUpSwiGLU(MetalContextRef ctx, MetalBufferRef input,
                                   int offWeights, MetalBufferRef output,
                                   int offOutput, int batchSize, int dim,
                                   int hiddenDim, int topK);
-void Metal_TurboQuant_PolarQuant(MetalContextRef ctx, MetalBufferRef input,
+void Metal_TurboQuant_PolarQuant(MetalWrapperRef ctx, MetalBufferRef input,
                                   int offInput, MetalBufferRef rotationMatrix,
                                   int offRot, MetalBufferRef quantized,
                                   int offQuant, MetalBufferRef scaleOut,
                                   int offScale, MetalBufferRef residual,
                                   int offRes, int n, int numBlocks, int bits);
-void Metal_TurboQuant_QJLTransform(MetalContextRef ctx, MetalBufferRef residual,
+void Metal_TurboQuant_QJLTransform(MetalWrapperRef ctx, MetalBufferRef residual,
                                     int offRes, MetalBufferRef signMatrix,
                                     int offSign, MetalBufferRef quantized,
                                     int offQuant, MetalBufferRef scaleOut,
                                     int offScale, int rows, int cols, int numBlocks);
-void Metal_TurboQuant_Encode(MetalContextRef ctx, MetalBufferRef input,
+void Metal_TurboQuant_Encode(MetalWrapperRef ctx, MetalBufferRef input,
                               int offInput, MetalBufferRef rotationMatrix,
                               int offRot, MetalBufferRef qjlMatrix,
                               int offQJL, MetalBufferRef output,
@@ -67,28 +67,28 @@ void Metal_TurboQuant_Encode(MetalContextRef ctx, MetalBufferRef input,
                               int offScale, MetalBufferRef qjlScaleOut,
                               int offQJLScale, int blockSize, int qjlRows, int numBlocks, int bits);
 // Buffer Management
-MetalBufferRef Metal_Alloc(MetalContextRef ctx, long long size);
-void Metal_FreeBuffer(MetalContextRef ctx, MetalBufferRef buf);
+MetalBufferRef Metal_Alloc(MetalWrapperRef ctx, long long size);
+void Metal_FreeBuffer(MetalWrapperRef ctx, MetalBufferRef buf);
 void Metal_CopyToDevice(MetalBufferRef buf, int offset, const void *data, int size);
 void Metal_CopyToHost(MetalBufferRef buf, int offset, void *data, int size);
 void *Metal_GetBufferContents(MetalBufferRef buf);
 void Metal_ZeroBuffer(MetalBufferRef buf, int offset, int size);
-void Metal_ZeroBufferGPU(MetalContextRef ctx, MetalBufferRef buf, int offset, int size);
+void Metal_ZeroBufferGPU(MetalWrapperRef ctx, MetalBufferRef buf, int offset, int size);
 
-void Metal_Copy_F32_F16(MetalContextRef ctx, MetalBufferRef src, int oS, MetalBufferRef dst, int oD, int n);
-void Metal_Copy_F16_F32(MetalContextRef ctx, MetalBufferRef src, int oS, MetalBufferRef dst, int oD, int n);
+void Metal_Copy_F32_F16(MetalWrapperRef ctx, MetalBufferRef src, int oS, MetalBufferRef dst, int oD, int n);
+void Metal_Copy_F16_F32(MetalWrapperRef ctx, MetalBufferRef src, int oS, MetalBufferRef dst, int oD, int n);
 
-void Metal_TurboQuant_Decode(MetalContextRef ctx, MetalBufferRef input,
+void Metal_TurboQuant_Decode(MetalWrapperRef ctx, MetalBufferRef input,
                               int offInput, MetalBufferRef rotationMatrix,
                               int offRot, MetalBufferRef qjlMatrix,
                               int offQJL, MetalBufferRef output,
                               int offOut, MetalBufferRef scaleIn,
                               int offScale, int blockSize, int qjlRows, int numBlocks);
 
-void Metal_FlashAttention2_F16(MetalContextRef ctx, MetalBufferRef q, MetalBufferRef k_cache, MetalBufferRef v_cache, MetalBufferRef output, int num_heads, int kv_heads, int headDim, int seq_len, int block_size, MetalBufferRef block_table);
-void Metal_Linear_LoRA_Add_F16(MetalContextRef ctx, MetalBufferRef input, int offIn, MetalBufferRef A, int offA, MetalBufferRef B, int offB, MetalBufferRef output, int offOut, int M, int N, int K, float scale);
-void Metal_Vision_Patch_Embed_F32(MetalContextRef ctx, MetalBufferRef pixels, int offPixels, MetalBufferRef weights, int offW, MetalBufferRef output, int offOut, int patchSize, int visionDim, int numPatchesX);
-void Metal_AllReduce_F16(MetalContextRef ctx, MetalBufferRef data, int offset, int count);
+void Metal_FlashAttention2_F16(MetalWrapperRef ctx, MetalBufferRef q, MetalBufferRef k_cache, MetalBufferRef v_cache, MetalBufferRef output, int num_heads, int kv_heads, int headDim, int seq_len, int block_size, MetalBufferRef block_table);
+void Metal_Linear_LoRA_Add_F16(MetalWrapperRef ctx, MetalBufferRef input, int offIn, MetalBufferRef A, int offA, MetalBufferRef B, int offB, MetalBufferRef output, int offOut, int M, int N, int K, float scale);
+void Metal_Vision_Patch_Embed_F32(MetalWrapperRef ctx, MetalBufferRef pixels, int offPixels, MetalBufferRef weights, int offW, MetalBufferRef output, int offOut, int patchSize, int visionDim, int numPatchesX);
+void Metal_AllReduce_F16(MetalWrapperRef ctx, MetalBufferRef data, int offset, int count);
 */
 import "C"
 import (
@@ -128,7 +128,7 @@ var flashKernelsSource string
 
 // Context holds the Metal connection and tensor pool
 type Context struct {
-	ref    C.MetalContextRef
+	ref    C.MetalWrapperRef
 	mu     sync.Mutex
 	pool   map[string][]*Tensor // pool by size key "RxCxType"
 	ExecMu sync.Mutex           // Execution lock for Metal command encoding
@@ -136,6 +136,14 @@ type Context struct {
 	// TurboQuant Global Matrices
 	TQRotation *Tensor
 	TQQJL      *Tensor
+
+	// Performance Counters (Hotpath)
+	ArrowBytesProcessed atomic.Int64
+	device              int
+}
+
+func (c *Context) DeviceID() int {
+	return c.device
 }
 
 type LoRAWeight struct {
@@ -221,13 +229,14 @@ func (t *Tensor) Data() []float32 {
 }
 
 func (t *Tensor) RawData() []byte {
-	// For Metal, we need to sync and copy back if it's TQ
-	if t.dataType == DataTypeTQ1_0 || t.dataType == DataTypeTQ2_0 {
-		t.ctx.Synchronize()
+	// For Metal on Apple Silicon, memory is unified/shared.
+	// We can get a pointer directly and wrap it in a slice for Zero-Copy Arrow transport.
+	if t.buf != nil {
 		ptr := C.Metal_GetBufferContents(t.buf)
 		if ptr == nil {
 			return nil
 		}
+		// Correct size: sizeBytes is already established in NewTensor/Load
 		return unsafe.Slice((*byte)(ptr), t.sizeBytes)
 	}
 	return nil
@@ -1780,6 +1789,85 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 	}
 }
 
+// LayerBatch executes a full transformer layer for a batch of sequences
+func (t *Tensor) LayerBatch(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffnUp, ffnDown, kCache, vCache *Tensor,
+	scratch *LayerScratch,
+	batchPositions, blockTables *Tensor, maxBlocksPerSeq int,
+	heads, kvHeads, headDim int, ropeTheta, eps float32, hiddenDim, blockSize, batchSize int, globalScale float32,
+	kvStoreBatch func(k, v *Tensor)) {
+
+	normed := scratch.Normed
+
+	// 1. RMSNorm (Batched)
+	t0_rmsnorm1 := time.Now()
+	C.Metal_RMSNorm_F16(t.ctx.ref, t.buf, C.int(t.Offset), attnNorm.buf, C.int(attnNorm.Offset),
+		normed.buf, C.int(normed.Offset), C.int(batchSize), C.int(t.cols), C.float(eps))
+	metrics.RecordKernelDuration("LayerBatch_RMSNorm1", time.Since(t0_rmsnorm1))
+
+	// 2. QKV Projections (Batched)
+	qPart := scratch.QPart
+	kPart := scratch.KPart
+	vPart := scratch.VPart
+
+	if q.dataType == DataTypeQ4K && k.dataType == DataTypeQ4K && v.dataType == DataTypeQ4K {
+		C.Metal_RMSNormQKV_Q4K_F16(t.ctx.ref, t.buf, C.int(t.Offset), attnNorm.buf, C.int(attnNorm.Offset),
+			q.buf, C.int(q.Offset), k.buf, C.int(k.Offset), v.buf, C.int(v.Offset),
+			qPart.buf, C.int(qPart.Offset), kPart.buf, C.int(kPart.Offset), vPart.buf, C.int(vPart.Offset),
+			C.int(t.cols), C.int(q.rows), C.int(k.rows), C.float(eps), C.float(globalScale), C.int(batchSize))
+	} else if q.dataType == DataTypeQ6K && k.dataType == DataTypeQ6K && v.dataType == DataTypeQ6K {
+		C.Metal_RMSNormQKV_Q6K_F16(t.ctx.ref, t.buf, C.int(t.Offset), attnNorm.buf, C.int(attnNorm.Offset),
+			q.buf, C.int(q.Offset), k.buf, C.int(k.Offset), v.buf, C.int(v.Offset),
+			qPart.buf, C.int(qPart.Offset), kPart.buf, C.int(kPart.Offset), vPart.buf, C.int(vPart.Offset),
+			C.int(t.cols), C.int(q.rows), C.int(k.rows), C.float(eps), C.float(globalScale), C.int(batchSize))
+	} else {
+		normed.linearIntoInternal(q, qPart, globalScale)
+		normed.linearIntoInternal(k, kPart, globalScale)
+		normed.linearIntoInternal(v, vPart, globalScale)
+	}
+
+	// 3. RoPE (Batched)
+	// For continuous batching, we need a specialized batched RoPE kernel if positions are disjoint.
+	// For now, we iterate if needed, or assume caller provides positions.
+	// TODO: Implement Metal_RoPE_Batch_F16
+	for i := 0; i < batchSize; i++ {
+		// Single-position RoPE for each row
+		qPart.Slice(i, 1).ropeInternal(0, heads, headDim, 1, ropeTheta)
+		kPart.Slice(i, 1).ropeInternal(0, kvHeads, headDim, 1, ropeTheta)
+	}
+
+	// 4. Store K/V (Batched Paged)
+	if kvStoreBatch != nil {
+		kvStoreBatch(kPart, vPart)
+	}
+
+	// 5. Attention (Batched Paged)
+	attOut := scratch.AttOut
+	t.ctx.AttentionPagedBatch(qPart, kCache, vCache, attOut, batchPositions, blockTables, maxBlocksPerSeq, heads, kvHeads, headDim, blockSize, batchSize)
+
+	// 6. Projections & Residual 1
+	resAtt := scratch.ResAtt
+	attOut.linearIntoInternal(o, resAtt, globalScale)
+	t.AddInPlace(resAtt)
+
+	// 7. FFN Part (Batched)
+	normedFFN := scratch.NormedFFN
+	C.Metal_RMSNorm_F16(t.ctx.ref, t.buf, C.int(t.Offset), ffnNorm.buf, C.int(ffnNorm.Offset),
+		normedFFN.buf, C.int(normedFFN.Offset), C.int(batchSize), C.int(t.cols), C.float(eps))
+
+	gatePart := scratch.GatePart
+	upPart := scratch.UpPart
+	normedFFN.linearIntoInternal(ffnGate, gatePart, globalScale)
+	normedFFN.linearIntoInternal(ffnUp, upPart, globalScale)
+
+	// SwiGLU Fused
+	C.Metal_SwiGLU_F16(t.ctx.ref, upPart.buf, C.int(upPart.Offset), gatePart.buf, C.int(gatePart.Offset),
+		scratch.SwiOut.buf, C.int(scratch.SwiOut.Offset), C.int(batchSize), C.int(hiddenDim))
+
+	resFFN := scratch.ResFFN
+	scratch.SwiOut.linearIntoInternal(ffnDown, resFFN, globalScale)
+	t.AddInPlace(resFFN)
+}
+
 func (t *Tensor) ropeInternal(posOffset, heads, headDim, seqLen int, ropeTheta float32) {
 	C.Metal_RoPE_F16(t.ctx.ref, t.buf, C.int(t.Offset), 1, C.int(seqLen), C.int(heads), C.int(headDim), C.int(posOffset), C.float(ropeTheta))
 }
@@ -2056,6 +2144,11 @@ func (t *Tensor) StoreKV(v *Tensor, kCache, vCache *Tensor, pos, heads, headDim,
 	t.ctx.ExecMu.Lock()
 	defer t.ctx.ExecMu.Unlock()
 	t.storeKVInternal(v, kCache, vCache, pos, heads, headDim, windowSize)
+}
+
+func (t *Tensor) StoreKVQuantized(v, kCache, vCache *Tensor, pos, heads, headDim, windowSize int) {
+	// For now, fall back to StoreKV to satisfy interface/build
+	t.StoreKV(v, kCache, vCache, pos, heads, headDim, windowSize)
 }
 
 func (t *Tensor) FetchKV(v *Tensor, kCache, vCache *Tensor, pos, heads, headDim, windowSize int) {
@@ -2425,6 +2518,19 @@ func (t *Tensor) CopyFromAt(src *Tensor, destRow int) {
 	C.Metal_Copy_F16(t.ctx.ref, src.buf, C.int(src.Offset), t.buf, C.int(t.Offset+off), C.int(src.rows*src.cols))
 }
 
+// EmbeddingLookupBatch performs embedding lookup for multiple tokens at once
+func (t *Tensor) EmbeddingLookupBatch(tokens []int, scale float32) *Tensor {
+	ctx := t.ctx
+	batchSize := len(tokens)
+	output := ctx.NewTensorWithType(batchSize, t.cols, DataTypeF16)
+	for i, token := range tokens {
+		emb := t.EmbeddingLookup(token, scale)
+		output.CopyFromAt(emb, i)
+		emb.Free()
+	}
+	return output
+}
+
 // AttPaged performs paged attention
 func (t *Tensor) attPagedInternal(kCache, vCache, blockTable *Tensor, output *Tensor, pos, nh, kh, hd, blockSize int) {
 	C.Metal_AttPaged_F16(
@@ -2593,3 +2699,17 @@ func (ctx *Context) TurboQuantDecode(input, rotationMatrix, scaleIn *Tensor, blo
 	return output
 }
 */
+
+// AttentionPagedBatch performs paged attention across a batch of sequences
+func (ctx *Context) AttentionPagedBatch(q, kCache, vCache, output, batchPositions, blockTables *Tensor, maxBlocksPerSeq, heads, kvHeads, headDim, blockSize, batchSize int) {
+	ctx.ExecMu.Lock()
+	defer ctx.ExecMu.Unlock()
+	C.Metal_AttPagedBatch_F16(ctx.ref, q.buf, C.int(q.Offset), kCache.buf, C.int(kCache.Offset), vCache.buf, C.int(vCache.Offset), output.buf, C.int(output.Offset), batchPositions.buf, C.int(batchPositions.Offset), blockTables.buf, C.int(blockTables.Offset), C.int(maxBlocksPerSeq), C.int(heads), C.int(kvHeads), C.int(headDim), C.int(blockSize), C.int(batchSize))
+}
+
+// StoreKVPagedBatch stores K and V projections for a batch of sequences into their respective physical blocks
+func (ctx *Context) StoreKVPagedBatch(k, v, kCache, vCache, physicalPositions *Tensor, kvDim, batchSize int) {
+	ctx.ExecMu.Lock()
+	defer ctx.ExecMu.Unlock()
+	C.Metal_StoreKVPagedBatch_F16(ctx.ref, k.buf, C.int(k.Offset), v.buf, C.int(v.Offset), kCache.buf, C.int(kCache.Offset), vCache.buf, C.int(vCache.Offset), physicalPositions.buf, C.int(physicalPositions.Offset), C.int(kvDim), C.int(batchSize))
+}

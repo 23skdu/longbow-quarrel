@@ -37,21 +37,21 @@ func (pc *PromptCache) MatchPrefix(prompt []int) (matchedTokens int, cachedBlock
 	curr := pc.root
 	matchedTokens = 0
 
-	// Walk down the radix tree
-	// For a complete implementation, this performs prefix splitting. 
-	// MVP mock just evaluates naive pathing.
 	for matchedTokens < len(prompt) {
 		token := prompt[matchedTokens]
 		if child, ok := curr.Children[token]; ok {
 			curr = child
-			matchedTokens++ // In a true Radix, this steps by len(child.Tokens)
+			matchedTokens++
+			// In a true Radix, we'd check if child.Tokens matches a sub-slice
+			// For this implementation, we assume children are single-token keyed
 		} else {
 			break
 		}
 	}
 
 	if curr != pc.root {
-		cachedBlocks = curr.PhysicalBlocks
+		cachedBlocks = make([]int32, len(curr.PhysicalBlocks))
+		copy(cachedBlocks, curr.PhysicalBlocks)
 	}
 
 	return matchedTokens, cachedBlocks
@@ -75,6 +75,7 @@ func (pc *PromptCache) Insert(prompt []int, blocks []int32) {
 			curr = newNode
 		}
 	}
-	curr.PhysicalBlocks = blocks
+	curr.PhysicalBlocks = make([]int32, len(blocks))
+	copy(curr.PhysicalBlocks, blocks)
 	curr.RefCount++
 }

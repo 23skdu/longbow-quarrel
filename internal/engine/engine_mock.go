@@ -74,3 +74,10 @@ func (e *mockEngine) SwapModel(modelPath string, cfg config.Config) error {
 func (e *mockEngine) GetSeqCachePos(seqID int) int {
 	return 0
 }
+
+func (e *mockEngine) ForwardDraft(tokens []int) ([][]float32, error) {
+	return nil, nil
+}
+
+func (e *mockEngine) RollbackKV(seqID int, stepCount int) {
+}
