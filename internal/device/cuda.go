@@ -58,9 +58,9 @@ import (
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
 )
 
-var globalCUDAContext *CUDAContext
+var globalContext *Context
 
-type CUDAContext struct {
+type Context struct {
 	Ctx    C.cudaStream_t
 	Cublas C.cublasHandle_t
 	pool   *tensorPool
@@ -75,8 +75,9 @@ type Tensor struct {
 	rows     int
 	cols     int
 	dataType DataType
-	ctx      *CUDAContext
+	ctx      *Context
 	pooled   bool
+	sizeBytes int
 }
 
 type tensorPool struct {
@@ -84,7 +85,7 @@ type tensorPool struct {
 	free map[int][]*Tensor
 }
 
-func NewCUDAContext() (*CUDAContext, error) {
+func NewContext() (*Context, error) {
 	var stream C.cudaStream_t
 	if err := C.cudaStreamCreate(&stream); err != 0 {
 		return nil, fmt.Errorf("cudaStreamCreate failed: %v", err)
@@ -96,14 +97,14 @@ func NewCUDAContext() (*CUDAContext, error) {
 	}
 	C.cublasSetStream(handle, stream)
 
-	ctx := &CUDAContext{
+	ctx := &Context{
 		Ctx:    stream,
 		Cublas: handle,
 		pool: &tensorPool{
 			free: make(map[int][]*Tensor),
 		},
 	}
-	globalCUDAContext = ctx
+	globalContext = ctx
 	return ctx, nil
 }
 
@@ -139,10 +140,40 @@ func (ctx *CUDAContext) NewTensor(rows, cols int, dtype DataType) (*Tensor, erro
 		cols:     cols,
 		dataType: dtype,
 		ctx:      ctx,
+		sizeBytes: bytes,
 	}, nil
 }
 
-func (ctx *CUDAContext) NewTensorPooled(rows, cols int) *Tensor {
+func (ctx *Context) NewTensorWithType(rows, cols int, dtype DataType) *Tensor {
+	t, _ := ctx.NewTensor(rows, cols, dtype)
+	return t
+}
+
+func (ctx *Context) NewTurboTensor(rows, cols int, dt DataType, blockSize, qjlRows int) *Tensor {
+	numElements := rows * cols
+	numBlocks := numElements / blockSize
+	if numElements%blockSize != 0 {
+		numBlocks++
+	}
+	bytesPerBlock := blockSize + qjlRows + 8
+	sizeBytes := numBlocks * bytesPerBlock
+
+	var ptr unsafe.Pointer
+	if err := C.cudaMalloc(&ptr, C.size_t(sizeBytes)); err != 0 {
+		return nil
+	}
+
+	return &Tensor{
+		ctx:       ctx,
+		rows:      rows,
+		cols:      cols,
+		dataType:  dt,
+		devPtr:    ptr,
+		sizeBytes: sizeBytes,
+	}
+}
+
+func (ctx *Context) NewTensorPooled(rows, cols int) *Tensor {
 	size := rows * cols
 	ctx.pool.mu.Lock()
 	defer ctx.pool.mu.Unlock()
@@ -180,13 +211,7 @@ func (t *Tensor) Cols() int { return t.cols }
 func (t *Tensor) Data() unsafe.Pointer { return t.devPtr }
 
 func (t *Tensor) SizeBytes() int {
-	size := t.rows * t.cols
-	switch t.dataType {
-	case DataTypeF32:
-		return size * 4
-	default:
-		return size * 2
-	}
+	return t.sizeBytes
 }
 
 func (t *Tensor) RawData() []byte {
@@ -219,7 +244,6 @@ func (t *Tensor) LoadFrom(data interface{}) error {
 	}
 	return nil
 }
-
 func (t *Tensor) ToHost() []float32 {
 	return t.ToHostF32()
 }
@@ -241,17 +265,30 @@ func (t *Tensor) ToHostF32() []float32 {
 	return result
 }
 
+func (t *Tensor) StoreKV(v *Tensor, kCache, vCache *Tensor, pos, heads, headDim, windowSize int) {
+	// Simple implementation for now: copy head-by-head or batch copy
+	// Each k/v at pos is heads * headDim elements.
+	count := heads * headDim
+	offset := uintptr(pos) * uintptr(count) * 2
+
+	kTarget := unsafe.Pointer(uintptr(kCache.devPtr) + offset)
+	vTarget := unsafe.Pointer(uintptr(vCache.devPtr) + offset)
+
+	C.cudaMemcpyAsync(kTarget, t.devPtr, C.size_t(count*2), C.cudaMemcpyDeviceToDevice, t.ctx.Ctx)
+	C.cudaMemcpyAsync(vTarget, v.devPtr, C.size_t(count*2), C.cudaMemcpyDeviceToDevice, t.ctx.Ctx)
+}
+
 // Math Kernels
 
-func (ctx *CUDAContext) RMSNorm(input, weight, output *Tensor, rows, cols int, eps float32) {
+func (ctx *Context) RMSNorm(input, weight, output *Tensor, rows, cols int, eps float32) {
 	C.cudaRMSNorm((*C.float)(input.devPtr), (*C.float)(weight.devPtr), (*C.float)(output.devPtr), C.int(rows), C.int(cols), C.float(eps), ctx.Ctx)
 }
 
-func (ctx *CUDAContext) Add(a, b, out *Tensor, size int) {
+func (ctx *Context) Add(a, b, out *Tensor, size int) {
 	C.cudaAdd((*C.float)(a.devPtr), (*C.float)(b.devPtr), (*C.float)(out.devPtr), C.int(size), ctx.Ctx)
 }
 
-func (ctx *CUDAContext) MatmulF16(a, b *Tensor) (*Tensor, error) {
+func (ctx *Context) MatmulF16(a, b *Tensor) (*Tensor, error) {
 	m := a.rows
 	k := a.cols
 	n := b.rows
@@ -275,7 +312,7 @@ func (ctx *CUDAContext) MatmulF16(a, b *Tensor) (*Tensor, error) {
 	return out, nil
 }
 
-func (ctx *CUDAContext) FusedRoPE(tensor *Tensor, posIds []int, batch, heads, seqLen, headDim int, theta float32) {
+func (ctx *Context) FusedRoPE(tensor *Tensor, posIds []int, batch, heads, seqLen, headDim int, theta float32) {
 	var dPosPtr unsafe.Pointer
 	C.cudaMalloc(&dPosPtr, C.size_t(len(posIds)*4))
 	C.cudaMemcpy(dPosPtr, unsafe.Pointer(&posIds[0]), C.size_t(len(posIds)*4), C.cudaMemcpyHostToDevice)
@@ -283,15 +320,15 @@ func (ctx *CUDAContext) FusedRoPE(tensor *Tensor, posIds []int, batch, heads, se
 	C.cudaFree(dPosPtr)
 }
 
-func (ctx *CUDAContext) FusedAttention(q, k, v, output, kCache, vCache *Tensor, batch, heads, seqLen, kvSeqLen, headDim int, scale float32, useCache, windowSize int) {
+func (ctx *Context) FusedAttention(q, k, v, output, kCache, vCache *Tensor, batch, heads, seqLen, kvSeqLen, headDim int, scale float32, useCache, windowSize int) {
 	C.cudaFusedAttention(ctx.Ctx, q.devPtr, k.devPtr, v.devPtr, output.devPtr, kCache.devPtr, vCache.devPtr, C.int(batch), C.int(heads), C.int(seqLen), C.int(kvSeqLen), C.int(headDim), C.float(scale), C.int(useCache), C.int(windowSize))
 }
 
-func (ctx *CUDAContext) FusedMLP(input, gateW, upW, downW, output *Tensor, batch, dim, hiddenDim int) {
+func (ctx *Context) FusedMLP(input, gateW, upW, downW, output *Tensor, batch, dim, hiddenDim int) {
 	C.cudaFusedMLP(ctx.Ctx, input.devPtr, gateW.devPtr, upW.devPtr, downW.devPtr, output.devPtr, C.int(batch), C.int(dim), C.int(hiddenDim))
 }
 
-func (ctx *CUDAContext) Synchronize() {
+func (ctx *Context) Synchronize() {
 	C.cudaStreamSynchronize(ctx.Ctx)
 }
 
@@ -306,14 +343,14 @@ type weight struct {
 }
 
 type CUDAModel struct {
-	Ctx     *CUDAContext
+	Ctx     *Context
 	Weights map[string]*weight
 	KCache  []*Tensor
 	VCache  []*Tensor
 	mu      sync.RWMutex
 }
 
-func (ctx *CUDAContext) NewCUDAModel(f *gguf.GGUFFile, preDequantize bool, kvCacheSize int) (*CUDAModel, error) {
+func (ctx *Context) NewCUDAModel(f *gguf.GGUFFile, preDequantize bool, kvCacheSize int) (*CUDAModel, error) {
 	m := &CUDAModel{
 		Ctx:     ctx,
 		Weights: make(map[string]*weight),
@@ -436,7 +473,7 @@ type LayerScratch struct {
 	Down    *Tensor
 }
 
-func (ctx *CUDAContext) NewLayerScratch(batch, dim, hiddenDim, heads, kvHeads, headDim, seqLen, vocabSize, qNormDim, kNormDim int) *LayerScratch {
+func (ctx *Context) NewLayerScratch(batch, dim, hiddenDim, heads, kvHeads, headDim, seqLen, vocabSize, qNormDim, kNormDim int) *LayerScratch {
 	normed, _ := ctx.NewTensor(batch, dim, DataTypeF16)
 	attn, _ := ctx.NewTensor(batch*heads, headDim, DataTypeF16)
 	gate, _ := ctx.NewTensor(batch, hiddenDim, DataTypeF16)
@@ -460,7 +497,7 @@ func (s *LayerScratch) Free() {
 	s.Down.Free()
 }
 
-func (ctx *CUDAContext) CopyF16(src, dst *Tensor) {
+func (ctx *Context) CopyF16(src, dst *Tensor) {
 	C.cudaMemcpyAsync(dst.devPtr, src.devPtr, C.size_t(src.rows*src.cols*2), C.cudaMemcpyDeviceToDevice, ctx.Ctx)
 }
 

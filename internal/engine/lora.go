@@ -35,7 +35,7 @@ func NewLoRAManager() *LoRAManager {
 }
 
 // LoadAdapter parses LoRA weights from a GGUF file into VRAM.
-func (lm *LoRAManager) LoadAdapter(ctx *device.CUDAContext, path string, id string) error {
+func (lm *LoRAManager) LoadAdapter(ctx *device.Context, path string, id string) error {
 	f, err := gguf.LoadFile(path)
 	if err != nil {
 		return fmt.Errorf("failed to load lora file: %w", err)

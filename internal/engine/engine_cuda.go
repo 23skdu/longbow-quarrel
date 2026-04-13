@@ -7,7 +7,6 @@ import (
 	"log"
 	"math"
 	"math/rand"
-	"os"
 	"sort"
 	"sync"
 	"time"
@@ -553,6 +552,17 @@ func (e *cudaEngine) ForwardDraft(tokens []int) ([][]float32, error) {
 	return nil, nil
 }
 
+func (e *cudaEngine) GetSeqCachePos(seqID string) int {
+	// For CUDA engine, we currently don't support paged cache with multiple sequences.
+	// We'll return 0 for now to satisfy the interface.
+	return 0
+}
+
+func (e *cudaEngine) RollbackKV(seqID string, newPos int) error {
+	// Rollback not yet implemented for CUDA KV cache.
+	return nil
+}
+
 func init() {
 	RegisterEngine("cuda", NewcudaEngine)
 }
@@ -564,15 +574,4 @@ func getKV(f *gguf.GGUFFile, keys ...string) (interface{}, bool) {
 		}
 	}
 	return nil, false
-}
-
-func toFloat64(v interface{}) float64 {
-	switch val := v.(type) {
-	case float64: return val
-	case float32: return float64(val)
-	case uint32: return float64(val)
-	case int32: return float64(val)
-	case int: return float64(val)
-	default: return 0
-	}
 }
