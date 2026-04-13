@@ -5,6 +5,8 @@ package engine
 import (
 	"fmt"
 	"sync"
+
+	"github.com/23skdu/longbow-quarrel/internal/metrics"
 )
 
 // InferenceRequest encapsulates a user generation request to be placed in the continuous batching queue.
@@ -48,6 +50,12 @@ func (q *RequestQueue) PopUpTo(n int) []*InferenceRequest {
 	return popped
 }
 
+func (q *RequestQueue) Depth() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return len(q.requests)
+}
+
 // ContinuousBatchManager oversees the lifecycle of sequences during decoding.
 type ContinuousBatchManager struct {
 	waitingQueue *RequestQueue
@@ -72,6 +80,7 @@ func NewContinuousBatchManager() *ContinuousBatchManager {
 // Submit adds a new request to the waiting pool.
 func (cm *ContinuousBatchManager) Submit(req *InferenceRequest) {
 	cm.waitingQueue.Push(req)
+	metrics.BatchQueueDepth.Set(float64(cm.waitingQueue.Depth()))
 }
 
 // Step advances the state of the batching iteration, pulling from the waiting queue if resources permit.
@@ -130,10 +139,7 @@ func (cm *ContinuousBatchManager) Step(maxBatchSize int, kvCache *PagedKVCache) 
 		}
 	}
 
-	if len(active) == 0 {
-		return nil, nil // No active sequences is a valid idle state
-	}
-
+	metrics.RecordBatchStats(cm.waitingQueue.Depth(), len(cm.running), len(cm.prefill))
 	return active, nil
 }
 

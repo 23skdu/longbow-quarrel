@@ -74,6 +74,11 @@ type Config struct {
 	DebugLogits      bool
 
 	DebugMemory bool
+
+	// Phase 2: Continuous Batching & Paged Attention
+	MaxBatchSize int
+	BlockSize    int
+	TotalBlocks  int
 }
 
 type Gemma4Config struct {

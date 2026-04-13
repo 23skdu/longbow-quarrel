@@ -7,9 +7,14 @@ import (
 	"github.com/23skdu/longbow-quarrel/internal/config"
 )
 
-// No init function here as metal shouldn't be registered on non-Metal platforms,
-// OR we register it as a "no-op" for testing. 
-// For now, let's just make it compilable for tests.
+// metalEngine is a no-op stub for platforms where Metal is not available.
+type metalEngine struct {
+	config config.Config
+
+	// Lifespan Control (Stubbed)
+	stopChan chan struct{}
+	doneChan chan struct{}
+}
 
 func (e *metalEngine) Infer(tokens []int, count int, cfg SamplerConfig) ([]int, error) {
 	return nil, errors.New("metal engine not available on this platform")

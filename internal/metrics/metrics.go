@@ -890,6 +890,28 @@ var (
 		Help:    "Context length used for Gemma4 inference",
 		Buckets: []float64{128, 512, 2048, 4096, 8192, 16384, 32768, 65536, 131072},
 	})
+
+	// Continuous Batching Metrics
+	BatchQueueDepth = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "batch_manager_queue_depth",
+		Help: "Number of requests waiting in the continuous batching queue",
+	})
+
+	BatchRunningCount = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "batch_manager_running_count",
+		Help: "Number of sequences currently being decoded in the batch",
+	})
+
+	BatchPrefillCount = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "batch_manager_prefill_count",
+		Help: "Number of sequences currently in prefill state",
+	})
+
+	BatchSize = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "batch_manager_batch_size",
+		Help:    "Distribution of actual batch sizes processed",
+		Buckets: []float64{1, 2, 4, 8, 16, 32, 64},
+	})
 )
 
 // RecordGemma4SlidingWindowLayer records a sliding window attention layer forward pass
@@ -945,4 +967,14 @@ func RecordGemma4QNormApplied() {
 
 func RecordGemma4KNormApplied() {
 	Gemma4KNormApplied.Inc()
+}
+
+// RecordBatchStats records current continuous batching manager state
+func RecordBatchStats(queueDepth, running, prefill int) {
+	BatchQueueDepth.Set(float64(queueDepth))
+	BatchRunningCount.Set(float64(running))
+	BatchPrefillCount.Set(float64(prefill))
+	if running+prefill > 0 {
+		BatchSize.Observe(float64(running + prefill))
+	}
 }

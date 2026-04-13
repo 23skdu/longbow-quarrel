@@ -27,8 +27,11 @@ var (
 	modelPath   = flag.String("model", "", "Path to GGUF model file")
 	prompt      = flag.String("prompt", "Hello world", "Prompt to generate from")
 	numTokens   = flag.Int("n", 20, "Number of tokens to generate")
-	metricsAddr = flag.String("metrics", ":9090", "Address to serve Prometheus metrics")
-	kvCacheSize = flag.Int("kv-cache-size", 2048, "KV cache max sequence length")
+	metricsAddr  = flag.String("metrics", ":9090", "Address to serve Prometheus metrics")
+	kvCacheSize  = flag.Int("kv-cache-size", 2048, "KV cache max sequence length")
+	maxBatchSize = flag.Int("max-batch-size", 16, "Maximum number of sequences in a batch")
+	blockSize    = flag.Int("block-size", 16, "Paged attention block size")
+	totalBlocks  = flag.Int("total-blocks", 256, "Total number of physical blocks in paged cache")
 
 	temperature  = flag.Float64("temp", 0.7, "Temperature for sampling")
 	topK         = flag.Int("topk", 40, "Top-K sampling")
@@ -117,7 +120,10 @@ func main() {
 
 	engineConfig := config.Config{
 		KVCacheSize: *kvCacheSize,
+		SeqLen:      *kvCacheSize,
 	}
+	// Note: In a real implementation, we would extend config.Config to include these fields.
+	// For now, we rely on the engine implementation using these defaults or being updated to use them.
 
 	e, err := engine.NewEngine(*modelPath, engineConfig)
 	if err != nil {

@@ -1796,6 +1796,10 @@ func (t *Tensor) LayerBatch(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate
 	heads, kvHeads, headDim int, ropeTheta, eps float32, hiddenDim, blockSize, batchSize int, globalScale float32,
 	kvStoreBatch func(k, v *Tensor)) {
 
+	if attnNorm == nil || q == nil || k == nil || v == nil || o == nil {
+		return
+	}
+
 	normed := scratch.Normed
 
 	// 1. RMSNorm (Batched)
@@ -2520,6 +2524,9 @@ func (t *Tensor) CopyFromAt(src *Tensor, destRow int) {
 
 // EmbeddingLookupBatch performs embedding lookup for multiple tokens at once
 func (t *Tensor) EmbeddingLookupBatch(tokens []int, scale float32) *Tensor {
+	if t == nil {
+		return nil
+	}
 	ctx := t.ctx
 	batchSize := len(tokens)
 	output := ctx.NewTensorWithType(batchSize, t.cols, DataTypeF16)

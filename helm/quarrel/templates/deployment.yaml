@@ -35,6 +35,12 @@ spec:
             - "-model"
             - "{{ .Values.model.name }}"
             {{- end }}
+            - "-max-batch-size"
+            - "{{ .Values.engine.maxBatchSize }}"
+            - "-block-size"
+            - "{{ .Values.engine.kvCache.blockSize }}"
+            - "-total-blocks"
+            - "{{ .Values.engine.kvCache.totalBlocks }}"
           ports:
             - name: http
               containerPort: {{ .Values.service.port }}

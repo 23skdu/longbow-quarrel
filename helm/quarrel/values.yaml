@@ -45,9 +45,15 @@ monitoring:
   enabled: true
   metricsPath: /metrics
   serviceMonitor:
-    enabled: false
+    enabled: true
     interval: 30s
     scrapeTimeout: 10s
+
+engine:
+  maxBatchSize: 16
+  kvCache:
+    blockSize: 16
+    totalBlocks: 256
 
 securityContext:
   runAsNonRoot: false

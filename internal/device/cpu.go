@@ -284,15 +284,7 @@ func dequantizeBlock(c *Context, src []byte, dst []float32, blockSize, qjlRows i
 		rotatedRes[i] = float32(q[i]) * s
 	}
 
-	if sj > 0 && c.TQQJL != nil {
-		for i := 0; i < qjlRows; i++ {
-			for j := 0; j < blockSize; j++ {
-				rotatedRes[j] += float32(qj[i]) * sj * c.TQQJL.data[i*blockSize+j] / float32(qjlRows)
-			}
-		}
-	}
-
-	// Apply Inverse Rotation
+	// Apply Inverse Rotation to get original space
 	if rotationMatrix != nil {
 		for i := 0; i < blockSize; i++ {
 			var sum float32
@@ -303,6 +295,16 @@ func dequantizeBlock(c *Context, src []byte, dst []float32, blockSize, qjlRows i
 		}
 	} else {
 		copy(dst, rotatedRes)
+	}
+
+	// 2. Add QJL Residual in Original Space
+	if sj > 0 && c.TQQJL != nil {
+		for i := 0; i < qjlRows; i++ {
+			scale_i := float32(int8(qj[i])) * sj
+			for j := 0; j < blockSize; j++ {
+				dst[j] += scale_i * c.TQQJL.data[i*blockSize+j]
+			}
+		}
 	}
 }
 
@@ -510,9 +512,10 @@ func (c *Context) TurboQuantDecode(input *Tensor, rotationMatrix *Tensor, qjlMat
 		}
 
 		// 3. Add QJL contribution (Residual) already in original space
+		// 3. Add QJL contribution (Residual) already in original space
 		if sj > 0 && qjlMatrix != nil {
 			for i := 0; i < qjlRows; i++ {
-				scale_i := float32(int8(qj[i])) * sj / float32(qjlRows)
+				scale_i := float32(int8(qj[i])) * sj
 				for j := 0; j < blockSize; j++ {
 					out[j] += scale_i * qjlMatrix.data[i*blockSize+j]
 				}
