@@ -402,6 +402,7 @@ func (e *cudaEngine) InferWithCallback(inputTokens []int, tokensToGenerate int, 
 	cudaBatchSize.WithLabelValues(e.config.Architecture).Observe(float64(len(inputTokens)))
 
 	inputLen := len(inputTokens)
+	kvHits, kvMisses := 0, 0
 	seqLen := inputLen + tokensToGenerate
 	if seqLen > e.config.SeqLen {
 		seqLen = e.config.SeqLen
@@ -1405,6 +1406,7 @@ func (e *cudaEngine) InferWithCallbackLogits(inputTokens []int, tokensToGenerate
 	cudaBatchSize.WithLabelValues(e.config.Architecture).Observe(float64(len(inputTokens)))
 
 	inputLen := len(inputTokens)
+	kvHits, kvMisses := 0, 0
 	seqLen := inputLen + tokensToGenerate
 	if seqLen > e.config.SeqLen {
 		seqLen = e.config.SeqLen
