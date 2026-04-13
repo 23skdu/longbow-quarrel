@@ -34,1269 +34,391 @@ extern void cudaDequantQ4_KToBF16(cudaStream_t stream, void* src, void* dst, int
 extern void cudaDequantQ6_K(cudaStream_t stream, void* src, void* dst, int numElements);
 extern void cudaDequantQ6_KToBF16(cudaStream_t stream, void* src, void* dst, int numElements);
 
-// Fused kernel exports
-extern void cudaFusedAttention(cudaStream_t stream, const void* q, const void* k, const void* v, void* output, const void* kCache, const void* vCache, int batch, int heads, int seqLen, int kvSeqLen, int headDim, float scale, int useCache, int windowSize);
-extern void cudaFlashFusedAttention(cudaStream_t stream, const void* q, const void* k, const void* v, void* output, int batch, int heads, int seqLen, int kvSeqLen, int headDim, float scale, int windowSize);
-extern void cudaFusedRoPE(cudaStream_t stream, void* tensor, const int* posIds, int batch, int heads, int seqLen, int headDim, float theta);
-extern void cudaFusedSwiGLU(cudaStream_t stream, const void* input, const void* gateWeight, const void* upWeight, const void* downWeight, void* output, int batch, int dim, int hiddenDim);
-extern void cudaFusedMLP(cudaStream_t stream, const void* input, const void* gateWeight, const void* upWeight, const void* downWeight, void* output, int batch, int dim, int hiddenDim);
-extern void cudaFusedRMSNormAdd(cudaStream_t stream, const void* input, const void* hidden, const void* weight, void* output, int batch, int dim, float eps);
-
+// Basic math kernels
 extern void cudaAdd(float* a, float* b, float* out, int size, cudaStream_t stream);
 extern void cudaRMSNorm(float* input, float* weight, float* output, int rows, int cols, float eps, cudaStream_t stream);
 extern void cudaSwiGLU(float* gate, float* up, float* output, int size, cudaStream_t stream);
 
-// TurboQuant kernel exports
-extern void cudaTurboQuantPolarQuant(cudaStream_t stream, const float* input, const float* rotationMatrix, int8_t* quantized, float* scaleOut, float* residual, int n, int bits);
-extern void cudaTurboQuantQJLTransform(cudaStream_t stream, const float* residual, const float* signMatrix, int8_t* quantized, float* scaleOut, int rows, int cols);
-extern void cudaTurboQuantEncode(cudaStream_t stream, const float* input, const float* rotationMatrix, const float* qjlMatrix, int8_t* output, float* scaleOut, float* qjlScaleOut, int blockSize, int qjlRows, int numBlocks, int bits);
-extern void cudaTurboQuantDecode(cudaStream_t stream, const int8_t* input, const float* rotationMatrix, void* output, const float* scaleIn, int blockSize, int qjlRows, int numBlocks);
-
-// Device properties structure for multi-GPU support
-typedef struct {
-    char name[256];
-    int totalGlobalMem;
-    int sharedMemPerBlock;
-    int regsPerBlock;
-    int warpSize;
-    int memPitch;
-    int maxThreadsPerBlock;
-    int maxThreadsDim[3];
-    int maxGridSize[3];
-    int clockRate;
-    int totalConstMem;
-    int major;
-    int minor;
-    int multiGpuBoard;
-    int memoryClockRate;
-    int memoryBusWidth;
-} cudaDevicePropFull;
-*/
-/*
-#include <stdlib.h>
-#include <string.h>
-#include <cuda.h>
-#include <cuda_runtime.h>
+// Fused kernel exports
+extern void cudaFusedAttention(cudaStream_t stream, const void* q, const void* k, const void* v, void* output, const void* kCache, const void* vCache, int batch, int heads, int seqLen, int kvSeqLen, int headDim, float scale, int useCache, int windowSize);
+extern void cudaFlashFusedAttention(cudaStream_t stream, const void* q, const void* k, const void* v, void* output, int batch, int heads, int seqLen, int kvSeqLen, int headDim, float scale, int windowSize);
+extern void cudaFusedRoPE(cudaStream_t stream, void* tensor, const int* posIds, int batch, int heads, int seqLen, int headDim, float theta);
+extern void cudaFusedMLP(cudaStream_t stream, const void* input, const void* gateWeight, const void* upWeight, const void* downWeight, void* output, int batch, int dim, int hiddenDim);
+extern void cudaFusedRMSNormAdd(cudaStream_t stream, const void* input, const void* hidden, const void* weight, void* output, int batch, int dim, float eps);
 */
 import "C"
+
 import (
 	"encoding/binary"
 	"fmt"
 	"log"
 	"math"
+	"reflect"
 	"runtime"
 	"sync"
-	"sync/atomic"
 	"unsafe"
 
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
-	"github.com/23skdu/longbow-quarrel/internal/metrics"
 )
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-type CUDADataType = DataType
+type DataType int
 
 const (
-	CUDA_R_16F CUDADataType = DataTypeF16
-	CUDA_R_32F CUDADataType = DataTypeF32
-	CUDA_R_64F CUDADataType = 2
-	CUDA_R_8I  CUDADataType = 3
-	CUDA_R_8U  CUDADataType = 4
+	DataTypeF16 DataType = iota
+	DataTypeF32
+	DataTypeQ8_0
+	DataTypeQ4_K
+	DataTypeQ6_K
 )
 
-type Tensor struct {
-	ctx       *Context
-	rows      int
-	cols      int
-	sizeBytes int
-	cudaPtr   *CUDATensor // The underlying GPU tensor
-	name      string
-	dataType  DataType
-}
-
-func NewTensor(name string, data []float32) *Tensor {
-	if globalCUDAContext == nil {
-		panic("CUDA context not initialized before NewTensor")
-	}
-	rows := 1
-	cols := len(data)
-	ct, err := globalCUDAContext.NewTensorFP32(rows, cols)
-	if err != nil {
-		panic(err)
-	}
-	err = ct.LoadFrom(data)
-	if err != nil {
-		panic(err)
-	}
-	return &Tensor{
-		ctx:       &Context{cudaCtx: globalCUDAContext},
-		rows:      rows,
-		cols:      cols,
-		cudaPtr:   ct,
-		name:      name,
-		dataType:  DataTypeF32,
-		sizeBytes: len(data) * 4,
-	}
-}
-
-func (t *Tensor) SizeBytes() int { return t.sizeBytes }
-func (t *Tensor) RawData() []byte {
-	if t.cudaPtr != nil && len(t.cudaPtr.HostData) > 0 {
-		return t.cudaPtr.HostData
-	}
-	return nil
-}
-
-func (t *Tensor) Rows() int { return t.rows }
-func (t *Tensor) Cols() int { return t.cols }
-func (t *Tensor) Free() {
-	if t.cudaPtr != nil {
-		t.cudaPtr.Free()
-		t.cudaPtr = nil
-	}
-}
-func (t *Tensor) Data() []float32 {
-	if t.cudaPtr == nil {
-		return nil
-	}
-	return t.cudaPtr.ToHostF32()
-}
-func (t *Tensor) Name() string { return t.name }
-func (t *Tensor) ZeroInit() {
-	if t.cudaPtr != nil {
-		t.ctx.cudaCtx.ZeroF16(t.cudaPtr)
-	}
-}
-func (t *Tensor) Dims() []int       { return []int{t.rows, t.cols} }
-func (t *Tensor) Strides() []int    { return []int{t.cols, 1} }
-func (t *Tensor) ToHost() []float32 { return t.Data() }
-func (t *Tensor) ToHostF32() []float32 {
-	if t.cudaPtr == nil {
-		return nil
-	}
-	return t.cudaPtr.ToHostF32()
-}
-func (t *Tensor) ToHostFP16() []uint16 {
-	if t.cudaPtr == nil {
-		return nil
-	}
-	return t.cudaPtr.ToHostFP16()
-}
-func (t *Tensor) NumElements() int { return t.rows * t.cols }
-func (t *Tensor) BufferID() uintptr {
-	if t.cudaPtr == nil {
-		return 0
-	}
-	return t.cudaPtr.BufferID()
-}
-func (t *Tensor) LoadFrom(data []float32) error {
-	if t.cudaPtr == nil {
-		return fmt.Errorf("cudaPtr is nil")
-	}
-	return t.cudaPtr.LoadFrom(data)
-}
-func (t *Tensor) LoadFromF32(data []float32) {
-	_ = t.LoadFrom(data)
-}
-
-type Context struct {
-	device  int
-	cudaCtx *CUDAContext
-	mu      sync.Mutex
-	pool    map[string][]*Tensor
-
-	// TurboQuant Global Matrices
-	TQRotation *Tensor
-	TQQJL      *Tensor
-
-	// Performance Counters (Hotpath)
-	ArrowBytesProcessed atomic.Int64
-}
-
-func (c *Context) DeviceID() int {
-	return c.device
-}
-
-func (c *Context) Synchronize() {
-	if c.cudaCtx != nil {
-		c.cudaCtx.Synchronize()
-	}
-}
-
-func (c *Context) NewTensorRaw(sizeBytes int) (*Tensor, error) {
-	ct, err := c.cudaCtx.NewTensorRaw(sizeBytes)
-	if err != nil {
-		return nil, err
-	}
-	return &Tensor{
-		ctx:       c,
-		sizeBytes: sizeBytes,
-		cudaPtr:   ct,
-	}, nil
-}
-
-func (t *Tensor) LoadFromRaw(data []byte) error {
-	return t.cudaPtr.LoadFromRaw(data)
-}
-
-func (c *Context) NewTensorFP32(rows, cols int) *Tensor {
-	ct, err := c.cudaCtx.NewTensorFP32(rows, cols)
-	if err != nil {
-		panic(err)
-	}
-	return &Tensor{
-		ctx:       c,
-		rows:      rows,
-		cols:      cols,
-		cudaPtr:   ct,
-		dataType:  DataTypeF32,
-		sizeBytes: rows * cols * 4,
-	}
-}
-
-func (c *Context) NewTensorFromData(rows, cols int, dt DataType, data []byte) (*Tensor, error) {
-	ct, err := c.cudaCtx.NewTensorFromData(rows, cols, dt, data)
-	if err != nil {
-		return nil, err
-	}
-	return &Tensor{
-		ctx:       c,
-		rows:      rows,
-		cols:      cols,
-		cudaPtr:   ct,
-		dataType:  dt,
-		sizeBytes: len(data),
-	}, nil
-}
-
-func (c *Context) NewTensorPooled(rows, cols int) *Tensor {
-	ct := c.cudaCtx.NewTensorPooled(rows, cols)
-	return &Tensor{
-		ctx:       c,
-		rows:      rows,
-		cols:      cols,
-		cudaPtr:   ct,
-		dataType:  DataTypeF16,
-		sizeBytes: rows * cols * 2,
-	}
-}
-
-func (c *Context) NewTurboTensor(rows, cols int, dt DataType, blockSize, qjlRows int) *Tensor {
-	numElements := rows * cols
-	numBlocks := numElements / blockSize
-	if numElements%blockSize != 0 {
-		numBlocks++
-	}
-	bytesPerBlock := blockSize + qjlRows + 8
-	sizeBytes := numBlocks * bytesPerBlock
-
-	ct, err := c.cudaCtx.NewTensorRaw(sizeBytes)
-	if err != nil {
-		panic(fmt.Sprintf("Failed to allocate CUDA TurboTensor: %v", err))
-	}
-
-	return &Tensor{
-		ctx:       c,
-		rows:      rows,
-		cols:      cols,
-		sizeBytes: sizeBytes,
-		cudaPtr:   ct,
-		dataType:  dt,
-	}
-}
-
-func (c *Context) NewTensorWithType(rows, cols int, dt DataType) *Tensor {
-	if dt == DataTypeTQ1_0 || dt == DataTypeTQ2_0 {
-		return c.NewTurboTensor(rows, cols, dt, 256, 64)
-	}
-
-	sizeBytes := rows * cols * 2
-	ct, err := c.cudaCtx.NewTensor(rows, cols, C.CUDA_DTYPE_F16)
-	if err != nil {
-		panic(fmt.Sprintf("Failed to allocate CUDA Tensor: %v", err))
-	}
-
-	return &Tensor{
-		ctx:       c,
-		rows:      rows,
-		cols:      cols,
-		sizeBytes: sizeBytes,
-		cudaPtr:   ct,
-		dataType:  dt,
-	}
-}
-
-func (t *Tensor) StoreKV(v *Tensor, kCache, vCache *Tensor, pos, heads, headDim, windowSize int) {
-	if kCache.dataType == DataTypeTQ1_0 || kCache.dataType == DataTypeTQ2_0 {
-		t.storeKVTurbo(v, kCache, vCache, pos, heads, headDim, windowSize)
-		return
-	}
-
-	// Standard F16 StoreKV
-	C.cudaFusedAttention(t.ctx.cudaCtx.stream,
-		nil, nil, nil, nil, // Q, K, V, output not used for pure store
-		kCache.cudaPtr.devPtr, vCache.cudaPtr.devPtr,
-		1, C.int(heads), 1, C.int(pos+1), C.int(headDim),
-		1.0, 1, 0) // useCache=1 signals store, windowSize=0 for full attention
-}
-
-func (t *Tensor) storeKVTurbo(v *Tensor, kCache, vCache *Tensor, pos, heads, headDim, windowSize int) {
-	ctx := t.ctx
-	if ctx.TQRotation == nil || ctx.TQQJL == nil {
-		panic("TurboQuant global matrices not initialized")
-	}
-
-	blockSize := 256
-	qjlRows := 64
-	numBlocksPerRow := (heads * headDim) / blockSize
-	bytesPerBlock := blockSize + qjlRows + 8
-	rowOffsetBytes := uintptr((pos % windowSize) * numBlocksPerRow * bytesPerBlock)
-
-	bits := 2
-	if kCache.dataType == DataTypeTQ2_0 {
-		bits = 4
-	}
-
-	C.cudaTurboQuantEncode(ctx.cudaCtx.stream,
-		(*C.float)(t.cudaPtr.devPtr),
-		(*C.float)(ctx.TQRotation.cudaPtr.devPtr),
-		(*C.float)(ctx.TQQJL.cudaPtr.devPtr),
-		(*C.int8_t)(unsafe.Add(kCache.cudaPtr.devPtr, rowOffsetBytes)),
-		nil, nil,
-		C.int(blockSize), C.int(qjlRows), C.int(numBlocksPerRow), C.int(bits))
-
-	// V Encode
-	C.cudaTurboQuantEncode(ctx.cudaCtx.stream,
-		(*C.float)(v.cudaPtr.devPtr),
-		(*C.float)(ctx.TQRotation.cudaPtr.devPtr),
-		(*C.float)(ctx.TQQJL.cudaPtr.devPtr),
-		(*C.int8_t)(unsafe.Add(vCache.cudaPtr.devPtr, rowOffsetBytes)),
-		nil, nil,
-		C.int(blockSize), C.int(qjlRows), C.int(numBlocksPerRow), C.int(bits))
-}
-
-func (t *Tensor) FetchKV(kCache, vCache *Tensor, seqLen, heads, headDim int) {
-	if kCache.dataType == DataTypeTQ1_0 || kCache.dataType == DataTypeTQ2_0 {
-		t.fetchKVTurbo(kCache, vCache, seqLen, heads, headDim)
-		return
-	}
-	// F16 Fetch (copy cache to t)
-	// Implementation depends on t's layout, usually used before attention.
-}
-
-func (t *Tensor) fetchKVTurbo(kCache, vCache *Tensor, seqLen, heads, headDim int) {
-	ctx := t.ctx
-	blockSize := 256
-	qjlRows := 64
-	numBlocksPerRow := (heads * headDim) / blockSize
-
-	// Decompress all blocks for the sequence
-	totalBlocks := seqLen * numBlocksPerRow
-	vOffset := seqLen * heads * headDim * 2
-
-	C.cudaTurboQuantDecode(ctx.cudaCtx.stream,
-		(*C.int8_t)(kCache.cudaPtr.devPtr),
-		(*C.float)(ctx.TQRotation.cudaPtr.devPtr),
-		t.cudaPtr.devPtr,
-		nil, C.int(blockSize), C.int(qjlRows), C.int(totalBlocks))
-
-	// V Decode
-	C.cudaTurboQuantDecode(ctx.cudaCtx.stream,
-		(*C.int8_t)(vCache.cudaPtr.devPtr),
-		(*C.float)(ctx.TQRotation.cudaPtr.devPtr),
-		unsafe.Pointer(uintptr(t.cudaPtr.devPtr)+uintptr(vOffset)),
-		nil, C.int(blockSize), C.int(qjlRows), C.int(totalBlocks))
-}
-
-var cudaAllocatedBytes int64
-
-func cudaTraceAlloc(delta int64) {
-	newVal := atomic.AddInt64(&cudaAllocatedBytes, delta)
-	metrics.RecordGPUMemory(newVal)
-}
-
-func CUDAAllocatedBytes() int64 {
-	return atomic.LoadInt64(&cudaAllocatedBytes)
-}
-
-var MaxCUDAMemory int64 = DefaultMaxMemoryCUDA
-
 type CUDAContext struct {
-	device        int
-	stream        C.cudaStream_t
-	handle        C.cublasHandle_t
-	mu            sync.Mutex
-	pool          map[string][]*CUDATensor
-	useTensorCore bool
-}
-
-var globalCUDAContext *CUDAContext
-
-func NewCUDAContext() (*CUDAContext, error) {
-	if globalCUDAContext != nil {
-		return globalCUDAContext, nil
-	}
-
-	ctx := &CUDAContext{
-		device:        0,
-		stream:        nil,
-		handle:        nil,
-		pool:          make(map[string][]*CUDATensor),
-		useTensorCore: true,
-	}
-
-	result := C.cudaSetDevice(C.int(ctx.device))
-	if result != C.cudaSuccess {
-		return nil, fmt.Errorf("cudaSetDevice failed: %v", result)
-	}
-
-	var cuDevice C.int
-	C.cudaGetDevice(&cuDevice)
-	ctx.device = int(cuDevice)
-
-	C.cudaStreamCreate(&ctx.stream)
-	if ctx.stream == nil {
-		return nil, fmt.Errorf("cudaStreamCreate failed")
-	}
-
-	status := C.cublasCreate(&ctx.handle)
-	if status != 0 {
-		C.cudaStreamDestroy(ctx.stream)
-		return nil, fmt.Errorf("cublasCreate failed with status: %d", status)
-	}
-
-	globalCUDAContext = ctx
-
-	C.cublasSetStream(ctx.handle, ctx.stream)
-
-	var version C.int
-	C.cudaDriverGetVersion(&version)
-	fmt.Printf("CUDA Driver Version: %d.%d\n", version/1000, (version%100)/10)
-
-	var runtimeVersion C.int
-	C.cudaRuntimeGetVersion(&runtimeVersion)
-	fmt.Printf("CUDA Runtime Version: %d.%d\n", runtimeVersion/1000, (runtimeVersion%100)/10)
-
-	var memInfo C.size_t
-	C.cudaMemGetInfo(nil, &memInfo)
-	fmt.Printf("GPU Memory: %.1f MB available\n", float64(memInfo)/1e6)
-
-	runtime.SetFinalizer(ctx, func(c *CUDAContext) {
-		c.Free()
-	})
-
-	return ctx, nil
-}
-
-func (c *CUDAContext) Free() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.handle != nil {
-		C.cublasDestroy(c.handle)
-		c.handle = nil
-	}
-	if c.stream != nil {
-		C.cudaStreamDestroy(c.stream)
-		c.stream = nil
-	}
-
-	for _, tensors := range c.pool {
-		for _, t := range tensors {
-			if t.devPtr != nil {
-				C.cudaFree(t.devPtr)
-				t.devPtr = nil
-			}
-		}
-	}
-	c.pool = make(map[string][]*CUDATensor)
-}
-
-func (c *CUDAContext) Synchronize() {
-	C.cudaStreamSynchronize(c.stream)
-}
-
-func GetDeviceCount() (int, error) {
-	var count C.int
-	result := C.cudaGetDeviceCount(&count)
-	if result != C.cudaSuccess {
-		return 0, fmt.Errorf("cudaGetDeviceCount failed: %v", result)
-	}
-	return int(count), nil
-}
-
-func GetDeviceName(device int) string {
-	return fmt.Sprintf("GPU-%d", device)
-}
-
-func GetDeviceMemory(device int) (int64, error) {
-	C.cudaSetDevice(C.int(device))
-	var free, total C.size_t
-	result := C.cudaMemGetInfo(&free, &total)
-	if result != C.cudaSuccess {
-		return 0, fmt.Errorf("cudaMemGetInfo failed: %v", result)
-	}
-	return int64(total), nil
-}
-
-type MultiGPUManager struct {
-	devices    []int
-	contexts   map[int]*CUDAContext
-	currentIdx int
-	mu         sync.Mutex
-}
-
-type DeviceInfo struct {
-	ID       int
-	Name     string
-	MemoryMB int64
-}
-
-var multiGPU *MultiGPUManager
-
-func GetMultiGPUManager() (*MultiGPUManager, error) {
-	if multiGPU != nil {
-		return multiGPU, nil
-	}
-
-	count, err := GetDeviceCount()
-	if err != nil {
-		return nil, err
-	}
-
-	if count <= 1 {
-		return nil, fmt.Errorf("need multiple GPUs for multi-GPU support, found %d", count)
-	}
-
-	multiGPU = &MultiGPUManager{
-		devices:  make([]int, count),
-		contexts: make(map[int]*CUDAContext),
-	}
-	for i := 0; i < count; i++ {
-		multiGPU.devices[i] = i
-	}
-
-	return multiGPU, nil
-}
-
-func (m *MultiGPUManager) GetContext(device int) (*CUDAContext, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if ctx, ok := m.contexts[device]; ok {
-		return ctx, nil
-	}
-
-	if device >= len(m.devices) {
-		return nil, fmt.Errorf("invalid device index: %d", device)
-	}
-
-	C.cudaSetDevice(C.int(device))
-
-	ctx := &CUDAContext{
-		device:        device,
-		stream:        nil,
-		handle:        nil,
-		pool:          make(map[string][]*CUDATensor),
-		useTensorCore: true,
-	}
-
-	var cuDevice C.int
-	C.cudaGetDevice(&cuDevice)
-	ctx.device = int(cuDevice)
-
-	C.cudaStreamCreate(&ctx.stream)
-	if ctx.stream == nil {
-		return nil, fmt.Errorf("cudaStreamCreate failed for device %d", device)
-	}
-
-	status := C.cublasCreate(&ctx.handle)
-	if status != 0 {
-		C.cudaStreamDestroy(ctx.stream)
-		return nil, fmt.Errorf("cublasCreate failed for device %d: %d", device, status)
-	}
-
-	C.cublasSetStream(ctx.handle, ctx.stream)
-	m.contexts[device] = ctx
-
-	return ctx, nil
-}
-
-func (m *MultiGPUManager) RoundRobinDevice() int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	device := m.devices[m.currentIdx]
-	m.currentIdx = (m.currentIdx + 1) % len(m.devices)
-	return device
-}
-
-func (m *MultiGPUManager) GetDeviceInfo(device int) (*DeviceInfo, error) {
-	return &DeviceInfo{
-		ID:       device,
-		Name:     GetDeviceName(device),
-		MemoryMB: 0,
-	}, nil
+	Ctx    C.cudaStream_t
+	Cublas C.cublasHandle_t
+	CuDNN  C.cudnnHandle_t
+	pool   *tensorPool
 }
 
 type CUDATensor struct {
-	ctx        *CUDAContext
-	rows, cols int
-	sizeBytes  int
-	devPtr     unsafe.Pointer
-	dataType   DataType
-	ggmlType   gguf.GGMLType
-	HostData   []byte
+	devPtr  unsafe.Pointer
+	rows    int
+	cols    int
+	dtype   DataType
+	ctx     *CUDAContext
+	pooled  bool
 }
 
-func (t *CUDATensor) Rows() int { return t.rows }
-func (t *CUDATensor) Cols() int { return t.cols }
-func (t *CUDATensor) BufferID() uintptr {
-	return uintptr(t.devPtr)
+type tensorPool struct {
+	mu     sync.Mutex
+	free   map[int][]*CUDATensor
+	active int
+}
+
+func NewCUDAContext() (*CUDAContext, error) {
+	var stream C.cudaStream_t
+	if err := C.cudaStreamCreate(&stream); err != 0 {
+		return nil, fmt.Errorf("cudaStreamCreate failed: %v", err)
+	}
+
+	var handle C.cublasHandle_t
+	if err := C.cublasCreate(&handle); err != 0 {
+		return nil, fmt.Errorf("cublasCreate failed: %v", err)
+	}
+	C.cublasSetStream(handle, stream)
+
+	return &CUDAContext{
+		Ctx:    stream,
+		Cublas: handle,
+		pool: &tensorPool{
+			free: make(map[int][]*CUDATensor),
+		},
+	}, nil
+}
+
+func (ctx *CUDAContext) Free() {
+	if ctx.Ctx != nil {
+		C.cudaStreamDestroy(ctx.Ctx)
+	}
+	if ctx.Cublas != nil {
+		C.cublasDestroy(ctx.Cublas)
+	}
+}
+
+func (ctx *CUDAContext) NewTensor(rows, cols int, dtype DataType) (*CUDATensor, error) {
+	size := rows * cols
+	var bytes int
+	switch dtype {
+	case DataTypeF16:
+		bytes = size * 2
+	case DataTypeF32:
+		bytes = size * 4
+	default:
+		return nil, fmt.Errorf("unsupported dtype for allocation: %v", dtype)
+	}
+
+	var ptr unsafe.Pointer
+	if err := C.cudaMalloc(&ptr, C.size_t(bytes)); err != 0 {
+		return nil, fmt.Errorf("cudaMalloc failed: %v", err)
+	}
+
+	return &CUDATensor{
+		devPtr: ptr,
+		rows:   rows,
+		cols:   cols,
+		dtype:  dtype,
+		ctx:    ctx,
+	}, nil
+}
+
+func (ctx *CUDAContext) NewTensorPooled(rows, cols int) *CUDATensor {
+	size := rows * cols
+	ctx.pool.mu.Lock()
+	defer ctx.pool.mu.Unlock()
+
+	if lp, ok := ctx.pool.free[size]; ok && len(lp) > 0 {
+		t := lp[len(lp)-1]
+		ctx.pool.free[size] = lp[:len(lp)-1]
+		return t
+	}
+
+	t, _ := ctx.NewTensor(rows, cols, DataTypeF16)
+	t.pooled = true
+	return t
+}
+
+func (t *CUDATensor) ReturnToPool() {
+	if !t.pooled {
+		return
+	}
+	size := t.rows * t.cols
+	t.ctx.pool.mu.Lock()
+	t.ctx.pool.free[size] = append(t.ctx.pool.free[size], t)
+	t.ctx.pool.mu.Unlock()
 }
 
 func (t *CUDATensor) Free() {
-	if t.devPtr != nil && t.ctx != nil {
+	if t.devPtr != nil {
 		C.cudaFree(t.devPtr)
 		t.devPtr = nil
 	}
 }
 
-func (c *CUDAContext) NewTensor(rows, cols int, dt CUDADataType) (*CUDATensor, error) {
-	elementSize := 2
-	switch dt {
-	case DataTypeF16:
-		elementSize = 2
-	case DataTypeF32:
-		elementSize = 4
-	case DataTypeQ4_0, DataTypeQ4_K, DataTypeQ6_K, DataTypeQ8_0:
-		elementSize = 1
+func (t *CUDATensor) LoadFrom(data interface{}) error {
+	var src unsafe.Pointer
+	var bytes int
+
+	switch d := data.(type) {
+	case []float32:
+		src = unsafe.Pointer(&d[0])
+		bytes = len(d) * 4
+		if t.dtype == DataTypeF16 {
+			// CPU-side conversion not implemented here, use specialized kernels
+			return fmt.Errorf("direct load of []float32 to F16 tensor not supported")
+		}
+	case []uint16: // already FP16 bits
+		src = unsafe.Pointer(&d[0])
+		bytes = len(d) * 2
+	case []byte:
+		src = unsafe.Pointer(&d[0])
+		bytes = len(d)
+	default:
+		return fmt.Errorf("unsupported data type for LoadFrom: %T", data)
 	}
 
-	size := rows * cols * elementSize
-	log.Printf("DEBUG NewTensor: rows=%d, cols=%d, elementSize=%d, size=%d bytes", rows, cols, elementSize, size)
-	var devPtr unsafe.Pointer
-	result := C.cudaMalloc(&devPtr, C.size_t(size))
-	if result != C.cudaSuccess {
-		return nil, fmt.Errorf("cudaMalloc failed: %v", result)
+	if err := C.cudaMemcpyAsync(t.devPtr, src, C.size_t(bytes), C.cudaMemcpyHostToDevice, t.ctx.Ctx); err != 0 {
+		return fmt.Errorf("cudaMemcpyAsync failed: %v", err)
 	}
-
-	cudaTraceAlloc(int64(size))
-
-	t := &CUDATensor{
-		ctx:       c,
-		rows:      rows,
-		cols:      cols,
-		sizeBytes: size,
-		devPtr:    devPtr,
-		dataType:  dt,
-	}
-
-	runtime.SetFinalizer(t, func(t *CUDATensor) {
-		t.Free()
-	})
-
-	return t, nil
-}
-
-func (c *CUDAContext) NewTensorFP32(rows, cols int) (*CUDATensor, error) {
-	return c.NewTensor(rows, cols, DataTypeF32)
-}
-
-func (c *CUDAContext) NewTensorRaw(size int) (*CUDATensor, error) {
-	var devPtr unsafe.Pointer
-	result := C.cudaMalloc(&devPtr, C.size_t(size))
-	if result != C.cudaSuccess {
-		return nil, fmt.Errorf("cudaMalloc failed: %v", result)
-	}
-	cudaTraceAlloc(int64(size))
-	return &CUDATensor{ctx: c, sizeBytes: size, devPtr: devPtr}, nil
-}
-
-func (c *CUDAContext) NewTensorFromData(rows, cols int, dt CUDADataType, data []byte) (*CUDATensor, error) {
-	t, err := c.NewTensor(rows, cols, dt)
-	if err != nil {
-		return nil, err
-	}
-	t.HostData = data
-
-	if len(data) > 0 {
-		C.cudaMemcpyAsync(t.devPtr, unsafe.Pointer(&data[0]), C.size_t(len(data)), C.cudaMemcpyHostToDevice, c.stream)
-	}
-
-	return t, nil
-}
-
-func (c *CUDAContext) NewTensorPooled(rows, cols int) *CUDATensor {
-	key := fmt.Sprintf("%dx%d", rows, cols)
-	if tensors, ok := c.pool[key]; ok && len(tensors) > 0 {
-		t := tensors[len(tensors)-1]
-		c.pool[key] = tensors[:len(tensors)-1]
-		return t
-	}
-
-	t, _ := c.NewTensor(rows, cols, DataTypeF16)
-	return t
-}
-
-func (t *CUDATensor) ReturnToPool() {
-	if t.devPtr == nil {
-		return
-	}
-	key := fmt.Sprintf("%dx%d", t.rows, t.cols)
-	t.ctx.mu.Lock()
-	defer t.ctx.mu.Unlock()
-	t.ctx.pool[key] = append(t.ctx.pool[key], t)
-}
-
-func (t *CUDATensor) ToHostFP16() []uint16 {
-	n := t.rows * t.cols
-	if n == 0 {
-		return nil
-	}
-	hostData := make([]uint16, n)
-	C.cudaMemcpy(unsafe.Pointer(&hostData[0]), t.devPtr, C.size_t(n*2), C.cudaMemcpyDeviceToHost)
-	return hostData
+	return nil
 }
 
 func (t *CUDATensor) ToHostF32() []float32 {
-	numElements := t.rows * t.cols
-	result := make([]float32, numElements)
+	size := t.rows * t.cols
+	result := make([]float32, size)
 
-	if len(t.HostData) > 0 {
-		if t.dataType == DataTypeF32 {
-			for i := 0; i < numElements; i++ {
-				offset := i * 4
-				if offset+4 <= len(t.HostData) {
-					result[i] = math.Float32frombits(binary.LittleEndian.Uint32(t.HostData[offset : offset+4]))
-				}
-			}
-		} else if t.dataType == DataTypeF16 {
-			for i := 0; i < numElements; i++ {
-				offset := i * 2
-				if offset+2 <= len(t.HostData) {
-					v16 := binary.LittleEndian.Uint16(t.HostData[offset : offset+2])
-					result[i] = Float16ToFloat32(v16)
-				}
-			}
-		}
-		return result
-	}
-
-	if t.dataType == DataTypeF16 {
-		temp := make([]uint16, numElements)
-		C.cudaMemcpy(unsafe.Pointer(&temp[0]), t.devPtr, C.size_t(numElements*2), C.cudaMemcpyDeviceToHost)
-		for i, v := range temp {
+	if t.dtype == DataTypeF16 {
+		// Device-side conversion to F32 then copy back
+		var f32Ptr unsafe.Pointer
+		C.cudaMalloc(&f32Ptr, C.size_t(size*4))
+		
+		// Use cublas or a simple kernel for conversion
+		// For simplicity/speed here, we use a temp buffer and copy
+		// Actually, let's just copy and convert on host if needed or use cublasGeam
+		hostF16 := make([]uint16, size)
+		C.cudaMemcpy(unsafe.Pointer(&hostF16[0]), t.devPtr, C.size_t(size*2), C.cudaMemcpyDeviceToHost)
+		for i, v := range hostF16 {
 			result[i] = Float16ToFloat32(v)
 		}
+		C.cudaFree(f32Ptr)
 	} else {
-		C.cudaMemcpy(unsafe.Pointer(&result[0]), t.devPtr, C.size_t(numElements*4), C.cudaMemcpyDeviceToHost)
+		C.cudaMemcpy(unsafe.Pointer(&result[0]), t.devPtr, C.size_t(size*4), C.cudaMemcpyDeviceToHost)
 	}
 
 	return result
 }
 
-func (t *CUDATensor) LoadFrom(data []float32) error {
-	if t.dataType == DataTypeF16 {
-		temp := make([]uint16, len(data))
-		for i, v := range data {
-			temp[i] = Float32ToFloat16(v)
-		}
-		C.cudaMemcpy(t.devPtr, unsafe.Pointer(&temp[0]), C.size_t(len(temp)*2), C.cudaMemcpyHostToDevice)
-	} else {
-		size := len(data) * 4
-		C.cudaMemcpy(t.devPtr, unsafe.Pointer(&data[0]), C.size_t(size), C.cudaMemcpyHostToDevice)
-	}
-	return nil
+// Math Kernels
+
+func (ctx *CUDAContext) RMSNorm(input, weight, output *CUDATensor, rows, cols int, eps float32) {
+	C.cudaRMSNorm((*C.float)(input.devPtr), (*C.float)(weight.devPtr), (*C.float)(output.devPtr), C.int(rows), C.int(cols), C.float(eps), ctx.Ctx)
 }
 
-func (t *CUDATensor) LoadFromRaw(data []byte) error {
-	C.cudaMemcpyAsync(t.devPtr, unsafe.Pointer(&data[0]), C.size_t(len(data)), C.cudaMemcpyHostToDevice, t.ctx.stream)
-	return nil
+func (ctx *CUDAContext) Add(a, b, out *CUDATensor, size int) {
+	C.cudaAdd((*C.float)(a.devPtr), (*C.float)(b.devPtr), (*C.float)(out.devPtr), C.int(size), ctx.Ctx)
 }
 
-func (c *CUDAContext) LinearF16(input, weight *CUDATensor) (*CUDATensor, error) {
-	output, err := c.NewTensor(input.rows, weight.cols, DataTypeF16)
-	if err != nil {
-		return nil, err
-	}
-
-	var alpha C.float = 1.0
-	var beta C.float = 0.0
-
-	status := C.cublasSgemmEx(
-		c.handle,
+func (ctx *CUDAContext) MatmulF16(a, b *CUDATensor) (*CUDATensor, error) {
+	// a: [m, k], b: [n, k] (weight is usually transposed)
+	m := a.rows
+	k := a.cols
+	n := b.rows
+	
+	out := ctx.NewTensorPooled(m, n)
+	
+	alpha := C.float(1.0)
+	beta := C.float(0.0)
+	
+	// cublasGemmEx: C = alpha * op(A) * op(B) + beta * C
+	// We want [1, k] * [k, n] = [1, n]
+	// Weights are [n, k]. op(B) should be trans.
+	
+	res := C.cublasGemmEx(ctx.Cublas,
 		C.CUBLAS_OP_T, C.CUBLAS_OP_N,
-		C.int(weight.cols), C.int(input.rows), C.int(weight.rows),
-		&alpha,
-		weight.devPtr, C.CUDA_R_16F, C.int(weight.rows),
-		input.devPtr, C.CUDA_R_16F, C.int(input.cols),
-		&beta,
-		output.devPtr, C.CUDA_R_16F, C.int(output.cols),
-	)
-
-	if status != 0 {
-		fmt.Printf("cublasSgemmEx failed with status: %d\n", status)
+		C.int(n), C.int(m), C.int(k),
+		unsafe.Pointer(&alpha),
+		b.devPtr, C.CUDA_R_16F, C.int(k),
+		a.devPtr, C.CUDA_R_16F, C.int(k),
+		unsafe.Pointer(&beta),
+		out.devPtr, C.CUDA_R_16F, C.int(n),
+		C.CUBLAS_COMPUTE_32F,
+		C.CUBLAS_GEMM_DEFAULT_TENSOR_OP)
+		
+	if res != 0 {
+		out.ReturnToPool()
+		return nil, fmt.Errorf("cublasGemmEx failed: %v", res)
 	}
-
-	return output, nil
+	
+	return out, nil
 }
 
-func (c *CUDAContext) LinearF16TensorCore(input, weight *CUDATensor) (*CUDATensor, error) {
-	output, err := c.NewTensor(input.rows, weight.cols, DataTypeF16)
-	if err != nil {
-		return nil, err
-	}
-
-	var alpha, beta float32 = 1.0, 0.0
-	alphaPtr := unsafe.Pointer(&alpha)
-	betaPtr := unsafe.Pointer(&beta)
-
-	status := C.cublasGemmEx(
-		c.handle,
-		C.CUBLAS_OP_T, C.CUBLAS_OP_N,
-		C.int(weight.cols), C.int(input.rows), C.int(weight.rows),
-		alphaPtr,
-		weight.devPtr, C.CUDA_R_16F, C.int(weight.rows),
-		input.devPtr, C.CUDA_R_16F, C.int(input.cols),
-		betaPtr,
-		output.devPtr, C.CUDA_R_16F, C.int(output.cols),
-		C.CUDA_C_16F,
-		C.CUBLAS_GEMM_DEFAULT_TENSOR_OP,
-	)
-
-	if status != 0 {
-		fmt.Printf("cublasGemmEx (Tensor Core) failed with status: %d, falling back\n", status)
-		return c.LinearF16(input, weight)
-	}
-
-	return output, nil
+func (ctx *CUDAContext) FusedRoPE(tensor *CUDATensor, posIds []int, batch, heads, seqLen, headDim int, theta float32) {
+	var dPosPtr unsafe.Pointer
+	C.cudaMalloc(&dPosPtr, C.size_t(len(posIds)*4))
+	C.cudaMemcpy(dPosPtr, unsafe.Pointer(&posIds[0]), C.size_t(len(posIds)*4), C.cudaMemcpyHostToDevice)
+	
+	C.cudaFusedRoPE(ctx.Ctx, tensor.devPtr, (*C.int)(dPosPtr), C.int(batch), C.int(heads), C.int(seqLen), C.int(headDim), C.float(theta))
+	
+	C.cudaFree(dPosPtr)
 }
 
-func (c *CUDAContext) StartProfiling(name string) {
-	C.cudaProfilerStart()
+func (ctx *CUDAContext) FusedAttention(q, k, v, output, kCache, vCache *CUDATensor, batch, heads, seqLen, kvSeqLen, headDim int, scale float32, useCache, windowSize int) {
+	C.cudaFusedAttention(ctx.Ctx, q.devPtr, k.devPtr, v.devPtr, output.devPtr, kCache.devPtr, vCache.devPtr, C.int(batch), C.int(heads), C.int(seqLen), C.int(kvSeqLen), C.int(headDim), C.float(scale), C.int(useCache), C.int(windowSize))
 }
 
-func (c *CUDAContext) StopProfiling() {
-	C.cudaProfilerStop()
+func (ctx *CUDAContext) FusedMLP(input, gateW, upW, downW, output *CUDATensor, batch, dim, hiddenDim int) {
+	C.cudaFusedMLP(ctx.Ctx, input.devPtr, gateW.devPtr, upW.devPtr, downW.devPtr, output.devPtr, C.int(batch), C.int(dim), C.int(hiddenDim))
 }
 
-func (c *CUDAContext) CreateEvent() (unsafe.Pointer, error) {
-	var event C.cudaEvent_t
-	err := C.cudaEventCreate(&event)
-	if err != C.cudaSuccess {
-		return nil, fmt.Errorf("cudaEventCreate failed: %d", err)
-	}
-	return unsafe.Pointer(event), nil
+func (ctx *CUDAContext) Synchronize() {
+	C.cudaStreamSynchronize(ctx.Ctx)
 }
 
-func (c *CUDAContext) RecordEvent(event unsafe.Pointer) {
-	C.cudaEventRecord(C.cudaEvent_t(event), c.stream)
-}
+// CUDAModel and Weight Loading
 
-func (c *CUDAContext) WaitEvent(event unsafe.Pointer) {
-	C.cudaStreamWaitEvent(c.stream, C.cudaEvent_t(event), 0)
-}
-
-func (c *CUDAContext) MatmulF16(input *CUDATensor, weight *CUDATensor) (*CUDATensor, error) {
-	return c.LinearF16(input, weight)
-}
-
-func (c *CUDAContext) CopyF16(src, dst *CUDATensor) {
-	size := src.rows * src.cols * 2
-	C.cudaMemcpyAsync(dst.devPtr, src.devPtr, C.size_t(size), C.cudaMemcpyDeviceToDevice, c.stream)
-}
-
-func (c *CUDAContext) ZeroF16(t *CUDATensor) {
-	C.cudaMemsetAsync(t.devPtr, 0, C.size_t(t.sizeBytes), c.stream)
-}
-
-func (c *CUDAContext) FusedAttention(q, k, v, output, kCache, vCache *CUDATensor, batch, heads, seqLen, kvSeqLen, headDim int, scale float32, useCache, windowSize int) {
-	C.cudaFusedAttention(
-		c.stream,
-		q.devPtr, k.devPtr, v.devPtr, output.devPtr,
-		kCache.devPtr, vCache.devPtr,
-		C.int(batch), C.int(heads), C.int(seqLen), C.int(kvSeqLen), C.int(headDim),
-		C.float(scale), C.int(useCache), C.int(windowSize))
-}
-
-func (c *CUDAContext) FlashFusedAttention(q, k, v, output *CUDATensor, batch, heads, seqLen, kvSeqLen, headDim int, scale float32, windowSize int) {
-	C.cudaFlashFusedAttention(
-		c.stream,
-		q.devPtr, k.devPtr, v.devPtr, output.devPtr,
-		C.int(batch), C.int(heads), C.int(seqLen), C.int(kvSeqLen), C.int(headDim),
-		C.float(scale), C.int(windowSize))
-}
-
-func (c *CUDAContext) FusedRoPE(tensor *CUDATensor, posIds []int, batch, heads, seqLen, headDim int, theta float32) {
-	C.cudaFusedRoPE(
-		c.stream,
-		tensor.devPtr, (*C.int)(unsafe.Pointer(&posIds[0])),
-		C.int(batch), C.int(heads), C.int(seqLen), C.int(headDim),
-		C.float(theta))
-}
-
-func (c *CUDAContext) FusedSwiGLU(input, gateWeight, upWeight, downWeight, output *CUDATensor, batch, dim, hiddenDim int) {
-	C.cudaFusedSwiGLU(
-		c.stream,
-		input.devPtr, gateWeight.devPtr, upWeight.devPtr, downWeight.devPtr, output.devPtr,
-		C.int(batch), C.int(dim), C.int(hiddenDim))
-}
-
-func (c *CUDAContext) FusedMLP(input, gateWeight, upWeight, downWeight, output *CUDATensor, batch, dim, hiddenDim int) {
-	C.cudaFusedMLP(
-		c.stream,
-		input.devPtr, gateWeight.devPtr, upWeight.devPtr, downWeight.devPtr, output.devPtr,
-		C.int(batch), C.int(dim), C.int(hiddenDim))
-}
-
-func (c *CUDAContext) RMSNorm(input, weight, output *CUDATensor, rows, cols int, eps float32) {
-	C.cudaRMSNorm(
-		(*C.float)(input.devPtr),
-		(*C.float)(weight.devPtr),
-		(*C.float)(output.devPtr),
-		C.int(rows), C.int(cols), C.float(eps),
-		c.stream)
-}
-
-func (c *CUDAContext) Add(a, b, out *CUDATensor, size int) {
-	C.cudaAdd(
-		(*C.float)(a.devPtr),
-		(*C.float)(b.devPtr),
-		(*C.float)(out.devPtr),
-		C.int(size),
-		c.stream)
-}
-
-func (c *CUDAContext) SwiGLU(gate, up, output *CUDATensor, size int) {
-	C.cudaSwiGLU(
-		(*C.float)(gate.devPtr),
-		(*C.float)(up.devPtr),
-		(*C.float)(output.devPtr),
-		C.int(size),
-		c.stream)
-}
-
-func (c *CUDAContext) FusedRMSNormAdd(input, hidden, weight, output *CUDATensor, batch, dim int, eps float32) {
-	C.cudaFusedRMSNormAdd(
-		c.stream,
-		input.devPtr, hidden.devPtr, weight.devPtr, output.devPtr,
-		C.int(batch), C.int(dim), C.float(eps))
-}
-
-type LayerScratch struct {
-	Q, K, V     *CUDATensor
-	Attn        *CUDATensor
-	Normed      *CUDATensor
-	Gate, Up    *CUDATensor
-	Down        *CUDATensor
-	Logits      []float32
-	KVAllocated bool
-}
-
-func (c *CUDAContext) NewLayerScratch(maxTokens, dim, hiddenDim, heads, kvHeads, headDim, seqLen, vocabSize, qNormDim, kNormDim int) *LayerScratch {
-	scratch := &LayerScratch{}
-
-	scratch.Q, _ = c.NewTensor(maxTokens, dim, DataTypeF16)
-	scratch.K, _ = c.NewTensor(kvHeads*seqLen, headDim, DataTypeF16)
-	scratch.V, _ = c.NewTensor(kvHeads*seqLen, headDim, DataTypeF16)
-	scratch.Attn, _ = c.NewTensor(maxTokens, dim, DataTypeF16)
-	scratch.Normed, _ = c.NewTensor(1, dim, DataTypeF16)
-	scratch.Gate, _ = c.NewTensor(1, hiddenDim, DataTypeF16)
-	scratch.Up, _ = c.NewTensor(1, hiddenDim, DataTypeF16)
-	scratch.Down, _ = c.NewTensor(1, dim, DataTypeF16)
-
-	scratch.Logits = make([]float32, vocabSize)
-
-	return scratch
-}
-
-func (s *LayerScratch) Free() {
-	resources := []*CUDATensor{s.Q, s.K, s.V, s.Attn, s.Normed, s.Gate, s.Up, s.Down}
-	for _, r := range resources {
-		if r != nil {
-			r.Free()
-		}
-	}
-}
-
-type CUDAWeight struct {
-	Name       string
-	Rows, Cols int
-	GGMLType   gguf.GGMLType
-	DevPtr     unsafe.Pointer
-	HostData   []byte
-	DataBytes  int
-	Dequanted  *CUDATensor
+type weight struct {
+	devPtr  unsafe.Pointer
+	rows    int
+	cols    int
+	dtype   DataType
+	ctx     *CUDAContext
 }
 
 type CUDAModel struct {
-	Ctx        *CUDAContext
-	Weights    map[string]*CUDAWeight
-	NumLayers  int
-	NumHeads   int
-	HeadDim    int
-	KCache     []*CUDATensor
-	VCache     []*CUDATensor
-	OutputNorm *CUDATensor
-	Output     *CUDATensor
-	TokenEmb   *CUDATensor
+	Ctx      *CUDAContext
+	Weights  map[string]*weight
+	KCache   []*CUDATensor
+	VCache   []*CUDATensor
+	mu       sync.RWMutex
 }
 
-func (m *CUDAModel) Free() {
-	for _, w := range m.Weights {
-		if w.DevPtr != nil {
-			C.cudaFree(w.DevPtr)
-			w.DevPtr = nil
-		}
-		if w.Dequanted != nil {
-			w.Dequanted.Free()
-			w.Dequanted = nil
-		}
-	}
-
-	for i := range m.KCache {
-		if m.KCache[i] != nil {
-			m.KCache[i].Free()
-		}
-	}
-	for i := range m.VCache {
-		if m.VCache[i] != nil {
-			m.VCache[i].Free()
-		}
-	}
-}
-
-func (c *CUDAContext) NewCUDAModel(f *gguf.GGUFFile, kvCache bool, maxSeqLen int) (*CUDAModel, error) {
+func (ctx *CUDAContext) NewCUDAModel(f *gguf.GGUFFile, preDequantize bool, kvCacheSize int) (*CUDAModel, error) {
 	m := &CUDAModel{
-		Ctx:     c,
-		Weights: make(map[string]*CUDAWeight),
+		Ctx:     ctx,
+		Weights: make(map[string]*weight),
 	}
 
-	arch := "unknown"
-	if v, ok := f.KV["general.architecture"].(string); ok {
-		arch = v
-	}
-
-	m.NumLayers = 1
-	if v, ok := f.KV["llama.block_count"].(uint32); ok {
-		m.NumLayers = int(v)
-	}
-
-	m.NumHeads = 32
-	if v, ok := f.KV["llama.attention.head_count"].(uint32); ok {
-		m.NumHeads = int(v)
-	}
-
-	dim := 2048
-	if v, ok := f.KV["llama.embedding_length"].(uint32); ok {
-		dim = int(v)
-	}
-
-	m.HeadDim = dim / m.NumHeads
-
-	fmt.Printf("Loading %s with %d layers, %d heads, headDim=%d\n", arch, m.NumLayers, m.NumHeads, m.HeadDim)
-	fmt.Printf("Loading %d tensors from GGUF...\n", len(f.Tensors))
-
-	for _, t := range f.Tensors {
-		name := t.Name
-
-		rows := int(t.Dimensions[0])
+	for name, tensor := range f.Tensors {
+		log.Printf("Loading tensor %s (%v, %v)...", name, tensor.Type, tensor.Dimensions)
+		
+		rows := int(tensor.Dimensions[0])
 		cols := 1
-		for d := 1; d < len(t.Dimensions); d++ {
-			cols *= int(t.Dimensions[d])
-		}
-
-		if rows == 0 || cols == 0 {
-			continue
+		if len(tensor.Dimensions) > 1 {
+			cols = int(tensor.Dimensions[1])
 		}
 
 		numElements := rows * cols
 		
-		// Dequantize host-side first
-		var fp32Data []float32
-		switch t.Type {
-		case gguf.GGMLTypeQ8_0:
-			fp32Data = gguf.DequantizeQ8_0(t.Data, numElements)
-		case gguf.GGMLTypeQ5_0:
-			fp32Data = gguf.DequantizeQ5_0(t.Data, numElements)
-		case gguf.GGMLTypeQ4_0:
-			fp32Data = gguf.DequantizeQ4_0(t.Data, numElements)
-		case gguf.GGMLTypeQ4_K:
-			fp32Data = gguf.DequantizeQ4K(t.Data, numElements)
-		case gguf.GGMLTypeQ6_K:
-			fp32Data = gguf.DequantizeQ6K(t.Data, numElements)
+		// Create GPU tensor for FP16 dequantized weights
+		var dPtr unsafe.Pointer
+		C.cudaMalloc(&dPtr, C.size_t(numElements*2))
+		
+		// Create temporary host buffer and dequantize
+		var hostFP16 []uint16
+		switch tensor.Type {
 		case gguf.GGMLTypeF32:
-			fp32Data = make([]float32, numElements)
+			f32Data := make([]float32, numElements)
 			for i := 0; i < numElements; i++ {
-				offset := i * 4
-				if offset+4 <= len(t.Data) {
-					fp32Data[i] = math.Float32frombits(binary.LittleEndian.Uint32(t.Data[offset : offset+4]))
-				}
+				f32Data[i] = math.Float32frombits(binary.LittleEndian.Uint32(tensor.HostData[i*4:]))
 			}
-		case gguf.GGMLTypeF16:
-			fp32Data = make([]float32, numElements)
-			for i := 0; i < numElements; i++ {
-				offset := i * 2
-				if offset+2 <= len(t.Data) {
-					fp16 := binary.LittleEndian.Uint16(t.Data[offset : offset+2])
-					fp32Data[i] = Float16ToFloat32(fp16)
-				}
-			}
+			hostFP16 = Float32SliceToFloat16(f32Data)
+		case gguf.GGMLTypeQ8_0:
+			f32Data := gguf.DequantizeQ8_0(tensor.HostData, numElements)
+			hostFP16 = Float32SliceToFloat16(f32Data)
+		case gguf.GGMLTypeQ4_K:
+			f32Data := gguf.DequantizeQ4K(tensor.HostData, numElements)
+			hostFP16 = Float32SliceToFloat16(f32Data)
+		case gguf.GGMLTypeQ6_K:
+			f32Data := gguf.DequantizeQ6K(tensor.HostData, numElements)
+			hostFP16 = Float32SliceToFloat16(f32Data)
 		default:
-			fmt.Printf("Warning: skipping unsupported tensor %s type %v\n", name, t.Type)
-			continue
+			C.cudaFree(dPtr)
+			return nil, fmt.Errorf("unsupported quantization: %v", tensor.Type)
 		}
-
-		// Convert to FP16 for GPU
-		fp16Data := make([]uint16, numElements)
-		for i, v := range fp32Data {
-			fp16Data[i] = Float32ToFloat16(v)
-		}
-
-		dataBytes := numElements * 2 // FP16
-		var devPtr unsafe.Pointer
-		result := C.cudaMalloc(&devPtr, C.size_t(dataBytes))
-		if result != C.cudaSuccess {
-			fmt.Printf("cudaMalloc failed for %s: %v (trying %d bytes)\n", name, result, dataBytes)
-			continue
-		}
-
-		C.cudaMemcpy(devPtr, unsafe.Pointer(&fp16Data[0]), C.size_t(dataBytes), C.cudaMemcpyHostToDevice)
-		cudaTraceAlloc(int64(dataBytes))
-
-		m.Weights[name] = &CUDAWeight{
-			Name:      name,
-			Rows:      rows,
-			Cols:      cols,
-			GGMLType:  gguf.GGMLTypeF16, // Now stored as F16 on GPU
-			DevPtr:    devPtr,
-			DataBytes: dataBytes,
+		
+		C.cudaMemcpy(dPtr, unsafe.Pointer(&hostFP16[0]), C.size_t(numElements*2), C.cudaMemcpyHostToDevice)
+		
+		m.Weights[name] = &weight{
+			devPtr: dPtr,
+			rows:   rows,
+			cols:   cols,
+			dtype:  DataTypeF16,
+			ctx:    ctx,
 		}
 	}
 
-	fmt.Printf("Loaded and dequantized %d tensors to GPU FP16\n", len(m.Weights))
+	// Allocate KV Cache
+	layers := 0
+	if v, ok := f.KV["llama.block_count"].(uint32); ok { layers = int(v) }
+	heads := 32
+	if v, ok := f.KV["llama.attention.head_count"].(uint32); ok { heads = int(v) }
+	dim := 2048
+	if v, ok := f.KV["llama.embedding_length"].(uint32); ok { dim = int(v) }
+	headDim := dim / heads
 
-	c.Synchronize()
-
-	fmt.Printf("Allocating KV cache for %d layers, %d positions\n", m.NumLayers, maxSeqLen)
-
-	if kvCache {
-		cacheSize := maxSeqLen
-		m.KCache = make([]*CUDATensor, m.NumLayers)
-		m.VCache = make([]*CUDATensor, m.NumLayers)
-
-		for i := 0; i < m.NumLayers; i++ {
-			k, err := c.NewTensor(m.NumHeads, cacheSize*m.HeadDim, DataTypeF16)
-			if err != nil {
-				fmt.Printf("Warning: failed to allocate K cache for layer %d: %v\n", i, err)
-				continue
-			}
-			m.KCache[i] = k
-
-			v, err := c.NewTensor(m.NumHeads, cacheSize*m.HeadDim, DataTypeF16)
-			if err != nil {
-				fmt.Printf("Warning: failed to allocate V cache for layer %d: %v\n", i, err)
-				continue
-			}
-			m.VCache[i] = v
-		}
+	m.KCache = make([]*CUDATensor, layers)
+	m.VCache = make([]*CUDATensor, layers)
+	for i := 0; i < layers; i++ {
+		m.KCache[i], _ = ctx.NewTensor(kvCacheSize * heads, headDim, DataTypeF16)
+		m.VCache[i], _ = ctx.NewTensor(kvCacheSize * heads, headDim, DataTypeF16)
 	}
 
 	return m, nil
 }
 
-func (m *CUDAModel) GetWeight(name string) (*CUDAWeight, bool) {
-	w, ok := m.Weights[name]
-	return w, ok
+func (m *CUDAModel) Free() {
+	for _, w := range m.Weights {
+		C.cudaFree(w.devPtr)
+	}
+	for _, c := range m.KCache { c.Free() }
+	for _, c := range m.VCache { c.Free() }
 }
 
-func (m *CUDAModel) GetDequantedWeight(name string) (*CUDATensor, error) {
+func (m *CUDAModel) GetWeightTensor(name string) (*CUDATensor, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	w, ok := m.Weights[name]
-	if !ok {
-		return nil, fmt.Errorf("weight not found: %s", name)
-	}
-
-	if w.Dequanted != nil {
-		return w.Dequanted, nil
-	}
-
-	numElements := w.Rows * w.Cols
-	var resultData []float32
-
-	switch w.GGMLType {
-	case gguf.GGMLTypeQ8_0:
-		resultData = gguf.DequantizeQ8_0(w.HostData, numElements)
-	case gguf.GGMLTypeQ5_0:
-		resultData = gguf.DequantizeQ5_0(w.HostData, numElements)
-	case gguf.GGMLTypeQ4_0:
-		resultData = gguf.DequantizeQ4_0(w.HostData, numElements)
-	case gguf.GGMLTypeQ4_K:
-		resultData = gguf.DequantizeQ4K(w.HostData, numElements)
-	case gguf.GGMLTypeQ6_K:
-		resultData = gguf.DequantizeQ6K(w.HostData, numElements)
-	case gguf.GGMLTypeF32:
-		resultData = make([]float32, numElements)
-		for i := 0; i < numElements; i++ {
-			offset := i * 4
-			if offset+4 <= len(w.HostData) {
-				resultData[i] = math.Float32frombits(binary.LittleEndian.Uint32(w.HostData[offset : offset+4]))
-			}
-		}
-	case gguf.GGMLTypeF16:
-		resultData = make([]float32, numElements)
-		for i := 0; i < numElements; i++ {
-			offset := i * 2
-			if offset+2 <= len(w.HostData) {
-				resultData[i] = Float16ToFloat32(binary.LittleEndian.Uint16(w.HostData[offset : offset+2]))
-			}
-		}
-	default:
-		return nil, fmt.Errorf("unsupported quantization type: %v", w.GGMLType)
-	}
-
-	d := &CUDATensor{
-		ctx:       m.Ctx,
-		rows:      w.Rows,
-		cols:      w.Cols,
-		sizeBytes: numElements * 4,
-		HostData:  Float32SliceToBytes(resultData),
-		ggmlType:  w.GGMLType,
-	}
-
-	w.Dequanted = d
-	return d, nil
-}
-
-func (m *CUDAModel) GetWeightTensor(name string) (*CUDATensor, error) {
-	w, ok := m.Weights[name]
-	if !ok {
-		return nil, fmt.Errorf("weight not found: %s", name)
-	}
-
-	if w.DevPtr == nil {
-		return nil, fmt.Errorf("weight %s has no GPU allocation", name)
-	}
-
+	if !ok { return nil, false }
 	return &CUDATensor{
-		ctx:       m.Ctx,
-		rows:      w.Rows,
-		cols:      w.Cols,
-		sizeBytes: w.DataBytes,
-		devPtr:    w.DevPtr,
-		ggmlType:  w.GGMLType,
-	}, nil
+		devPtr: w.devPtr,
+		rows:   w.rows,
+		cols:   w.cols,
+		dtype:  w.dtype,
+		ctx:    m.Ctx,
+	}, true
 }
 
 func (m *CUDAModel) GetEmbeddingTensor(token int) (*CUDATensor, error) {
-	embWeight, err := m.GetWeightTensor("token_embd.weight")
-	if err != nil {
-		return nil, err
+	embWeight, ok := m.GetWeightTensor("token_embd.weight")
+	if !ok {
+		return nil, fmt.Errorf("embedding weight not found")
 	}
 	tokenEmb := m.Ctx.NewTensorPooled(1, embWeight.rows)
 	offset := uintptr(token) * uintptr(embWeight.rows) * 2
@@ -1305,113 +427,109 @@ func (m *CUDAModel) GetEmbeddingTensor(token int) (*CUDATensor, error) {
 	return tokenEmb, nil
 }
 
-func (m *CUDAModel) GetEmbedding_OLD(token int) ([]float32, error) {
-	emb, ok := m.GetWeight("token_embd.weight")
-	if !ok {
-		return nil, fmt.Errorf("embedding weight not found")
-	}
-
-	dim := emb.Rows // 2048
-	result := make([]float32, dim)
-
-	switch emb.GGMLType {
-	case gguf.GGMLTypeQ8_0:
-		const blockSize = 32
-		const blockBytes = 34 // 2 (scale) + 32 (quants)
-		data := emb.HostData
-
-		// dim = 2048 (embedding dimension)
-		// numBlocks = 2048/32 = 64 blocks per token
-		numBlocks := dim / blockSize
-		bytesPerToken := numBlocks * blockBytes
-
-		if len(data) < (token+1)*bytesPerToken {
-			log.Printf("WARNING: embedding data too small: have %d bytes, need %d for token %d",
-				len(data), (token+1)*bytesPerToken, token)
-		}
-
-		for blk := 0; blk < numBlocks; blk++ {
-			blockOffset := token*bytesPerToken + blk*blockBytes
-			if blockOffset+2 >= len(data) {
-				break
-			}
-
-			scale := Float16ToFloat32(binary.LittleEndian.Uint16(data[blockOffset : blockOffset+2]))
-			qs := data[blockOffset+2 : blockOffset+blockBytes]
-			for j := 0; j < blockSize; j++ {
-				result[blk*blockSize+j] = scale * float32(int8(qs[j]))
-			}
-		}
-
-		// Debug: print first few values
-		log.Printf("DEBUG: Q8_0 embedding token=%d first5=%v", token, result[:5])
-
-	case gguf.GGMLTypeF32:
-		offset := token * dim * 4
-		data := emb.HostData
-		for i := 0; i < dim; i++ {
-			result[i] = math.Float32frombits(
-				uint32(data[offset+i*4]) |
-					uint32(data[offset+i*4+1])<<8 |
-					uint32(data[offset+i*4+2])<<16 |
-					uint32(data[offset+i*4+3])<<24)
-		}
-
-	case gguf.GGMLTypeQ5_0:
-		return m.GetEmbeddingQ5_0(token, emb)
-
-	case gguf.GGMLTypeQ4_0:
-		return m.GetEmbeddingQ4_0(token, emb)
-
-	case gguf.GGMLTypeQ6_K:
-		return m.GetEmbeddingQ6_K(token, emb)
-
-	case gguf.GGMLTypeQ4_K:
-		return m.GetEmbeddingQ4_K(token, emb)
-
-	default:
-		return nil, fmt.Errorf("unsupported embedding quantization: %v", emb.GGMLType)
-	}
-
-	return result, nil
-}
-
 func (m *CUDAModel) GetKCache(layer int) *CUDATensor {
-	if layer < 0 || layer >= len(m.KCache) {
-		return nil
-	}
+	if layer < 0 || layer >= len(m.KCache) { return nil }
 	return m.KCache[layer]
 }
 
 func (m *CUDAModel) GetVCache(layer int) *CUDATensor {
-	if layer < 0 || layer >= len(m.VCache) {
-		return nil
-	}
+	if layer < 0 || layer >= len(m.VCache) { return nil }
 	return m.VCache[layer]
 }
 
+// Utils
 
+func Float16ToFloat32(h uint16) float32 {
+	s := (h >> 15) & 0x01
+	e := (h >> 10) & 0x1f
+	f := h & 0x03ff
 
+	if e == 0 {
+		if f == 0 { return math.Float32frombits(uint32(s) << 31) }
+		for (f & 0x0400) == 0 {
+			f <<= 1
+			e--
+		}
+		e++
+		f &= 0x03ff
+	} else if e == 31 {
+		if f == 0 { return math.Float32frombits((uint32(s) << 31) | 0x7f800000) }
+		return math.Float32frombits((uint32(s) << 31) | 0x7f800000 | (uint32(f) << 13))
+	}
 
-
-func (ctx *CUDAContext) TurboQuantPolarQuant(input, rotationMatrix []float32, n, bits int) (quantized []int8, scale float32, residual []float32) {
-	quantized = make([]int8, n)
-	residual = make([]float32, n)
-	return quantized, 1.0, residual
+	bits := (uint32(s) << 31) | (uint32(e+127-15) << 23) | (uint32(f) << 13)
+	return math.Float32frombits(bits)
 }
 
-func (ctx *CUDAContext) TurboQuantQJLTransform(residual, signMatrix []float32, rows, cols int) (quantized []int8, scale float32) {
-	quantized = make([]int8, rows)
-	return quantized, 1.0
+func Float32ToFloat16(f float32) uint16 {
+	bits := math.Float32bits(f)
+	s := uint16((bits >> 16) & 0x8000)
+	e := int16((bits >> 23) & 0xff)
+	m := bits & 0x7fffff
+
+	if e == 0 {
+		return s
+	} else if e == 0xff {
+		if m == 0 { return s | 0x7c00 }
+		return s | 0x7e00
+	}
+
+	e = e - 127 + 15
+	if e >= 31 {
+		return s | 0x7c00
+	} else if e <= 0 {
+		return s
+	}
+
+	return s | (uint16(e) << 10) | uint16(m>>13)
 }
 
-func (ctx *CUDAContext) TurboQuantEncode(input, rotationMatrix, qjlMatrix []float32, blockSize, qjlRows, bits int) (output []int8, scale, qjlScale float32) {
-	outputSize := blockSize + qjlRows
-	output = make([]int8, outputSize)
-	return output, 1.0, 1.0
+func Float32SliceToFloat16(data []float32) []uint16 {
+	res := make([]uint16, len(data))
+	for i, v := range data {
+		res[i] = Float32ToFloat16(v)
+	}
+	return res
 }
 
-func (ctx *CUDAContext) TurboQuantDecode(input []int8, rotationMatrix, scaleIn []float32, blockSize, qjlRows int) []float32 {
-	output := make([]float32, blockSize)
-	return output
+func CUDAAllocatedBytes() int64 {
+	var free, total C.size_t
+	C.cudaMemGetInfo(&free, &total)
+	return int64(total - free)
+}
+
+type LayerScratch struct {
+	Normed  *CUDATensor
+	Attn    *CUDATensor
+	Gate    *CUDATensor
+	Up      *CUDATensor
+	Down    *CUDATensor
+}
+
+func (ctx *CUDAContext) NewLayerScratch(batch, dim, hiddenDim, heads, kvHeads, headDim, seqLen, vocabSize, qNormDim, kNormDim int) *LayerScratch {
+	normed, _ := ctx.NewTensor(batch, dim, DataTypeF16)
+	attn, _ := ctx.NewTensor(batch*heads, headDim, DataTypeF16)
+	gate, _ := ctx.NewTensor(batch, hiddenDim, DataTypeF16)
+	up, _ := ctx.NewTensor(batch, hiddenDim, DataTypeF16)
+	down, _ := ctx.NewTensor(batch, dim, DataTypeF16)
+
+	return &LayerScratch{
+		Normed: normed,
+		Attn:   attn,
+		Gate:   gate,
+		Up:     up,
+		Down:   down,
+	}
+}
+
+func (s *LayerScratch) Free() {
+	s.Normed.Free()
+	s.Attn.Free()
+	s.Gate.Free()
+	s.Up.Free()
+	s.Down.Free()
+}
+
+func (ctx *CUDAContext) CopyF16(src, dst *CUDATensor) {
+	C.cudaMemcpyAsync(dst.devPtr, src.devPtr, C.size_t(src.rows*src.cols*2), C.cudaMemcpyDeviceToDevice, ctx.Ctx)
 }
