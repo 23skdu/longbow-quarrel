@@ -12,10 +12,10 @@ type CUDAContext struct {
 }
 
 type CUDAModel struct {
-	KCache []*CUDATensor
+	KCache []*Tensor
 }
 
-type CUDATensor struct{}
+type Tensor struct{}
 type CUDAWeight struct{}
 type CUDALayerScratch struct{}
 

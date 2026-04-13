@@ -144,32 +144,27 @@ func (t *TensorParallelManager) GetContext(device int) (*CUDAContext, error) {
 
 	C.cudaSetDevice(C.int(device))
 
+	var stream C.cudaStream_t
+	if err := C.cudaStreamCreate(&stream); err != 0 {
+		return nil, fmt.Errorf("cudaStreamCreate failed: %v", err)
+	}
+
+	var handle C.cublasHandle_t
+	if err := C.cublasCreate(&handle); err != 0 {
+		C.cudaStreamDestroy(stream)
+		return nil, fmt.Errorf("cublasCreate failed: %v", err)
+	}
+	C.cublasSetStream(handle, stream)
+
 	ctx := &CUDAContext{
-		device:        device,
-		stream:        nil,
-		handle:        nil,
-		pool:          make(map[string][]*CUDATensor),
-		useTensorCore: true,
+		Ctx:    stream,
+		Cublas: handle,
+		pool: &tensorPool{
+			free: make(map[int][]*Tensor),
+		},
 	}
 
-	var cuDevice C.int
-	C.cudaGetDevice(&cuDevice)
-	ctx.device = int(cuDevice)
-
-	C.cudaStreamCreate(&ctx.stream)
-	if ctx.stream == nil {
-		return nil, fmt.Errorf("cudaStreamCreate failed for device %d", device)
-	}
-
-	status := C.cublasCreate(&ctx.handle)
-	if status != 0 {
-		C.cudaStreamDestroy(ctx.stream)
-		return nil, fmt.Errorf("cublasCreate failed for device %d: %d", device, status)
-	}
-
-	C.cublasSetStream(ctx.handle, ctx.stream)
 	t.contexts[device] = ctx
-
 	return ctx, nil
 }
 
@@ -202,7 +197,7 @@ func (t *TensorParallelManager) AllReduce(data []float32, count int) error {
 	outputPtr := unsafe.Pointer(&data[0])
 
 	ncclSum := C.int(1)
-	C.ncclAllReduceStub(inputPtr, outputPtr, C.size_t(count), ncclSum, C.int(1), unsafe.Pointer(ctx.stream))
+	C.ncclAllReduceStub(inputPtr, outputPtr, C.size_t(count), ncclSum, C.int(1), unsafe.Pointer(ctx.Ctx))
 
 	return nil
 }
@@ -221,7 +216,7 @@ func (t *TensorParallelManager) AllGather(input []float32, output []float32, cou
 	inputPtr := unsafe.Pointer(&input[0])
 	outputPtr := unsafe.Pointer(&output[0])
 
-	C.ncclAllGatherStub(inputPtr, outputPtr, C.size_t(count), 1, unsafe.Pointer(ctx.stream))
+	C.ncclAllGatherStub(inputPtr, outputPtr, C.size_t(count), 1, unsafe.Pointer(ctx.Ctx))
 
 	return nil
 }
@@ -238,7 +233,7 @@ func (t *TensorParallelManager) Broadcast(data []float32, count int, root int) e
 
 	dataPtr := unsafe.Pointer(&data[0])
 
-	C.ncclBroadcastStub(dataPtr, dataPtr, C.size_t(count), 1, C.int(root), unsafe.Pointer(ctx.stream))
+	C.ncclBroadcastStub(dataPtr, dataPtr, C.size_t(count), 1, C.int(root), unsafe.Pointer(ctx.Ctx))
 
 	return nil
 }
@@ -250,7 +245,7 @@ func (t *TensorParallelManager) SynchronizeAll() {
 			continue
 		}
 		C.cudaSetDevice(C.int(device))
-		C.cudaStreamSynchronize(ctx.stream)
+		C.cudaStreamSynchronize(ctx.Ctx)
 	}
 }
 
@@ -264,10 +259,10 @@ type PipelineStage struct {
 	EndLayer     int
 	DeviceID     int
 	Context      *CUDAContext
-	InputBuffer  *CUDATensor
-	OutputBuffer *CUDATensor
-	Weights      map[string]*CUDATensor
-	DeQuantCache map[string]*CUDATensor
+	InputBuffer  *Tensor
+	OutputBuffer *Tensor
+	Weights      map[string]*Tensor
+	DeQuantCache map[string]*Tensor
 	mu           sync.Mutex
 }
 
@@ -331,8 +326,8 @@ func NewPipelineParallelManager(config *MultiGPUConfig, numLayers int) (*Pipelin
 			StartLayer:   startLayer,
 			EndLayer:     endLayer,
 			DeviceID:     deviceID,
-			Weights:      make(map[string]*CUDATensor),
-			DeQuantCache: make(map[string]*CUDATensor),
+			Weights:      make(map[string]*Tensor),
+			DeQuantCache: make(map[string]*Tensor),
 		}
 		pp.stages[i] = stage
 	}
@@ -371,21 +366,19 @@ func (p *PipelineParallelManager) forwardStage(stage *PipelineStage, input []flo
 	stage.mu.Lock()
 	defer stage.mu.Unlock()
 
-	manager, err := GetMultiGPUManager()
-	if err != nil {
-		return nil, err
+	manager := GetHybridManager()
+	if manager == nil {
+		return nil, fmt.Errorf("hybrid manager not initialized")
 	}
-	ctx, err := manager.GetContext(stage.DeviceID)
-	if err != nil {
-		return nil, err
-	}
+	// Note: We need a way to get context from multi-gpu manager or directly
+	// For now, we'll assume the context is available through the stage or similar
+	_ = microBatchID
 
 	dim := len(input)
 	output := make([]float32, dim)
 
 	for layer := stage.StartLayer; layer < stage.EndLayer; layer++ {
 		_ = layer
-		_ = ctx
 	}
 
 	copy(output, input)
