@@ -252,8 +252,8 @@ func NewCUDNNContext() (*CUDNNContext, error) {
 }
 
 func (c *CUDNNContext) FlashAttention(
-	q, k, v *CUDATensor,
-	output *CUDATensor,
+	q, k, v *Tensor,
+	output *Tensor,
 	batchSize, numHeads, seqLen, headDim int,
 	scale float32,
 ) error {
@@ -286,7 +286,7 @@ func (c *CUDNNContext) FlashAttention(
 }
 
 func (c *CUDNNContext) GroupedConv(
-	input, weight, output *CUDATensor,
+	input, weight, output *Tensor,
 	batchSize, numGroups, inChannels, outChannels, height, width int,
 ) error {
 	c.mu.Lock()
@@ -317,7 +317,7 @@ func (c *CUDNNContext) GroupedConv(
 }
 
 func (c *CUDNNContext) LayerNorm(
-	input, gamma, beta, output *CUDATensor,
+	input, gamma, beta, output *Tensor,
 	batchSize, channels, innerSize int,
 	eps float32,
 ) error {

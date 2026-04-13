@@ -67,18 +67,22 @@ type CUDAContext struct {
 	pool   *tensorPool
 }
 
+func (ctx *CUDAContext) DeviceID() int {
+	return 0 // Placeholder
+}
+
 type Tensor struct {
-	devPtr  unsafe.Pointer
-	rows    int
-	cols    int
-	dtype   DataType
-	ctx     *CUDAContext
-	pooled  bool
+	devPtr   unsafe.Pointer
+	rows     int
+	cols     int
+	dataType DataType
+	ctx      *CUDAContext
+	pooled   bool
 }
 
 type tensorPool struct {
-	mu     sync.Mutex
-	free   map[int][]*Tensor
+	mu   sync.Mutex
+	free map[int][]*Tensor
 }
 
 func NewCUDAContext() (*CUDAContext, error) {
@@ -116,12 +120,11 @@ func (ctx *CUDAContext) NewTensor(rows, cols int, dtype DataType) (*Tensor, erro
 	var bytes int
 	switch dtype {
 	case DataTypeF16, DataTypeQ4K, DataTypeQ4_0, DataTypeQ6K, DataTypeQ8_0:
-		// GPU weights are typically F16 after dequantization for math kernels
 		bytes = size * 2
 	case DataTypeF32:
 		bytes = size * 4
 	default:
-		bytes = size * 4 // Fallback
+		bytes = size * 4
 	}
 
 	var ptr unsafe.Pointer
@@ -130,11 +133,11 @@ func (ctx *CUDAContext) NewTensor(rows, cols int, dtype DataType) (*Tensor, erro
 	}
 
 	return &Tensor{
-		devPtr: ptr,
-		rows:   rows,
-		cols:   cols,
-		dtype:  dtype,
-		ctx:    ctx,
+		devPtr:   ptr,
+		rows:     rows,
+		cols:     cols,
+		dataType: dtype,
+		ctx:      ctx,
 	}, nil
 }
 
@@ -175,6 +178,20 @@ func (t *Tensor) Rows() int { return t.rows }
 func (t *Tensor) Cols() int { return t.cols }
 func (t *Tensor) Data() unsafe.Pointer { return t.devPtr }
 
+func (t *Tensor) SizeBytes() int {
+	size := t.rows * t.cols
+	switch t.dataType {
+	case DataTypeF32:
+		return size * 4
+	default:
+		return size * 2
+	}
+}
+
+func (t *Tensor) RawData() []byte {
+	return unsafe.Slice((*byte)(t.devPtr), t.SizeBytes())
+}
+
 func (t *Tensor) LoadFrom(data interface{}) error {
 	var src unsafe.Pointer
 	var bytes int
@@ -183,7 +200,7 @@ func (t *Tensor) LoadFrom(data interface{}) error {
 	case []float32:
 		src = unsafe.Pointer(&d[0])
 		bytes = len(d) * 4
-		if t.dtype == DataTypeF16 {
+		if t.dataType == DataTypeF16 {
 			return fmt.Errorf("direct load of []float32 to F16 tensor not supported")
 		}
 	case []uint16:
@@ -210,7 +227,7 @@ func (t *Tensor) ToHostF32() []float32 {
 	size := t.rows * t.cols
 	result := make([]float32, size)
 
-	if t.dtype == DataTypeF16 {
+	if t.dataType == DataTypeF16 {
 		hostF16 := make([]uint16, size)
 		C.cudaMemcpy(unsafe.Pointer(&hostF16[0]), t.devPtr, C.size_t(size*2), C.cudaMemcpyDeviceToHost)
 		for i, v := range hostF16 {
@@ -280,11 +297,11 @@ func (ctx *CUDAContext) Synchronize() {
 // CUDAModel and Weight Loading
 
 type weight struct {
-	devPtr unsafe.Pointer
-	rows   int
-	cols   int
-	dtype  DataType
-	ctx    *CUDAContext
+	devPtr   unsafe.Pointer
+	rows     int
+	cols     int
+	dataType DataType
+	ctx      *CUDAContext
 }
 
 type CUDAModel struct {
@@ -333,26 +350,20 @@ func (ctx *CUDAContext) NewCUDAModel(f *gguf.GGUFFile, preDequantize bool, kvCac
 		}
 		C.cudaMemcpy(dPtr, unsafe.Pointer(&hostFP16[0]), C.size_t(numElements*2), C.cudaMemcpyHostToDevice)
 		m.Weights[name] = &weight{
-			devPtr: dPtr,
-			rows:   rows,
-			cols:   cols,
-			dtype:  DataTypeF16,
-			ctx:    ctx,
+			devPtr:   dPtr,
+			rows:     rows,
+			cols:     cols,
+			dataType: DataTypeF16,
+			ctx:      ctx,
 		}
 	}
 
 	layers := 0
-	if v, ok := f.KV["llama.block_count"].(uint32); ok {
-		layers = int(v)
-	}
+	if v, ok := f.KV["llama.block_count"].(uint32); ok { layers = int(v) }
 	heads := 32
-	if v, ok := f.KV["llama.attention.head_count"].(uint32); ok {
-		heads = int(v)
-	}
+	if v, ok := f.KV["llama.attention.head_count"].(uint32); ok { heads = int(v) }
 	dim := 2048
-	if v, ok := f.KV["llama.embedding_length"].(uint32); ok {
-		dim = int(v)
-	}
+	if v, ok := f.KV["llama.embedding_length"].(uint32); ok { dim = int(v) }
 	headDim := dim / heads
 
 	m.KCache = make([]*Tensor, layers)
@@ -361,6 +372,7 @@ func (ctx *CUDAContext) NewCUDAModel(f *gguf.GGUFFile, preDequantize bool, kvCac
 		m.KCache[i], _ = ctx.NewTensor(kvCacheSize*heads, headDim, DataTypeF16)
 		m.VCache[i], _ = ctx.NewTensor(kvCacheSize*heads, headDim, DataTypeF16)
 	}
+
 	return m, nil
 }
 
@@ -368,27 +380,21 @@ func (m *CUDAModel) Free() {
 	for _, w := range m.Weights {
 		C.cudaFree(w.devPtr)
 	}
-	for _, c := range m.KCache {
-		c.Free()
-	}
-	for _, c := range m.VCache {
-		c.Free()
-	}
+	for _, c := range m.KCache { c.Free() }
+	for _, c := range m.VCache { c.Free() }
 }
 
 func (m *CUDAModel) GetWeightTensor(name string) (*Tensor, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	w, ok := m.Weights[name]
-	if !ok {
-		return nil, false
-	}
+	if !ok { return nil, false }
 	return &Tensor{
-		devPtr: w.devPtr,
-		rows:   w.rows,
-		cols:   w.cols,
-		dtype:  w.dtype,
-		ctx:    m.Ctx,
+		devPtr:   w.devPtr,
+		rows:     w.rows,
+		cols:     w.cols,
+		dataType: w.dataType,
+		ctx:      m.Ctx,
 	}, true
 }
 
@@ -405,16 +411,12 @@ func (m *CUDAModel) GetEmbeddingTensor(token int) (*Tensor, error) {
 }
 
 func (m *CUDAModel) GetKCache(layer int) *Tensor {
-	if layer < 0 || layer >= len(m.KCache) {
-		return nil
-	}
+	if layer < 0 || layer >= len(m.KCache) { return nil }
 	return m.KCache[layer]
 }
 
 func (m *CUDAModel) GetVCache(layer int) *Tensor {
-	if layer < 0 || layer >= len(m.VCache) {
-		return nil
-	}
+	if layer < 0 || layer >= len(m.VCache) { return nil }
 	return m.VCache[layer]
 }
 
@@ -425,11 +427,11 @@ func CUDAAllocatedBytes() int64 {
 }
 
 type LayerScratch struct {
-	Normed *Tensor
-	Attn   *Tensor
-	Gate   *Tensor
-	Up     *Tensor
-	Down   *Tensor
+	Normed  *Tensor
+	Attn    *Tensor
+	Gate    *Tensor
+	Up      *Tensor
+	Down    *Tensor
 }
 
 func (ctx *CUDAContext) NewLayerScratch(batch, dim, hiddenDim, heads, kvHeads, headDim, seqLen, vocabSize, qNormDim, kNormDim int) *LayerScratch {
@@ -438,6 +440,7 @@ func (ctx *CUDAContext) NewLayerScratch(batch, dim, hiddenDim, heads, kvHeads, h
 	gate, _ := ctx.NewTensor(batch, hiddenDim, DataTypeF16)
 	up, _ := ctx.NewTensor(batch, hiddenDim, DataTypeF16)
 	down, _ := ctx.NewTensor(batch, dim, DataTypeF16)
+
 	return &LayerScratch{
 		Normed: normed,
 		Attn:   attn,
