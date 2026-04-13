@@ -562,18 +562,18 @@ func (e *cudaEngine) forward(token int, pos int, allTokens []int) ([]float32, er
 		}
 
 		var q, k, v []float32
-		q, _ = e.matmulGPU(hidden, fmt.Sprintf("blk.%d.attn_q.weight", layer))
-		k, _ = e.matmulGPU(hidden, fmt.Sprintf("blk.%d.attn_k.weight", layer))
-		v, _ = e.matmulGPU(hidden, fmt.Sprintf("blk.%d.attn_v.weight", layer))
-
-		if q == nil {
-			q = e.matmul(hidden, qW.ToHostF32())
+		var err error
+		q, err = e.matmulGPU(hidden, fmt.Sprintf("blk.%d.attn_q.weight", layer))
+		if err != nil {
+			return nil, fmt.Errorf("failed to project q: %w", err)
 		}
-		if k == nil {
-			k = e.matmul(hidden, kW.ToHostF32())
+		k, err = e.matmulGPU(hidden, fmt.Sprintf("blk.%d.attn_k.weight", layer))
+		if err != nil {
+			return nil, fmt.Errorf("failed to project k: %w", err)
 		}
-		if v == nil {
-			v = e.matmul(hidden, vW.ToHostF32())
+		v, err = e.matmulGPU(hidden, fmt.Sprintf("blk.%d.attn_v.weight", layer))
+		if err != nil {
+			return nil, fmt.Errorf("failed to project v: %w", err)
 		}
 
 		// Gemma4: Apply Q/K normalization after projection
@@ -655,10 +655,9 @@ func (e *cudaEngine) forward(token int, pos int, allTokens []int) ([]float32, er
 			log.Printf("DEBUG: after attention: attnOut sum=%f, first5=%v", sum, attnOut[:5])
 		}
 
-		attnProj, _ := e.matmulGPU(attnOut, fmt.Sprintf("blk.%d.attn_output.weight", layer))
-		if attnProj == nil {
-			oWHost := oW.ToHostF32()
-			attnProj = e.matmul(attnOut, oWHost)
+		attnProj, err := e.matmulGPU(attnOut, fmt.Sprintf("blk.%d.attn_output.weight", layer))
+		if err != nil {
+			return nil, fmt.Errorf("failed to project attn_output: %w", err)
 		}
 
 		// Debug: after proj
@@ -689,14 +688,14 @@ func (e *cudaEngine) forward(token int, pos int, allTokens []int) ([]float32, er
 			hidden = e.rmsnorm(hidden, ffnNorm, eps)
 
 			var ffnGate, ffnUp, ffnDown []float32
-			ffnGate, _ = e.matmulGPU(hidden, fmt.Sprintf("blk.%d.ffn_gate.weight", layer))
-			ffnUp, _ = e.matmulGPU(hidden, fmt.Sprintf("blk.%d.ffn_up.weight", layer))
-
-			if ffnGate == nil {
-				ffnGate = e.matmul(hidden, ffnGateW.ToHostF32())
+			var err error
+			ffnGate, err = e.matmulGPU(hidden, fmt.Sprintf("blk.%d.ffn_gate.weight", layer))
+			if err != nil {
+				return nil, fmt.Errorf("failed to project ffn_gate: %w", err)
 			}
-			if ffnUp == nil {
-				ffnUp = e.matmul(hidden, ffnUpW.ToHostF32())
+			ffnUp, err = e.matmulGPU(hidden, fmt.Sprintf("blk.%d.ffn_up.weight", layer))
+			if err != nil {
+				return nil, fmt.Errorf("failed to project ffn_up: %w", err)
 			}
 
 			for i := range ffnGate {
@@ -707,9 +706,9 @@ func (e *cudaEngine) forward(token int, pos int, allTokens []int) ([]float32, er
 				ffnUp[i] *= ffnGate[i]
 			}
 
-			ffnDown, _ = e.matmulGPU(ffnUp, fmt.Sprintf("blk.%d.ffn_down.weight", layer))
-			if ffnDown == nil {
-				ffnDown = e.matmul(ffnUp, ffnDownW.ToHostF32())
+			ffnDown, err = e.matmulGPU(ffnUp, fmt.Sprintf("blk.%d.ffn_down.weight", layer))
+			if err != nil {
+				return nil, fmt.Errorf("failed to project ffn_down: %w", err)
 			}
 			for i := range hidden {
 				hidden[i] += ffnDown[i]

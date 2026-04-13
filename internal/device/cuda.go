@@ -801,10 +801,10 @@ func (c *CUDAContext) LinearF16(input, weight *CUDATensor) (*CUDATensor, error) 
 
 	status := C.cublasSgemmEx(
 		c.handle,
-		C.CUBLAS_OP_N, C.CUBLAS_OP_N,
+		C.CUBLAS_OP_T, C.CUBLAS_OP_N,
 		C.int(weight.cols), C.int(input.rows), C.int(weight.rows),
 		&alpha,
-		weight.devPtr, C.CUDA_R_16F, C.int(weight.cols),
+		weight.devPtr, C.CUDA_R_16F, C.int(weight.rows),
 		input.devPtr, C.CUDA_R_16F, C.int(input.cols),
 		&beta,
 		output.devPtr, C.CUDA_R_16F, C.int(output.cols),
@@ -829,10 +829,10 @@ func (c *CUDAContext) LinearF16TensorCore(input, weight *CUDATensor) (*CUDATenso
 
 	status := C.cublasGemmEx(
 		c.handle,
-		C.CUBLAS_OP_N, C.CUBLAS_OP_N,
+		C.CUBLAS_OP_T, C.CUBLAS_OP_N,
 		C.int(weight.cols), C.int(input.rows), C.int(weight.rows),
 		alphaPtr,
-		weight.devPtr, C.CUDA_R_16F, C.int(weight.cols),
+		weight.devPtr, C.CUDA_R_16F, C.int(weight.rows),
 		input.devPtr, C.CUDA_R_16F, C.int(input.cols),
 		betaPtr,
 		output.devPtr, C.CUDA_R_16F, C.int(output.cols),
