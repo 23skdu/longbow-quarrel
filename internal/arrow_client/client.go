@@ -194,7 +194,8 @@ func (fc *FlightClient) DoPut(ctx context.Context, vectors [][]float32, ids []st
 	return nil
 }
 
-// StreamEmbeddings pushes embeddings directly from one or more device.Tensors using zero-copy Arrow mapping
+// StreamEmbeddings pushes embeddings directly from one or more device.Tensors using zero-copy Arrow mapping.
+// All tensors in a single call must share the same data type and column count.
 func (fc *FlightClient) StreamEmbeddings(ctx context.Context, tensors []*device.Tensor, ids []string, metadata map[string]string) error {
 	if len(tensors) == 0 {
 		return fmt.Errorf("no tensors provided to stream")
@@ -204,64 +205,25 @@ func (fc *FlightClient) StreamEmbeddings(ctx context.Context, tensors []*device.
 		return fmt.Errorf("client not connected, call Connect() first")
 	}
 
-	// 1. Convert Tensors to Arrow arrays (zero-copy if possible)
-	var arrays []arrow.Array
-	var totalRows int64
-	vecDim := tensors[0].Cols()
+	// 1. Determine Schema from the first tensor
+	first := tensors[0]
+	vecDim := first.Cols()
+	var arrowType arrow.DataType
+	switch first.DataType() {
+	case device.DataTypeF32:
+		arrowType = arrow.PrimitiveTypes.Float32
+	case device.DataTypeF16:
+		arrowType = arrow.FixedWidthTypes.Float16
+	default:
+		return fmt.Errorf("unsupported tensor data type for Flight streaming: %v", first.DataType())
+	}
 
 	schema := arrow.NewSchema([]arrow.Field{
 		{Name: "id", Type: arrow.BinaryTypes.String, Nullable: true},
-		{Name: "vector", Type: arrow.FixedSizeListOf(int32(vecDim), arrow.PrimitiveTypes.Float32)},
+		{Name: "vector", Type: arrow.FixedSizeListOf(int32(vecDim), arrowType)},
 	}, nil)
 
-	for _, t := range tensors {
-		arr, err := t.ToArrowArray(fc.allocator)
-		if err != nil {
-			// Clean up partially created arrays
-			for _, a := range arrays {
-				a.Release()
-			}
-			return fmt.Errorf("failed to convert tensor to Arrow: %w", err)
-		}
-		arrays = append(arrays, arr)
-		totalRows += int64(t.Rows())
-	}
-	defer func() {
-		for _, a := range arrays {
-			a.Release()
-		}
-	}()
-
-	// 2. Build ID Array
-	builder := array.NewRecordBuilder(fc.allocator, schema)
-	defer builder.Release()
-
-	idBuilder := builder.Field(0).(*array.StringBuilder)
-	for i := 0; i < int(totalRows); i++ {
-		if i < len(ids) {
-			idBuilder.Append(ids[i])
-		} else {
-			idBuilder.AppendNull()
-		}
-	}
-	idArr := idBuilder.NewArray()
-	defer idArr.Release()
-
-	// 3. Construct Record Batch
-	// Since tensors might be separate, we might need to concatenate the Arrow arrays
-	// or send multiple records. For simplicity in the MVP, we'll concatenate if they are separate.
-	// But arrow.FixedSizeList doesn't easily concatenate without copy.
-	// For now, if there's only one tensor, it's easy. If multiple, we send them as a single record if they share a buffer.
-	
-	vectorArr := arrays[0] // Simplified to first tensor for now
-	if len(arrays) > 1 {
-		// Concatenation would go here
-	}
-
-	record := array.NewRecord(schema, []arrow.Array{idArr, vectorArr}, int64(tensors[0].Rows()))
-	defer record.Release()
-
-	// 4. Create DoPut stream
+	// 2. Open DoPut stream
 	desc := &flight.FlightDescriptor{
 		Type: flight.DescriptorPATH,
 		Path: []string{"embeddings"},
@@ -274,13 +236,62 @@ func (fc *FlightClient) StreamEmbeddings(ctx context.Context, tensors []*device.
 
 	writer := flight.NewRecordWriter(stream, ipc.WithSchema(schema))
 	writer.SetFlightDescriptor(desc)
+	defer writer.Close()
 
-	if err := writer.Write(record); err != nil {
-		return fmt.Errorf("failed to write record: %w", err)
+	// 3. Process each tensor as a separate Record Batch
+	idOffset := 0
+	var totalBytes int64
+
+	for i, t := range tensors {
+		// Validation: Tensors must be homogeneous for a single Flight stream
+		if t.Cols() != vecDim {
+			return fmt.Errorf("tensor %d column mismatch: expected %d, got %d", i, vecDim, t.Cols())
+		}
+		if t.DataType() != first.DataType() {
+			return fmt.Errorf("tensor %d data type mismatch: expected %v, got %v", i, first.DataType(), t.DataType())
+		}
+
+		// Zero-copy conversion to Arrow Array
+		vectorArr, err := t.ToArrowArray(fc.allocator)
+		if err != nil {
+			return fmt.Errorf("failed to convert tensor %d to Arrow: %w", i, err)
+		}
+		defer vectorArr.Release()
+
+		// Build ID array for this specific tensor range
+		rows := t.Rows()
+		idBuilder := array.NewStringBuilder(fc.allocator)
+		for r := 0; r < rows; r++ {
+			idx := idOffset + r
+			if idx < len(ids) {
+				idBuilder.Append(ids[idx])
+			} else {
+				idBuilder.AppendNull()
+			}
+		}
+		idArr := idBuilder.NewArray()
+		idBuilder.Release()
+		defer idArr.Release()
+
+		// Create and write the record
+		record := array.NewRecord(schema, []arrow.Array{idArr, vectorArr}, int64(rows))
+		if err := writer.Write(record); err != nil {
+			record.Release()
+			return fmt.Errorf("failed to write record %d: %w", i, err)
+		}
+		
+		totalBytes += int64(t.SizeBytes())
+		idOffset += rows
+		record.Release()
 	}
 
+	// 4. Close and Acknowledge
 	if err := writer.Close(); err != nil {
-		return fmt.Errorf("failed to close writer: %w", err)
+		return fmt.Errorf("failed to close flight writer: %w", err)
+	}
+
+	if err := stream.CloseSend(); err != nil {
+		return fmt.Errorf("failed to close flight stream: %w", err)
 	}
 
 	_, err = stream.Recv()
@@ -289,10 +300,9 @@ func (fc *FlightClient) StreamEmbeddings(ctx context.Context, tensors []*device.
 	}
 
 	// Update hotpath metrics
-	totalBytes := int64(totalRows * int64(vecDim) * 4)
 	fc.BytesTransferred.Add(totalBytes)
 	metrics.RecordArrowBytesHotpath(totalBytes)
-	for i := 0; i < int(totalRows); i++ {
+	for i := 0; i < idOffset; i++ {
 		metrics.RecordArrowEmbeddingHotpath()
 	}
 

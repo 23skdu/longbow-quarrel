@@ -7,7 +7,6 @@ import (
 	"math"
 	"runtime"
 	"sync/atomic"
-
 	"unsafe"
 
 	"github.com/23skdu/longbow-quarrel/internal/simd"
@@ -152,7 +151,7 @@ func (t *Tensor) Strides() []int {
 }
 
 func (t *Tensor) RawData() []byte {
-	if t.dataType == DataTypeF32 && t.data != nil {
+	if t.data != nil {
 		return unsafe.Slice((*byte)(unsafe.Pointer(&t.data[0])), len(t.data)*4) // #nosec G103
 	}
 	return t.rawData
@@ -199,6 +198,8 @@ func (t *Tensor) ZeroInit() {
 		t.rawData[i] = 0
 	}
 }
+
+func (t *Tensor) DataType() DataType { return t.dataType }
 
 func (t *Tensor) Rows() int {
 	if len(t.dims) < 1 {
@@ -329,9 +330,8 @@ func (t *Tensor) LoadFrom(data interface{}) error {
 		copy(t.data, d)
 	case []byte:
 		return t.LoadFromRaw(d)
-	default:
-		return fmt.Errorf("unsupported data type for LoadFrom: %T", data)
 	}
+	return nil
 }
 
 // LoadFromRaw copies raw bytes to the tensor (for F32 currently on CPU)
@@ -595,4 +595,90 @@ func (c *Context) SetNumThreads(n int) {
 
 func (c *Context) NumThreads() int {
 	return c.numThreads
+}
+
+// AttentionPagedBatch performs paged attention across a batch of sequences on the CPU.
+// q: [batchSize, heads, headDim]
+// kCache, vCache: [totalBlocks, blockSize, heads, headDim] (block-paged pool)
+// blockTables: [batchSize, maxBlocksPerSeq] (int32 physical block IDs)
+func (c *Context) AttentionPagedBatch(q, kCache, vCache, output, tokenPositions, blockTables *Tensor, maxBlocksPerSeq, heads, kvHeads, headDim, blockSize int, tokenToSeq *Tensor, batchSize int) {
+	// Reference multi-threaded implementation for CPU
+	// This is a naive implementation for numerical verification.
+	
+	// Assuming F32 for CPU reference
+	scale := float32(1.0 / math.Sqrt(float64(headDim)))
+
+	for b := 0; b < batchSize; b++ {
+		// Get current token position and block assignments
+		pos := int(getFloat32(tokenPositions.rawData[b*4:]))
+		
+		for h := 0; h < heads; h++ {
+			qOff := (b*heads + h) * headDim
+			qHead := q.data[qOff : qOff+headDim]
+			
+			scores := make([]float32, pos+1)
+			
+			// Compute Attention Scores
+			for p := 0; p <= pos; p++ {
+				logicalBlockIdx := p / blockSize
+				blockOffset := p % blockSize
+				
+				// Fetch physical block ID
+				pBlockID := int(getFloat32(blockTables.rawData[(b*maxBlocksPerSeq+logicalBlockIdx)*4:]))
+				
+				// Map to physical memory in pool
+				// Pooling layout: [blockIdx][tokenInBlock][head][dim]
+				kOff := ((pBlockID*blockSize + blockOffset)*kvHeads + (h % kvHeads)) * headDim
+				kHead := kCache.data[kOff : kOff+headDim]
+				
+				var dot float32
+				for i := 0; i < headDim; i++ {
+					dot += qHead[i] * kHead[i]
+				}
+				scores[p] = dot * scale
+			}
+			
+			// Softmax
+			simd.SoftmaxAVX2(scores)
+			
+			// Weighted Sum
+			outOff := (b*heads + h) * headDim
+			outHead := output.data[outOff : outOff+headDim]
+			for i := range outHead { outHead[i] = 0 }
+			
+			for p := 0; p <= pos; p++ {
+				logicalBlockIdx := p / blockSize
+				blockOffset := p % blockSize
+				pBlockID := int(getFloat32(blockTables.rawData[(b*maxBlocksPerSeq+logicalBlockIdx)*4:]))
+				
+				vOff := ((pBlockID*blockSize + blockOffset)*kvHeads + (h % kvHeads)) * headDim
+				vHead := vCache.data[vOff : vOff+headDim]
+				
+				s := scores[p]
+				for i := 0; i < headDim; i++ {
+					outHead[i] += s * vHead[i]
+				}
+			}
+		}
+	}
+}
+
+// StoreKVPagedBatch stores K and V projections into their respective physical blocks in the CPU cache pool.
+func (c *Context) StoreKVPagedBatch(k, v, kCache, vCache, physicalPositions *Tensor, kvDim, batchSize int) {
+	for b := 0; b < batchSize; b++ {
+		// physicalPosition is absolute token index in the block pool: blockID * blockSize + offset
+		pPos := int(getFloat32(physicalPositions.rawData[b*4:]))
+		
+		offSrc := b * kvDim
+		offDst := pPos * kvDim
+		
+		copy(kCache.data[offDst:offDst+kvDim], k.data[offSrc:offSrc+kvDim])
+		copy(vCache.data[offDst:offDst+kvDim], v.data[offSrc:offSrc+kvDim])
+	}
+}
+
+// StoreKVQuantized is a stub for future quantized KV cache storage support.
+func (t *Tensor) StoreKVQuantized(v *Tensor, kCache, vCache *Tensor, pos, heads, headDim, windowSize int) {
+	// Fallback to standard StoreKV
+	t.StoreKV(v, kCache, vCache, pos, heads, headDim, windowSize)
 }

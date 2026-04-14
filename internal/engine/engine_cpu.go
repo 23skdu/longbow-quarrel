@@ -8,10 +8,12 @@ import (
 	"math/rand"
 
 	"github.com/23skdu/longbow-quarrel/internal/config"
+	"github.com/23skdu/longbow-quarrel/internal/device"
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
 	"github.com/23skdu/longbow-quarrel/internal/logger"
 	"github.com/23skdu/longbow-quarrel/internal/simd"
 	"github.com/23skdu/longbow-quarrel/internal/tokenizer"
+	"time"
 )
 
 type CPUEngine struct {
@@ -19,6 +21,12 @@ type CPUEngine struct {
 	config  config.Config
 	weights *CPUWeights
 	tok     *tokenizer.Tokenizer
+	ctx     *device.Context
+	cache   *PagedKVCache
+	
+	BatchManager *ContinuousBatchManager
+	stopChan     chan struct{}
+	doneChan     chan struct{}
 }
 
 type CPUWeights struct {
@@ -46,6 +54,25 @@ func NewCPUEngine(modelPath string, cfg config.Config) (Engine, error) {
 		return nil, fmt.Errorf("failed to load GGUF: %w", err)
 	}
 
+	// Load Dimensions from GGUF into config
+	if v, ok := f.KV["llama.block_count"].(uint32); ok {
+		cfg.Layers = int(v)
+	}
+	if v, ok := f.KV["llama.embedding_length"].(uint32); ok {
+		cfg.Dim = int(v)
+	}
+	if v, ok := f.KV["llama.attention.head_count"].(uint32); ok {
+		cfg.Heads = int(v)
+	}
+	if v, ok := f.KV["llama.attention.head_count_kv"].(uint32); ok {
+		cfg.KVHeads = int(v)
+	} else {
+		cfg.KVHeads = cfg.Heads // Default MHA
+	}
+	if cfg.Heads > 0 {
+		cfg.HeadDim = cfg.Dim / cfg.Heads
+	}
+
 	weights, err := loadCPUWeights(f)
 	if err != nil {
 		_ = f.Close()
@@ -58,14 +85,31 @@ func NewCPUEngine(modelPath string, cfg config.Config) (Engine, error) {
 		return nil, fmt.Errorf("failed to load tokenizer: %w", err)
 	}
 
-	logger.Log.Info("CPU engine initialized", "model", modelPath)
+	ctx := device.NewContext()
+	cache := &PagedKVCache{}
+	if err := cache.Init(ctx, cfg); err != nil {
+		ctx.Free()
+		_ = f.Close()
+		return nil, fmt.Errorf("failed to initialize paged cache: %w", err)
+	}
 
-	return &CPUEngine{
+	logger.Log.Info("CPU engine initialized with PagedKVCache", "model", modelPath, "heads", cfg.Heads, "kv_heads", cfg.KVHeads, "dim", cfg.Dim)
+
+	e := &CPUEngine{
 		model:   f,
 		config:  cfg,
 		weights: weights,
 		tok:     tok,
-	}, nil
+		ctx:     ctx,
+		cache:   cache,
+		BatchManager: NewContinuousBatchManager(),
+		stopChan:     make(chan struct{}),
+		doneChan:     make(chan struct{}),
+	}
+	
+	go e.runBatchLoop()
+
+	return e, nil
 }
 
 func loadCPUWeights(f *gguf.GGUFFile) (*CPUWeights, error) {
@@ -178,12 +222,12 @@ func (e *CPUEngine) GetSeqCachePos(seqID string) int {
 }
 
 func (e *CPUEngine) Infer(tokens []int, count int, cfg SamplerConfig) ([]int, error) {
-	return e.InferWithCallback(tokens, count, cfg, nil)
+	return e.inferInternal(tokens, count, cfg, nil, nil)
 }
 
 func (e *CPUEngine) InferWithLogits(tokens []int, count int, cfg SamplerConfig) ([]int, []float32, error) {
 	var lastLogits []float32
-	tokens, err := e.InferWithCallbackLogits(tokens, count, cfg, nil, func(logits []float32) {
+	tokens, err := e.inferInternal(tokens, count, cfg, nil, func(logits []float32) {
 		lastLogits = make([]float32, len(logits))
 		copy(lastLogits, logits)
 	})
@@ -191,28 +235,137 @@ func (e *CPUEngine) InferWithLogits(tokens []int, count int, cfg SamplerConfig) 
 }
 
 func (e *CPUEngine) InferWithCallback(tokens []int, count int, cfg SamplerConfig, callback func(token int)) ([]int, error) {
-	return e.InferWithCallbackLogits(tokens, count, cfg, callback, nil)
+	return e.inferInternal(tokens, count, cfg, callback, nil)
 }
 
 func (e *CPUEngine) InferWithCallbackLogits(tokens []int, count int, cfg SamplerConfig, tokenCallback func(int), logitsCallback func([]float32)) ([]int, error) {
-	inputTokens := make([]int, len(tokens))
-	copy(inputTokens, tokens)
+	return e.inferInternal(tokens, count, cfg, tokenCallback, logitsCallback)
+}
 
-	outputTokens := make([]int, 0, count)
-	for i := 0; i < count; i++ {
-		token, err := e.sample(inputTokens, cfg)
-		if err != nil {
-			return nil, err
+func (e *CPUEngine) runBatchLoop() {
+	defer close(e.doneChan)
+	for {
+		select {
+		case <-e.stopChan:
+			return
+		default:
 		}
-		outputTokens = append(outputTokens, token)
-		inputTokens = append(inputTokens, token)
 
-		if tokenCallback != nil {
-			tokenCallback(token)
+		// 1. Pull active sequences
+		desc, _ := e.BatchManager.Step(16, e.cache, nil) // No PromptCache for CPU yet
+		if desc == nil || len(desc.Sequences) == 0 {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+
+		// 2. Forward Pass
+		results, err := e.ForwardBatch(desc)
+		if err != nil {
+			for _, seq := range desc.Sequences {
+				select {
+				case seq.Err <- err:
+				default:
+				}
+			}
+			continue
+		}
+
+		// 3. Sampling & Update
+		for i := range desc.Sequences {
+			seq := desc.Sequences[i]
+			logits := results[i].ToHostF32()
+			results[i].Free()
+
+			if seq.LogitsCallback != nil {
+				seq.LogitsCallback(logits)
+			}
+
+			sampler := NewSampler(seq.Config)
+			token := sampler.Sample(logits, seq.Tokens)
+
+			// Update Sequence State
+			chunkLen := 1
+			if i < len(desc.Offsets)-1 {
+				chunkLen = desc.Offsets[i+1] - desc.Offsets[i]
+			} else {
+				chunkLen = len(desc.Tokens) - desc.Offsets[i]
+			}
+
+			seq.Tokens = append(seq.Tokens, token)
+			seq.Pos += chunkLen
+
+			if seq.TokenCallback != nil {
+				seq.TokenCallback(token)
+			}
+
+			// Termination
+			if token == 2 || len(seq.Tokens) >= seq.MaxTokens {
+				select {
+				case seq.Result <- seq.Tokens:
+				default:
+				}
+				e.BatchManager.CompleteSequence(seq.ID, e.cache)
+			}
 		}
 	}
+}
 
-	return outputTokens, nil
+func (e *CPUEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, error) {
+	// For CPU, we perform a sequential forward pass for each sequence in the batch for now.
+	// This ensures the batching loop works while we optimize the CPU kernels later.
+	batchSize := len(desc.Sequences)
+	results := make([]*device.Tensor, batchSize)
+
+	for i := range desc.Sequences {
+		// Identify the tokens for THIS sequence in the packed batch
+		start := desc.Offsets[i]
+		var end int
+		if i < batchSize - 1 {
+			end = desc.Offsets[i+1]
+		} else {
+			end = len(desc.Tokens)
+		}
+		
+		seqTokens := desc.Tokens[start:end]
+		
+		// Run existing forward (which returns hidden/embedding)
+		// and wrap it in a device.Tensor
+		hidden := e.forward(seqTokens)
+		
+		res := e.ctx.NewTensorFP32(1, len(hidden))
+		res.LoadFrom(hidden)
+		results[i] = res
+	}
+
+	return results, nil
+}
+
+func (e *CPUEngine) inferInternal(inputTokens []int, tokensToGenerate int, samplerConfig SamplerConfig, tokenCallback func(int), logitsCallback func([]float32)) ([]int, error) {
+	resChan := make(chan []int, 1)
+	errChan := make(chan error, 1)
+
+	req := &InferenceRequest{
+		ID:             uint64(time.Now().UnixNano()),
+		Prompt:         inputTokens,
+		MaxTokens:      len(inputTokens) + tokensToGenerate,
+		Config:         samplerConfig,
+		Result:         resChan,
+		Err:            errChan,
+		TokenCallback:  tokenCallback,
+		LogitsCallback: logitsCallback,
+	}
+
+	e.BatchManager.Submit(req)
+
+	select {
+	case tokens := <-resChan:
+		if len(tokens) > len(inputTokens) {
+			return tokens[len(inputTokens):], nil
+		}
+		return []int{}, nil
+	case err := <-errChan:
+		return nil, err
+	}
 }
 
 func (e *CPUEngine) SwapModel(modelPath string, cfg config.Config) error {
@@ -262,8 +415,11 @@ func (e *CPUEngine) forward(tokens []int) []float32 {
 }
 
 func (e *CPUEngine) Close() {
-	if e.weights != nil {
-		e.weights.Free()
+	if e.cache != nil {
+		e.cache.Free()
+	}
+	if e.ctx != nil {
+		e.ctx.Free()
 	}
 	if e.model != nil {
 		_ = e.model.Close()
@@ -369,6 +525,8 @@ func (e *CPUEngine) ForwardDraft(tokens []int) ([][]float32, error) {
 }
 
 func (e *CPUEngine) RollbackKV(seqID string, newPos int) error {
-	// Stub for now: satisfy interface
-	return nil
+	if e.cache == nil {
+		return fmt.Errorf("cache not initialized")
+	}
+	return e.cache.RollbackKV(seqID, newPos)
 }

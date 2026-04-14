@@ -222,6 +222,8 @@ func (t *Tensor) SizeBytes() int {
 	return t.sizeBytes
 }
 
+func (t *Tensor) DataType() DataType { return t.dataType }
+
 func (t *Tensor) Rows() int { return t.rows }
 func (t *Tensor) Cols() int { return t.cols }
 

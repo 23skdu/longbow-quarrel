@@ -1465,4 +1465,134 @@ void cudaTurboQuantDecode(cudaStream_t stream, const int8_t* input,
         input, rotationMatrix, output, blockSize, qjlRows, numBlocks);
 }
 
+// =============================================================================
+// Paged Attention Kernels
+// =============================================================================
+
+__global__ void store_kv_paged_batch_kernel(
+    const float* __restrict__ k,      // [numTokens, kvDim]
+    const float* __restrict__ v,      // [numTokens, kvDim]
+    __half* __restrict__ kPool,        // [numPhysicalBlocks, blockSize, kvDim]
+    __half* __restrict__ vPool,        // [numPhysicalBlocks, blockSize, kvDim]
+    const int* __restrict__ physicalPositions, // [numTokens] mapping token to absolute slot in pool
+    int kvDim, int numTokens) {
+
+    int tokenIdx = blockIdx.x;
+    int tid = threadIdx.x;
+
+    if (tokenIdx >= numTokens) return;
+
+    int slotIdx = physicalPositions[tokenIdx];
+    
+    // Each token maps to a single slot (row) in the flattened pool: [totalSlots, kvDim]
+    // where totalSlots = numPhysicalBlocks * blockSize
+    for (int d = tid; d < kvDim; d += blockDim.x) {
+        kPool[slotIdx * kvDim + d] = __float2half(k[tokenIdx * kvDim + d]);
+        vPool[slotIdx * kvDim + d] = __float2half(v[tokenIdx * kvDim + d]);
+    }
+}
+
+__global__ void paged_attention_kernel(
+    const float* __restrict__ q,       // [numTokens, heads, headDim]
+    const __half* __restrict__ kPool,   // [numPhysicalBlocks, blockSize, kvDim]
+    const __half* __restrict__ vPool,   // [numPhysicalBlocks, blockSize, kvDim]
+    float* __restrict__ output,         // [numTokens, heads, headDim]
+    const int* __restrict__ tokenPositions, // [numTokens] position in sequence
+    const int* __restrict__ blockTables, // [batchSize, maxBlocks]
+    const int* __restrict__ tokenToSeq,  // [numTokens] mapping token to its sequence in batch
+    int maxBlocks, int heads, int kvHeads, int headDim, int blockSize,
+    int numTokens, float scale) {
+
+    int tokenIdx = blockIdx.x;
+    int headIdx = threadIdx.y;
+    int tid = threadIdx.x;
+
+    if (tokenIdx >= numTokens || headIdx >= heads) return;
+
+    int seqIdx = tokenToSeq[tokenIdx];
+    int pos = tokenPositions[tokenIdx];
+    int kvHeadIdx = headIdx * kvHeads / heads;
+    int kvDim = kvHeads * headDim;
+
+    // Allocate shared memory for Q and scores
+    // Basic implementation uses global memory for scores if shared is too small
+    // For now, we'll keep it simple: one thread calculates one score part
+    
+    // Output row for this token/head
+    float* out_row = output + (tokenIdx * heads + headIdx) * headDim;
+    const float* q_row = q + (tokenIdx * heads + headIdx) * headDim;
+
+    float max_score = -INFINITY;
+    float sum_exp = 0.0f;
+    
+    // We'll use a local buffer for out values (dim)
+    // This is a naive implementation; production kernels use tiling and shared memory
+    float res[128]; // Max headDim supported in this stub
+    if (headDim > 128) return; 
+    for(int d=0; d<headDim; d++) res[d] = 0.0f;
+
+    // Iterate through all blocks for this sequence
+    int numBlocksNeeded = (pos + 1 + blockSize - 1) / blockSize;
+    for (int b = 0; b < numBlocksNeeded; b++) {
+        int physicalBlockIdx = blockTables[seqIdx * maxBlocks + b];
+        int tokensInThisBlock = (b == numBlocksNeeded - 1) ? (pos % blockSize) + 1 : blockSize;
+
+        for (int t = 0; t < tokensInThisBlock; t++) {
+            float score = 0.0f;
+            int poolSlotIdx = physicalBlockIdx * blockSize + t;
+            const __half* k_ptr = kPool + poolSlotIdx * kvDim + kvHeadIdx * headDim;
+            const __half* v_ptr = vPool + poolSlotIdx * kvDim + kvHeadIdx * headDim;
+
+            // Dot product Q*K
+            for (int d = 0; d < headDim; d++) {
+                score += q_row[d] * __half2float(k_ptr[d]);
+            }
+            score *= scale;
+
+            // Softmax update
+            float old_max = max_score;
+            if (score > max_score) max_score = score;
+            
+            float exp_val = expf(score - max_score);
+            float scale_old = expf(old_max - max_score);
+            
+            sum_exp = sum_exp * scale_old + exp_val;
+
+            // Weighted sum update
+            for (int d = 0; d < headDim; d++) {
+                res[d] = res[d] * scale_old + exp_val * __half2float(v_ptr[d]);
+            }
+        }
+    }
+
+    // Final normalization
+    float inv_sum = 1.0f / (sum_exp + 1e-9f);
+    for (int d = tid; d < headDim; d += blockDim.x) {
+        out_row[d] = res[d] * inv_sum;
+    }
+}
+
+extern "C" {
+
+void cudaStoreKVPagedBatch(cudaStream_t stream, const float* k, const float* v, 
+                             __half* kPool, __half* vPool, const int* physicalPositions,
+                             int kvDim, int numTokens) {
+    if (numTokens == 0) return;
+    int threads = 256;
+    store_kv_paged_batch_kernel<<<numTokens, threads, 0, stream>>>(k, v, kPool, vPool, physicalPositions, kvDim, numTokens);
+}
+
+void cudaPagedAttentionBatch(cudaStream_t stream, const float* q, const __half* kPool, const __half* vPool,
+                               float* output, const int* tokenPositions, const int* blockTables,
+                               const int* tokenToSeq, int maxBlocks, int heads, int kvHeads, int headDim,
+                               int blockSize, int numTokens, float scale) {
+    if (numTokens == 0) return;
+    dim3 grid(numTokens);
+    dim3 block(32, heads); // 32 threads for dimension reduction, y-dim for heads
+    paged_attention_kernel<<<grid, block, 0, stream>>>(q, kPool, vPool, output, tokenPositions, blockTables, tokenToSeq,
+                                                        maxBlocks, heads, kvHeads, headDim, blockSize, numTokens, scale);
+}
+
+} // extern "C"
+
 }

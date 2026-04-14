@@ -45,6 +45,8 @@ extern void cudaFlashFusedAttention(cudaStream_t stream, const void* q, const vo
 extern void cudaFusedRoPE(cudaStream_t stream, void* tensor, const int* posIds, int batch, int heads, int seqLen, int headDim, float theta);
 extern void cudaFusedMLP(cudaStream_t stream, const void* input, const void* gateWeight, const void* upWeight, const void* downWeight, void* output, int batch, int dim, int hiddenDim);
 extern void cudaFusedRMSNormAdd(cudaStream_t stream, const void* input, const void* hidden, const void* weight, void* output, int batch, int dim, float eps);
+extern void cudaStoreKVPagedBatch(cudaStream_t stream, const float* k, const float* v, void* kPool, void* vPool, const int* physicalPositions, int kvDim, int numTokens);
+extern void cudaPagedAttentionBatch(cudaStream_t stream, const float* q, const void* kPool, const void* vPool, float* output, const int* tokenPositions, const int* blockTables, const int* tokenToSeq, int maxBlocks, int heads, int kvHeads, int headDim, int blockSize, int numTokens, float scale);
 */
 import "C"
 
@@ -205,6 +207,8 @@ func (t *Tensor) Free() {
 		t.devPtr = nil
 	}
 }
+
+func (t *Tensor) DataType() DataType { return t.dataType }
 
 func (t *Tensor) Rows() int { return t.rows }
 func (t *Tensor) Cols() int { return t.cols }
@@ -531,4 +535,19 @@ func GetDeviceMemory(device int) (int64, error) {
 		return 0, fmt.Errorf("cudaGetDeviceProperties failed: %v", err)
 	}
 	return int64(prop.totalGlobalMem), nil
+}
+
+// AttentionPagedBatch performs paged attention across a batch of sequences on the GPU.
+func (c *Context) AttentionPagedBatch(q, kCache, vCache, output, tokenPositions, blockTables *Tensor, maxBlocksPerSeq, heads, kvHeads, headDim, blockSize int, tokenToSeq *Tensor, batchSize int) {
+	C.cudaPagedAttentionBatch(c.Ctx, (*C.float)(q.devPtr), kCache.devPtr, vCache.devPtr, (*C.float)(output.devPtr), (*C.int)(tokenPositions.devPtr), (*C.int)(blockTables.devPtr), (*C.int)(tokenToSeq.devPtr), C.int(maxBlocksPerSeq), C.int(heads), C.int(kvHeads), C.int(headDim), C.int(blockSize), C.int(q.rows), C.float(1.0/math.Sqrt(float64(headDim))))
+}
+
+// StoreKVPagedBatch stores K and V projections into their respective physical blocks in the GPU cache pool.
+func (c *Context) StoreKVPagedBatch(k, v, kCache, vCache, physicalPositions *Tensor, kvDim, batchSize int) {
+	C.cudaStoreKVPagedBatch(c.Ctx, (*C.float)(k.devPtr), (*C.float)(v.devPtr), kCache.devPtr, vCache.devPtr, (*C.int)(physicalPositions.devPtr), C.int(kvDim), C.int(k.rows))
+}
+
+// StoreKVQuantized is a stub for future quantized KV cache storage support on CUDA.
+func (t *Tensor) StoreKVQuantized(v *Tensor, kCache, vCache *Tensor, pos, heads, headDim, windowSize int) {
+	panic("StoreKVQuantized not yet implemented for CUDA")
 }

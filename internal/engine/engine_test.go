@@ -22,7 +22,7 @@ func generateTestGGUF(path string) error {
 	binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMagic))
 	binary.Write(f, binary.LittleEndian, uint32(3)) // Version
 	binary.Write(f, binary.LittleEndian, uint64(12)) // Tensors
-	binary.Write(f, binary.LittleEndian, uint64(6))  // KVs
+	binary.Write(f, binary.LittleEndian, uint64(7))  // KVs
 
 	// KVs
 	// 1. Architecture
@@ -56,6 +56,11 @@ func generateTestGGUF(path string) error {
 	writeString(f, "llama.block_count")
 	binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeUint32))
 	binary.Write(f, binary.LittleEndian, uint32(1))
+
+	// 7. Embedding Length
+	writeString(f, "llama.embedding_length")
+	binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeUint32))
+	binary.Write(f, binary.LittleEndian, uint32(128))
 
 	// Tensors
 	writeTensor := func(name string, offset uint64) error {

@@ -1,5 +1,3 @@
-//go:build metal
-
 package engine
 
 import (

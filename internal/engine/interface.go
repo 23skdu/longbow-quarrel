@@ -3,6 +3,7 @@ package engine
 import (
 	"fmt"
 	"github.com/23skdu/longbow-quarrel/internal/config"
+	"github.com/23skdu/longbow-quarrel/internal/device"
 )
 
 // Engine is the common interface for all inference backends (Metal, CUDA, CPU)
@@ -19,6 +20,9 @@ type Engine interface {
 	// Speculative Decoding Primitives
 	ForwardDraft(tokens []int) ([][]float32, error)
 	RollbackKV(seqID string, newPos int) error
+
+	// Continuous Batching
+	ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, error)
 }
 
 // EngineCreator defines the factory function for creating an engine

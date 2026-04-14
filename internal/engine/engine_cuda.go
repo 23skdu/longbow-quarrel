@@ -99,12 +99,16 @@ var (
 )
 
 type cudaEngine struct {
-	model            *gguf.GGUFFile
-	tokenizer        *tokenizer.Tokenizer
-	config           config.Config
-	cuda             *device.CUDAModel
-	scratch          *device.LayerScratch
-	mu               sync.RWMutex
+	model        *gguf.GGUFFile
+	ctx          *device.Context
+	cuda         *CUDAStorage
+	config       config.Config
+	scratch      *CUDAScratch
+	tok          *tokenizer.Tokenizer
+	cache        *PagedKVCache
+	BatchManager *ContinuousBatchManager
+	stopChan     chan struct{}
+	doneChan     chan struct{}
 }
 
 func NewcudaEngine(modelPath string, cfg config.Config) (Engine, error) {
@@ -132,6 +136,15 @@ func NewcudaEngine(modelPath string, cfg config.Config) (Engine, error) {
 		f.Close()
 		cudaEngineFailed.WithLabelValues(arch, "model_load_failed").Inc()
 		return nil, fmt.Errorf("failed to load model to GPU: %w", err)
+	}
+
+	cache := &PagedKVCache{}
+	if err := cache.Init(ctx, cfg); err != nil {
+		ctx.Free()
+		cudaModel.Free()
+		f.Close()
+		cudaEngineFailed.WithLabelValues(arch, "cache_init_failed").Inc()
+		return nil, fmt.Errorf("failed to initialize paged cache: %w", err)
 	}
 
 	cudaEngineInitialized.WithLabelValues(arch, arch).Inc()
@@ -202,17 +215,11 @@ func NewcudaEngine(modelPath string, cfg config.Config) (Engine, error) {
 		seqLen = int(toFloat64(val))
 	}
 
-	log.Printf("=== CUDA Engine ===")
-	log.Printf("Architecture: %s", arch)
-	log.Printf("Layers: %d, Dim: %d, Heads: %d, HeadDim: %d, KVHeads: %d", layers, dim, heads, headDim, kvHeads)
-	log.Printf("Vocab: %d, HiddenDim: %d", vocabSize, hiddenDim)
-	log.Printf("RoPE Theta: %.0f, Eps: %e", ropeTheta, eps)
-	log.Printf("GPU Memory: %.1f MB", float64(device.CUDAAllocatedBytes())/1e6)
-
 	isGemma4 := arch == "gemma4"
 	e := &cudaEngine{
-		model:            f,
-		tokenizer:        tok,
+		model: f,
+		ctx:   ctx,
+		cuda:  cudaModel,
 		config: config.Config{
 			Architecture:  arch,
 			Dim:           dim,
@@ -229,7 +236,11 @@ func NewcudaEngine(modelPath string, cfg config.Config) (Engine, error) {
 			KVCacheSize:   cfg.KVCacheSize,
 			IsGemma4:      isGemma4,
 		},
-		cuda: cudaModel,
+		tok:          tok,
+		cache:        cache,
+		BatchManager: NewContinuousBatchManager(),
+		stopChan:     make(chan struct{}),
+		doneChan:     make(chan struct{}),
 	}
 
 	// Initialize scratch space
@@ -244,6 +255,10 @@ func NewcudaEngine(modelPath string, cfg config.Config) (Engine, error) {
 		e.config.Gemma4FullHeadDim = 512
 	}
 
+	logger.Log.Info("CUDA engine initialized with PagedKVCache", "model", modelPath, "heads", heads, "kv_heads", kvHeads)
+	
+	go e.runBatchLoop()
+
 	return e, nil
 }
 
@@ -255,11 +270,14 @@ func (e *cudaEngine) Close() {
 	if e.scratch != nil {
 		e.scratch.Free()
 	}
+	if e.cache != nil {
+		e.cache.Free()
+	}
 	if e.cuda != nil {
-		if e.cuda.Ctx != nil {
-			e.cuda.Ctx.Free()
-		}
 		e.cuda.Free()
+	}
+	if e.ctx != nil {
+		e.ctx.Free()
 	}
 	if e.model != nil {
 		e.model.Close()
@@ -271,25 +289,150 @@ func (e *cudaEngine) SwapModel(newModelPath string, newConfig config.Config) err
 }
 
 func (e *cudaEngine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig SamplerConfig) ([]int, error) {
-	return e.InferWithCallbackLogits(inputTokens, tokensToGenerate, samplerConfig, nil, nil)
+	return e.inferInternal(inputTokens, tokensToGenerate, samplerConfig, nil, nil)
 }
 
 func (e *cudaEngine) InferWithLogits(inputTokens []int, tokensToGenerate int, samplerConfig SamplerConfig) ([]int, []float32, error) {
 	var lastLogits []float32
-	result, err := e.InferWithCallbackLogits(inputTokens, tokensToGenerate, samplerConfig, nil, func(l []float32) {
+	result, err := e.inferInternal(inputTokens, tokensToGenerate, samplerConfig, nil, func(l []float32) {
 		lastLogits = l
 	})
 	return result, lastLogits, err
 }
 
 func (e *cudaEngine) InferWithCallback(inputTokens []int, tokensToGenerate int, samplerConfig SamplerConfig, callback func(int)) ([]int, error) {
-	return e.InferWithCallbackLogits(inputTokens, tokensToGenerate, samplerConfig, callback, nil)
+	return e.inferInternal(inputTokens, tokensToGenerate, samplerConfig, callback, nil)
 }
 
 func (e *cudaEngine) InferWithCallbackLogits(inputTokens []int, tokensToGenerate int, samplerConfig SamplerConfig, tokenCallback func(int), logitsCallback func([]float32)) ([]int, error) {
-	if len(inputTokens) == 0 {
-		return nil, fmt.Errorf("empty input tokens")
+	return e.inferInternal(inputTokens, tokensToGenerate, samplerConfig, tokenCallback, logitsCallback)
+}
+
+func (e *cudaEngine) runBatchLoop() {
+	defer close(e.doneChan)
+	for {
+		select {
+		case <-e.stopChan:
+			return
+		default:
+		}
+
+		// 1. Pull active sequences
+		desc, _ := e.BatchManager.Step(16, e.cache, nil)
+		if desc == nil || len(desc.Sequences) == 0 {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+
+		// 2. Forward Pass
+		results, err := e.ForwardBatch(desc)
+		if err != nil {
+			for _, seq := range desc.Sequences {
+				select {
+				case seq.Err <- err:
+				default:
+				}
+			}
+			continue
+		}
+
+		// 3. Sampling & Update
+		for i, seq := range desc.Sequences {
+			logits := results[i].ToHostF32()
+			results[i].Free()
+
+			if seq.LogitsCallback != nil {
+				seq.LogitsCallback(logits)
+			}
+
+			sampler := NewSampler(seq.Config)
+			token := sampler.Sample(logits, seq.Tokens)
+
+			// Update Sequence State
+			chunkLen := 1
+			if i < len(desc.Offsets)-1 {
+				chunkLen = desc.Offsets[i+1] - desc.Offsets[i]
+			} else {
+				chunkLen = len(desc.Tokens) - desc.Offsets[i]
+			}
+
+			seq.Tokens = append(seq.Tokens, token)
+			seq.Pos += chunkLen
+
+			if seq.TokenCallback != nil {
+				seq.TokenCallback(token)
+			}
+
+			// Termination
+			if token == 2 || len(seq.Tokens) >= seq.MaxTokens {
+				select {
+				case seq.Result <- seq.Tokens:
+				default:
+				}
+				e.BatchManager.CompleteSequence(seq.ID, e.cache)
+			}
+		}
 	}
+}
+
+func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, error) {
+	// For CUDA, we'll implement a fallback batch processing similar to CPU for the first iteration.
+	// This ensures the batching loop works. Real performance comes from batched kernels in the next phase.
+	batchSize := len(desc.Sequences)
+	results := make([]*device.Tensor, batchSize)
+
+	for i, seq := range desc.Sequences {
+		start := desc.Offsets[i]
+		var end int
+		if i < batchSize - 1 {
+			end = desc.Offsets[i+1]
+		} else {
+			end = len(desc.Tokens)
+		}
+		
+		seqTokens := desc.Tokens[start:end]
+		
+		// Run existing forward
+		logits, err := e.forward(seqTokens)
+		if err != nil {
+			return nil, err
+		}
+		
+		res := e.ctx.NewTensorWithType(1, e.config.VocabSize, device.DataTypeF32)
+		res.LoadFrom(logits)
+		results[i] = res
+	}
+
+	return results, nil
+}
+
+func (e *cudaEngine) inferInternal(inputTokens []int, tokensToGenerate int, samplerConfig SamplerConfig, tokenCallback func(int), logitsCallback func([]float32)) ([]int, error) {
+	resChan := make(chan []int, 1)
+	errChan := make(chan error, 1)
+
+	req := &InferenceRequest{
+		ID:             uint64(time.Now().UnixNano()),
+		Prompt:         inputTokens,
+		MaxTokens:      len(inputTokens) + tokensToGenerate,
+		Config:         samplerConfig,
+		Result:         resChan,
+		Err:            errChan,
+		TokenCallback:  tokenCallback,
+		LogitsCallback: logitsCallback,
+	}
+
+	e.BatchManager.Submit(req)
+
+	select {
+	case tokens := <-resChan:
+		if len(tokens) > len(inputTokens) {
+			return tokens[len(inputTokens):], nil
+		}
+		return []int{}, nil
+	case err := <-errChan:
+		return nil, err
+	}
+}
 
 	result := make([]int, 0, tokensToGenerate)
 	sampler := NewSampler(samplerConfig)
@@ -566,8 +709,10 @@ func (e *cudaEngine) GetSeqCachePos(seqID string) int {
 }
 
 func (e *cudaEngine) RollbackKV(seqID string, newPos int) error {
-	// Rollback not yet implemented for CUDA KV cache.
-	return nil
+	if e.cache == nil {
+		return fmt.Errorf("cache not initialized")
+	}
+	return e.cache.RollbackKV(seqID, newPos)
 }
 
 func init() {

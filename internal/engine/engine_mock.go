@@ -2,6 +2,7 @@ package engine
 
 import (
 	"github.com/23skdu/longbow-quarrel/internal/config"
+	"github.com/23skdu/longbow-quarrel/internal/device"
 	"github.com/23skdu/longbow-quarrel/internal/logger"
 )
 
@@ -81,4 +82,8 @@ func (e *MockEngine) ForwardDraft(tokens []int) ([][]float32, error) {
 
 func (e *MockEngine) RollbackKV(seqID string, newPos int) error {
 	return nil
+}
+
+func (e *MockEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, error) {
+	return nil, nil // Mock implementation
 }
