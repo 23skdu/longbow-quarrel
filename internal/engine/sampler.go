@@ -9,8 +9,9 @@ import (
 )
 
 type Sampler struct {
-	Config SamplerConfig
-	rng    *rand.Rand
+	Config     SamplerConfig
+	rng        *rand.Rand
+	mirostatMu float64
 }
 
 func NewSampler(cfg SamplerConfig) *Sampler {
@@ -101,11 +102,47 @@ func (s *Sampler) Sample(logits []float32, history []int) int {
 	candidates = applyTopK(candidates, s.Config.TopK)
 	candidates = applyTopP(candidates, s.Config.TopP)
 
+	if s.Config.MinP > 0 && len(candidates) > 0 {
+		maxProb := candidates[0].prob
+		filtered := make([]tokenProb, 0, len(candidates))
+		for _, c := range candidates {
+			if c.prob >= s.Config.MinP*maxProb {
+				filtered = append(filtered, c)
+			}
+		}
+		if len(filtered) > 0 {
+			candidates = filtered
+		}
+	}
+
 	if len(candidates) == 0 {
 		return argMax(logits)
 	}
 
-	return s.sampleFromCandidates(candidates)
+	if s.Config.MirostatTau > 0 && s.Config.MirostatEta > 0 && s.mirostatMu == 0 {
+		s.mirostatMu = 2 * s.Config.MirostatTau
+	}
+
+	selected := s.sampleFromCandidates(candidates)
+
+	if s.Config.MirostatTau > 0 && s.Config.MirostatEta > 0 {
+		selectedProb := 0.0
+		for _, c := range candidates {
+			if c.id == selected {
+				selectedProb = c.prob
+				break
+			}
+		}
+		if selectedProb > 0 {
+			surprise := -math.Log2(selectedProb)
+			s.mirostatMu -= s.Config.MirostatEta * (surprise - s.Config.MirostatTau)
+			if s.mirostatMu < 0 {
+				s.mirostatMu = 0
+			}
+		}
+	}
+
+	return selected
 }
 
 func (s *Sampler) validateLogits(logits []float32) bool {

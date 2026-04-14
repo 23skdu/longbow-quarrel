@@ -49,7 +49,8 @@ func (m *mockEngine) ForwardBatch(desc *engine.BatchDescriptor) ([]*device.Tenso
 
 type mockTokenizer struct{}
 
-func (m *mockTokenizer) Encode(s string) []int { return []int{10} }
+func (m *mockTokenizer) Encode(s string) []int       { return []int{10} }
 func (m *mockTokenizer) Decode(t []int) string       { return "test response" }
 func (m *mockTokenizer) EncodeTokens(s string) []int { return []int{10} }
 func (m *mockTokenizer) DecodeTokens(t []int) string { return "test response" }
+func (m *mockTokenizer) GetVocab() []string          { return []string{"test", "vocab"} }

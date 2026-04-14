@@ -60,7 +60,6 @@ func NewFromGGUF(f *gguf.GGUFFile) (*Tokenizer, error) {
 		}
 	}
 
-
 	return &Tokenizer{
 		Tokens: tokens,
 		Vocab:  vocab,
@@ -225,4 +224,8 @@ func (t *Tokenizer) Decode(ids []int) string {
 		sb.WriteString(token)
 	}
 	return sb.String()
+}
+
+func (t *Tokenizer) GetVocab() []string {
+	return t.Tokens
 }

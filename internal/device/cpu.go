@@ -609,56 +609,58 @@ func (c *Context) NumThreads() int {
 func (c *Context) AttentionPagedBatch(q, kCache, vCache, output, tokenPositions, blockTables *Tensor, maxBlocksPerSeq, heads, kvHeads, headDim, blockSize int, tokenToSeq *Tensor, batchSize int) {
 	// Reference multi-threaded implementation for CPU
 	// This is a naive implementation for numerical verification.
-	
+
 	// Assuming F32 for CPU reference
 	scale := float32(1.0 / math.Sqrt(float64(headDim)))
 
 	for b := 0; b < batchSize; b++ {
 		// Get current token position and block assignments
 		pos := int(getFloat32(tokenPositions.rawData[b*4:]))
-		
+
 		for h := 0; h < heads; h++ {
 			qOff := (b*heads + h) * headDim
 			qHead := q.data[qOff : qOff+headDim]
-			
+
 			scores := make([]float32, pos+1)
-			
+
 			// Compute Attention Scores
 			for p := 0; p <= pos; p++ {
 				logicalBlockIdx := p / blockSize
 				blockOffset := p % blockSize
-				
+
 				// Fetch physical block ID
 				pBlockID := int(getFloat32(blockTables.rawData[(b*maxBlocksPerSeq+logicalBlockIdx)*4:]))
-				
+
 				// Map to physical memory in pool
 				// Pooling layout: [blockIdx][tokenInBlock][head][dim]
-				kOff := ((pBlockID*blockSize + blockOffset)*kvHeads + (h % kvHeads)) * headDim
+				kOff := ((pBlockID*blockSize+blockOffset)*kvHeads + (h % kvHeads)) * headDim
 				kHead := kCache.data[kOff : kOff+headDim]
-				
+
 				var dot float32
 				for i := 0; i < headDim; i++ {
 					dot += qHead[i] * kHead[i]
 				}
 				scores[p] = dot * scale
 			}
-			
+
 			// Softmax
 			simd.SoftmaxAVX2(scores)
-			
+
 			// Weighted Sum
 			outOff := (b*heads + h) * headDim
 			outHead := output.data[outOff : outOff+headDim]
-			for i := range outHead { outHead[i] = 0 }
-			
+			for i := range outHead {
+				outHead[i] = 0
+			}
+
 			for p := 0; p <= pos; p++ {
 				logicalBlockIdx := p / blockSize
 				blockOffset := p % blockSize
 				pBlockID := int(getFloat32(blockTables.rawData[(b*maxBlocksPerSeq+logicalBlockIdx)*4:]))
-				
-				vOff := ((pBlockID*blockSize + blockOffset)*kvHeads + (h % kvHeads)) * headDim
+
+				vOff := ((pBlockID*blockSize+blockOffset)*kvHeads + (h % kvHeads)) * headDim
 				vHead := vCache.data[vOff : vOff+headDim]
-				
+
 				s := scores[p]
 				for i := 0; i < headDim; i++ {
 					outHead[i] += s * vHead[i]
@@ -673,10 +675,10 @@ func (c *Context) StoreKVPagedBatch(k, v, kCache, vCache, physicalPositions *Ten
 	for b := 0; b < batchSize; b++ {
 		// physicalPosition is absolute token index in the block pool: blockID * blockSize + offset
 		pPos := int(getFloat32(physicalPositions.rawData[b*4:]))
-		
+
 		offSrc := b * kvDim
 		offDst := pPos * kvDim
-		
+
 		copy(kCache.data[offDst:offDst+kvDim], k.data[offSrc:offSrc+kvDim])
 		copy(vCache.data[offDst:offDst+kvDim], v.data[offSrc:offSrc+kvDim])
 	}
@@ -687,12 +689,60 @@ func (t *Tensor) StoreKVQuantized(v *Tensor, kCache, vCache *Tensor, pos, heads,
 	// Fallback to standard StoreKV
 	t.StoreKV(v, kCache, vCache, pos, heads, headDim, windowSize)
 }
-// VisionPatchEmbed is a CPU stub for patch embedding.
+
+// VisionPatchEmbed performs patch embedding projection on CPU.
+// Note: Full implementation requires SIMD-optimized GEMM; this is a reference implementation.
 func (c *Context) VisionPatchEmbed(pixels *Tensor, weights *Tensor, output *Tensor, patchSize, visionDim, numPatchesX int) {
-	// CPU implementation stub
+	if pixels == nil || weights == nil || output == nil {
+		return
+	}
+	input := pixels.ToHostF32()
+	wt := weights.ToHostF32()
+	out := output.ToHostF32()
+
+	hiddenSize := len(wt) / len(out)
+
+	for i := 0; i < len(out); i++ {
+		sum := float32(0)
+		for j := 0; j < hiddenSize && i*hiddenSize+j < len(wt); j++ {
+			sum += input[j] * wt[i*hiddenSize+j]
+		}
+		out[i] = sum
+	}
+	output.LoadFrom(out)
 }
 
-// VisionPatchEmbedGemma4 is a CPU stub for Gemma 4 patch embedding.
+// VisionPatchEmbedGemma4 performs Gemma 4 patch embedding on CPU.
 func (c *Context) VisionPatchEmbedGemma4(pixels *Tensor, weights *Tensor, bias *Tensor, output *Tensor, patchSize, hiddenDim, numPatches int) {
-	// CPU implementation stub
+	if pixels == nil || weights == nil || output == nil {
+		return
+	}
+
+	input := pixels.ToHostF32()
+	wt := weights.ToHostF32()
+	out := output.ToHostF32()
+	biasVals := make([]float32, 0)
+	if bias != nil {
+		biasVals = bias.ToHostF32()
+	}
+
+	inputSize := len(input) / numPatches
+
+	for p := 0; p < numPatches; p++ {
+		offset := p * hiddenDim
+		for i := 0; i < hiddenDim && offset+i < len(out); i++ {
+			sum := float32(0)
+			for j := 0; j < inputSize; j++ {
+				srcIdx := p*inputSize + j
+				if srcIdx < len(input) {
+					sum += input[srcIdx] * wt[(offset+i)*inputSize+j]
+				}
+			}
+			out[offset+i] = sum
+			if len(biasVals) > i {
+				out[offset+i] += biasVals[i]
+			}
+		}
+	}
+	output.LoadFrom(out)
 }

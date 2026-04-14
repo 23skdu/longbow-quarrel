@@ -213,3 +213,58 @@ This roadmap is designed to elevate Longbow-Quarrel to compete directly with ind
 - **Change:** Implement the full transformer loop using `simd.MatMulF32` backed by `cblas_sgemm` (Apple `Accelerate.framework` on macOS, `OpenBLAS` on Linux via cgo): `embed → [RMSNorm, QKV-GEMM, Softmax, AttnO-GEMM, residual] × L → [RMSNorm, Gate/Up-GEMM, SwiGLU, Down-GEMM, residual] × L → OutputNorm → LogitGEMM`.
 - **Benchmark:** Add `BenchmarkCPUForwardLayer` to `engine_cpu_unit_test.go`, gating merges on ≥2 tok/s for a single 7B-class attention layer (dim=4096, heads=32) on Apple Silicon.
 - **Impact:** A working CPU engine enables `SpeculativeManager` to use CPU as a zero-VRAM draft model for any Metal/CUDA target, unlocking speculative decoding without a second GPU.
+
+---
+
+## Additional Stubbed/Incomplete Code Found in Codebase
+
+### 1. RemoteWorkerEngine Flight RPC Not Implemented
+- **Location:** `internal/engine/remote.go:45,55,59`
+- `ForwardShard()`, `InferWithCallback()`, `ForwardBatch()` all return not-implemented errors
+
+### 2. StoreKVQuantized Panics on CUDA
+- **Location:** `internal/device/cuda.go:558`, `internal/device/cpu.go:685`
+- Returns panic for unimplemented quantized KV cache storage
+
+### 3. CPU VisionPatchEmbed Stubs  
+- **Location:** `internal/device/cpu.go:690-697`
+- CPU stubs for VLM patch embedding
+
+### 4. Multi-GPU NCCL Stubs
+- **Location:** `internal/device/multi_gpu.go:11`
+- Placeholder for distributed training NCCL integration
+
+### 5. CUDA Engine SwapModel Not Implemented
+- **Location:** `internal/engine/engine_cuda.go:288`
+- Returns error that swap is not implemented
+
+### 6. Q5_K Falls Back to Q4_K
+- **Location:** `internal/engine/engine.go:543-544`
+- Q5_K quantization falls back to Q4_K instead of full implementation
+
+### 7. CPU ForwardDraft Not Implemented
+- **Location:** `internal/engine/engine_cpu.go:511`
+- Returns error for speculative decoding on CPU
+
+### 8. Grammar Initialization Stubbed
+- **Location:** `internal/api/server.go:166`
+- Grammar field is ignored, not enforced
+
+---
+
+## Validation of Existing Next Steps
+
+The following items from the original document were checked against current codebase:
+
+| Item | Status | Verified Location |
+|------|--------|-------------------|
+| 5. Rejection Sampling | ⚠️ Still stubbed | `internal/engine/speculative.go:93` - verify() commented out |
+| 6. CoW Physical Block Copy | ⚠️ Still stubbed | `internal/engine/kv_cache_paged.go:399-404` - comment confirms missing copy |
+| 7. PromptCache LRU Eviction | ⚠️ Not implemented | No Evict method found in prompt_cache.go |
+| 8. Multi-LoRA Batch Dispatch | ⚠️ Not implemented | No AdapterIDs handling in ForwardBatch |
+| 9. OTLP Exporter | ⚠️ Still stubbed | `internal/telemetry/telemetry.go:35` - no WithBatcher |
+| 10. Min-P / Mirostat | ⚠️ Not implemented | No fields in `sampler_config.go` |
+| 11. VLM Encoder Pixels | ⚠️ Still stubbed | `internal/vlm/encoder.go:57` - pixels created but zeroed |
+| 12. Tensor Parallel All-Reduce | ⚠️ Still stubbed | `internal/engine/distributed_master.go:56` - delegates to shard[0] |
+| 13. Block Table CPU Round-trips | ⚠️ Still stubbed | `internal/engine/kv_cache_paged.go:559-565` - unconditional LoadFrom |
+| 14. CPU Engine Full Stack | ⚠️ Still stubbed | `internal/engine/engine_cpu.go:389-405` - only embedding lookup |

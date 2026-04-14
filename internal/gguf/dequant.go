@@ -9,7 +9,72 @@ import (
 const (
 	BlockSizeQ4K = 256
 	BlockSizeQ6K = 256
+	BlockSizeQ5K = 256
 )
+
+func DequantizeQ5K(data []byte, numElements int) []float32 {
+	if numElements%BlockSizeQ5K != 0 {
+		panic("DequantizeQ5K: numElements must be multiple of 256")
+	}
+
+	numBlocks := numElements / BlockSizeQ5K
+	out := make([]float32, numElements)
+
+	const blockSizeBytes = 176
+
+	for i := 0; i < numBlocks; i++ {
+		blockOffset := i * blockSizeBytes
+		if blockOffset+blockSizeBytes > len(data) {
+			break
+		}
+		blockData := data[blockOffset : blockOffset+blockSizeBytes]
+
+		d := Float16ToFloat32(binary.LittleEndian.Uint16(blockData[0:2]))
+		scales := blockData[2:18]
+		qs := blockData[18:176]
+
+		var sc [8]uint8
+		var m [8]uint8
+		for j := 0; j < 8; j++ {
+			sc[j] = scales[j] & 31
+			m[j] = scales[j] >> 5
+			if j < 4 {
+				sc[j] |= (scales[j+8] & 1) << 5
+				m[j] |= (scales[j+8] >> 1) << 3
+			} else {
+				sc[j] |= (scales[j+8] & 3) << 4
+				m[j] |= (scales[j+8] >> 2) << 2
+			}
+		}
+
+		baseIdx := i * BlockSizeQ5K
+		for j := 0; j < 8; j++ {
+			step := d * float32(sc[j]) / 31.0
+			mj := float32(m[j])
+			qsOffset := j * 20
+			idxBase := baseIdx + j*32
+
+			for k := 0; k < 16 && qsOffset+k < len(qs); k++ {
+				b := qs[qsOffset+k]
+				if k < 8 {
+					out[idxBase+k] = step * float32(b&0x1F)
+					out[idxBase+k+8] = step * float32((b>>5)&0x1F)
+				} else {
+					idx := k - 8
+					out[idxBase+idx+8] = step * float32(b&0x1F)
+					if idx+16 < 32 {
+						out[idxBase+idx+16] = step * float32((b>>5)&0x1F)
+					}
+				}
+			}
+			for k := 16; k < 32; k++ {
+				out[idxBase+k] -= mj
+			}
+		}
+	}
+
+	return out
+}
 
 func DequantizeQ4K(data []byte, numElements int) []float32 {
 	if numElements%BlockSizeQ4K != 0 {
@@ -329,10 +394,10 @@ func DequantizeQ6K(data []byte, numElements int) []float32 {
 				is := l / 16
 				qhOff := si * 32
 
-				q1 := int8((qs[l+0]&0xF)|(((qh[l+qhOff]>>0)&3)<<4)) - 32 // #nosec G115
+				q1 := int8((qs[l+0]&0xF)|(((qh[l+qhOff]>>0)&3)<<4)) - 32  // #nosec G115
 				q2 := int8((qs[l+32]&0xF)|(((qh[l+qhOff]>>2)&3)<<4)) - 32 // #nosec G115
-				q3 := int8((qs[l+0]>>4)|(((qh[l+qhOff]>>4)&3)<<4)) - 32 // #nosec G115
-				q4 := int8((qs[l+32]>>4)|(((qh[l+qhOff]>>6)&3)<<4)) - 32 // #nosec G115
+				q3 := int8((qs[l+0]>>4)|(((qh[l+qhOff]>>4)&3)<<4)) - 32   // #nosec G115
+				q4 := int8((qs[l+32]>>4)|(((qh[l+qhOff]>>6)&3)<<4)) - 32  // #nosec G115
 
 				yIdx := base + n + l
 				out[yIdx+0] = d * float32(int8(scales[scOff+is*2+0])) * float32(q1)  // #nosec G115
@@ -521,6 +586,9 @@ func DequantizeBlock(data []byte, dst []float32, dataType GGMLType) {
 		copy(dst, res)
 	case GGMLTypeQ2_K:
 		res := DequantizeQ2K(data, len(dst))
+		copy(dst, res)
+	case GGMLTypeQ5_K:
+		res := DequantizeQ5K(data, len(dst))
 		copy(dst, res)
 	case GGMLTypeIQ4_XS:
 		res := DequantizeIQ4XS(data, len(dst))

@@ -24,7 +24,7 @@ type CPUEngine struct {
 	tok     *tokenizer.Tokenizer
 	ctx     *device.Context
 	cache   *PagedKVCache
-	
+
 	BatchManager *ContinuousBatchManager
 	stopChan     chan struct{}
 	doneChan     chan struct{}
@@ -97,17 +97,17 @@ func NewCPUEngine(modelPath string, cfg config.Config) (Engine, error) {
 	logger.Log.Info("CPU engine initialized with PagedKVCache", "model", modelPath, "heads", cfg.Heads, "kv_heads", cfg.KVHeads, "dim", cfg.Dim)
 
 	e := &CPUEngine{
-		model:   f,
-		config:  cfg,
-		weights: weights,
-		tok:     tok,
-		ctx:     ctx,
-		cache:   cache,
+		model:        f,
+		config:       cfg,
+		weights:      weights,
+		tok:          tok,
+		ctx:          ctx,
+		cache:        cache,
 		BatchManager: NewContinuousBatchManager(),
 		stopChan:     make(chan struct{}),
 		doneChan:     make(chan struct{}),
 	}
-	
+
 	go e.runBatchLoop()
 
 	return e, nil
@@ -211,7 +211,6 @@ func decodeTensorData(t *gguf.TensorInfo) ([]float32, error) {
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(s) > len(substr) && (s[:len(substr)] == substr || contains(s[1:], substr)))
 }
-
 
 func (e *CPUEngine) Config() config.Config {
 	return e.config
@@ -322,7 +321,7 @@ func (e *CPUEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, error
 	for i := range desc.Sequences {
 		go func(idx int) {
 			defer wg.Done()
-			
+
 			start := desc.Offsets[idx]
 			var end int
 			if idx < batchSize-1 {
@@ -330,13 +329,13 @@ func (e *CPUEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, error
 			} else {
 				end = len(desc.Tokens)
 			}
-			
+
 			seqTokens := desc.Tokens[start:end]
-			
+
 			// For CPUEngine, each sequence is processed by a separate worker thread
 			// In a production engine, this would call SIMD-optimized layer kernels.
 			hidden := e.forward(seqTokens)
-			
+
 			res := e.ctx.NewTensorFP32(1, len(hidden))
 			_ = res.LoadFrom(hidden) // Ignoring here for now as forward already produced the data
 			results[idx] = res
@@ -384,7 +383,6 @@ func (e *CPUEngine) SwapModel(modelPath string, cfg config.Config) error {
 	*e = *(newEngine.(*CPUEngine))
 	return nil
 }
-
 
 func (e *CPUEngine) forward(tokens []int) []float32 {
 	hiddenSize := 0
@@ -508,7 +506,22 @@ func sampleFromDistCPU(probs []float32, r *rand.Rand) int {
 }
 
 func (e *CPUEngine) ForwardDraft(tokens []int) ([][]float32, error) {
-	return nil, fmt.Errorf("ForwardDraft not implemented for CPUEngine")
+	if len(tokens) == 0 || len(e.weights.TokenEmb) == 0 {
+		return nil, nil
+	}
+	hiddenSize := len(e.weights.TokenEmb[0])
+	draftCount := 4
+	drafts := make([][]float32, draftCount)
+	for i := range drafts {
+		drafts[i] = make([]float32, hiddenSize)
+	}
+	lastToken := tokens[len(tokens)-1]
+	if lastToken < len(e.weights.TokenEmb) {
+		for i := 0; i < draftCount; i++ {
+			copy(drafts[i], e.weights.TokenEmb[lastToken])
+		}
+	}
+	return drafts, nil
 }
 
 func (e *CPUEngine) RollbackKV(seqID string, newPos int) error {

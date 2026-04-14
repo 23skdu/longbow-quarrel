@@ -3,6 +3,7 @@
 package engine
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -285,7 +286,54 @@ func (e *cudaEngine) Close() {
 }
 
 func (e *cudaEngine) SwapModel(newModelPath string, newConfig config.Config) error {
-	return fmt.Errorf("SwapModel not implemented for refactored CUDA engine")
+	if e.stopChan != nil {
+		close(e.stopChan)
+		<-e.doneChan
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if e.BatchManager != nil {
+		e.BatchManager.AbortAll(ErrModelSwapped)
+	}
+
+	if e.cache != nil {
+		e.cache.Free()
+		e.cache = nil
+	}
+
+	if e.ctx != nil {
+		e.ctx.Free()
+		e.ctx = nil
+	}
+
+	if e.model != nil {
+		e.model.Close()
+		e.model = nil
+	}
+
+	f, err := gguf.LoadFile(newModelPath)
+	if err != nil {
+		return fmt.Errorf("failed to load new GGUF: %w", err)
+	}
+	e.model = f
+
+	ctx, err := device.NewContext()
+	if err != nil {
+		return fmt.Errorf("failed to create CUDA context: %w", err)
+	}
+	e.ctx = ctx
+
+	e.config = newConfig
+
+	stopChan := make(chan struct{})
+	doneChan := make(chan struct{})
+	e.stopChan = stopChan
+	e.doneChan = doneChan
+	go e.runBatchLoop()
+
+	return nil
 }
 
 func (e *cudaEngine) Infer(inputTokens []int, tokensToGenerate int, samplerConfig SamplerConfig) ([]int, error) {

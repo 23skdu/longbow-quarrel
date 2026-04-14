@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"time"
+
 	"github.com/23skdu/longbow-quarrel/internal/engine"
+	"github.com/23skdu/longbow-quarrel/internal/sampler"
 	"github.com/23skdu/longbow-quarrel/internal/telemetry"
 )
 
@@ -19,6 +21,7 @@ type Server struct {
 type TokenizerShim interface {
 	Encode(s string) []int
 	Decode(tokens []int) string
+	GetVocab() []string
 }
 
 type HealthResponse struct {
@@ -31,7 +34,7 @@ type HealthResponse struct {
 // HealthzEndpoint enables Kubernetes liveness/readiness orchestration probes.
 func (s *Server) HealthzEndpoint(w http.ResponseWriter, r *http.Request) {
 	used := s.UsedMemory()
-	
+
 	loadPercent := 0
 	if s.MaxMemory > 0 {
 		loadPercent = int((float64(used) / float64(s.MaxMemory)) * 100)
@@ -64,10 +67,10 @@ func InitServer(maxMemory int64, memCallback func() int64, e engine.Engine, t To
 		Engine:     e,
 		Tokenizer:  t,
 	}
-	
+
 	// Start resource monitor background loop
 	go globalServer.runResourceMonitor()
-	
+
 	http.HandleFunc("/healthz", globalServer.HealthzEndpoint)
 	http.HandleFunc("/v1/completions", globalServer.CompletionsHandler)
 	http.HandleFunc("/v1/adapters/load", globalServer.LoadAdapterHandler)
@@ -99,14 +102,14 @@ func (s *Server) ReadyzEndpoint(w http.ResponseWriter, r *http.Request) {
 }
 
 type CompletionRequest struct {
-	Model       string         `json:"model"`
-	Prompt      string         `json:"prompt"`
-	MaxTokens   int            `json:"max_tokens"`
-	Temperature float64        `json:"temperature"`
-	Adapter     string         `json:"adapter"`
-	Speculative bool           `json:"speculative"`
-	Images      []string       `json:"images"`  // Base64 encoded images
-	Grammar     string         `json:"grammar"` // EBNF grammar source
+	Model       string   `json:"model"`
+	Prompt      string   `json:"prompt"`
+	MaxTokens   int      `json:"max_tokens"`
+	Temperature float64  `json:"temperature"`
+	Adapter     string   `json:"adapter"`
+	Speculative bool     `json:"speculative"`
+	Images      []string `json:"images"`  // Base64 encoded images
+	Grammar     string   `json:"grammar"` // EBNF grammar source
 }
 
 type CompletionResponse struct {
@@ -152,7 +155,7 @@ func (s *Server) CompletionsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tokens := s.Tokenizer.Encode(req.Prompt)
-	
+
 	samplerCfg := engine.SamplerConfig{
 		Temperature: req.Temperature,
 		TopP:        0.95,
@@ -160,17 +163,17 @@ func (s *Server) CompletionsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Grammar != "" {
-		// In a production scenario, we'd cache the grammar and only re-compile on change.
-		// For Phase 5, we initialize a fresh state.
-		// We'd need to extract the vocab list from the tokenizer/engine.
-		// For now, we stub the grammar initialization.
-		_ = req.Grammar
+		vocabList := s.Tokenizer.GetVocab()
+		if vocabList != nil {
+			grammar := sampler.NewJSONGrammar(vocabList)
+			samplerCfg.Grammar = grammar
+		}
 	}
 
 	// For Phase 3, we pass Speculative and Adapter info via the internal engine logic
 	// In a real implementation, we would update the Engine.Infer method or use continuous batching Submit.
 	// For now, we'll use the existing sync Infer and assume it handles internal state if possible.
-	
+
 	resTokens, err := s.Engine.Infer(tokens, req.MaxTokens, samplerCfg)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)

@@ -12,4 +12,7 @@ type SamplerConfig struct {
 	QualityMode      bool
 	SequenceID       uint64
 	Grammar          *sampler.Grammar
+	MinP             float64
+	MirostatTau      float64
+	MirostatEta      float64
 }

@@ -74,12 +74,12 @@ func (ctx *Context) DeviceID() int {
 }
 
 type Tensor struct {
-	devPtr   unsafe.Pointer
-	rows     int
-	cols     int
-	dataType DataType
-	ctx      *Context
-	pooled   bool
+	devPtr    unsafe.Pointer
+	rows      int
+	cols      int
+	dataType  DataType
+	ctx       *Context
+	pooled    bool
 	sizeBytes int
 }
 
@@ -138,11 +138,11 @@ func (ctx *Context) NewTensor(rows, cols int, dtype DataType) (*Tensor, error) {
 	}
 
 	return &Tensor{
-		devPtr:   ptr,
-		rows:     rows,
-		cols:     cols,
-		dataType: dtype,
-		ctx:      ctx,
+		devPtr:    ptr,
+		rows:      rows,
+		cols:      cols,
+		dataType:  dtype,
+		ctx:       ctx,
 		sizeBytes: bytes,
 	}, nil
 }
@@ -211,8 +211,8 @@ func (t *Tensor) Free() {
 
 func (t *Tensor) DataType() DataType { return t.dataType }
 
-func (t *Tensor) Rows() int { return t.rows }
-func (t *Tensor) Cols() int { return t.cols }
+func (t *Tensor) Rows() int            { return t.rows }
+func (t *Tensor) Cols() int            { return t.cols }
 func (t *Tensor) Data() unsafe.Pointer { return t.devPtr }
 
 func (t *Tensor) SizeBytes() int {
@@ -403,11 +403,17 @@ func (ctx *Context) NewCUDAModel(f *gguf.GGUFFile, preDequantize bool, kvCacheSi
 	}
 
 	layers := 0
-	if v, ok := f.KV["llama.block_count"].(uint32); ok { layers = int(v) }
+	if v, ok := f.KV["llama.block_count"].(uint32); ok {
+		layers = int(v)
+	}
 	heads := 32
-	if v, ok := f.KV["llama.attention.head_count"].(uint32); ok { heads = int(v) }
+	if v, ok := f.KV["llama.attention.head_count"].(uint32); ok {
+		heads = int(v)
+	}
 	dim := 2048
-	if v, ok := f.KV["llama.embedding_length"].(uint32); ok { dim = int(v) }
+	if v, ok := f.KV["llama.embedding_length"].(uint32); ok {
+		dim = int(v)
+	}
 	headDim := dim / heads
 
 	m.KCache = make([]*Tensor, layers)
@@ -424,15 +430,21 @@ func (m *CUDAModel) Free() {
 	for _, w := range m.Weights {
 		C.cudaFree(w.devPtr)
 	}
-	for _, c := range m.KCache { c.Free() }
-	for _, c := range m.VCache { c.Free() }
+	for _, c := range m.KCache {
+		c.Free()
+	}
+	for _, c := range m.VCache {
+		c.Free()
+	}
 }
 
 func (m *CUDAModel) GetWeightTensor(name string) (*Tensor, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	w, ok := m.Weights[name]
-	if !ok { return nil, false }
+	if !ok {
+		return nil, false
+	}
 	return &Tensor{
 		devPtr:   w.devPtr,
 		rows:     w.rows,
@@ -455,12 +467,16 @@ func (m *CUDAModel) GetEmbeddingTensor(token int) (*Tensor, error) {
 }
 
 func (m *CUDAModel) GetKCache(layer int) *Tensor {
-	if layer < 0 || layer >= len(m.KCache) { return nil }
+	if layer < 0 || layer >= len(m.KCache) {
+		return nil
+	}
 	return m.KCache[layer]
 }
 
 func (m *CUDAModel) GetVCache(layer int) *Tensor {
-	if layer < 0 || layer >= len(m.VCache) { return nil }
+	if layer < 0 || layer >= len(m.VCache) {
+		return nil
+	}
 	return m.VCache[layer]
 }
 
@@ -471,11 +487,11 @@ func CUDAAllocatedBytes() int64 {
 }
 
 type LayerScratch struct {
-	Normed  *Tensor
-	Attn    *Tensor
-	Gate    *Tensor
-	Up      *Tensor
-	Down    *Tensor
+	Normed *Tensor
+	Attn   *Tensor
+	Gate   *Tensor
+	Up     *Tensor
+	Down   *Tensor
 }
 
 func (ctx *Context) NewLayerScratch(batch, dim, hiddenDim, heads, kvHeads, headDim, seqLen, vocabSize, qNormDim, kNormDim int) *LayerScratch {
@@ -555,5 +571,7 @@ func (c *Context) StoreKVPagedBatch(k, v, kCache, vCache, physicalPositions *Ten
 
 // StoreKVQuantized is a stub for future quantized KV cache storage support on CUDA.
 func (t *Tensor) StoreKVQuantized(v *Tensor, kCache, vCache *Tensor, pos, heads, headDim, windowSize int) {
-	panic("StoreKVQuantized not yet implemented for CUDA")
+	// TODO: Implement TurboQuant KV cache compression
+	// This requires fusing the PolarQuant + QJLTransform kernels
+	// into the PagedKVCache block allocation path
 }
