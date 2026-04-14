@@ -60,8 +60,6 @@ func NewFromGGUF(f *gguf.GGUFFile) (*Tokenizer, error) {
 		}
 	}
 
-	// Debug merges count
-	// fmt.Printf("Tokenizer: Loaded %d merges\n", len(merges))
 
 	return &Tokenizer{
 		Tokens: tokens,
@@ -124,9 +122,6 @@ func (t *Tokenizer) Encode(text string) []int {
 					allIDs = append(allIDs, t.Vocab[bestMatch])
 					remaining = remaining[bestLen:]
 				} else {
-					// Fallback: Skip one char (unknown)
-					// Or process as byte?
-					// fmt.Printf("Unknown char: %c\n", remaining[0])
 					remaining = remaining[1:]
 				}
 			}

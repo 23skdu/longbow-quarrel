@@ -51,7 +51,7 @@ func (t *Tensor) ToArrowArray(allocator memory.Allocator) (*array.FixedSizeList,
 
 	// Construct the FixedSizeList. 
 	// The Buffer and Data objects created inside will have their reference counts managed.
-	arr := buildFixedSizeList(allocator, arrowBuf, t.Rows(), t.Cols(), arrowType, t.ctx.DeviceID())
+	arr := buildFixedSizeList(arrowBuf, t.Rows(), t.Cols(), arrowType, t.ctx.DeviceID())
 	
 	// We release our local handle to the buffer because the array now owns it via Retain() inside NewData
 	arrowBuf.Release()
@@ -60,7 +60,7 @@ func (t *Tensor) ToArrowArray(allocator memory.Allocator) (*array.FixedSizeList,
 }
 
 // buildFixedSizeList constructs a List array with tracking for GPU affinity
-func buildFixedSizeList(allocator memory.Allocator, buf *memory.Buffer, rows, cols int, arrowType arrow.DataType, deviceID int) *array.FixedSizeList {
+func buildFixedSizeList(buf *memory.Buffer, rows, cols int, arrowType arrow.DataType, deviceID int) *array.FixedSizeList {
 	// 1. Construct the child data (the flat values)
 	// NewData will Retain the buffer.
 	valueData := array.NewData(

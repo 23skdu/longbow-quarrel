@@ -8,9 +8,7 @@ import (
 
 func TestContinuousBatchManager_Lifecycle(t *testing.T) {
 	conf := config.Default()
-	conf.MaxBatchSize = 4
-	conf.BlockSize = 8
-	conf.TotalBlocks = 16
+	_ = conf
 
 	mgr := NewContinuousBatchManager()
 	

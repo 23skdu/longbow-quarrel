@@ -13,19 +13,22 @@ import (
 
 // VisionEncoder handles loading and executing multimodal CLIP/SigLIP transformer stacks.
 type VisionEncoder struct {
-	ctx     *device.Context
-	dim     int
-	weights *VisionWeights
+	ctx          *device.Context
+	dim          int
+	weights      *VisionWeights
+	Architecture string
 }
 
 type VisionWeights struct {
-	PatchEmbed *device.Tensor
+	PatchEmbed  *device.Tensor
+	ProjectionB *device.Tensor
 }
 
-func NewVisionEncoder(ctx *device.Context, dim int) *VisionEncoder {
+func NewVisionEncoder(ctx *device.Context, dim int, arch string) *VisionEncoder {
 	return &VisionEncoder{
-		ctx: ctx,
-		dim: dim,
+		ctx:          ctx,
+		dim:          dim,
+		Architecture: arch,
 	}
 }
 
@@ -61,8 +64,14 @@ func (v *VisionEncoder) Encode(imageData []byte) (*device.Tensor, error) {
 	pixelTensor := v.ctx.NewTensorFP32(Channels, TargetW*TargetH)
 	pixelTensor.LoadFrom(pixels)
 	
-	// 4. Run CLIP Projection
-	v.ctx.VisionPatchEmbed(pixelTensor, v.weights.PatchEmbed, outTensor, 14, v.dim, TargetW/14)
+	// 4. Run Architecture-Specific Projection
+	if v.Architecture == "gemma4" {
+		// Gemma 4 uses a specialized fused kernel for Q/K norm + projection alignment
+		v.ctx.VisionPatchEmbedGemma4(pixelTensor, v.weights.PatchEmbed, v.weights.ProjectionB, outTensor, 14, v.dim, numPatches)
+	} else {
+		// Standard CLIP Projection
+		v.ctx.VisionPatchEmbed(pixelTensor, v.weights.PatchEmbed, outTensor, 14, v.dim, TargetW/14)
+	}
 	
 	pixelTensor.Free()
 	return outTensor, nil

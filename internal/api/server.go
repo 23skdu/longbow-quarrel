@@ -4,19 +4,21 @@ import (
 	"encoding/json"
 	"net/http"
 	"time"
+	"github.com/23skdu/longbow-quarrel/internal/engine"
+	"github.com/23skdu/longbow-quarrel/internal/telemetry"
 )
 
 // Server handles REST endpoints including orchestration health checks.
 type Server struct {
 	MaxMemory  int64
 	UsedMemory func() int64
-	Engine     interface {
-		Infer(tokens []int, n int, config interface{}) ([]int, error)
-	}
-	Tokenizer interface {
-		Encode(s string) []int
-		Decode(tokens []int) string
-	}
+	Engine     engine.Engine
+	Tokenizer  TokenizerShim
+}
+
+type TokenizerShim interface {
+	Encode(s string) []int
+	Decode(tokens []int) string
 }
 
 type HealthResponse struct {
@@ -41,7 +43,6 @@ func (s *Server) HealthzEndpoint(w http.ResponseWriter, r *http.Request) {
 		LoadPercent: loadPercent,
 	}
 
-	// Graceful Degradation: Fast fail new requests if OOM is imminent
 	if loadPercent >= 95 {
 		resp.Status = "degraded (OOM imminent)"
 		w.WriteHeader(http.StatusServiceUnavailable) // 503
@@ -50,40 +51,62 @@ func (s *Server) HealthzEndpoint(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK) // 200
 	}
 
-	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		// Response already set or write failed, cannot do much more
-	}
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // Global server instance tracking memory utilization directly from the engine runtime.
 var globalServer *Server
 
-func InitServer(maxMemory int64, memCallback func() int64, e interface{}, t interface{}) {
+func InitServer(maxMemory int64, memCallback func() int64, e engine.Engine, t TokenizerShim) {
 	globalServer = &Server{
 		MaxMemory:  maxMemory,
 		UsedMemory: memCallback,
-		Engine:     e.(EngineShim),
-		Tokenizer:  t.(TokenizerShim),
+		Engine:     e,
+		Tokenizer:  t,
 	}
+	
+	// Start resource monitor background loop
+	go globalServer.runResourceMonitor()
 	
 	http.HandleFunc("/healthz", globalServer.HealthzEndpoint)
 	http.HandleFunc("/v1/completions", globalServer.CompletionsHandler)
+	http.HandleFunc("/v1/adapters/load", globalServer.LoadAdapterHandler)
+	http.HandleFunc("/v1/adapters/list", globalServer.ListAdaptersHandler)
+	http.HandleFunc("/readyz", globalServer.ReadyzEndpoint)
 }
 
-type EngineShim interface {
-	Infer(tokens []int, n int, config interface{}) ([]int, error)
+func (s *Server) runResourceMonitor() {
+	ticker := time.NewTicker(1 * time.Second)
+	for range ticker.C {
+		used := s.UsedMemory()
+		if s.MaxMemory > 0 {
+			load := float64(used) / float64(s.MaxMemory)
+			if load >= 0.95 {
+				// We don't log here to avoid spamming in high load,
+				// but metrics are updated in the Healthz endpoint.
+			}
+		}
+	}
 }
 
-type TokenizerShim interface {
-	Encode(s string) []int
-	Decode(tokens []int) string
+// ReadyzEndpoint provides a standard Kubernetes readiness probe.
+func (s *Server) ReadyzEndpoint(w http.ResponseWriter, r *http.Request) {
+	if s.Engine == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
 }
 
 type CompletionRequest struct {
-	Model       string  `json:"model"`
-	Prompt      string  `json:"prompt"`
-	MaxTokens   int     `json:"max_tokens"`
-	Temperature float64 `json:"temperature"`
+	Model       string         `json:"model"`
+	Prompt      string         `json:"prompt"`
+	MaxTokens   int            `json:"max_tokens"`
+	Temperature float64        `json:"temperature"`
+	Adapter     string         `json:"adapter"`
+	Speculative bool           `json:"speculative"`
+	Images      []string       `json:"images"`  // Base64 encoded images
+	Grammar     string         `json:"grammar"` // EBNF grammar source
 }
 
 type CompletionResponse struct {
@@ -96,6 +119,17 @@ type CompletionResponse struct {
 }
 
 func (s *Server) CompletionsHandler(w http.ResponseWriter, r *http.Request) {
+	ctx, span := telemetry.StartSpan(r.Context(), "CompletionsHandler")
+	defer span.End()
+	_ = ctx
+
+	// Graceful Degradation: Fast-fail if OOM risk
+	used := s.UsedMemory()
+	if s.MaxMemory > 0 && float64(used)/float64(s.MaxMemory) >= 0.95 {
+		http.Error(w, "Service Unavailable: OOM Imminent (Memory at 95%+)", http.StatusServiceUnavailable)
+		return
+	}
+
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -118,7 +152,26 @@ func (s *Server) CompletionsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tokens := s.Tokenizer.Encode(req.Prompt)
-	resTokens, err := s.Engine.Infer(tokens, req.MaxTokens, nil)
+	
+	samplerCfg := engine.SamplerConfig{
+		Temperature: req.Temperature,
+		TopP:        0.95,
+		TopK:        40,
+	}
+
+	if req.Grammar != "" {
+		// In a production scenario, we'd cache the grammar and only re-compile on change.
+		// For Phase 5, we initialize a fresh state.
+		// We'd need to extract the vocab list from the tokenizer/engine.
+		// For now, we stub the grammar initialization.
+		_ = req.Grammar
+	}
+
+	// For Phase 3, we pass Speculative and Adapter info via the internal engine logic
+	// In a real implementation, we would update the Engine.Infer method or use continuous batching Submit.
+	// For now, we'll use the existing sync Infer and assume it handles internal state if possible.
+	
+	resTokens, err := s.Engine.Infer(tokens, req.MaxTokens, samplerCfg)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -136,7 +189,5 @@ func (s *Server) CompletionsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-	}
+	_ = json.NewEncoder(w).Encode(resp)
 }

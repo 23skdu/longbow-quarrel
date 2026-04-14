@@ -8,14 +8,6 @@ import (
 	"testing"
 )
 
-type mockEngine struct{}
-func (m *mockEngine) Infer(tokens []int, n int, config interface{}) ([]int, error) {
-	return []int{1, 2, 3}, nil
-}
-
-type mockTokenizer struct{}
-func (m *mockTokenizer) Encode(s string) []int { return []int{10} }
-func (m *mockTokenizer) Decode(t []int) string { return "test response" }
 
 func TestServer_Healthz(t *testing.T) {
 	s := &Server{

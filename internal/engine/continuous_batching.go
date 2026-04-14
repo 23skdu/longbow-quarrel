@@ -20,7 +20,15 @@ type InferenceRequest struct {
 	LogitsCallback func([]float32)
 	AdapterID      string // Active LoRA adapter for this request
 
+	// Speculative Decoding Parameters
+	Speculative bool // Enable speculative decoding for this request
+	DraftK      int  // Number of tokens to draft per step
+	NumPaths    int  // Number of parallel sampling paths for the draft model
+
 	PrefillCompleted bool // Set when the full prompt has been ingested into KV cache
+
+	// Phase 5: Multimodal
+	Images []string // Base64 image payloads
 }
 
 // BatchDescriptor describes a packed execution batch for the engine
@@ -38,6 +46,9 @@ type BatchDescriptor struct {
 	AdapterIDs []string
 	// IsDecode indicates if the sequence entry is a single-token decode (true) or a multi-token prefill/chunk (false)
 	IsDecode []bool
+
+	// Phase 5: Multimodal Injection Tensors [seqIdx -> EmbeddingTensor]
+	VisionTensors map[int]interface{} // map[seqIdx]*device.Tensor
 }
 
 // RequestQueue handles thread-safe enqueuing and dequeuing of raw incoming requests.
@@ -161,6 +172,11 @@ func (cm *ContinuousBatchManager) Step(maxBatchSize int, kvCache *PagedKVCache, 
 			seq.TokenCallback = req.TokenCallback
 			seq.LogitsCallback = req.LogitsCallback
 			seq.AdapterID = req.AdapterID
+			
+			// Speculative Decoding Parameters
+			seq.Speculative = req.Speculative
+			seq.DraftK = req.DraftK
+			seq.NumPaths = req.NumPaths
 
 			// 3. If cache hit, adopt blocks and advance position
 			if matchedCount > 0 {

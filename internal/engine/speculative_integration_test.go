@@ -28,10 +28,10 @@ func (e *specMockEngine) RollbackKV(seqID string, newPos int) error {
 func TestSpeculativeManager_Coverage(t *testing.T) {
 	target := &specMockEngine{MockEngine: MockEngine{cfg: config.Config{MaxTokens: 10}}}
 	draft := &specMockEngine{MockEngine: MockEngine{}}
-	sm := NewSpeculativeManager(target, draft, 1)
+	sm := NewSpeculativeManager(target, draft)
 
 	t.Run("Initialize", func(t *testing.T) {
-		sm_err := NewSpeculativeManager(nil, nil, 1)
+		sm_err := NewSpeculativeManager(nil, nil)
 		seq := &Sequence{ID: 1, Tokens: []int{1}}
 		err := sm_err.GenerateSpeculative(context.Background(), seq)
 		if err == nil {

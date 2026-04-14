@@ -1,69 +1,59 @@
 # Metrics Reference
 
-## Overview
-
 Comprehensive Prometheus metrics for monitoring inference performance, model behavior, and system health.
 
-## Engine Metrics
-
-### Kernel Performance
-
-| Metric | Type | Labels | Description |
-|--------|------|--------|-------------|
-| `gpu_kernel_duration_seconds` | Histogram | `kernel` | Metal kernel execution time |
-| `gpu_memory_allocated_bytes` | Gauge | N/A | Current GPU memory in use |
-
-### Inference
-
-| Metric | Type | Labels | Description |
-|--------|------|--------|-------------|
-| `inference_tokens_total` | Counter | N/A | Total tokens generated |
-| `inference_duration_seconds` | Summary | N/A | Inference step duration |
-
-## Model-Specific Metrics
-
-### Gemma4 Metrics
+## Core Engine Metrics
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `gemma4_sliding_window_layers_total` | Counter | Sliding window attention layers processed |
-| `gemma4_full_attention_layers_total` | Counter | Full attention layers processed |
-| `gemma4_sliding_window_size` | Gauge | Configured sliding window (default: 512) |
-| `gemma4_partial_rope_factor` | Histogram | p-RoPE rotation factor (0.25 = 25%) |
-| `gemma4_rope_theta` | Histogram | RoPE theta (10K sliding, 1M full) |
-| `gemma4_q_norm_applied_total` | Counter | Q normalization operations |
-| `gemma4_k_norm_applied_total` | Counter | K normalization operations |
-| `gemma4_layer_pattern_ratio` | Histogram | Sliding:full attention ratio (5:1) |
-| `gemma4_sliding_head_dim` | Gauge | Sliding attention head dim (256) |
-| `gemma4_full_head_dim` | Gauge | Full attention head dim (512) |
-| `gemma4_context_length_tokens` | Histogram | Context length distribution |
+| `inference_tokens_total` | Counter | Total tokens generated across all requests. |
+| `inference_duration_seconds` | Summary | Total time spent in the inference step loop. |
+| `gpu_memory_allocated_bytes` | Gauge | Current bytes allocated on the GPU. |
+| `gpu_kernel_duration_seconds` | Histogram | Execution time per individual kernel (label: `kernel`). |
+| `context_length_tokens` | Histogram | Distribution of sequence lengths processed. |
 
-### KV Cache
+## Paged KV Cache Metrics
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `kv_cache_sliding_window_total` | Counter | Sliding window cache operations |
-| `kv_cache_overlap_total` | Counter | Cache position overlaps |
-| `kv_cache_hits_total` | Counter | Cache hits |
-| `kv_cache_misses_total` | Counter | Cache misses |
+| `kv_cache_capacity_bytes` | Gauge | Total pre-allocated KV cache capacity. |
+| `kv_cache_used_bytes` | Gauge | Current KV cache memory usage. |
+| `kv_cache_hits_total` | Counter | Number of positions retrieved from the prompt cache. |
+| `kv_cache_misses_total` | Counter | Number of positions requiring new computation. |
+| `kv_cache_evictions_total` | Counter | Number of blocks evicted from the cache. |
+| `kv_cache_oob_total` | Counter | Count of out-of-bounds KV cache access attempts (Stability Audit). |
+| `kv_cache_overlap_total` | Counter | Count of position overlaps in the block table (Stability Audit). |
 
-### Quantization
+## Model Health & Audit Metrics
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `dequant_max_abs_error` | Histogram | Max absolute dequantization error |
-| `dequant_pass_total` | Counter | Passing accuracy checks |
-| `dequant_fail_total` | Counter | Failing accuracy checks |
+| `logit_nan_count_total` | Counter | Total count of NaN values detected in model output. |
+| `logit_extreme_values_total` | Counter | Values exceeding +/- 1000 in the logit distribution. |
+| `numerical_instability_total` | Counter | Instances of NaN/Inf in hidden states (label: `tensor`). |
+| `activation_unhealthy_total` | Counter | Count of layers with collapsed or saturated activations. |
+| `nan_detected_total` | Counter | Count of NaN propagation events detected during forward pass. |
 
-## Query Examples
+## Speculative Decoding & Advanced Features
 
-```promql
-# Tokens per second
-rate(inference_tokens_total[5m])
+| Metric | Type | Description |
+|--------|------|-------------|
+| `model_hot_swap_total` | Counter | Number of times a model was swapped via API. |
+| `model_hot_swap_duration_seconds` | Histogram | Time taken to load a new model and restart the engine. |
+| `quarrel_moe_expert_selection_total` | Counter | frequency of selection per expert (labels: `layer`, `expert_id`). |
+| `quarrel_moe_routing_latency_seconds` | Histogram | Latency of the MOE router top-k selection. |
 
-# Kernel performance
-histogram_quantile(0.95, rate(gpu_kernel_duration_seconds_bucket[5m]))
+## Quantization Accuracy (Audit)
 
-# KV cache effectiveness
-kv_cache_hits_total / (kv_cache_hits_total + kv_cache_misses_total)
-```
+| Metric | Type | Description |
+|--------|------|-------------|
+| `dequant_max_abs_error` | Histogram | Maximum error compared to FP16 reference during dequantization. |
+| `dequant_fail_total` | Counter | Count of kernels failing accuracy gates (>0.1 error). |
+
+## Tokenizer Performance
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `tokenizer_encode_time_seconds` | Histogram | Latency of the BPE encoding process. |
+| `tokenizer_decode_time_seconds` | Histogram | Latency of the BPE decoding process. |
+| `tokenizer_unknown_tokens_total` | Counter | Number of unknown tokens encountered. |

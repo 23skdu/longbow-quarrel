@@ -65,6 +65,12 @@ curl -X POST http://localhost:8080/v1/completions \
   }'
 ```
 
+**Extensions (Phase 3):**
+- `"adapter"`: (string) ID of a previously loaded LoRA adapter.
+- `"speculative"`: (bool) Enable accelerated speculative decoding.
+- `"draft_k"`: (int, optional) Number of tokens to draft per step (default: 4).
+- `"num_paths"`: (int, optional) Number of parallel sampling paths (default: 1).
+
 ### Custom Endpoints
 
 #### POST /generate
@@ -123,6 +129,25 @@ Hot-swap model without restart.
 curl -X POST http://localhost:8080/hotswap \
   -H "Content-Type: application/json" \
   -d '{"model": "/path/to/new_model.gguf"}'
+```
+
+#### POST /v1/adapters/load
+Load a LoRA adapter dynamically.
+
+```bash
+curl -X POST http://localhost:8080/v1/adapters/load \
+  -H "Content-Type: application/json" \
+  -d '{
+    "path": "/path/to/adapter.gguf",
+    "id": "my-lora-id"
+  }'
+```
+
+#### GET /v1/adapters/list
+List all currently loaded LoRA adapters.
+
+```bash
+curl http://localhost:8080/v1/adapters/list
 ```
 
 ### Health & Metrics

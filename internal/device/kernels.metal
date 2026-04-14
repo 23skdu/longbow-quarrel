@@ -3197,3 +3197,59 @@ kernel void all_reduce_sum_f16(
     if (qid >= (uint)count) return;
     output[qid] = input_0[qid] + input_1[qid];
 }
+kernel void dequantize_q2_k(device const void *x [[ buffer(0) ]],
+                           device float *out [[ buffer(1) ]],
+                           uint qid [[ thread_position_in_grid ]]) {
+    struct block_q2_K {
+        uint8_t scales[16];
+        uint8_t qs[64];
+        half d;
+        half dmin;
+    };
+    
+    device const block_q2_K *blocks = (device const block_q2_K *)x;
+    const uint block_idx = qid / 256;
+    const uint i = qid % 256;
+    
+    device const block_q2_K &b = blocks[block_idx];
+    
+    const uint l = i / 16;
+    const uint k = i % 16;
+    
+    const float d = (float)b.d;
+    const float dmin = (float)b.dmin;
+    const uint8_t sc = b.scales[l] & 0xF;
+    const uint8_t m = b.scales[l] >> 4;
+    
+    const float dl = d * (float)sc;
+    const float ml = dmin * (float)m;
+    
+    const uint8_t qByte = b.qs[i / 4];
+    const float q = (float)((qByte >> ((i % 4) * 2)) & 3);
+    
+    out[qid] = dl * q - ml;
+}
+
+kernel void dequantize_iq4_xs(device const void *x [[ buffer(0) ]],
+                            device float *out [[ buffer(1) ]],
+                            uint qid [[ thread_position_in_grid ]]) {
+    struct block_iq4_xs {
+        uint8_t qs[128];
+        uint8_t scales[8];
+        half d;
+    };
+    
+    device const block_iq4_xs *blocks = (device const block_iq4_xs *)x;
+    const uint block_idx = qid / 256;
+    const uint i = qid % 256;
+    
+    device const block_iq4_xs &b = blocks[block_idx];
+    
+    const uint group_idx = i / 32;
+    const float s = (float)b.d * (float)b.scales[group_idx];
+    
+    const uint8_t qb = b.qs[i / 2];
+    const float q = (i % 2 == 0) ? (float)(qb & 0xF) : (float)(qb >> 4);
+    
+    out[qid] = s * (q - 8.0f);
+}

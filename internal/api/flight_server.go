@@ -7,6 +7,7 @@ import (
 	"net"
 
 	"github.com/23skdu/longbow-quarrel/internal/engine"
+	"github.com/23skdu/longbow-quarrel/internal/logger"
 	"github.com/23skdu/longbow-quarrel/internal/tokenizer"
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -149,6 +150,6 @@ func (s *InferenceFlightServer) ServeListener(lis net.Listener) error {
 	grpcServer := grpc.NewServer()
 	flight.RegisterFlightServiceServer(grpcServer, s)
 
-	fmt.Printf("Starting Arrow Flight Inference stream on %s\n", lis.Addr().String())
+	logger.Log.Info("Starting Arrow Flight Inference stream", "addr", lis.Addr().String())
 	return grpcServer.Serve(lis)
 }

@@ -6,12 +6,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"runtime"
 	"sync"
 	"time"
 
+	"github.com/23skdu/longbow-quarrel/internal/logger"
 	"github.com/23skdu/longbow-quarrel/internal/metrics"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -128,7 +128,7 @@ func (hm *HealthMonitor) Start(addr string) error {
 		WriteTimeout: 10 * time.Second,
 	}
 
-	log.Printf("Health monitor starting on %s", addr)
+	logger.Log.Info("Health monitor starting", "addr", addr)
 	return hm.server.ListenAndServe()
 }
 
@@ -201,7 +201,7 @@ func (hm *HealthMonitor) AddAlert(level, component, message string) {
 		hm.alerts = hm.alerts[1:]
 	}
 
-	log.Printf("ALERT [%s/%s]: %s", level, component, message)
+	logger.Log.Warn("ALERT system triggered", "level", level, "component", component, "message", message)
 }
 
 // ResolveAlert resolves an alert

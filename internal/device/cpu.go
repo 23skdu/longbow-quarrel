@@ -687,3 +687,12 @@ func (t *Tensor) StoreKVQuantized(v *Tensor, kCache, vCache *Tensor, pos, heads,
 	// Fallback to standard StoreKV
 	t.StoreKV(v, kCache, vCache, pos, heads, headDim, windowSize)
 }
+// VisionPatchEmbed is a CPU stub for patch embedding.
+func (c *Context) VisionPatchEmbed(pixels *Tensor, weights *Tensor, output *Tensor, patchSize, visionDim, numPatchesX int) {
+	// CPU implementation stub
+}
+
+// VisionPatchEmbedGemma4 is a CPU stub for Gemma 4 patch embedding.
+func (c *Context) VisionPatchEmbedGemma4(pixels *Tensor, weights *Tensor, bias *Tensor, output *Tensor, patchSize, hiddenDim, numPatches int) {
+	// CPU implementation stub
+}

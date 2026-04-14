@@ -72,6 +72,10 @@ func (e *MockEngine) SwapModel(modelPath string, cfg config.Config) error {
 	return nil
 }
 
+func (e *MockEngine) LoadAdapter(path, id string) error {
+	return nil
+}
+
 func (e *MockEngine) GetSeqCachePos(seqID string) int {
 	return 0
 }

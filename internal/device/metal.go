@@ -88,7 +88,9 @@ void Metal_TurboQuant_Decode(MetalWrapperRef ctx, MetalBufferRef input,
 
 void Metal_FlashAttention2_F16(MetalWrapperRef ctx, MetalBufferRef q, MetalBufferRef k_cache, MetalBufferRef v_cache, MetalBufferRef output, int num_heads, int kv_heads, int headDim, MetalBufferRef seq_lens, int block_size, MetalBufferRef block_table, int max_blocks_per_seq, MetalBufferRef token_to_seq, int batchSize);
 void Metal_Linear_LoRA_Add_F16(MetalWrapperRef ctx, MetalBufferRef input, int offIn, MetalBufferRef A, int offA, MetalBufferRef B, int offB, MetalBufferRef output, int offOut, int M, int N, int K, int R, float scale);
-void Metal_Vision_Patch_Embed_F32(MetalWrapperRef ctx, MetalBufferRef pixels, int offPixels, MetalBufferRef weights, int offW, MetalBufferRef output, int offOut, int patchSize, int visionDim, int numPatchesX);
+void Metal_Vision_Patch_Embed_Gemma4(MetalWrapperRef ctx, MetalBufferRef pixels, int offPixels, MetalBufferRef weights, int offW, MetalBufferRef bias, int offB, MetalBufferRef output, int offOut, int patchSize, int hiddenDim, int numPatches);
+void Metal_Dequantize_Q2_K(MetalWrapperRef ctx, MetalBufferRef data, int offData, MetalBufferRef output, int offOut, int numElements);
+void Metal_Dequantize_IQ4_XS(MetalWrapperRef ctx, MetalBufferRef data, int offData, MetalBufferRef output, int offOut, int numElements);
 void Metal_AllReduce_F16(MetalWrapperRef ctx, MetalBufferRef data, int offset, int count);
 */
 import "C"
@@ -721,11 +723,31 @@ func (c *Context) VisionPatchEmbed(pixels *Tensor, weights *Tensor, output *Tens
 	C.Metal_Vision_Patch_Embed_F32(c.ref, pixels.buf, C.int(pixels.Offset), weights.buf, C.int(weights.Offset), output.buf, C.int(output.Offset), C.int(patchSize), C.int(visionDim), C.int(numPatchesX))
 }
 
+func (c *Context) VisionPatchEmbedGemma4(pixels *Tensor, weights *Tensor, bias *Tensor, output *Tensor, patchSize, hiddenDim, numPatches int) {
+	c.ExecMu.Lock()
+	defer c.ExecMu.Unlock()
+	C.Metal_Vision_Patch_Embed_Gemma4(c.ref, pixels.buf, C.int(pixels.Offset), weights.buf, C.int(weights.Offset), bias.buf, C.int(bias.Offset), output.buf, C.int(output.Offset), C.int(patchSize), C.int(hiddenDim), C.int(numPatches))
+}
+
 func (c *Context) AllReduce(data *Tensor) {
 	c.ExecMu.Lock()
 	defer c.ExecMu.Unlock()
 	count := data.rows * data.cols
 	C.Metal_AllReduce_F16(c.ref, data.buf, C.int(data.Offset), C.int(count))
+}
+
+func (c *Context) DequantizeQ2K(data *Tensor, output *Tensor) {
+	c.ExecMu.Lock()
+	defer c.ExecMu.Unlock()
+	numElements := output.rows * output.cols
+	C.Metal_Dequantize_Q2_K(c.ref, data.buf, C.int(data.Offset), output.buf, C.int(output.Offset), C.int(numElements))
+}
+
+func (c *Context) DequantizeIQ4XS(data *Tensor, output *Tensor) {
+	c.ExecMu.Lock()
+	defer c.ExecMu.Unlock()
+	numElements := output.rows * output.cols
+	C.Metal_Dequantize_IQ4_XS(c.ref, data.buf, C.int(data.Offset), output.buf, C.int(output.Offset), C.int(numElements))
 }
 
 // NewTensorPooled attempts to reuse tensor from pool (defaults to F16)

@@ -385,23 +385,6 @@ func (e *CPUEngine) SwapModel(modelPath string, cfg config.Config) error {
 	return nil
 }
 
-func (e *CPUEngine) sample(tokens []int, cfg SamplerConfig) (int, error) {
-	logits := e.forward(tokens)
-
-	if cfg.Temperature > 0 {
-		logits = applyTempCPU(logits, cfg.Temperature)
-	}
-
-	logits = applyTopKCPU(logits, cfg.TopK)
-	logits = applyTopPCPU(logits, cfg.TopP)
-
-	probs := softmaxCPU(logits)
-
-	seed := cfg.Seed + int64(len(tokens))
-	r := rand.New(rand.NewSource(seed)) // #nosec G404
-
-	return sampleFromDistCPU(probs, r), nil
-}
 
 func (e *CPUEngine) forward(tokens []int) []float32 {
 	hiddenSize := 0
@@ -533,4 +516,8 @@ func (e *CPUEngine) RollbackKV(seqID string, newPos int) error {
 		return fmt.Errorf("cache not initialized")
 	}
 	return e.cache.RollbackKV(seqID, newPos)
+}
+
+func (e *CPUEngine) LoadAdapter(path, id string) error {
+	return nil // Not supported on CPU for now
 }

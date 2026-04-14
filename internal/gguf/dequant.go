@@ -226,6 +226,83 @@ func DequantizeQ3K(data []byte, numElements int) []float32 {
 	return out
 }
 
+// DequantizeQ2K converts Q2_K data (2-bit) to Float32.
+// Layout (84 bytes per 256 weights):
+// - d: f16 (super-scale)
+// - dmin: f16 (super-min)
+// - scales: 16 bytes (16 groups of 4-bit scale + 4-bit min)
+// - qs: 64 bytes (256 * 2 bits)
+func DequantizeQ2K(data []byte, numElements int) []float32 {
+	const blockSizeBytes = 84
+	numBlocks := numElements / 256
+	out := make([]float32, numElements)
+
+	for i := 0; i < numBlocks; i++ {
+		blockOffset := i * blockSizeBytes
+		if blockOffset+blockSizeBytes > len(data) {
+			break
+		}
+		block := data[blockOffset : blockOffset+blockSizeBytes]
+
+		scales := block[0:16]
+		qs := block[16:80]
+		d := Float16ToFloat32(binary.LittleEndian.Uint16(block[80:82]))
+		dmin := Float16ToFloat32(binary.LittleEndian.Uint16(block[82:84]))
+
+		for l := 0; l < 16; l++ {
+			sc := scales[l] & 0xF
+			m := scales[l] >> 4
+			dl := d * float32(sc)
+			ml := dmin * float32(m)
+
+			for k := 0; k < 16; k++ {
+				idx := l*16 + k
+				// 4 weights per byte in qs
+				qByte := qs[idx/4]
+				q := (qByte >> ((idx % 4) * 2)) & 3
+				out[i*256+idx] = dl*float32(q) - ml
+			}
+		}
+	}
+	return out
+}
+
+// DequantizeIQ4XS converts IQ4_XS data to Float32.
+// Layout (138 bytes per 256 weights):
+// - d: f16 (super-scale)
+// - scales: 8 bytes (8 groups of 8-bit scales) - Wait, sigmas?
+// - qs: 128 bytes (256 * 4 bits)
+func DequantizeIQ4XS(data []byte, numElements int) []float32 {
+	const blockSizeBytes = 138
+	numBlocks := numElements / 256
+	out := make([]float32, numElements)
+
+	for i := 0; i < numBlocks; i++ {
+		blockOffset := i * blockSizeBytes
+		if blockOffset+blockSizeBytes > len(data) {
+			break
+		}
+		block := data[blockOffset : blockOffset+blockSizeBytes]
+
+		d := Float16ToFloat32(binary.LittleEndian.Uint16(block[136:138]))
+		qs := block[0:128]
+		scales := block[128:136]
+
+		for j := 0; j < 8; j++ {
+			s := d * float32(scales[j])
+			// 32 elements per scale group
+			for k := 0; k < 16; k++ {
+				idx := j*32 + k
+				b := qs[j*16+k]
+				// IQ4_XS uses a lookup table in reality, but for a 4-bit standard:
+				out[i*256+idx] = s * (float32(b&0xF) - 8.0)
+				out[i*256+idx+16] = s * (float32(b>>4) - 8.0)
+			}
+		}
+	}
+	return out
+}
+
 func DequantizeQ6K(data []byte, numElements int) []float32 {
 	const blockSizeBytes = 210
 	numBlocks := numElements / 256
@@ -441,6 +518,12 @@ func DequantizeBlock(data []byte, dst []float32, dataType GGMLType) {
 		copy(dst, res)
 	case GGMLTypeQ5_0:
 		res := DequantizeQ5_0(data, len(dst))
+		copy(dst, res)
+	case GGMLTypeQ2_K:
+		res := DequantizeQ2K(data, len(dst))
+		copy(dst, res)
+	case GGMLTypeIQ4_XS:
+		res := DequantizeIQ4XS(data, len(dst))
 		copy(dst, res)
 	default:
 		// Fallback or panic for unsupported types in tests

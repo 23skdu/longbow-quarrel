@@ -91,6 +91,9 @@
 @property(strong) id<MTLComputePipelineState> pipelineAttentionTQ_Values;
 @property(strong) id<MTLComputePipelineState> pipelineLinearLoRA;
 @property(strong) id<MTLComputePipelineState> pipelineVisionPatchEmbed;
+@property(strong) id<MTLComputePipelineState> pipelineVisionPatchEmbedGemma4;
+@property(strong) id<MTLComputePipelineState> pipelineDequantizeQ2K;
+@property(strong) id<MTLComputePipelineState> pipelineDequantizeIQ4XS;
 @property(strong) id<MTLComputePipelineState> pipelineAllReduce;
 @property(strong) id<MTLComputePipelineState> pipelineAttPagedBatch_F16;
 @property(strong) id<MTLComputePipelineState> pipelineStoreKVPagedBatch_F16;
@@ -297,6 +300,9 @@ MetalWrapperRef Metal_Init(const char *libSource) {
   ctx.pipelineAttentionTQ_Values = loadPipeline(ctx, @"attention_tq_values_f16");
   ctx.pipelineLinearLoRA = loadPipeline(ctx, @"linear_lora_add_f16");
   ctx.pipelineVisionPatchEmbed = loadPipeline(ctx, @"vision_patch_embed_f32");
+  ctx.pipelineVisionPatchEmbedGemma4 = loadPipeline(ctx, @"vision_patch_embed_gemma4");
+  ctx.pipelineDequantizeQ2K = loadPipeline(ctx, @"dequantize_q2_k");
+  ctx.pipelineDequantizeIQ4XS = loadPipeline(ctx, @"dequantize_iq4_xs");
   ctx.pipelineAllReduce = loadPipeline(ctx, @"all_reduce_sum_f16");
   ctx.pipelineFlashAttention2 = loadPipeline(ctx, @"flash_attention2_f16");
 
@@ -2109,6 +2115,63 @@ void Metal_Vision_Patch_Embed_F32(MetalWrapperRef ctx, MetalBufferRef pixels, in
         int totalPatches = numPatchesX * numPatchesX;
         MTLSize gridSize = MTLSizeMake(visionDim, totalPatches, 1);
         MTLSize threadgroupSize = MTLSizeMake(32, 1, 1);
+        
+        [enc dispatchThreads:gridSize threadsPerThreadgroup:threadgroupSize];
+        [mc barrier];
+    }
+}
+
+void Metal_Vision_Patch_Embed_Gemma4(MetalWrapperRef ctx, MetalBufferRef pixels, int offPixels,
+                                  MetalBufferRef weights, int offW, MetalBufferRef bias, int offB,
+                                  MetalBufferRef output, int offOut, int patchSize, int hiddenDim, int numPatches) {
+    @autoreleasepool {
+        MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
+        id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
+        
+        [enc setComputePipelineState:mc.pipelineVisionPatchEmbedGemma4];
+        [enc setBuffer:(__bridge id<MTLBuffer>)pixels offset:offPixels atIndex:0];
+        [enc setBuffer:(__bridge id<MTLBuffer>)weights offset:offW atIndex:1];
+        [enc setBuffer:(__bridge id<MTLBuffer>)bias offset:offB atIndex:2];
+        [enc setBuffer:(__bridge id<MTLBuffer>)output offset:offOut atIndex:3];
+        [enc setBytes:&patchSize length:sizeof(int) atIndex:4];
+        [enc setBytes:&hiddenDim length:sizeof(int) atIndex:5];
+        
+        MTLSize gridSize = MTLSizeMake(numPatches, hiddenDim, 1);
+        MTLSize threadgroupSize = MTLSizeMake(1, 32, 1); 
+        
+        [enc dispatchThreads:gridSize threadsPerThreadgroup:threadgroupSize];
+        [mc barrier];
+    }
+}
+
+void Metal_Dequantize_Q2_K(MetalWrapperRef ctx, MetalBufferRef data, int offData, MetalBufferRef output, int offOut, int numElements) {
+    @autoreleasepool {
+        MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
+        id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
+        
+        [enc setComputePipelineState:mc.pipelineDequantizeQ2K];
+        [enc setBuffer:(__bridge id<MTLBuffer>)data offset:offData atIndex:0];
+        [enc setBuffer:(__bridge id<MTLBuffer>)output offset:offOut atIndex:1];
+        
+        MTLSize gridSize = MTLSizeMake(numElements, 1, 1);
+        MTLSize threadgroupSize = MTLSizeMake(256, 1, 1);
+        
+        [enc dispatchThreads:gridSize threadsPerThreadgroup:threadgroupSize];
+        [mc barrier];
+    }
+}
+
+void Metal_Dequantize_IQ4_XS(MetalWrapperRef ctx, MetalBufferRef data, int offData, MetalBufferRef output, int offOut, int numElements) {
+    @autoreleasepool {
+        MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
+        id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
+        
+        [enc setComputePipelineState:mc.pipelineDequantizeIQ4XS];
+        [enc setBuffer:(__bridge id<MTLBuffer>)data offset:offData atIndex:0];
+        [enc setBuffer:(__bridge id<MTLBuffer>)output offset:offOut atIndex:1];
+        
+        MTLSize gridSize = MTLSizeMake(numElements, 1, 1);
+        MTLSize threadgroupSize = MTLSizeMake(256, 1, 1);
         
         [enc dispatchThreads:gridSize threadsPerThreadgroup:threadgroupSize];
         [mc barrier];

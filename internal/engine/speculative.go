@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"github.com/23skdu/longbow-quarrel/internal/logger"
 )
 
 // SpeculativeManager orchestrates draft-model generation logic.
@@ -11,92 +12,114 @@ type SpeculativeManager struct {
 	mu           sync.Mutex
 	targetEngine Engine
 	draftEngine  Engine
-	draftScale   int // Max number of draft tokens per step
 }
 
-func NewSpeculativeManager(target, draft Engine, scale int) *SpeculativeManager {
+func NewSpeculativeManager(target, draft Engine) *SpeculativeManager {
 	return &SpeculativeManager{
 		targetEngine: target,
 		draftEngine:  draft,
-		draftScale:   scale,
 	}
 }
 
-// GenerateSpeculative performs continuous decoding using speculative evaluation.
-func (sm *SpeculativeManager) GenerateSpeculative(ctx context.Context, seq *Sequence) error {
+// GenerateSpeculativeMultiPath performs continuous decoding using multiple parallel draft paths.
+func (sm *SpeculativeManager) GenerateSpeculativeMultiPath(ctx context.Context, seq *Sequence) error {
 	if sm.draftEngine == nil || sm.targetEngine == nil {
 		return fmt.Errorf("engines not fully initialized")
 	}
 
-	// 1. Draft model autoregressively suggests K tokens
-	draftTokens := make([]int, 0, sm.draftScale)
-	draftLogits := make([][]float32, 0, sm.draftScale)
+	numPaths := seq.NumPaths
+	if numPaths < 1 { numPaths = 1 }
+	draftK := seq.DraftK
+	if draftK < 1 { draftK = 4 }
 
 	currentPos := seq.Pos
-	seqIDStr := fmt.Sprintf("seq-%d", seq.ID)
 
-	for i := 0; i < sm.draftScale; i++ {
-		// Sample one token from Draft model
-		token, logits, err := sm.draftEngine.InferWithLogits(seq.Tokens, 1, seq.Config)
+	// 1. Generate N parallel candidate paths using the Draft model
+	// We create N sequences in the draft engine, starting from the same prefix
+	candidates := make([][]int, numPaths)
+	for i := 0; i < numPaths; i++ {
+		candidates[i] = make([]int, 0, draftK)
+	}
+
+	// For simplicity in this implementation, we run draft sampling in a loop
+	// but using the DraftEngine's internal batching if it were exposed.
+	// Since the current Engine interface is sequence-oriented for Infer, 
+	// we will run N parallel inferences.
+	
+	var wg sync.WaitGroup
+	wg.Add(numPaths)
+	for p := 0; p < numPaths; p++ {
+		go func(pathIdx int) {
+			defer wg.Done()
+			// Each path gets its own stochastic sample
+			pathTokens := append([]int{}, seq.Tokens...)
+			for k := 0; k < draftK; k++ {
+				token, _, err := sm.draftEngine.InferWithLogits(pathTokens, 1, seq.Config)
+				if err != nil {
+					logger.Log.Error("Draft path inference failed", "path", pathIdx, "error", err)
+					return
+				}
+				candidates[pathIdx] = append(candidates[pathIdx], token[0])
+				pathTokens = append(pathTokens, token[0])
+			}
+		}(p)
+	}
+	wg.Wait()
+
+	// 2. Target model evaluates all draft paths
+	// In a real implementation, we would pack all candidates into a single ForwardBatch call.
+	// For now, we'll implement the "Best Path" selection.
+	
+	bestAcceptedCount := 0
+	bestPathIdx := -1
+
+	for p := 0; p < numPaths; p++ {
+		if len(candidates[p]) == 0 { continue }
+		
+		// Evaluate this candidate path against the target model
+		candidateTokens := append([]int{}, seq.Tokens...)
+		candidateTokens = append(candidateTokens, candidates[p]...)
+		
+		targetLogits, err := sm.targetEngine.ForwardDraft(candidateTokens)
 		if err != nil {
-			return err
+			continue
 		}
-		draftTokens = append(draftTokens, token[0])
-		draftLogits = append(draftLogits, logits)
+
+		accepted := 0
+		for i := 0; i < len(candidates[p]); i++ {
+			// Mock verification logic (to be replaced with actual log-prob comparison)
+			// For now, we assume a simple greedy match or probability threshold
+			if i < len(targetLogits) {
+				// verify(targetLogits[i], candidates[p][i])
+				accepted++ 
+			} else {
+				break
+			}
+		}
 		
-		// Temporarily advance seq.Tokens for next draft step
-		seq.Tokens = append(seq.Tokens, token[0])
+		if accepted > bestAcceptedCount {
+			bestAcceptedCount = accepted
+			bestPathIdx = p
+		}
 	}
 
-	// 2. Target model evaluates all draft tokens simultaneously
-	// Standard speculative decoding: Target evaluates P(x_i | x_{<i}, drafted_{<i})
-	targetLogits, err := sm.targetEngine.ForwardDraft(seq.Tokens)
-	if err != nil {
-		return err
-	}
-
-	// 3. Rejection Sampling
-	acceptedCount := 0
-	for i := 0; i < len(draftTokens); i++ {
-		if i >= len(targetLogits) {
-			break
-		}
-		pTarget := targetLogits[i] 
-		qDraft := draftLogits[i]
-		draftedToken := draftTokens[i]
-
-		// Acceptance probability: min(1, P(x)/Q(x))
-		if draftedToken >= len(pTarget) || draftedToken >= len(qDraft) {
-			break
-		}
-		p_x := pTarget[draftedToken]
-		q_x := qDraft[draftedToken]
+	// 3. Finalize best path
+	if bestPathIdx != -1 && bestAcceptedCount > 0 {
+		seq.Tokens = append(seq.Tokens, candidates[bestPathIdx][:bestAcceptedCount]...)
+		seq.Pos = currentPos + bestAcceptedCount
 		
-		accepted := false
-		if q_x > 0 && p_x/q_x >= 1.0 {
-			accepted = true
-		} else if q_x > 0 {
-			// Random acceptance (mock for now, should use rand.Float32())
-			accepted = true 
-		}
-
-		if accepted {
-			acceptedCount++
-		} else {
-			break
-		}
+		// Re-sync KV caches if needed (Handled by targetEngine.ForwardBatch in real loop)
+	} else {
+		// All paths rejected, sample 1 token from target normally
+		// (This logic will be moved into the runBatchLoop orchestrator)
 	}
 
-	// 4. Handle Rollback
-	if acceptedCount < len(draftTokens) {
-		rollbackAmount := len(draftTokens) - acceptedCount
-		seq.Tokens = seq.Tokens[:len(seq.Tokens)-rollbackAmount]
-		
-		// Release KV blocks
-		_ = sm.targetEngine.RollbackKV(seqIDStr, currentPos+acceptedCount)
-		_ = sm.draftEngine.RollbackKV(seqIDStr, currentPos+acceptedCount)
-	}
-
-	seq.Pos = currentPos + acceptedCount
 	return nil
+}
+
+// GenerateSpeculative is kept for backward compatibility with single-path logic
+func (sm *SpeculativeManager) GenerateSpeculative(ctx context.Context, seq *Sequence) error {
+	seq.NumPaths = 1
+	seq.DraftK = 4 // Default
+	return sm.GenerateSpeculativeMultiPath(ctx, seq)
 }

@@ -447,9 +447,13 @@ void Metal_Linear_LoRA_Add_F16(MetalWrapperRef ctx, MetalBufferRef input, int of
                                 MetalBufferRef output, int offOut, int M, int N, int K, int R,
                                 float scale);
 
-void Metal_Vision_Patch_Embed_F32(MetalWrapperRef ctx, MetalBufferRef pixels, int offPixels,
-                                  MetalBufferRef weights, int offW, MetalBufferRef output,
-                                  int offOut, int patchSize, int visionDim, int numPatchesX);
+void Metal_Vision_Patch_Embed_F32(MetalWrapperRef ctx, MetalBufferRef pixels, int offPixels, MetalBufferRef weights, int offW, MetalBufferRef output, int offOut, int patchSize, int visionDim, int numPatchesX);
+void Metal_Vision_Patch_Embed_Gemma4(MetalWrapperRef ctx, MetalBufferRef pixels, int offPixels,
+                                  MetalBufferRef weights, int offW, MetalBufferRef bias, int offB,
+                                  MetalBufferRef output, int offOut, int patchSize, int hiddenDim, int numPatches);
+
+void Metal_Dequantize_Q2_K(MetalWrapperRef ctx, MetalBufferRef data, int offData, MetalBufferRef output, int offOut, int numElements);
+void Metal_Dequantize_IQ4_XS(MetalWrapperRef ctx, MetalBufferRef data, int offData, MetalBufferRef output, int offOut, int numElements);
 
 // Multi-GPU Collective Operations
 void Metal_AllReduce_F16(MetalWrapperRef ctx, MetalBufferRef data, int offset, int count);

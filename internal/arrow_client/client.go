@@ -16,6 +16,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/23skdu/longbow-quarrel/internal/device"
+	"github.com/23skdu/longbow-quarrel/internal/logger"
 	"github.com/23skdu/longbow-quarrel/internal/metrics"
 )
 
@@ -184,7 +185,7 @@ func (fc *FlightClient) DoPut(ctx context.Context, vectors [][]float32, ids []st
 		return fmt.Errorf("error receiving acknowledgment: %w", err)
 	}
 
-	fmt.Printf("Sent %d embeddings with %d dimensions, metadata: %v\n", len(vectors), vecDim, metadata)
+	logger.Log.Info("Sent embeddings", "count", len(vectors), "dimensions", vecDim, "metadata", metadata)
 
 	// Update hotpath metrics
 	fc.BytesTransferred.Add(int64(record.NumRows() * int64(vecDim) * 4))

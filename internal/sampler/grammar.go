@@ -1,14 +1,25 @@
 package sampler
 
 import (
-	"fmt"
+	// "fmt" - removed unused
 )
 
 // Grammar masks tokens that violate structural state machines like JSON format.
 type Grammar struct {
-	Active    bool
-	JSONState *JSONState
-	Vocab     []string
+	Active      bool
+	JSONState   *JSONState
+	Vocab       interface{} // *VocabularyTrie
+	Bitmask     []byte      // Pre-calculated bitmask for current state
+	VocabSize   int
+}
+
+type VocabularyTrie struct {
+	Root *TrieNode
+}
+
+type TrieNode struct {
+	Children map[rune]*TrieNode
+	TokenID  int // -1 if not a full token
 }
 
 type JSONState struct {
@@ -18,11 +29,28 @@ type JSONState struct {
 
 // NewJSONGrammar initializes structural enforcing for pure JSON.
 func NewJSONGrammar(vocab []string) *Grammar {
+	trie := &VocabularyTrie{Root: &TrieNode{Children: make(map[rune]*TrieNode), TokenID: -1}}
+	for i, token := range vocab {
+		trie.insert(token, i)
+	}
+
 	return &Grammar{
 		Active:    true,
-		JSONState: &JSONState{Stack: make([]rune, 0)},
-		Vocab:     vocab,
+		Vocab:     trie,
+		VocabSize: len(vocab),
+		Bitmask:   make([]byte, (len(vocab)+7)/8),
 	}
+}
+
+func (t *VocabularyTrie) insert(token string, id int) {
+	node := t.Root
+	for _, r := range token {
+		if _, ok := node.Children[r]; !ok {
+			node.Children[r] = &TrieNode{Children: make(map[rune]*TrieNode), TokenID: -1}
+		}
+		node = node.Children[r]
+	}
+	node.TokenID = id
 }
 
 // Apply restricts logits *before* Softmax conversion.
@@ -30,19 +58,12 @@ func (g *Grammar) Apply(logits []float32) error {
 	if !g.Active {
 		return nil
 	}
-	if len(logits) == 0 {
-		return fmt.Errorf("empty logits slice")
-	}
-
-	// We iterate through all tokens and check if they're allowed in the current JSON state.
-	// In a production engine, this is optimized via a Trie or pre-filtered bitmask.
-	for i := range logits {
-		if i >= len(g.Vocab) {
-			break
-		}
-		
-		token := g.Vocab[i]
-		if !g.isValidInJSON(token) {
+	
+	// Fast-path: use pre-calculated bitmask
+	for i := 0; i < g.VocabSize; i++ {
+		byteIdx := i / 8
+		bitIdx := uint(i % 8)
+		if (g.Bitmask[byteIdx] & (1 << bitIdx)) == 0 {
 			logits[i] = -1e9
 		}
 	}
@@ -50,25 +71,6 @@ func (g *Grammar) Apply(logits []float32) error {
 	return nil
 }
 
-func (g *Grammar) isValidInJSON(token string) bool {
-	// Simple state-machine validation for common JSON tokens
-	if len(g.JSONState.Stack) == 0 {
-		return token == "{" || token == "["
-	}
-	
-	last := g.JSONState.Stack[len(g.JSONState.Stack)-1]
-	
-	switch last {
-	case '{':
-		// Expecting key or end
-		return token == "\"" || token == "}"
-	case '[':
-		// Expecting value or end
-		return token == "{" || token == "[" || token == "\"" || token == "]" || (token >= "0" && token <= "9")
-	}
-	
-	return true
-}
 
 func (g *Grammar) Update(token string) {
 	for _, r := range token {

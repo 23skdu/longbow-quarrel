@@ -15,6 +15,7 @@ type Engine interface {
 	Config() config.Config
 	Close()
 	SwapModel(modelPath string, cfg config.Config) error
+	LoadAdapter(path, id string) error
 	GetSeqCachePos(seqID string) int
 
 	// Speculative Decoding Primitives

@@ -1,4 +1,4 @@
-package arrow_client
+package arrow_client_test
 
 import (
 	"context"
@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/23skdu/longbow-quarrel/internal/api"
+	"github.com/23skdu/longbow-quarrel/internal/arrow_client"
 	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/engine"
 	"github.com/23skdu/longbow-quarrel/internal/tokenizer"
@@ -43,7 +44,7 @@ func TestArrowIntegration_Suite(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 
 	// 2. Connect client
-	client, err := NewFlightClient(host, port, host, port)
+	client, err := arrow_client.NewFlightClient(host, port, host, port)
 	if err != nil {
 		t.Fatalf("failed to create client: %v", err)
 	}
