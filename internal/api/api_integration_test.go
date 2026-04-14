@@ -9,8 +9,10 @@ import (
 
 func TestAPIIntegration_FailureModes(t *testing.T) {
 	s := &Server{
-		Engine:    &mockEngine{},
-		Tokenizer: &mockTokenizer{},
+		Engine:     &mockEngine{},
+		Tokenizer:  &mockTokenizer{},
+		MaxMemory:  1024,
+		UsedMemory: func() int64 { return 0 },
 	}
 
 	// 1. Method Not Allowed
