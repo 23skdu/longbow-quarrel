@@ -106,3 +106,110 @@ This roadmap is designed to elevate Longbow-Quarrel to compete directly with ind
 **Objective:** Expand context window capacity limits drastically by finalizing the TurboQuant custom KV cache logic natively inside PagedKVCache allocations.
 - **Change:** Utilize `DataTypeTQ1_0` and `DataTypeTQ2_0` inside PagedKVCache buffers (`internal/device/utils.go`).
 - **Mechanism:** During each dynamic memory block allocation, compress encoded elements using the fused PolarQuant + QJLTransform native Metal kernels (`turboquant_encode`), yielding robust low-bit residual caches pinned inside the BlockTable mappings.
+---
+
+## Phase 5: Performance Hardening & Feature Completions
+
+*The following 10 steps are derived from a deep code review. Each step identifies a concrete gap in the live implementation, with specific file and line references.*
+
+---
+
+### 5. Wire Real Rejection Sampling into Speculative Decoding
+
+**Objective:** The speculative acceptance logic in `speculative.go` is a stub — all draft tokens are currently accepted unconditionally regardless of the target model's probability distribution.
+
+- **Gap:** `internal/engine/speculative.go:93` — `// verify(targetLogits[i], candidates[p][i])` is commented out; `accepted++` fires unconditionally.
+- **Change:** Implement `func rejectSample(targetLogits []float32, draftToken int, cfg SamplerConfig) (accepted bool, correctedToken int)` using the criterion `accept if u ~ Uniform(0,1) < min(1, p_target[t] / p_draft[t])`. On rejection, sample the correction token from the renormalized `(p_target - p_draft)+` distribution and truncate the accepted prefix at `i`.
+- **Metrics:** Add `SpeculativeTokensAccepted` / `SpeculativeTokensRejected` counters to `internal/metrics/metrics.go` to track acceptance rate per model pair in production.
+
+---
+
+### 6. Copy-on-Write Physical Block Data in PagedKVCache
+
+**Objective:** The CoW path in `PagedKVCache.Update()` allocates a new physical block but does not copy existing KV data into it — a documented correctness gap that silently corrupts forked sequences.
+
+- **Gap:** `internal/engine/kv_cache_paged.go:399–404` — explicit comment: *"Note: We'd normally need to copy actual physical tensor data from physBlock to newPhys here!"*
+- **Change:** Expose `ctx.CopyTensorRows(src, dst *device.Tensor, srcRowStart, dstRowStart, numRows int)` implemented as a device-side blit in `internal/device/metal.go` (and CUDA equivalent).
+- **Wire In:** Call `ctx.CopyTensorRows(c.kPools[layer], c.kPools[layer], oldPhysOffset, newPhysOffset, c.blockSize)` for every layer immediately after the CoW block is allocated in `Update()`.
+
+---
+
+### 7. PromptCache LRU Eviction to Prevent OOM
+
+**Objective:** `internal/engine/prompt_cache.go` has no eviction policy. Under memory pressure, cached prefix blocks are never released back to `PagedKVCache.freeBlocks`, eventually exhausting the block pool.
+
+- **Gap:** `PromptCache.Insert` increments `RefCount` indefinitely with no complementary `Evict` path or maximum size bound.
+- **Change:** Add `maxCachedBlocks int` and an LRU-ordered node list to `PromptCache`. Implement `func (pc *PromptCache) Evict(kvCache *PagedKVCache) (freed int)` that removes the LRU leaf, calls `kvCache.FreeSequence`, and returns the block count released.
+- **Wire In:** Call `pc.Evict(kvCache)` from `ContinuousBatchManager.Step` when `kvCache.FreeBlocksCount()` drops below a configurable `LowWaterMark` field (default 32 blocks), before the admission loop runs.
+
+---
+
+### 8. Multi-LoRA Batch Dispatch — Per-Row Adapter Routing
+
+**Objective:** `BatchDescriptor.AdapterIDs` records the active adapter per sequence, but the metal engine forward pass ignores it and applies (or skips) a single adapter for the full batch, making concurrent multi-LoRA serving semantically incorrect.
+
+- **Gap:** In `engine.go` (metal build), the `runBatchLoop` forward pass does not inspect `desc.AdapterIDs` when calling `LoRAManager.GetWeights`.
+- **Change:** Group sequences in `BatchDescriptor` by `AdapterID`. For each adapter group, apply its LoRA delta `(B·A) * (alpha/rank)` via a fused `Metal_LoRAForwardBatch` kernel accepting an `adapter_mask` index per row. Stage both A and B matrices into a pre-allocated adapter slab indexed by `(adapterID, layerIdx)` for O(1) lookup.
+- **Metric:** Emit `lora_dispatch_groups_per_batch` histogram to measure adapter batching efficiency.
+
+---
+
+### 9. OpenTelemetry OTLP Exporter Wiring
+
+**Objective:** `internal/telemetry/telemetry.go` creates a `TracerProvider` with `AlwaysSample()` but no exporter — every span is silently discarded, providing zero distributed tracing signal.
+
+- **Gap:** `telemetry/telemetry.go:35` — `sdktrace.NewTracerProvider` has no `WithBatcher` or `WithSpanProcessor` argument.
+- **Change:** Conditionally wire an OTLP gRPC exporter when `OTEL_EXPORTER_OTLP_ENDPOINT` is set; fall back to `stdouttrace.New()` for local development.
+- **Wire In:** Stop blanking the `ctx` return value in `api/server.go:123` and `api/adapters.go:27` (`_ = ctx`). Propagate the span-enriched context through to `engine.Infer` so nested engine spans nest correctly under the HTTP handler span, resolving both outstanding IDE warnings in one pass.
+
+---
+
+### 10. Min-P Filtering and Mirostat v2 Adaptive Sampling
+
+**Objective:** `internal/engine/sampler.go` is missing two widely-used sampling modes available in llama.cpp and Ollama: Min-P (relative probability floor) and Mirostat v2 (entropy-targeting adaptive temperature).
+
+- **Gap:** `internal/engine/sampler_config.go` has no `MinP`, `MirostatTau`, or `MirostatEta` fields.
+- **Change (Min-P):** Add `MinP float64` to `SamplerConfig`. After temperature softmax, filter candidates where `c.prob < MinP * candidates[0].prob`. Cheaper than Top-P and avoids incoherence at low temperatures.
+- **Change (Mirostat v2):** Add `MirostatTau`, `MirostatEta float64` fields and per-`Sampler` `mirostatMu float64` state. After sampling, compute surprise `s = -log2(p_sampled)`, update `mu -= eta * (s - tau)`, clip logits above `mu` before the next step.
+- **Expose:** Add corresponding JSON fields to `CompletionRequest` in `internal/api/server.go`.
+
+---
+
+### 11. VLM Encoder — Real Pixel Preprocessing
+
+**Objective:** `internal/vlm/encoder.go` decodes the image container but fills the pixel tensor with all zeros, so every vision embedding is a meaningless zero vector regardless of the image content.
+
+- **Gap:** `vlm/encoder.go:57` — `pixels := make([]float32, TargetW*TargetH*Channels)` is never populated. The decoded `image.Image` is discarded.
+- **Change:** Use `golang.org/x/image/draw.CatmullRom.Scale` to bicubic-resize to 224×224. Fill pixels as `(float32(channel_value)/255.0 - mean[c]) / std[c]` using per-architecture normalization constants loaded from GGUF metadata (`clip.vision.image_mean`, `clip.vision.image_std`) into a new `VisionEncoderConfig` struct.
+- **Test:** Add a test in `vlm/encoder_test.go` loading a 4×4 solid-color PNG and asserting the output patch tensor is non-zero.
+
+---
+
+### 12. MasterDistributedEngine — Real Tensor Parallel All-Reduce
+
+**Objective:** `internal/engine/distributed_master.go` stubs all `ForwardBatch` calls by forwarding entirely to `shards[0]`. Remaining shards receive no computation, making the distributed engine non-functional for Tensor Parallelism.
+
+- **Gap:** `distributed_master.go:56` — `// Stub: currently delegating to primary`.
+- **Change (Phase A):** Add `ForwardShardedLayer(layerIdx int, colStart, colEnd int, input *device.Tensor) (*device.Tensor, error)` to the `DistributedEngine` interface. `RemoteWorkerEngine` implements it via a bidirectional Arrow Flight RPC: `DoPut` receives input activations, `DoGet` returns partial output activations, reusing the `InferenceFlightServer` scaffold in `internal/api/flight_server.go`.
+- **Change (Phase B):** In `MasterDistributedEngine.ForwardBatch`, fan out one `ForwardShardedLayer` goroutine per shard via `errgroup`, then call `ctx.ConcatTensors` (column axis) to reconstruct the full hidden state before proceeding to the next layer.
+
+---
+
+### 13. Eliminate Per-Layer Block Table CPU Round-Trips
+
+**Objective:** `PagedKVCache.Get()` unconditionally converts the block table to `[]float32` and calls `LoadFrom` (a CPU→GPU upload) on every call. For a 32-layer model with batch size 8, this is 256 unnecessary host-device transfers per forward pass.
+
+- **Gap:** `internal/engine/kv_cache_paged.go:559–565` — `goTable := make([]float32, len(table))` + `tableDevice.LoadFrom(goTable)` fires unconditionally inside the hot path.
+- **Change (short-term):** Track `dirty map[string]bool` in `PagedKVCache`. Only call `LoadFrom` when `dirty[seqID]` is true (set by `Update`, `Allocate`, `AttachPrefixBlocks`), then clear the flag.
+- **Change (long-term):** Unify `blockTablesDevice` as a single 2D tensor `[maxBatchSize, maxBlocksPerSeq]` updated in-place with a `ctx.SetRow` primitive, passed once per forward pass to the attention kernel via `GetBatch`.
+
+---
+
+### 14. CPU Engine Full Layer Stack via Accelerate/BLAS GEMM
+
+**Objective:** `internal/engine/engine_cpu.go` `forward()` only copies the last token's embedding and returns it without executing any Attention or FFN layers, making the CPU engine produce semantically incorrect output for all real models.
+
+- **Gap:** `engine_cpu.go:406–421` — the function body is a pure embedding lookup stub with no matrix multiplications.
+- **Change:** Implement the full transformer loop using `simd.MatMulF32` backed by `cblas_sgemm` (Apple `Accelerate.framework` on macOS, `OpenBLAS` on Linux via cgo): `embed → [RMSNorm, QKV-GEMM, Softmax, AttnO-GEMM, residual] × L → [RMSNorm, Gate/Up-GEMM, SwiGLU, Down-GEMM, residual] × L → OutputNorm → LogitGEMM`.
+- **Benchmark:** Add `BenchmarkCPUForwardLayer` to `engine_cpu_unit_test.go`, gating merges on ≥2 tok/s for a single 7B-class attention layer (dim=4096, heads=32) on Apple Silicon.
+- **Impact:** A working CPU engine enables `SpeculativeManager` to use CPU as a zero-VRAM draft model for any Metal/CUDA target, unlocking speculative decoding without a second GPU.
