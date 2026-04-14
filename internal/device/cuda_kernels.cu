@@ -1572,6 +1572,53 @@ __global__ void paged_attention_kernel(
     }
 }
 
+__global__ void paged_attention_turboquant_kernel(const float* q, const int8_t* kPool, const int8_t* vPool, float* output,
+                                           const int* tokenPositions, const int* blockTables, const int* tokenToSeq,
+                                           int maxBlocks, int heads, int kvHeads, int headDim, int blockSize, int numTokens, float scale, int qjlRows) {
+    int tid = threadIdx.x;
+    int headIdx = threadIdx.y;
+    int tokenIdx = blockIdx.x;
+
+    if (tokenIdx >= numTokens || headIdx >= heads) return;
+
+    int seqIdx = tokenToSeq[tokenIdx];
+    int currentPos = tokenPositions[tokenIdx];
+
+    float score_max = -1e20f;
+    float score_sum = 0.0f;
+
+    int kvHeadIdx = headIdx * kvHeads / heads;
+    int tqBlockSize = headDim + qjlRows + 8;
+
+    for (int t = 0; t <= currentPos; t++) {
+        int bidx = t / blockSize;
+        int boff = t % blockSize;
+        int physicalBlock = blockTables[seqIdx * maxBlocks + bidx];
+        
+        const int8_t* kRow = &kPool[((physicalBlock * blockSize + boff) * kvHeads + kvHeadIdx) * tqBlockSize];
+        const float s = *(float*)(&kRow[headDim + qjlRows]);
+
+        float dot = 0.0f;
+        for (int d = tid; d < headDim; d += 32) {
+            float k_val = (float)kRow[d] * s;
+            dot += q[(tokenIdx * heads + headIdx) * headDim + d] * k_val;
+        }
+
+        for (int offset = 16; offset > 0; offset /= 2)
+            dot += __shfl_down_sync(0xffffffff, dot, offset);
+
+        if (tid == 0) {
+            float score = dot * scale;
+            if (score > score_max) {
+                score_sum = score_sum * expf(score_max - score) + 1.0f;
+                score_max = score;
+            } else {
+                score_sum += expf(score - score_max);
+            }
+        }
+    }
+}
+
 extern "C" {
 
 void cudaStoreKVPagedBatch(cudaStream_t stream, const float* k, const float* v, 
@@ -1588,9 +1635,20 @@ void cudaPagedAttentionBatch(cudaStream_t stream, const float* q, const __half* 
                                int blockSize, int numTokens, float scale) {
     if (numTokens == 0) return;
     dim3 grid(numTokens);
-    dim3 block(32, heads); // 32 threads for dimension reduction, y-dim for heads
+    dim3 block(32, heads);
     paged_attention_kernel<<<grid, block, 0, stream>>>(q, kPool, vPool, output, tokenPositions, blockTables, tokenToSeq,
                                                         maxBlocks, heads, kvHeads, headDim, blockSize, numTokens, scale);
+}
+
+void cudaPagedAttentionTurboQuant(cudaStream_t stream, const float* q, const void* kPool, const void* vPool, float* output,
+                                   const int* tokenPositions, const int* blockTables, const int* tokenToSeq,
+                                   int maxBlocks, int heads, int kvHeads, int headDim, int blockSize, int numTokens, float scale, int qjlRows) {
+    if (numTokens == 0) return;
+    dim3 grid(numTokens);
+    dim3 block(32, heads);
+    paged_attention_turboquant_kernel<<<grid, block, 0, stream>>>(q, (const int8_t*)kPool, (const int8_t*)vPool, output,
+                                                                   tokenPositions, blockTables, tokenToSeq,
+                                                                   maxBlocks, heads, kvHeads, headDim, blockSize, numTokens, scale, qjlRows);
 }
 
 } // extern "C"

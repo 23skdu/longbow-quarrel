@@ -36,6 +36,8 @@ type BatchDescriptor struct {
 	TokenToSeq []int
 	// AdapterIDs maps each sequence to its active LoRA adapter ID
 	AdapterIDs []string
+	// IsDecode indicates if the sequence entry is a single-token decode (true) or a multi-token prefill/chunk (false)
+	IsDecode []bool
 }
 
 // RequestQueue handles thread-safe enqueuing and dequeuing of raw incoming requests.
@@ -97,6 +99,11 @@ func NewContinuousBatchManager() *ContinuousBatchManager {
 func (cm *ContinuousBatchManager) Submit(req *InferenceRequest) {
 	cm.waitingQueue.Push(req)
 	metrics.BatchQueueDepth.Set(float64(cm.waitingQueue.Depth()))
+}
+
+// Depth returns the number of requests waiting in the queue.
+func (cm *ContinuousBatchManager) Depth() int {
+	return cm.waitingQueue.Depth()
 }
 
 // Step advances the state of the batching iteration, pulling from the waiting queue if resources permit.
@@ -171,6 +178,7 @@ func (cm *ContinuousBatchManager) Step(maxBatchSize int, kvCache *PagedKVCache, 
 		Offsets:     make([]int, 0),
 		ContextLens: make([]int, 0),
 		TokenToSeq:  make([]int, 0),
+		IsDecode:    make([]bool, 0),
 	}
 	
 	// Track added IDs to avoid duplicates
@@ -193,6 +201,8 @@ func (cm *ContinuousBatchManager) Step(maxBatchSize int, kvCache *PagedKVCache, 
 				desc.TokenToSeq = append(desc.TokenToSeq, seqIdx)
 			}
 			desc.Sequences = append(desc.Sequences, seq)
+			desc.AdapterIDs = append(desc.AdapterIDs, seq.AdapterID)
+			desc.IsDecode = append(desc.IsDecode, toProcess == 1 && seq.PrefillCompleted)
 			added[id] = true
 			
 			// Update locally for next iteration (actual Pos update happens after kernel success in runBatchLoop)
@@ -219,6 +229,7 @@ func (cm *ContinuousBatchManager) Step(maxBatchSize int, kvCache *PagedKVCache, 
 		desc.ContextLens = append(desc.ContextLens, seq.Pos)
 		desc.TokenToSeq = append(desc.TokenToSeq, len(desc.Sequences))
 		desc.Sequences = append(desc.Sequences, seq)
+		desc.IsDecode = append(desc.IsDecode, true)
 		added[id] = true
 	}
 

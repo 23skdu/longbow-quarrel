@@ -12,11 +12,12 @@ import (
 // PagedKVCache implements a block-based KV cache inspired by PagedAttention.
 // It manages a pool of memory blocks and a page table (BlockTable) to map logical tokens to physical blocks.
 type PagedKVCache struct {
-	ctx     *device.Context
-	config  config.Config
-	kvHeads int
-	headDim int
-	layers  int
+	ctx       *device.Context
+	config    config.Config
+	kvHeads   int
+	headDim   int
+	layers    int
+	Precision device.DataType
 
 	blockSize   int
 	totalBlocks int
@@ -97,35 +98,117 @@ func (c *PagedKVCache) Init(ctx *device.Context, config config.Config) error {
 	c.vPools = make([]*device.Tensor, c.layers)
 
 	kvDim := c.kvHeads * c.headDim
-	// poolElements := capacity * kvDim
-	if kvDim == 0 {
-		return fmt.Errorf("invalid config: kvDim=0")
+	if c.Precision == device.DataTypeTQ1_0 {
+		// TurboQuant Block Structure: [headDim int8][qjlRows int8][8 bytes metadata]
+		// We'll allocate a single INT8 tensor for the whole pool
+		qjlRows := 32 // Default for many models
+		tqBlockSize := c.headDim + qjlRows + 8
+		kvDim = tqBlockSize
 	}
 
 	for i := 0; i < c.layers; i++ {
-		// NewTensor creates FP16 tensor
-		k := ctx.NewTensor(capacity, kvDim)
-		if k == nil {
+		var k, v *device.Tensor
+		if c.Precision == device.DataTypeTQ1_0 {
+			k = ctx.NewTensorWithType(capacity, kvDim, device.DataTypeINT8)
+			v = ctx.NewTensorWithType(capacity, kvDim, device.DataTypeINT8)
+		} else {
+			k = ctx.NewTensor(capacity, kvDim)
+			v = ctx.NewTensor(capacity, kvDim)
+		}
+
+		if k == nil || v == nil {
 			c.Free()
-			return fmt.Errorf("failed to allocate K pool for layer %d", i)
+			return fmt.Errorf("failed to allocate pools for layer %d", i)
 		}
 		c.kPools[i] = k
-
-		v := ctx.NewTensor(capacity, kvDim)
-		if v == nil {
-			c.Free()
-			return fmt.Errorf("failed to allocate V pool for layer %d", i)
-		}
 		c.vPools[i] = v
 	}
 
 	c.initialized = true
-
-	// Initial stats
-	totalBytes := int64(c.layers * 2 * capacity * kvDim * 2)
-	metrics.RecordKVCacheStats(totalBytes, 0)
-
 	return nil
+}
+
+// StoreKVPagedBatch updates the cache pools with new K/V projections.
+func (c *PagedKVCache) StoreKVPagedBatch(layer int, k, v, physicalPositions *device.Tensor) {
+	c.execMu.Lock()
+	defer c.execMu.Unlock()
+
+	kPool := c.kPools[layer]
+	vPool := c.vPools[layer]
+
+	if c.Precision == device.DataTypeTQ1_0 {
+		// TODO: Call TurboQuant encode kernel
+		// For now, it stays a placeholder as we focus on CUDA paged kernels first
+	} else {
+		c.ctx.StoreKVPagedBatch(k, v, kPool, vPool, physicalPositions, c.kvHeads*c.headDim, 1)
+	}
+}
+
+// Allocate reserves blocks for a sequence to accommodate numTokens.
+func (c *PagedKVCache) Allocate(seqID string, numTokens int) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if existing, exists := c.blockTables[seqID]; exists {
+		// Calculate how many MORE blocks we need
+		currentBlocks := len(existing)
+		blocksNeeded := (numTokens + c.blockSize - 1) / c.blockSize
+		additional := blocksNeeded - currentBlocks
+		if additional <= 0 {
+			return nil // Already has enough
+		}
+		
+		for i := 0; i < additional; i++ {
+			phys, err := c.allocateBlock()
+			if err != nil {
+				return err
+			}
+			existing = append(existing, phys)
+		}
+		c.blockTables[seqID] = existing
+		return nil
+	}
+
+	blocksNeeded := (numTokens + c.blockSize - 1) / c.blockSize
+	table := make([]int32, blocksNeeded)
+	for i := 0; i < blocksNeeded; i++ {
+		phys, err := c.allocateBlock()
+		if err != nil {
+			// Rollback allocation
+			for j := 0; j < i; j++ {
+				c.blockRefs[table[j]]--
+				c.freeBlocks = append(c.freeBlocks, table[j])
+			}
+			return err
+		}
+		table[i] = phys
+	}
+	c.blockTables[seqID] = table
+	return nil
+}
+
+// GetPhysicalPositions returns the physical memory offsets for a range of logical tokens.
+func (c *PagedKVCache) GetPhysicalPositions(seqID string, startPos, numTokens int) ([]int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	table, exists := c.blockTables[seqID]
+	if !exists {
+		return nil, fmt.Errorf("sequence %s not found", seqID)
+	}
+
+	positions := make([]int, numTokens)
+	for i := 0; i < numTokens; i++ {
+		logicalPos := startPos + i
+		blockIdx := logicalPos / c.blockSize
+		offset := logicalPos % c.blockSize
+
+		if blockIdx >= len(table) {
+			return nil, fmt.Errorf("logical position %d exceeds allocated blocks", logicalPos)
+		}
+		positions[i] = int(table[blockIdx])*c.blockSize + offset
+	}
+	return positions, nil
 }
 
 func (c *PagedKVCache) allocateBlock() (int32, error) {
@@ -426,7 +509,9 @@ func (c *PagedKVCache) UpdateBatch(layer int, items []struct {
 	for i, p := range physPositions {
 		ppF32[i] = float32(p)
 	}
-	ppDevice.LoadFrom(ppF32)
+	if err := ppDevice.LoadFrom(ppF32); err != nil {
+		return err
+	}
 
 	kTarget := c.kPools[layer]
 	vTarget := c.vPools[layer]
@@ -475,7 +560,9 @@ func (c *PagedKVCache) Get(seqID string, layer int) CacheView {
 	for i, b := range table {
 		goTable[i] = float32(b)
 	}
-	tableDevice.LoadFrom(goTable)
+	// We ignore the error here as Get is currently not error-returning and
+	// it's a synchronous device call. In production, CacheView should probably wrap result.
+	_ = tableDevice.LoadFrom(goTable)
 
 	return CacheView{
 		K:          c.kPools[layer],
@@ -515,14 +602,14 @@ func (c *PagedKVCache) GetBatch(seqIDs []string, positions []int, layer int) Bat
 	}
 
 	btDevice := c.ctx.NewTensorFP32(batchSize, maxBlocks)
-	btDevice.LoadFrom(btData)
+	_ = btDevice.LoadFrom(btData)
 
 	posData := make([]float32, batchSize)
 	for i, p := range positions {
 		posData[i] = float32(p)
 	}
 	posDevice := c.ctx.NewTensorFP32(1, batchSize)
-	posDevice.LoadFrom(posData)
+	_ = posDevice.LoadFrom(posData)
 
 	return BatchCacheView{
 		KPools:         c.kPools,

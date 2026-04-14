@@ -774,8 +774,7 @@ func (t *Tensor) LoadFrom(data interface{}) error {
 		if len(d) != t.rows*t.cols {
 			return fmt.Errorf("LoadFrom: size mismatch: expected %d, got %d", t.rows*t.cols, len(d))
 		}
-		t.LoadFromF32(d)
-		return nil
+		return t.LoadFromF32(d)
 	case []byte:
 		return t.LoadFromRaw(d)
 	default:
@@ -910,11 +909,6 @@ func (t *Tensor) Probe(name string, n int) {
 func (t *Tensor) GetBufferContents() unsafe.Pointer {
 	t.ctx.Synchronize()
 	return C.Metal_GetBufferContents(t.buf)
-}
-
-// DataType returns the tensor's data type
-func (t *Tensor) DataType() DataType {
-	return t.dataType
 }
 
 func (t *Tensor) Context() *Context {
@@ -1705,9 +1699,9 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 			// For single token case, create a temporary position tensor
 			maxBlocks := blockTable.Cols()
 			pPos := t.ctx.NewTensorFP32(1, 1)
-			pPos.LoadFrom([]float32{float32(p)})
+			_ = pPos.LoadFrom([]float32{float32(p)})
 			pSeq := t.ctx.NewTensorFP32(1, 1)
-			pSeq.LoadFrom([]float32{0})
+			_ = pSeq.LoadFrom([]float32{0})
 			
 			t.ctx.FlashAttention2(qPart.Slice(i, 1), kCache, vCache, attOut.Slice(i, 1), pPos, heads, kvHeads, headDim, blockSize, blockTable, maxBlocks, pSeq, 1)
 			
@@ -2478,11 +2472,6 @@ func (c *Context) LoadBuffer(t *Tensor, data []byte) {
 }
 
 // Test helper methods
-
-// LoadFromF32 loads F32 data into tensor (converts to F16 if needed)
-func (t *Tensor) LoadFromF32(data []float32) {
-	t.LoadFrom(data)
-}
 
 // ToHostF32 retrieves tensor data as F32 (converts from F16 if needed)
 func (t *Tensor) ToHostF32() []float32 {

@@ -13,6 +13,7 @@ import (
 	"github.com/23skdu/longbow-quarrel/internal/logger"
 	"github.com/23skdu/longbow-quarrel/internal/simd"
 	"github.com/23skdu/longbow-quarrel/internal/tokenizer"
+	"sync"
 	"time"
 )
 
@@ -311,32 +312,38 @@ func (e *CPUEngine) runBatchLoop() {
 }
 
 func (e *CPUEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, error) {
-	// For CPU, we perform a sequential forward pass for each sequence in the batch for now.
-	// This ensures the batching loop works while we optimize the CPU kernels later.
 	batchSize := len(desc.Sequences)
 	results := make([]*device.Tensor, batchSize)
 
+	// Use a WaitGroup to parallelize sequence processing
+	var wg sync.WaitGroup
+	wg.Add(batchSize)
+
 	for i := range desc.Sequences {
-		// Identify the tokens for THIS sequence in the packed batch
-		start := desc.Offsets[i]
-		var end int
-		if i < batchSize - 1 {
-			end = desc.Offsets[i+1]
-		} else {
-			end = len(desc.Tokens)
-		}
-		
-		seqTokens := desc.Tokens[start:end]
-		
-		// Run existing forward (which returns hidden/embedding)
-		// and wrap it in a device.Tensor
-		hidden := e.forward(seqTokens)
-		
-		res := e.ctx.NewTensorFP32(1, len(hidden))
-		res.LoadFrom(hidden)
-		results[i] = res
+		go func(idx int) {
+			defer wg.Done()
+			
+			start := desc.Offsets[idx]
+			var end int
+			if idx < batchSize-1 {
+				end = desc.Offsets[idx+1]
+			} else {
+				end = len(desc.Tokens)
+			}
+			
+			seqTokens := desc.Tokens[start:end]
+			
+			// For CPUEngine, each sequence is processed by a separate worker thread
+			// In a production engine, this would call SIMD-optimized layer kernels.
+			hidden := e.forward(seqTokens)
+			
+			res := e.ctx.NewTensorFP32(1, len(hidden))
+			_ = res.LoadFrom(hidden) // Ignoring here for now as forward already produced the data
+			results[idx] = res
+		}(i)
 	}
 
+	wg.Wait()
 	return results, nil
 }
 
@@ -472,11 +479,8 @@ func applyTopKCPU(logits []float32, k int) []float32 {
 		indices[i], indices[maxIdx] = indices[maxIdx], indices[i]
 	}
 
-	topKVal := logits[indices[k-1]]
 	for i := k; i < len(logits); i++ {
-		if logits[indices[i]] > topKVal {
-			logits[indices[i]] = float32(-math.Inf(1))
-		}
+		logits[indices[i]] = float32(-math.Inf(1))
 	}
 
 	return logits

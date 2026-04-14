@@ -418,27 +418,16 @@ func (e *metalEngine) loadModel(path string) error {
 		var mt *device.Tensor
 
 		switch t.Type {
+
 		case gguf.GGMLTypeF32:
-			if e == nil || e.ctx == nil {
-				panic(fmt.Sprintf("FATAL: Engine or Ctx became nil! Tensor=%s, EnginePtr=%p, CtxPtr=%p", t.Name, e, e.ctx))
-			}
 			mt = e.ctx.NewTensorFP32(rows, cols)
-			// ... F32 load ...
 			dataBytes := numElements * 4
 			if uint64(len(t.Data)) < uint64(dataBytes) {
 				return fmt.Errorf("tensor %s data truncated", t.Name)
 			}
-			rawBytes := t.Data[:dataBytes]
-
-			f32Data := make([]float32, numElements)
-			for i := 0; i < numElements; i++ {
-				bits := binary.LittleEndian.Uint32(rawBytes[i*4 : (i+1)*4])
-				f32Data[i] = math.Float32frombits(bits)
+			if err := mt.LoadFromRaw(t.Data[:dataBytes]); err != nil {
+				return err
 			}
-
-			mt.LoadFrom(f32Data)
-
-			// Heuristic for GlobalScale disabled
 			e.GlobalScale = 1.0
 
 		case gguf.GGMLTypeF16:
@@ -446,7 +435,9 @@ func (e *metalEngine) loadModel(path string) error {
 				// Promote Norm weights to FP32 for precision and kernel compatibility
 				f32Data := gguf.DequantizeF16(t.Data, numElements)
 				mt = e.ctx.NewTensorFP32(rows, cols)
-				mt.LoadFrom(f32Data)
+				if err := mt.LoadFrom(f32Data); err != nil {
+					return err
+				}
 
 			} else {
 				mt = e.ctx.NewTensorWithType(rows, cols, device.DataTypeF16)
@@ -455,7 +446,9 @@ func (e *metalEngine) loadModel(path string) error {
 				if uint64(len(t.Data)) < uint64(dataBytes) {
 					return fmt.Errorf("tensor %s data truncated", t.Name)
 				}
-				mt.LoadFromRaw(t.Data[:dataBytes])
+				if err := mt.LoadFromRaw(t.Data[:dataBytes]); err != nil {
+					return err
+				}
 			}
 		case gguf.GGMLTypeQ4_K:
 			// Type 12 (Q4_K).
@@ -479,7 +472,9 @@ func (e *metalEngine) loadModel(path string) error {
 					return fmt.Errorf("tensor %s data truncated (Need %d, Has %d)", t.Name, dataBytes, len(t.Data))
 				}
 
-				mt.LoadFromRaw(t.Data[:dataBytes])
+				if err := mt.LoadFromRaw(t.Data[:dataBytes]); err != nil {
+					return err
+				}
 			}
 		case gguf.GGMLTypeQ4_0:
 			// Type 2 (Q4_0).
@@ -495,14 +490,18 @@ func (e *metalEngine) loadModel(path string) error {
 			if uint64(len(t.Data)) < uint64(dataBytes) {
 				return fmt.Errorf("tensor %s data truncated (Need %d, Has %d)", t.Name, dataBytes, len(t.Data))
 			}
-			mt.LoadFromRaw(t.Data[:dataBytes])
+			if err := mt.LoadFromRaw(t.Data[:dataBytes]); err != nil {
+				return err
+			}
 
 		case gguf.GGMLTypeQ8_0:
 			// Type 8 (Q8_0).
 			// Dequantize to F16 for use in engine
 			f32Data := gguf.DequantizeQ8_0(t.Data, numElements)
 			mt = e.ctx.NewTensorWithType(rows, cols, device.DataTypeF16)
-			mt.LoadFrom(f32Data)
+			if err := mt.LoadFrom(f32Data); err != nil {
+				return err
+			}
 
 		case gguf.GGMLTypeQ6_K:
 			// Type 14 (Q6_K).
@@ -510,7 +509,9 @@ func (e *metalEngine) loadModel(path string) error {
 				logger.Log.Debug("token_embd.weight dequantizing to FP16")
 				f32Data := gguf.DequantizeQ6K(t.Data, numElements)
 				mt = e.ctx.NewTensorWithType(rows, cols, device.DataTypeF16)
-				mt.LoadFrom(f32Data)
+				if err := mt.LoadFrom(f32Data); err != nil {
+					return err
+				}
 			} else if t.Name == "output.weight" || e.config.Dim >= 1024 {
 				// Use Native Q6K
 				mt = e.ctx.NewTensorWithType(rows, cols, device.DataTypeQ6K)
@@ -518,11 +519,15 @@ func (e *metalEngine) loadModel(path string) error {
 				if uint64(len(t.Data)) < uint64(dataBytes) {
 					return fmt.Errorf("tensor %s data truncated", t.Name)
 				}
-				mt.LoadFromRaw(t.Data[:dataBytes])
+				if err := mt.LoadFromRaw(t.Data[:dataBytes]); err != nil {
+					return err
+				}
 			} else {
 				f32Data := gguf.DequantizeQ6K(t.Data, numElements)
 				mt = e.ctx.NewTensorWithType(rows, cols, device.DataTypeF16)
-				mt.LoadFrom(f32Data)
+				if err := mt.LoadFrom(f32Data); err != nil {
+					return err
+				}
 			}
 
 		case gguf.GGMLTypeQ4_K_S: // 99 Unused
@@ -531,12 +536,16 @@ func (e *metalEngine) loadModel(path string) error {
 			// Type 6 (Q5_0). Dequantize to F16 for use in engine
 			f32Data := gguf.DequantizeQ5_0(t.Data, numElements)
 			mt = e.ctx.NewTensorWithType(rows, cols, device.DataTypeF16)
-			mt.LoadFrom(f32Data)
+			if err := mt.LoadFrom(f32Data); err != nil {
+				return err
+			}
 		case gguf.GGMLTypeQ5_K:
 			// Type 13 (Q5_K). Dequantize to F16 for use in engine (use Q5_0 as fallback)
 			f32Data := gguf.DequantizeQ5_0(t.Data, numElements)
 			mt = e.ctx.NewTensorWithType(rows, cols, device.DataTypeF16)
-			mt.LoadFrom(f32Data)
+			if err := mt.LoadFrom(f32Data); err != nil {
+				return err
+			}
 		default:
 			continue
 		}
@@ -1002,11 +1011,15 @@ func (e *metalEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, err
 	}
 
 	tokenPositions := e.ctx.NewTensorFP32(1, numTokens)
-	tokenPositions.LoadFrom(tokenPosData)
+	if err := tokenPositions.LoadFrom(tokenPosData); err != nil {
+		return nil, err
+	}
 	defer tokenPositions.Free()
 
 	tokenToSeq := e.ctx.NewTensorFP32(1, numTokens)
-	tokenToSeq.LoadFrom(tokenSeqData)
+	if err := tokenToSeq.LoadFrom(tokenSeqData); err != nil {
+		return nil, err
+	}
 	defer tokenToSeq.Free()
 
 	current := inputT

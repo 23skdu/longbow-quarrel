@@ -44,8 +44,13 @@ func TestFlashAttention2_NumericalParity(t *testing.T) {
 	for i := range btData { btData[i] = float32(i) }
 	blockTable.LoadFrom(btData)
 
+	seqLens := ctx.NewTensorFP32(1, batchSize)
+	_ = seqLens.LoadFrom([]float32{float32(seqLen)})
+	tokenToSeq := ctx.NewTensorFP32(1, 1) // 1 token (decode case)
+	_ = tokenToSeq.LoadFrom([]float32{0})
+
 	// 4. Run FlashAttention2
-	ctx.FlashAttention2(q, kCache, vCache, output, seqLen, numHeads, kvHeads, headDim, blockSize, blockTable, maxBlocks, batchSize)
+	ctx.FlashAttention2(q, kCache, vCache, output, seqLens, numHeads, kvHeads, headDim, blockSize, blockTable, maxBlocks, tokenToSeq, batchSize)
 	ctx.Synchronize()
 
 	flashResult := output.ToHost()

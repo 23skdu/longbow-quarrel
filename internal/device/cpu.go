@@ -172,8 +172,8 @@ func (t *Tensor) SizeBytes() int {
 	return len(t.rawData)
 }
 
-func (t *Tensor) LoadFromF32(data []float32) {
-	t.LoadFrom(data)
+func (t *Tensor) LoadFromF32(data []float32) error {
+	return t.LoadFrom(data)
 }
 
 func (t *Tensor) ToHostF32() []float32 {
@@ -328,10 +328,12 @@ func (t *Tensor) LoadFrom(data interface{}) error {
 			return fmt.Errorf("LoadFrom: size mismatch: %d != %d", len(d), t.NumElements())
 		}
 		copy(t.data, d)
+		return nil
 	case []byte:
 		return t.LoadFromRaw(d)
+	default:
+		return fmt.Errorf("LoadFrom: unsupported data type: %T", data)
 	}
-	return nil
 }
 
 // LoadFromRaw copies raw bytes to the tensor (for F32 currently on CPU)
@@ -534,10 +536,13 @@ func (c *Context) TurboQuantDecode(input *Tensor, rotationMatrix *Tensor, qjlMat
 		}
 
 		// 3. Add QJL contribution (Residual) already in original space
-		// 3. Add QJL contribution (Residual) already in original space
 		if sj > 0 && qjlMatrix != nil {
+			// Random sign matrix reconstruction factor
+			// Residual ≈ (sj / sqrt(blockSize)) * (1/rows) * SignMatrix^T * qj
+			// But since sj was computed as RMS(Projected), it already has sqrt(blockSize) bias.
+			normFactor := sj / (float32(qjlRows) * float32(math.Sqrt(float64(blockSize))))
 			for i := 0; i < qjlRows; i++ {
-				scale_i := float32(int8(qj[i])) * sj
+				scale_i := float32(int8(qj[i])) * normFactor
 				for j := 0; j < blockSize; j++ {
 					out[j] += scale_i * qjlMatrix.data[i*blockSize+j]
 				}
