@@ -106,7 +106,6 @@ This roadmap is designed to elevate Longbow-Quarrel to compete directly with ind
 **Objective:** Expand context window capacity limits drastically by finalizing the TurboQuant custom KV cache logic natively inside PagedKVCache allocations.
 - **Change:** Utilize `DataTypeTQ1_0` and `DataTypeTQ2_0` inside PagedKVCache buffers (`internal/device/utils.go`).
 - **Mechanism:** During each dynamic memory block allocation, compress encoded elements using the fused PolarQuant + QJLTransform native Metal kernels (`turboquant_encode`), yielding robust low-bit residual caches pinned inside the BlockTable mappings.
----
 
 ## Phase 5: Performance Hardening & Feature Completions
 
@@ -216,55 +215,180 @@ This roadmap is designed to elevate Longbow-Quarrel to compete directly with ind
 
 ---
 
-## Additional Stubbed/Incomplete Code Found in Codebase
+## Phase 6: Transformers v5 Compatibility & Cross-Engine Interoperability Testing
 
-### 1. RemoteWorkerEngine Flight RPC Not Implemented
-- **Location:** `internal/engine/remote.go:45,55,59`
-- `ForwardShard()`, `InferWithCallback()`, `ForwardBatch()` all return not-implemented errors
+*Deep research into Transformers v5 (released December 2025) reveals the core theme of "interoperability" — ensuring compatibility across the ecosystem: train with Unsloth/Axolotl/LlamaFactory/MaxText, deploy with vLLM/SGLang, export to llama.cpp/executorch/MLX. This phase validates Longbow-Quarrel's compatibility and coherence against vLLM, llama.cpp, and Ollama using basic text prompts under Transformers v5's modular architecture.*
 
-### 2. StoreKVQuantized Panics on CUDA
-- **Location:** `internal/device/cuda.go:558`, `internal/device/cpu.go:685`
-- Returns panic for unimplemented quantized KV cache storage
+### Overview
 
-### 3. CPU VisionPatchEmbed Stubs  
-- **Location:** `internal/device/cpu.go:690-697`
-- CPU stubs for VLM patch embedding
+Transformers v5 introduces:
+- **Unified Model/Processor APIs**: Clean separation from tokenizers
+- **Dynamic Weight Loading**: First-class quantization concepts
+- **Interoperability Focus**: Seamless export/import across inference engines
+- **Tokenization Redesign**: Architecture separated from trained vocab
 
-### 4. Multi-GPU NCCL Stubs
-- **Location:** `internal/device/multi_gpu.go:11`
-- Placeholder for distributed training NCCL integration
+### Test Categories
 
-### 5. CUDA Engine SwapModel Not Implemented
-- **Location:** `internal/engine/engine_cuda.go:288`
-- Returns error that swap is not implemented
+#### Category A: Unit & Fuzz Tests for Basic Text Prompts
 
-### 6. Q5_K Falls Back to Q4_K
-- **Location:** `internal/engine/engine.go:543-544`
-- Q5_K quantization falls back to Q4_K instead of full implementation
+**A1. Tokenizer Parity Unit Tests**
+- **Objective:** Validate tokenization parity between Quarrel and Transformers v5 across basic prompts
+- **Test:** `TestTokenizerParityV5` — Tokenize identical prompt via Quarrel and compare token IDs to HuggingFace v5 `AutoTokenizer`
+- **Prompts:** "Hello world", "The quick brown", "Once upon a time", "Explain quantum computing", "Write a haiku about AI"
+- **Fuzz:** `FuzzTokenizerV5` — Random UTF-8 strings 1-512 bytes, ensure deterministic output
 
-### 7. CPU ForwardDraft Not Implemented
-- **Location:** `internal/engine/engine_cpu.go:511`
-- Returns error for speculative decoding on CPU
+**A2. Chat Template Unit Tests**
+- **Objective:** Verify chat template compatibility with Transformers v5's `apply_chat_template`
+- **Test:** `TestChatTemplateParity` — Compare rendered output against `tokenizer.apply_chat_template()` from v5
+- **Templates:** llama3, chatml, mistral, qwen
 
-### 8. Grammar Initialization Stubbed
-- **Location:** `internal/api/server.go:166`
-- Grammar field is ignored, not enforced
+**A3. Model Loading Fuzz Tests**
+- **Objective:** Stress GGUF loading with malformed configs ( Transformers v5 exports)
+- **Fuzz:** `FuzzGGUFLoading` — Random GGUF files, ensure graceful errors
+
+**A4. Quantization Sanity Tests**
+- **Objective:** Validate Q4_K, Q5_K, Q8_0, F16 parity with v5's weight-only quantization
+- **Test:** `TestQuantizationParity` — Load identical model, compare output floats within epsilon
+
+#### Category B: Metrics Validation
+
+**B1. Token Output Metrics**
+- **Objective:** Emit and validate token metrics across engines
+- **Metrics:** `tokens_generated_total`, `tokens_per_second`, `time_to_first_token_ms`, `time_per_token_ms`
+- **Test:** `TestTokenMetricsOutput` — Validate Prometheus metric emission
+
+**B2. Memory Metrics**
+- **Objective:** KV cache memory accounting with PagedAttention
+- **Metrics:** `kv_cache_blocks_used`, `kv_cache_blocks_free`, `memory_allocated_bytes`
+- **Test:** `TestMemoryMetricsAccuracy` — Compare to runtime `runtime.ReadMemStats`
+
+**B3. Request Metrics**
+- **Objective:** Track concurrent requests, queue time
+- **Metrics:** `requests_in_flight`, `requests_total`, `queue_time_ms`, `batch_size_observed`
+- **Test:** `TestRequestMetrics`
+
+**B4. Error Metrics**
+- **Objective:** Track engine errors, OOM, timeout rates
+- **Metrics:** `engine_errors_total`, `oom_errors_total`, `timeout_errors_total`
+- **Test:** `TestErrorMetrics`
+
+#### Category C: End-to-End (E2E) Tests
+
+**C1. Basic Prompt E2E — Quarrel vs vLLM**
+- **Objective:** Compare generated output for basic prompts between Quarrel and vLLM with the same model (e.g., Qwen2-0.5B-Instruct.GGUF)
+- **Prompts:** "What is 2+2?", "Capital of France", "Hello, how are you?", "List colors", "Define photosynthesis"
+- **Validation:** Compare token sequences, check if first 8 tokens match within decode temperature 0.0
+- **Test:** `TestE2EBasicPromptVLLM`
+
+**C2. Basic Prompt E2E — Quarrel vs llama.cpp**
+- **Objective:** Same comparison against llama.cpp via `llama-cli` with identical GGUF
+- **Prompts:** Same as C1
+- **Validation:** Verify 100% token match at temperature 0.0
+- **Test:** `TestE2EBasicPromptLlamaCpp`
+
+**C3. Basic Prompt E2E — Quarrel vs Ollama**
+- **Objective:** Compare against Ollama server with matching Modelfile
+- **Prompts:** Same as C1
+- **Test:** `TestE2EBasicPromptOllama`
+
+**C4. Streaming E2E Test**
+- **Objective:** Validate SSE streaming parity across engines
+- **Test:** `TestStreamingE2E` — Compare token-by-token streaming between Quarrel and reference
+
+#### Category D: Coherence Tests
+
+**D1. Cross-Engine Token Coherence**
+- **Objective:** Verify token-by-token match probability across Quarrel, vLLM, llama.cpp
+- **Test:** `TestTokenCoherenceCrossEngine` — Run 100 basic prompts, compute Jaccard similarity of token sets
+- **Threshold:** Jaccard ≥ 0.85 for temperature ≤ 0.3
+
+**D2. Logit Distribution Coherence**
+- **Objective:** Compare top-5 logit probability distributions
+- **Test:** `TestLogitCoherence` — KL-divergence between Quarrel and reference engine top-5 probs
+- **Threshold:** KL-divergence < 0.5 for same model weight loading
+
+**D3. Sampling Coherence**
+- **Objective:** Validate deterministic sampling (temperature 0) and probabilistic sampling (temperature > 0)
+- **Test:** `TestSamplingCoherence` — Run 50 basic prompts with temperature 0.0 and 0.7, compare token overlap rates
+- **Threshold:** 100% match at temp 0.0, ≥60% match at temp 0.7
+
+**D4. Long-Context Coherence**
+- **Objective:** Validate generation coherence with >4096 token context
+- **Test:** `TestLongContextCoherence` — Feed 5K token prompt, verify generation continues sensibly
+- **Reference:** Compare to vLLM with the same prompt
+
+**D5. Multi-Turn Coherence**
+- **Objective:** Validate multi-turn conversation continuity
+- **Test:** `TestMultiTurnCoherence` — 3-turn conversation, verify context accumulation
+- **Reference:** Compare conversation continuity to Ollama
+
+#### Category E: Transformers v5 Export/Import Tests
+
+**E1. Export GGUF from Transformers v5**
+- **Objective:** Validate conversion of v5-exported model to Quarrel-compatible GGUF
+- **Tool:** Use ` optimum.exporters.llm` to export to GGUF, load in Quarrel
+- **Test:** `TestV5ExportCompatibility`
+
+**E2. Import v5-Format Configs**
+- **Objective:** Parse Transformers v5 `config.json` and map to Quarrel config
+- **Fields:** `model_type`, `hidden_size`, `num_hidden_layers`, `num_attention_heads`, `intermediate_size`
+- **Test:** `TestV5ConfigImport`
+
+### Subtask Checklist
+
+| ID | Subtask | Type | Dependencies |
+|----|--------|------|---------------|
+| A1 | Tokenizer parity unit tests | unit | A2 |
+| A2 | Fuzz tokenizer input | fuzz | A1 |
+| A3 | Chat template unit tests | unit | - |
+| A4 | Model loading fuzz | fuzz | - |
+| A5 | Quantization sanity | unit | - |
+| B1 | Token output metrics | metrics | C1 |
+| B2 | Memory metrics | metrics | - |
+| B3 | Request metrics | metrics | - |
+| B4 | Error metrics | metrics | - |
+| C1 | E2E vs vLLM | e2e | B1, B2 |
+| C2 | E2E vs llama.cpp | e2e | B1, B2 |
+| C3 | E2E vs Ollama | e2e | B1, B2 |
+| C4 | Streaming E2E | e2e | - |
+| D1 | Cross-engine coherence | coherence | C1, C2, C3 |
+| D2 | Logit distribution coherence | coherence | - |
+| D3 | Sampling coherence | coherence | - |
+| D4 | Long-context coherence | coherence | - |
+| D5 | Multi-turn coherence | coherence | - |
+| E1 | v5 export compatibility | integration | - |
+| E2 | v5 config import | integration | - |
+
+### Test Files Location
+
+- `internal/engine/transformers_v5_compat_test.go` — Unit tests (A1-A5)
+- `internal/engine/transformers_v5_fuzz_test.go` — Fuzz tests (A2, A4)
+- `internal/metrics/v5_metrics_test.go` — Metrics tests (B1-B4)
+- `internal/api/v5_e2e_test.go` — E2E tests (C1-C4)
+- `internal/engine/v5_coherence_test.go` — Coherence tests (D1-D5)
+- `internal/integration/v5_export_test.go` — Export/import tests (E1-E2)
+
+### Reference Commands
+
+```bash
+# vLLM server
+vllm serve Qwen/Qwen2-0.5B-Instruct --dtype half
+
+# llama.cpp server
+llama-cli serve model.gguf -c 4096
+
+# Ollama server
+ollama serve
+ollama run qwen2:0.5b
+
+# Quarrel server
+./quarrel serve --model model.gguf
+
+# Compare outputs
+diff <(curl -s http://localhost:8080/v1/chat/completions -d '{"messages":[{"role":"user","content":"What is 2+2?"}]}' | jq -c '.choices[].message.content') \
+       <(curl -s http://localhost:8001/v1/chat/completions -d '{"messages":[{"role":"user","content":"What is 2+2?"}]}' | jq -c '.choices[].message.content')
+```
 
 ---
 
-## Validation of Existing Next Steps
-
-The following items from the original document were checked against current codebase:
-
-| Item | Status | Verified Location |
-|------|--------|-------------------|
-| 5. Rejection Sampling | ⚠️ Still stubbed | `internal/engine/speculative.go:93` - verify() commented out |
-| 6. CoW Physical Block Copy | ⚠️ Still stubbed | `internal/engine/kv_cache_paged.go:399-404` - comment confirms missing copy |
-| 7. PromptCache LRU Eviction | ⚠️ Not implemented | No Evict method found in prompt_cache.go |
-| 8. Multi-LoRA Batch Dispatch | ⚠️ Not implemented | No AdapterIDs handling in ForwardBatch |
-| 9. OTLP Exporter | ⚠️ Still stubbed | `internal/telemetry/telemetry.go:35` - no WithBatcher |
-| 10. Min-P / Mirostat | ⚠️ Not implemented | No fields in `sampler_config.go` |
-| 11. VLM Encoder Pixels | ⚠️ Still stubbed | `internal/vlm/encoder.go:57` - pixels created but zeroed |
-| 12. Tensor Parallel All-Reduce | ⚠️ Still stubbed | `internal/engine/distributed_master.go:56` - delegates to shard[0] |
-| 13. Block Table CPU Round-trips | ⚠️ Still stubbed | `internal/engine/kv_cache_paged.go:559-565` - unconditional LoadFrom |
-| 14. CPU Engine Full Stack | ⚠️ Still stubbed | `internal/engine/engine_cpu.go:389-405` - only embedding lookup |
+#### Last updated: April 2026
