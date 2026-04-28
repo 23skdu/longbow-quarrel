@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/23skdu/longbow-quarrel/internal/engine"
+	"github.com/23skdu/longbow-quarrel/internal/logger"
 	"github.com/23skdu/longbow-quarrel/internal/sampler"
 	"github.com/23skdu/longbow-quarrel/internal/telemetry"
 )
@@ -54,7 +55,9 @@ func (s *Server) HealthzEndpoint(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK) // 200
 	}
 
-	_ = json.NewEncoder(w).Encode(resp)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		logger.Log.Error("failed to encode health response", "error", err)
+	}
 }
 
 // Global server instance tracking memory utilization directly from the engine runtime.
@@ -192,5 +195,7 @@ func (s *Server) CompletionsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(resp)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		logger.Log.Error("failed to encode completion response", "error", err)
+	}
 }

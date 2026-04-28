@@ -524,7 +524,7 @@ func (c *PagedKVCache) UpdateBatch(layer int, items []struct {
 			c.blockTables[item.SeqID] = table
 		}
 
-		physPositions[i] = table[logicalBlockIdx]*int32(c.blockSize) + int32(blockOffset)
+		physPositions[i] = int32(int64(table[logicalBlockIdx])*int64(c.blockSize) + int64(blockOffset))
 	}
 	c.mu.Unlock()
 

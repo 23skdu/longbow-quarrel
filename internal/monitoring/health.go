@@ -227,16 +227,20 @@ func (hm *HealthMonitor) handleHealth(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}
 
-	json.NewEncoder(w).Encode(map[string]string{
+	if err := json.NewEncoder(w).Encode(map[string]string{
 		"status":    status.Status,
 		"timestamp": status.Timestamp.Format(time.RFC3339),
-	})
+	}); err != nil {
+		logger.Log.Error("failed to encode health response", "error", err)
+	}
 }
 
 func (hm *HealthMonitor) handleDetailedStatus(w http.ResponseWriter, r *http.Request) {
 	status := hm.getHealthStatus()
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(status)
+	if err := json.NewEncoder(w).Encode(status); err != nil {
+		logger.Log.Error("failed to encode detailed status", "error", err)
+	}
 }
 
 func (hm *HealthMonitor) handleAlerts(w http.ResponseWriter, r *http.Request) {
@@ -246,7 +250,9 @@ func (hm *HealthMonitor) handleAlerts(w http.ResponseWriter, r *http.Request) {
 	hm.mu.RUnlock()
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(alerts)
+	if err := json.NewEncoder(w).Encode(alerts); err != nil {
+		logger.Log.Error("failed to encode alerts", "error", err)
+	}
 }
 
 func (hm *HealthMonitor) handleClearAlerts(w http.ResponseWriter, r *http.Request) {
@@ -260,7 +266,9 @@ func (hm *HealthMonitor) handleClearAlerts(w http.ResponseWriter, r *http.Reques
 	hm.mu.Unlock()
 
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{"message": "alerts cleared"})
+	if err := json.NewEncoder(w).Encode(map[string]string{"message": "alerts cleared"}); err != nil {
+		logger.Log.Error("failed to encode clear alerts response", "error", err)
+	}
 }
 
 // Health status calculation

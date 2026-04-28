@@ -62,7 +62,9 @@ func (s *Server) LoadAdapterHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(map[string]string{"status": "loaded", "id": req.ID})
+	if err := json.NewEncoder(w).Encode(map[string]string{"status": "loaded", "id": req.ID}); err != nil {
+		logger.Log.Error("failed to encode adapter response", "error", err)
+	}
 }
 
 // ListAdaptersHandler handles GET /v1/adapters/list
@@ -79,5 +81,7 @@ func (s *Server) ListAdaptersHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		logger.Log.Error("failed to encode adapters list", "error", err)
+	}
 }

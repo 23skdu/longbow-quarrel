@@ -110,7 +110,9 @@ func ModelsHandler(cfg config.Config) http.HandlerFunc {
 		models := adapter.ListModels()
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(models)
+		if err := json.NewEncoder(w).Encode(models); err != nil {
+			log.Printf("ERROR: failed to encode models: %v", err)
+		}
 	}
 }
 
@@ -194,7 +196,9 @@ func GenerateHandler(cfg config.Config) http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(response)
+		if err := json.NewEncoder(w).Encode(response); err != nil {
+			log.Printf("ERROR: failed to encode response: %v", err)
+		}
 	}
 }
 
@@ -333,10 +337,12 @@ func HotSwapHandler(cfg config.Config) http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(HotSwapResponse{
+		if err := json.NewEncoder(w).Encode(HotSwapResponse{
 			Success: true,
 			Message: "Model hot-swapped successfully",
-		})
+		}); err != nil {
+			log.Printf("ERROR: failed to encode hot swap response: %v", err)
+		}
 	}
 }
 
@@ -421,7 +427,9 @@ func OpenAIChatCompletionsHandler(cfg config.Config) http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(response)
+		if err := json.NewEncoder(w).Encode(response); err != nil {
+			log.Printf("ERROR: failed to encode response: %v", err)
+		}
 	}
 }
 
@@ -502,7 +510,9 @@ func OpenAICompletionsHandler(cfg config.Config) http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(response)
+		if err := json.NewEncoder(w).Encode(response); err != nil {
+			log.Printf("ERROR: failed to encode response: %v", err)
+		}
 	}
 }
 
@@ -531,7 +541,9 @@ func OpenAIModelsHandler(cfg config.Config) http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(response)
+		if err := json.NewEncoder(w).Encode(response); err != nil {
+			log.Printf("ERROR: failed to encode response: %v", err)
+		}
 	}
 }
 
