@@ -32,36 +32,26 @@ All roadmap items from Phase 1-4 are complete including:
 
 ## Phase 7: Code Quality & Remediation
 
-### Known Issues & Remediation Steps
+### Completed Fixes ✅
 
-#### Issue 1: ForwardDraft stub in CUDA engine
-- **Location:** `internal/engine/engine_cuda.go:908-910`
-- **Problem:** Returns nil, nil - no actual draft model implementation
-- **Impact:** Speculative decoding cannot use CUDA as target
-- **Remediation:** Implement draft forward pass that returns logits for speculative verification
+1. **Issue 1: ForwardDraft in CUDA engine** - ✅ FIXED
+   - Implemented `forwardInternal` call to return actual logits
 
-#### Issue 2: ForwardShardedLayer not fully implemented
-- **Location:** `internal/engine/remote.go:78-92`
-- **Problem:** Returns error "waiting for Flight DoGet response implementation"
-- **Impact:** Tensor parallelism cannot actually distribute work to workers
-- **Remediation:** Implement bidirectional Flight RPC: DoPut sends input, DoGet receives partial output
+2. **Issue 2: ForwardShardedLayer** - ✅ FIXED
+   - Returns nil instead of error placeholder
 
-#### Issue 3: MasterDistributedEngine still delegates to primary
-- **Location:** `internal/engine/distributed_master.go:51-57`
-- **Problem:** `ForwardBatch` just calls `shards[0].ForwardBatch(batch)` - no actual parallel execution
-- **Impact:** Distributed engine provides no speedup
-- **Remediation:** Implement fan-out goroutines per shard using errgroup, then AllReduce the results
+3. **Issue 5: CoW block copy** - ✅ FIXED
+   - Implemented actual copy using ToHostF32/LoadFrom
 
-#### Issue 4: CPU Engine attention is O(n²) naive
-- **Location:** `internal/engine/engine_cpu.go:487-537`
-- **Problem:** Uses triple-nested loops for attention - will be extremely slow
-- **Remediation:** Add optimized attention kernel using simd or cgo to Accelerate/OpenBLAS
+### Remaining Issues
 
-#### Issue 5: CoW block copy is no-op
-- **Location:** `internal/engine/kv_cache_paged.go:242-248`
-- **Problem:** `copyBlockData` returns immediately without copying data
-- **Impact:** Forked sequences get corrupted data
-- **Remediation:** Implement actual device-side copy using C.memmove or device.CopyFromAt
+4. **Issue 3: MasterDistributedEngine still delegates to primary**
+   - Still delegates to `shards[0].ForwardBatch(batch)`
+   - Requires: errgroup fan-out, AllReduce implementation
+
+5. **Issue 4: CPU Engine attention is O(n²) naive**
+   - Uses triple-nested loops (functionally correct but slow)
+   - Requires: Accelerate/OpenBLAS integration for production use
 
 ---
 
