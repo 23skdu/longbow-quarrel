@@ -906,8 +906,19 @@ func (s *Sampler) Sample(logits []float32, history []int) int {
 }
 
 func (e *cudaEngine) ForwardDraft(tokens []int) ([][]float32, error) {
-	// Stub for speculative decoding support
-	return nil, nil
+	if e.model == nil || e.weights == nil {
+		return nil, fmt.Errorf("model not initialized")
+	}
+
+	hidden := e.forwardInternal(tokens, false)
+	if hidden == nil {
+		return nil, fmt.Errorf("forward pass failed")
+	}
+
+	logits := make([][]float32, 1)
+	logits[0] = hidden
+
+	return logits, nil
 }
 
 func (e *cudaEngine) GetSeqCachePos(seqID string) int {

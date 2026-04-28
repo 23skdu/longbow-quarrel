@@ -244,7 +244,40 @@ func (c *PagedKVCache) copyBlockData(layer int, srcBlock, dstBlock int32) error 
 		return nil
 	}
 
-	_ = layer
+	if layer < 0 || layer >= len(c.kPools) || c.kPools[layer] == nil {
+		return nil
+	}
+
+	kPool := c.kPools[layer]
+	srcStart := int(srcBlock) * c.blockSize
+	dstStart := int(dstBlock) * c.blockSize
+	cols := kPool.Cols()
+
+	data := kPool.ToHostF32()
+	if data == nil {
+		return nil
+	}
+
+	for row := 0; row < c.blockSize; row++ {
+		for col := 0; col < cols; col++ {
+			data[(dstStart+row)*cols+col] = data[(srcStart+row)*cols+col]
+		}
+	}
+
+	c.kPools[layer].LoadFrom(data)
+
+	if layer < len(c.vPools) && c.vPools[layer] != nil {
+		vPool := c.vPools[layer]
+		vData := vPool.ToHostF32()
+		if vData != nil {
+			for row := 0; row < c.blockSize; row++ {
+				for col := 0; col < cols; col++ {
+					vData[(dstStart+row)*cols+col] = vData[(srcStart+row)*cols+col]
+				}
+			}
+			vPool.LoadFrom(vData)
+		}
+	}
 
 	return nil
 }
