@@ -3,8 +3,13 @@ package engine
 import (
 	"context"
 	"fmt"
+	"math"
+	"math/rand"
 	"sync"
+	"time"
+
 	"github.com/23skdu/longbow-quarrel/internal/logger"
+	"github.com/23skdu/longbow-quarrel/internal/metrics"
 )
 
 // SpeculativeManager orchestrates draft-model generation logic.
@@ -12,12 +17,14 @@ type SpeculativeManager struct {
 	mu           sync.Mutex
 	targetEngine Engine
 	draftEngine  Engine
+	rng          *rand.Rand
 }
 
 func NewSpeculativeManager(target, draft Engine) *SpeculativeManager {
 	return &SpeculativeManager{
 		targetEngine: target,
 		draftEngine:  draft,
+		rng:          rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 }
 
@@ -86,15 +93,23 @@ func (sm *SpeculativeManager) GenerateSpeculativeMultiPath(ctx context.Context, 
 		}
 
 		accepted := 0
+		corrected := make([]int, 0)
 		for i := 0; i < len(candidates[p]); i++ {
-			// Mock verification logic (to be replaced with actual log-prob comparison)
-			// For now, we assume a simple greedy match or probability threshold
-			if i < len(targetLogits) {
-				// verify(targetLogits[i], candidates[p][i])
-				accepted++ 
-			} else {
+			if i >= len(targetLogits) {
 				break
 			}
+			draftToken := candidates[p][i]
+			isAccepted, correctedToken := rejectSample(targetLogits[i], draftToken, seq.Config, sm.rng)
+			if isAccepted {
+				accepted++
+			} else {
+				corrected = append(corrected, correctedToken)
+				break
+			}
+		}
+
+		if len(corrected) > 0 {
+			candidates[p] = append(candidates[p][:accepted], corrected[0])
 		}
 		
 		if accepted > bestAcceptedCount {
@@ -122,4 +137,73 @@ func (sm *SpeculativeManager) GenerateSpeculative(ctx context.Context, seq *Sequ
 	seq.NumPaths = 1
 	seq.DraftK = 4 // Default
 	return sm.GenerateSpeculativeMultiPath(ctx, seq)
+}
+
+func rejectSample(targetLogits []float32, draftToken int, cfg SamplerConfig, rng *rand.Rand) (accepted bool, correctedToken int) {
+	if draftToken >= len(targetLogits) {
+		return false, 0
+	}
+
+	draftProb := math.Exp(float64(targetLogits[draftToken]))
+	maxLogit := targetLogits[0]
+	for _, l := range targetLogits {
+		if l > maxLogit {
+			maxLogit = l
+		}
+	}
+
+	sum := 0.0
+	probs := make([]float64, len(targetLogits))
+	for i, l := range targetLogits {
+		probs[i] = math.Exp(float64(l - maxLogit))
+		sum += probs[i]
+	}
+	for i := range probs {
+		probs[i] /= sum
+	}
+
+	targetProb := probs[draftToken]
+	if targetProb <= 0 {
+		return false, 0
+	}
+
+	acceptanceRatio := targetProb / draftProb
+	if acceptanceRatio > 1 {
+		acceptanceRatio = 1
+	}
+
+	if rng.Float64() < acceptanceRatio {
+		metrics.SpeculativeTokensAccepted.Add(1)
+		return true, draftToken
+	}
+
+	metrics.SpeculativeTokensRejected.Add(1)
+
+	diff := make([]float64, len(probs))
+	for i := range diff {
+		diff[i] = probs[i] - draftProb
+		if diff[i] < 0 {
+			diff[i] = 0
+		}
+	}
+
+	residualSum := 0.0
+	for _, v := range diff {
+		residualSum += v
+	}
+
+	if residualSum <= 0 {
+		return false, 0
+	}
+
+	r := rng.Float64() * residualSum
+	acc := 0.0
+	for i, v := range diff {
+		acc += v
+		if r < acc {
+			return false, i
+		}
+	}
+
+	return false, 0
 }

@@ -88,21 +88,21 @@ func (q *RequestQueue) Depth() int {
 // ContinuousBatchManager oversees the lifecycle of sequences during decoding.
 type ContinuousBatchManager struct {
 	waitingQueue *RequestQueue
-	
-	// running represents the set of sequences currently in the decoding iteration
+
 	running map[uint64]*Sequence
-	
-	// prefill indicates sequences that need their prompt processed next tick
+
 	prefill map[uint64]*Sequence
-	
-	mu sync.RWMutex
+
+	mu           sync.RWMutex
+	LowWaterMark int
 }
 
 func NewContinuousBatchManager() *ContinuousBatchManager {
 	return &ContinuousBatchManager{
-		waitingQueue: &RequestQueue{},
-		running:      make(map[uint64]*Sequence),
-		prefill:      make(map[uint64]*Sequence),
+		waitingQueue:  &RequestQueue{},
+		running:       make(map[uint64]*Sequence),
+		prefill:       make(map[uint64]*Sequence),
+		LowWaterMark:  32,
 	}
 }
 
@@ -123,14 +123,16 @@ func (cm *ContinuousBatchManager) Step(maxBatchSize int, kvCache *PagedKVCache, 
 	defer cm.mu.Unlock()
 
 	const PrefillChunkSize = 512
+
+	if promptCache != nil && kvCache != nil && kvCache.FreeBlocksCount() < cm.LowWaterMark {
+		promptCache.Evict(kvCache)
+	}
+
 	availableSlots := maxBatchSize - len(cm.running) - len(cm.prefill)
 
-	// Resource-aware Admission Control
-	// Only pull if we have slots AND the KV cache isn't nearly exhausted
-	// If kvCache is nil (tests), we bypass admission control
 	canAdmit := availableSlots > 0
 	if kvCache != nil {
-		canAdmit = canAdmit && kvCache.FreeBlocksCount() > 32 // Lower threshold for admission
+		canAdmit = canAdmit && kvCache.FreeBlocksCount() > cm.LowWaterMark
 	}
 
 	if canAdmit {

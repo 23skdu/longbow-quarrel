@@ -7,8 +7,11 @@ import (
 	"fmt"
 	"github.com/23skdu/longbow-quarrel/internal/device"
 	"image"
+	"image/color"
 	_ "image/jpeg"
 	_ "image/png"
+
+	"golang.org/x/image/draw"
 )
 
 // VisionEncoder handles loading and executing multimodal CLIP/SigLIP transformer stacks.
@@ -90,22 +93,17 @@ func (v *VisionEncoder) resizeAndNormalize(img image.Image, targetW, targetH, ch
 		std = []float32{0.26862954, 0.26130259, 0.27577711}
 	}
 
+	dst := image.NewNRGBA(image.Rect(0, 0, targetW, targetH))
+	catmullRom := draw.CatmullRom{}
+	catmullRom.Scale(dst, img.Bounds(), img, bounds.Min, draw.Over)
+
 	for y := 0; y < targetH; y++ {
 		for x := 0; x < targetW; x++ {
-			srcX := x * srcW / targetW
-			srcY := y * srcH / targetH
-			if srcX >= srcW {
-				srcX = srcW - 1
-			}
-			if srcY >= srcH {
-				srcY = srcH - 1
-			}
+			r, g, b, _ := dst.At(x, y).RGBA()
 
-			r, g, b, _ := img.At(srcX+bounds.Min.X, srcY+bounds.Min.Y).RGBA()
-
-			rFloat := float32(r>>8) / 65535.0
-			gFloat := float32(g>>8) / 65535.0
-			bFloat := float32(b>>8) / 65535.0
+			rFloat := float32(r>>8) / 255.0
+			gFloat := float32(g>>8) / 255.0
+			bFloat := float32(b>>8) / 255.0
 
 			idx := (y*targetW + x) * channels
 			pixels[idx] = (rFloat - mean[0]) / std[0]
@@ -113,6 +111,10 @@ func (v *VisionEncoder) resizeAndNormalize(img image.Image, targetW, targetH, ch
 			pixels[idx+2] = (bFloat - mean[2]) / std[2]
 		}
 	}
+
+	_ = srcW
+	_ = srcH
+	_ = color.RGBA{}
 
 	return pixels
 }

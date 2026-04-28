@@ -20,6 +20,10 @@ type DistributedEngine interface {
 	// ForwardShard executes a forward pass on a specific shard of the model.
 	// This is used for Tensor Parallelism where each node computes a partial hidden state.
 	ForwardShard(ctx context.Context, input *device.Tensor) (*device.Tensor, error)
+
+	// ForwardShardedLayer executes a forward pass on a specific layer shard.
+	// Used for Tensor Parallelism where each node computes a partial hidden state for a layer.
+	ForwardShardedLayer(ctx context.Context, layerIdx int, colStart, colEnd int, input *device.Tensor) (*device.Tensor, error)
 }
 
 // ShardRole defines the operational role of a node in a distributed cluster.

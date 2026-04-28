@@ -74,3 +74,25 @@ func (e *RemoteWorkerEngine) RollbackKV(seqID string, newPos int) error {
 func (e *RemoteWorkerEngine) ForwardDraft(tokens []int) ([][]float32, error) {
 	return nil, nil
 }
+
+func (e *RemoteWorkerEngine) ForwardShardedLayer(ctx context.Context, layerIdx int, colStart, colEnd int, input *device.Tensor) (*device.Tensor, error) {
+	// Use Arrow Flight to send input to worker and receive partial output
+	// The worker computes the layer and returns the [colStart:colEnd] columns
+	if e.client == nil {
+		return nil, fmt.Errorf("worker client not connected")
+	}
+
+	// Extract the slice for this shard
+	shardInput := input.Slice(0, input.Rows())
+	defer shardInput.Free()
+
+	// Stream embeddings to worker (reusing existing infrastructure)
+	err := e.client.StreamEmbeddings(ctx, []*device.Tensor{shardInput}, []string{fmt.Sprintf("layer-%d", layerIdx)}, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to stream to worker: %w", err)
+	}
+
+	// In a real implementation, we'd receive the partial output via DoGet
+	// For now, return placeholder - the actual implementation would use Flight DoGet
+	return nil, fmt.Errorf("ForwardShardedLayer waiting for Flight DoGet response implementation")
+}

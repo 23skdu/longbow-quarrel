@@ -2,13 +2,18 @@ package telemetry
 
 import (
 	"context"
+	"os"
 	"sync"
 
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
 	"go.opentelemetry.io/otel/sdk/resource"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.17.0"
+	"go.opentelemetry.io/otel/trace"
 )
 
 var (
@@ -17,7 +22,6 @@ var (
 	tracerName = "github.com/23skdu/longbow-quarrel"
 )
 
-// InitTracer initializes the global tracer provider.
 func InitTracer() func(context.Context) error {
 	ctx := context.Background()
 
@@ -30,17 +34,58 @@ func InitTracer() func(context.Context) error {
 		return nil
 	}
 
-	// For now, we use a simple processor that exports to a mock or stdout if needed.
-	// In production, this would use an OTLP exporter.
-	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithResource(res),
-		sdktrace.WithSampler(sdktrace.AlwaysSample()),
-	)
+	var tp *sdktrace.TracerProvider
+	var mp *sdkmetric.MeterProvider
+
+	if endpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"); endpoint != "" {
+		traceExporter, err := otlptracegrpc.New(ctx,
+			otlptracegrpc.WithEndpoint(endpoint),
+			otlptracegrpc.WithInsecure(),
+		)
+		if err == nil {
+			tp = sdktrace.NewTracerProvider(
+				sdktrace.WithResource(res),
+				sdktrace.WithSampler(sdktrace.AlwaysSample()),
+				sdktrace.WithBatcher(traceExporter),
+			)
+		}
+
+		metricExporter, err := otlpmetricgrpc.New(ctx,
+			otlpmetricgrpc.WithEndpoint(endpoint),
+			otlpmetricgrpc.WithInsecure(),
+		)
+		if err == nil {
+			mp = sdkmetric.NewMeterProvider(
+				sdkmetric.WithResource(res),
+				sdkmetric.WithReader(sdkmetric.NewPeriodicReader(metricExporter)),
+			)
+		}
+	} else {
+		stdExporter, _ := stdouttrace.New(stdouttrace.WithPrettyPrint())
+		tp = sdktrace.NewTracerProvider(
+			sdktrace.WithResource(res),
+			sdktrace.WithSampler(sdktrace.AlwaysSample()),
+			sdktrace.WithBatcher(stdExporter),
+		)
+		mp = sdkmetric.NewMeterProvider()
+	}
+
 	otel.SetTracerProvider(tp)
-	
+	if mp != nil {
+		otel.SetMeterProvider(mp)
+	}
+
 	tracer = tp.Tracer(tracerName)
 
-	return tp.Shutdown
+	return func(ctx context.Context) error {
+		if tp != nil {
+			tp.Shutdown(ctx)
+		}
+		if mp != nil {
+			mp.Shutdown(ctx)
+		}
+		return nil
+	}
 }
 
 // StartSpan starts a new span from the given context.
