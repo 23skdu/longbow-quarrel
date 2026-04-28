@@ -37,16 +37,16 @@ This roadmap is designed to elevate Longbow-Quarrel to compete directly with ind
 
 ### Phase 3: Advanced Features & Ecosystem (Parity with llama.cpp/Ollama)
 
-1. **Speculative Decoding Pipelines**: Implement draft-model speculative decoding to accelerate token generation speeds by 2x-3x through multi-draft concurrent processing.
-2. **Multi-LoRA Dynamic Serving**: Support loading and hot-swapping multiple Low-Rank Adaptations on the fly, enabling a single base model instance to serve disparate fine-tuned use-cases simultaneously.
-3. **Structured Outputs & Grammar Sampling**: Integrate structured inference (JSON mode and formal grammar definition), enforcing model compliance to expected downstream application schemas.
-4. **Vision-Language Model (VLM) Architectures**: Expand backend architecture to route multimodal inputs through vision encoders (e.g., CLIP, SigLIP) for leading open weights models like Llava and Qwen-VL.
-5. **Comprehensive Quantization Support**: Round out GGUF compatibility to include the missing configurations (`Q5_K`, `Q2_K`, etc.) and upcoming low-bit floating point formats (e.g., GGUF v3).
+1. **Speculative Decoding Pipelines**: ✅ Complete. Multi-draft concurrent processing with rejection sampling.
+2. **Multi-LoRA Dynamic Serving**: ✅ Complete. LoadAdapter/loRA routing in batch dispatcher.
+3. **Structured Outputs & Grammar Sampling**: ✅ Complete. JSON grammar and EBNF support in sampler.
+4. **Vision-Language Model (VLM) Architectures**: ✅ Complete. CLIP, SigLIP, Llava, Qwen-VL support via vlm_loader.
+5. **Comprehensive Quantization Support**: ✅ Complete. Added Q5_K, Q2_K, Q1_K for GGUF v3.
 
 ### Phase 4: Stability & Enterprise Orchestration
 
-1. **Multi-GPU Tensor Parallelism (NCCL/Metal)**: Implement distributed inference capable of sharding model weights across multiple PCIe/NVLink GPUs using NCCL, or multi-M-Max SoCs.
-2. **Kubernetes-native Fault Tolerance**: Introduce strict memory budget enforcement (graceful degradation), liveness/readiness probes, and semantic routing features for deployment within large-scale container orchestration.
+1. **Multi-GPU Tensor Parallelism (NCCL/Metal)**: ✅ Framework complete. ForwardShardedLayer interface ready.
+2. **Kubernetes-native Fault Tolerance**: ✅ Complete. /healthz liveness probe, /readyz probe, memory budget at 95% graceful degradation.
 
 ---
 
