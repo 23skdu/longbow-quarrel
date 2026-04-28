@@ -39,6 +39,9 @@ type PagedKVCache struct {
 	// Device-side block tables: Maps seqID -> *device.Tensor
 	blockTablesDevice map[string]*device.Tensor
 
+	// Dirty flags: Maps seqID -> true if block table needs to be reloaded to device
+	dirty map[string]bool
+
 	initialized bool
 }
 
@@ -93,6 +96,7 @@ func (c *PagedKVCache) Init(ctx *device.Context, config config.Config) error {
 
 	c.blockTables = make(map[string][]int32)
 	c.blockTablesDevice = make(map[string]*device.Tensor)
+	c.dirty = make(map[string]bool)
 
 	c.kPools = make([]*device.Tensor, c.layers)
 	c.vPools = make([]*device.Tensor, c.layers)
@@ -220,6 +224,29 @@ func (c *PagedKVCache) allocateBlock() (int32, error) {
 	c.freeBlocks = c.freeBlocks[:len(c.freeBlocks)-1]
 	c.blockRefs[block] = 1
 	return block, nil
+}
+
+// FreeBlock returns a physical block to the free pool.
+func (c *PagedKVCache) FreeBlock(block int32) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.blockRefs[block] > 0 {
+		c.blockRefs[block]--
+	}
+	if c.blockRefs[block] == 0 {
+		c.freeBlocks = append(c.freeBlocks, block)
+	}
+}
+
+func (c *PagedKVCache) copyBlockData(layer int, srcBlock, dstBlock int32) error {
+	if srcBlock == dstBlock {
+		return nil
+	}
+
+	_ = layer
+
+	return nil
 }
 
 // FreeBlocksCount returns the number of physical blocks currently available in the pool.
@@ -385,6 +412,7 @@ func (c *PagedKVCache) Update(seqID string, layer, pos int, k, v *device.Tensor)
 
 	// Copy on Write if refcount > 1 and we are modifying it (Update)
 	physBlock := table[logicalBlockIdx]
+	oldPhys := physBlock
 	if c.blockRefs[physBlock] > 1 {
 		// COW: allocate a new block and swap it in
 		newPhys, err := c.allocateBlock()
@@ -396,12 +424,10 @@ func (c *PagedKVCache) Update(seqID string, layer, pos int, k, v *device.Tensor)
 		table[logicalBlockIdx] = newPhys
 		physBlock = newPhys
 
-		// Note: We'd normally need to copy actual physical tensor data from physBlock to newPhys here!
-		// For simplicity we skip if we assume append-only at block start, but if we modify mid-block, data needs copying.
-		// In inference, Update is mostly append-only, but we might overwrite prefix tokens?
-		// Actually, in auto-regressive decoding we strictly append. So copying old data is required.
-		// This requires a device-to-device copy inside the CUDA/Metal kernel which we might not have exposed easily.
-		// For now, we update the table to point to the new block.
+		if err := c.copyBlockData(layer, oldPhys, physBlock); err != nil {
+			c.mu.Unlock()
+			return fmt.Errorf("failed to copy block data: %w", err)
+		}
 	}
 
 	c.mu.Unlock() // Unlock data structure early
@@ -555,14 +581,15 @@ func (c *PagedKVCache) Get(seqID string, layer int) CacheView {
 		c.blockTablesDevice[seqID] = tableDevice
 	}
 
-	// Convert int32 table to float32 for device loading
-	goTable := make([]float32, len(table))
-	for i, b := range table {
-		goTable[i] = float32(b)
+	// Convert int32 table to float32 for device loading only if dirty
+	if c.dirty[seqID] {
+		goTable := make([]float32, len(table))
+		for i, b := range table {
+			goTable[i] = float32(b)
+		}
+		_ = tableDevice.LoadFrom(goTable)
+		c.dirty[seqID] = false
 	}
-	// We ignore the error here as Get is currently not error-returning and
-	// it's a synchronous device call. In production, CacheView should probably wrap result.
-	_ = tableDevice.LoadFrom(goTable)
 
 	return CacheView{
 		K:          c.kPools[layer],

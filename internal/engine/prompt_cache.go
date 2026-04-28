@@ -2,6 +2,7 @@ package engine
 
 import (
 	"sync"
+	"time"
 )
 
 // RadixNode represents a node in the prompt cache RadixTree.
@@ -13,10 +14,22 @@ type RadixNode struct {
 	RefCount       int
 }
 
+type lruNode struct {
+	node     *RadixNode
+	lastUsed time.Time
+	prev     *lruNode
+	next     *lruNode
+}
+
 // PromptCache manages a Radix tree of shared prefix sequences to implement Time-To-First-Token optimizations.
 type PromptCache struct {
 	mu   sync.RWMutex
 	root *RadixNode
+
+	maxCachedBlocks int
+	lruHead         *lruNode
+	lruTail         *lruNode
+	lruSize         int
 }
 
 // NewPromptCache creates a globally shared prefix cache.
@@ -26,7 +39,15 @@ func NewPromptCache() *PromptCache {
 			Tokens:   []int{},
 			Children: make(map[int]*RadixNode),
 		},
+		maxCachedBlocks: 256,
 	}
+}
+
+// SetMaxCachedBlocks sets the maximum number of blocks to cache.
+func (pc *PromptCache) SetMaxCachedBlocks(max int) {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	pc.maxCachedBlocks = max
 }
 
 // MatchPrefix finds the longest matching cached prompt prefix for the incoming token sequence.
@@ -78,4 +99,94 @@ func (pc *PromptCache) Insert(prompt []int, blocks []int32) {
 	curr.PhysicalBlocks = make([]int32, len(blocks))
 	copy(curr.PhysicalBlocks, blocks)
 	curr.RefCount++
+
+	pc.moveToHead(curr)
+}
+
+func (pc *PromptCache) moveToHead(node *RadixNode) {
+	lru := &lruNode{node: node, lastUsed: time.Now()}
+
+	if pc.lruHead == nil {
+		pc.lruHead = lru
+		pc.lruTail = lru
+		pc.lruSize = len(node.PhysicalBlocks)
+		return
+	}
+
+	for existing := pc.lruHead; existing != nil; existing = existing.next {
+		if existing.node == node {
+			if existing == pc.lruHead {
+				return
+			}
+			if existing.prev != nil {
+				existing.prev.next = existing.next
+			}
+			if existing.next != nil {
+				existing.next.prev = existing.prev
+			}
+			if existing == pc.lruTail {
+				pc.lruTail = existing.prev
+			}
+			break
+		}
+	}
+
+	lru.next = pc.lruHead
+	pc.lruHead.prev = lru
+	pc.lruHead = lru
+	pc.lruSize += len(node.PhysicalBlocks)
+}
+
+func (pc *PromptCache) removeLRU() {
+	if pc.lruTail == nil {
+		return
+	}
+
+	toRemove := pc.lruTail
+	pc.lruSize -= len(toRemove.node.PhysicalBlocks)
+
+	if toRemove.prev != nil {
+		toRemove.prev.next = nil
+		pc.lruTail = toRemove.prev
+	} else {
+		pc.lruHead = nil
+		pc.lruTail = nil
+	}
+}
+
+func (pc *PromptCache) currentBlockCount() int {
+	return pc.lruSize
+}
+
+// Evict removes the least recently used cached prompts to free blocks back to the KV cache.
+// Returns the number of blocks freed.
+func (pc *PromptCache) Evict(kvCache *PagedKVCache) int {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+
+	freed := 0
+	for pc.lruSize > pc.maxCachedBlocks && pc.lruTail != nil {
+		node := pc.lruTail.node
+
+		if len(node.PhysicalBlocks) > 0 && kvCache != nil {
+			for _, block := range node.PhysicalBlocks {
+				kvCache.FreeBlock(block)
+				freed++
+			}
+		}
+
+		pc.lruSize -= len(node.PhysicalBlocks)
+		node.PhysicalBlocks = nil
+		node.RefCount = 0
+
+		if pc.lruTail.prev != nil {
+			pc.lruTail.prev.next = nil
+			pc.lruTail = pc.lruTail.prev
+		} else {
+			pc.lruHead = nil
+			pc.lruTail = nil
+		}
+	}
+
+	return freed
 }

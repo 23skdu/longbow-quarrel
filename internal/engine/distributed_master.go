@@ -1,9 +1,7 @@
 package engine
 
 import (
-	"context"
 	"fmt"
-	"sync"
 
 	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/device"
@@ -14,7 +12,6 @@ import (
 type MasterDistributedEngine struct {
 	shards []DistributedEngine
 	config config.Config
-	ctx    *device.Context
 }
 
 func NewMasterDistributedEngine(shards []DistributedEngine, cfg config.Config) *MasterDistributedEngine {
@@ -56,62 +53,7 @@ func (m *MasterDistributedEngine) ForwardBatch(batch *BatchDescriptor) ([]*devic
 		return nil, fmt.Errorf("no distributed shards available")
 	}
 
-	if len(m.shards) == 1 {
-		return m.shards[0].ForwardBatch(batch)
-	}
-
-	numShards := len(m.shards)
-
-	hiddenSize := m.config.HiddenSize
-	shardSize := hiddenSize / numShards
-	ctx := context.Background()
-
-	var wg sync.WaitGroup
-	partialResults := make([]*device.Tensor, numShards)
-	errs := make([]error, numShards)
-
-	for i := 0; i < numShards; i++ {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-			input := batch.Sequences[idx].CachedEmbedding
-			if input == nil {
-				errs[idx] = fmt.Errorf("no cached embedding for sequence %d", idx)
-				return
-			}
-			partialResults[idx], errs[idx] = m.shards[idx].ForwardShardedLayer(ctx, 0, idx*shardSize, (idx+1)*shardSize, input)
-		}(i)
-	}
-	wg.Wait()
-
-	for _, err := range errs {
-		if err != nil {
-			for _, t := range partialResults {
-				if t != nil {
-					t.Free()
-				}
-			}
-			return nil, fmt.Errorf("tensor parallel forward failed: %w", err)
-		}
-	}
-
-	layerOutputs := make([]*device.Tensor, m.config.NumLayers)
-	for layerIdx := 0; layerIdx < m.config.NumLayers; layerIdx++ {
-		result := partialResults[0]
-		for i := 1; i < numShards; i++ {
-			if partialResults[i] != nil {
-				result.AddInto(result, partialResults[i])
-				partialResults[i].Free()
-			}
-		}
-		layerOutputs[layerIdx] = result
-	}
-
-	return layerOutputs, nil
-}
-
-func (m *MasterDistributedEngine) SetContext(ctx *device.Context) {
-	m.ctx = ctx
+	return m.shards[0].ForwardBatch(batch)
 }
 
 func (m *MasterDistributedEngine) Config() config.Config {
