@@ -399,7 +399,149 @@ func (e *CPUEngine) forward(tokens []int) []float32 {
 		}
 	}
 
+	for layerIdx := 0; layerIdx < e.config.Layers; layerIdx++ {
+		hidden = e.applyLayerCPU(hidden, layerIdx)
+	}
+
+	if e.weights.OutputNorm != nil {
+		hidden = rmsNormCPU(hidden, e.weights.OutputNorm, e.config.Eps)
+	}
+
+	if e.weights.Output != nil {
+		logits := matMulVec(hidden, e.weights.Output)
+		return logits
+	}
+
 	return hidden
+}
+
+func (e *CPUEngine) applyLayerCPU(input []float32, layerIdx int) []float32 {
+	normed := rmsNormCPU(input, e.weights.AttnNorm[layerIdx], e.config.Eps)
+
+	q := matMulVec(normed, e.weights.AttnQ[layerIdx])
+	k := matMulVec(normed, e.weights.AttnK[layerIdx])
+	v := matMulVec(normed, e.weights.AttnV[layerIdx])
+
+	attn := attentionCPU(q, k, v, e.config.Heads, e.config.KVHeads, e.config.HeadDim)
+
+	out := matMulVec(attn, e.weights.AttnO[layerIdx])
+
+	residual := make([]float32, len(input))
+	for i := range residual {
+		residual[i] = input[i] + out[i]
+	}
+
+	normedFFN := rmsNormCPU(residual, e.weights.FfnNorm[layerIdx], e.config.Eps)
+
+	gate := matMulVec(normedFFN, e.weights.FfnGate[layerIdx])
+	up := matMulVec(normedFFN, e.weights.FfnUp[layerIdx])
+
+	swiGLU := make([]float32, len(gate))
+	for i := range swiGLU {
+		swiGLU[i] = gate[i] * sigmoid(gate[i]) * up[i]
+	}
+
+	down := matMulVec(swiGLU, e.weights.FfnDown[layerIdx])
+
+	result := make([]float32, len(residual))
+	for i := range result {
+		result[i] = residual[i] + down[i]
+	}
+
+	return result
+}
+
+func rmsNormCPU(input, weight []float32, eps float32) []float32 {
+	result := make([]float32, len(input))
+	sum := 0.0
+	for _, v := range input {
+		sum += float64(v * v)
+	}
+	sum /= float64(len(input))
+	sum += float64(eps)
+	norm := 1.0 / math.Sqrt(sum)
+
+	for i := range result {
+		result[i] = float32(float64(input[i]) * norm * float64(weight[i]))
+	}
+	return result
+}
+
+func sigmoid(x float32) float32 {
+	if x < -30 {
+		return 0
+	}
+	if x > 30 {
+		return 1
+	}
+	return float32(1.0 / (1.0 + math.Exp(-float64(x))))
+}
+
+func attentionCPU(q, k, v []float32, numHeads, kvHeads, headDim int) []float32 {
+	headSize := headDim
+	seqLen := len(q) / (numHeads * headDim)
+
+	scale := 1.0 / math.Sqrt(float64(headDim))
+
+	result := make([]float32, len(q))
+
+	for h := 0; h < numHeads; h++ {
+		qHead := q[h*headSize*seqLen : (h+1)*headSize*seqLen]
+		kvPerHead := numHeads / kvHeads
+		kh := h / kvPerHead
+		kHead := k[kh*headSize*seqLen : (kh+1)*headSize*seqLen]
+		vHead := v[kh*headSize*seqLen : (kh+1)*headSize*seqLen]
+
+		for i := 0; i < seqLen; i++ {
+			var maxScore float64
+			for j := 0; j <= i; j++ {
+				dot := 0.0
+				for d := 0; d < headDim; d++ {
+					dot += float64(qHead[i*headDim+d]) * float64(kHead[j*headDim+d])
+				}
+				score := dot * scale
+				if j == i || score > maxScore {
+					maxScore = score
+				}
+			}
+
+			var sum float64
+			for j := 0; j <= i; j++ {
+				dot := 0.0
+				for d := 0; d < headDim; d++ {
+					dot += float64(qHead[i*headDim+d]) * float64(kHead[j*headDim+d])
+				}
+				sum += math.Exp(dot*scale - maxScore)
+			}
+
+			for d := 0; d < headDim; d++ {
+				var attnSum float64
+				for j := 0; j <= i; j++ {
+					dot := 0.0
+					for dd := 0; dd < headDim; dd++ {
+						dot += float64(qHead[i*headDim+dd]) * float64(kHead[j*headDim+dd])
+					}
+					attnSum += math.Exp(dot*scale-maxScore) * float64(vHead[j*headDim+d])
+				}
+				result[h*seqLen*headDim+i*headDim+d] = float32(attnSum / sum)
+			}
+		}
+	}
+
+	return result
+}
+
+func matMulVec(matrix []float32, vector []float32) []float32 {
+	rows := len(matrix) / len(vector)
+	result := make([]float32, rows)
+	for i := 0; i < rows; i++ {
+		sum := 0.0
+		for j := 0; j < len(vector); j++ {
+			sum += float64(matrix[i*len(vector)+j]) * float64(vector[j])
+		}
+		result[i] = float32(sum)
+	}
+	return result
 }
 
 func (e *CPUEngine) Close() {
