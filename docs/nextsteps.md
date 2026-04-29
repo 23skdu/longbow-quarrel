@@ -61,10 +61,10 @@ All roadmap items from Phase 1-4 are complete including:
 
 ### Current Issues Identified
 
-1. **CPU Engine Weight Loading Bug** - IN PROGRESS
-   - Quantized weights (Q4_K, Q5_0, Q6_K, Q8_0) are loaded but dequantization returns zeros
-   - Root cause: Weight matrices stored as `[][]float32` per layer but accessed incorrectly
-   - Location: `internal/engine/engine_cpu.go:loadCPUWeights()`
+1. **CPU Engine Weight Loading Bug** - FIXED ✅
+   - Fixed `decodeTensorData()` to use proper gguf dequantization functions
+   - Added support for Q4_K, Q6_K, Q5_0, Q8_0, Q2_K, Q3_K, Q5_K types
+   - Location: `internal/engine/engine_cpu.go:decodeTensorData()`
 
 2. **Forward Pass Missing Layer Processing** - PENDING
    - Current forward() only uses embedding lookup without transformer layers

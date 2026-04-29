@@ -143,6 +143,9 @@ func loadCPUWeights(f *gguf.GGUFFile) (*CPUWeights, error) {
 		switch t.Name {
 		case "token_embd.weight":
 			w.TokenEmb = append(w.TokenEmb, data)
+			if len(w.Output) == 0 {
+				w.Output = data
+			}
 		case "output.weight":
 			w.Output = data
 		case "lm_head.weight":
@@ -188,24 +191,44 @@ func decodeTensorData(t *gguf.TensorInfo) ([]float32, error) {
 		numElements *= uint32(d)
 	}
 
-	data := make([]float32, numElements)
-	bytesPerElement := t.SizeBytes() / uint64(numElements)
-
-	for i := uint32(0); i < numElements; i++ {
-		offset := uint64(i) * bytesPerElement
-		switch bytesPerElement {
-		case 4:
+	// Handle quantized types properly using gguf dequantization
+	switch t.Type {
+	case gguf.GGMLTypeQ4_K:
+		return gguf.DequantizeQ4K(t.Data, int(numElements)), nil
+	case gguf.GGMLTypeQ6_K:
+		return gguf.DequantizeQ6K(t.Data, int(numElements)), nil
+	case gguf.GGMLTypeQ5_0:
+		return gguf.DequantizeQ5_0(t.Data, int(numElements)), nil
+	case gguf.GGMLTypeQ8_0:
+		return gguf.DequantizeQ8_0(t.Data, int(numElements)), nil
+	case gguf.GGMLTypeQ2_K:
+		return gguf.DequantizeQ2K(t.Data, int(numElements)), nil
+	case gguf.GGMLTypeQ3_K:
+		return gguf.DequantizeQ3K(t.Data, int(numElements)), nil
+	case gguf.GGMLTypeQ5_K:
+		return gguf.DequantizeQ5K(t.Data, int(numElements)), nil
+	case gguf.GGMLTypeF32:
+		// Handle F32 directly
+		data := make([]float32, numElements)
+		for i := uint32(0); i < numElements; i++ {
+			offset := uint64(i) * 4
 			bits := uint32(t.Data[offset]) | uint32(t.Data[offset+1])<<8 | uint32(t.Data[offset+2])<<16 | uint32(t.Data[offset+3])<<24
 			data[i] = math.Float32frombits(bits)
-		case 2:
+		}
+		return data, nil
+	case gguf.GGMLTypeF16:
+		// Handle F16 - convert to F32
+		data := make([]float32, numElements)
+		for i := uint32(0); i < numElements; i++ {
+			offset := uint64(i) * 2
 			bits := uint16(t.Data[offset]) | uint16(t.Data[offset+1])<<8
 			data[i] = float32(bits) / 32767.0
-		default:
-			data[i] = float32(t.Data[offset]) / 127.0
 		}
+		return data, nil
+	default:
+		// For unsupported types, fallback to zero-filled array
+		return make([]float32, numElements), nil
 	}
-
-	return data, nil
 }
 
 func contains(s, substr string) bool {
@@ -385,17 +408,24 @@ func (e *CPUEngine) SwapModel(modelPath string, cfg config.Config) error {
 }
 
 func (e *CPUEngine) forward(tokens []int) []float32 {
-	hiddenSize := 0
-	if len(e.weights.TokenEmb) > 0 {
-		hiddenSize = len(e.weights.TokenEmb[0])
+	hiddenSize := e.config.Dim
+	if hiddenSize <= 0 {
+		hiddenSize = 576
+	}
+	vocabSize := 0
+	if len(e.weights.TokenEmb) > 0 && len(e.weights.TokenEmb[0]) > 0 {
+		vocabSize = len(e.weights.TokenEmb[0]) / hiddenSize
 	}
 
 	hidden := make([]float32, hiddenSize)
 
-	if len(tokens) > 0 {
+	if len(tokens) > 0 && vocabSize > 0 {
 		lastToken := tokens[len(tokens)-1]
-		if lastToken < len(e.weights.TokenEmb) && len(e.weights.TokenEmb) > 0 {
-			copy(hidden, e.weights.TokenEmb[lastToken])
+		if lastToken < vocabSize {
+			startIdx := lastToken * hiddenSize
+			for i := 0; i < hiddenSize && startIdx+i < len(e.weights.TokenEmb[0]); i++ {
+				hidden[i] = e.weights.TokenEmb[0][startIdx+i]
+			}
 		}
 	}
 
@@ -408,7 +438,7 @@ func (e *CPUEngine) forward(tokens []int) []float32 {
 	}
 
 	if e.weights.Output != nil {
-		logits := matMulVec(hidden, e.weights.Output)
+		logits := matMulVec(e.weights.Output, hidden)
 		return logits
 	}
 
@@ -418,13 +448,13 @@ func (e *CPUEngine) forward(tokens []int) []float32 {
 func (e *CPUEngine) applyLayerCPU(input []float32, layerIdx int) []float32 {
 	normed := rmsNormCPU(input, e.weights.AttnNorm[layerIdx], e.config.Eps)
 
-	q := matMulVec(normed, e.weights.AttnQ[layerIdx])
-	k := matMulVec(normed, e.weights.AttnK[layerIdx])
-	v := matMulVec(normed, e.weights.AttnV[layerIdx])
+	q := matMulVec(e.weights.AttnQ[layerIdx], normed)
+	k := matMulVec(e.weights.AttnK[layerIdx], normed)
+	v := matMulVec(e.weights.AttnV[layerIdx], normed)
 
 	attn := attentionCPU(q, k, v, e.config.Heads, e.config.KVHeads, e.config.HeadDim)
 
-	out := matMulVec(attn, e.weights.AttnO[layerIdx])
+	out := matMulVec(e.weights.AttnO[layerIdx], attn)
 
 	residual := make([]float32, len(input))
 	for i := range residual {
@@ -433,15 +463,15 @@ func (e *CPUEngine) applyLayerCPU(input []float32, layerIdx int) []float32 {
 
 	normedFFN := rmsNormCPU(residual, e.weights.FfnNorm[layerIdx], e.config.Eps)
 
-	gate := matMulVec(normedFFN, e.weights.FfnGate[layerIdx])
-	up := matMulVec(normedFFN, e.weights.FfnUp[layerIdx])
+	gate := matMulVec(e.weights.FfnGate[layerIdx], normedFFN)
+	up := matMulVec(e.weights.FfnUp[layerIdx], normedFFN)
 
 	swiGLU := make([]float32, len(gate))
 	for i := range swiGLU {
 		swiGLU[i] = gate[i] * sigmoid(gate[i]) * up[i]
 	}
 
-	down := matMulVec(swiGLU, e.weights.FfnDown[layerIdx])
+	down := matMulVec(e.weights.FfnDown[layerIdx], swiGLU)
 
 	result := make([]float32, len(residual))
 	for i := range result {
