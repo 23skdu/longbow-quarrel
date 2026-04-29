@@ -7,6 +7,8 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/23skdu/longbow-quarrel/internal/config"
+	"github.com/23skdu/longbow-quarrel/internal/engine"
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
 	"github.com/23skdu/longbow-quarrel/internal/tokenizer"
 )
@@ -17,7 +19,6 @@ func main() {
 	maxTokens := flag.Int("n", 50, "Maximum tokens to generate")
 	temp := flag.Float64("temp", 0.7, "Temperature for sampling")
 	topK := flag.Int("topk", 40, "Top-K sampling")
-	verbose := flag.Bool("v", false, "Verbose output")
 	flag.Parse()
 
 	if *modelPath == "" {
@@ -81,29 +82,36 @@ func main() {
 
 	fmt.Println()
 	fmt.Printf("Input: %s\n", *prompt)
-	fmt.Printf("Generated: ")
 
-	generated := make([]int, 0, *maxTokens)
 	startTime := time.Now()
 
-	for i := 0; i < *maxTokens; i++ {
-		if *verbose && i%10 == 0 {
-			fmt.Fprintf(os.Stderr, "Generating token %d/%d...\n", i+1, *maxTokens)
-		}
+	samplerCfg := engine.SamplerConfig{
+		Temperature: 0.8,
+		TopK:        40,
+		RepPenalty:  1.5,
+	}
 
-		tokenID := inputTokens[len(inputTokens)-1]
-		generated = append(generated, tokenID)
+	e, err := engine.NewEngine(*modelPath, config.Default())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to create engine: %v\n", err)
+		os.Exit(1)
+	}
+	defer e.Close()
 
-		text := tok.Decode([]int{tokenID})
-		fmt.Print(text)
-
-		time.Sleep(10 * time.Millisecond)
+	resultTokens, err := e.Infer(inputTokens, *maxTokens, samplerCfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Inference failed: %v\n", err)
+		os.Exit(1)
 	}
 
 	elapsed := time.Since(startTime)
+	fmt.Printf("Generated: ")
+	for _, tokenID := range resultTokens {
+		fmt.Printf("%d:%s ", tokenID, tok.Decode([]int{tokenID}))
+	}
 	fmt.Println()
-	fmt.Printf("Generated %d tokens in %v (%.2f tokens/s)\n", len(generated), elapsed, float64(len(generated))/elapsed.Seconds())
+	fmt.Printf("Generated %d tokens in %v (%.2f tokens/s)\n", len(resultTokens), elapsed, float64(len(resultTokens))/elapsed.Seconds())
 
-	fullText := *prompt + tok.Decode(generated)
+	fullText := *prompt + tok.Decode(resultTokens)
 	fmt.Printf("\nFull output:\n%s\n", fullText)
 }
