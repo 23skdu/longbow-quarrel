@@ -6,6 +6,28 @@ import (
 	"math"
 )
 
+// TurboQuantType represents the bit depth for TurboQuant encoding
+type TurboQuantType int
+
+const (
+	TurboQuant2 TurboQuantType = 2 // 2-bit + 1-bit QJL residual
+	TurboQuant4 TurboQuantType = 4 // 4-bit + 1-bit QJL residual
+	TurboQuant8 TurboQuantType = 8 // 8-bit + 1-bit QJL residual
+)
+
+func (t TurboQuantType) String() string {
+	switch t {
+	case TurboQuant2:
+		return "TurboQuant2"
+	case TurboQuant4:
+		return "TurboQuant4"
+	case TurboQuant8:
+		return "TurboQuant8"
+	default:
+		return "Unknown"
+	}
+}
+
 func PolarQuantSIMD(input []float32, rotationMatrix []float32, n int, bits int) ([]int8, float32, []float32) {
 	rotated := make([]float32, n)
 	maxAbs := float32(0.0)
@@ -54,6 +76,34 @@ func PolarQuantSIMD(input []float32, rotationMatrix []float32, n int, bits int) 
 	}
 
 	return quantized, scale, finalResidual
+}
+
+// PolarQuantVariant performs TurboQuant with specified bit depth
+func PolarQuantVariant(input []float32, rotationMatrix []float32, n int, tqType TurboQuantType) ([]int8, float32, []float32) {
+	return PolarQuantSIMD(input, rotationMatrix, n, int(tqType))
+}
+
+// DequantizeTurboQuant reconstructs float32 from TurboQuant-encoded data
+func DequantizeTurboQuant(quantized []int8, scale float32, rotationMatrix []float32, n int) []float32 {
+	result := make([]float32, n)
+	invScale := 1.0 / scale
+
+	// First, reconstruct from quantized
+	for i := 0; i < n; i++ {
+		result[i] = float32(quantized[i]) * invScale
+	}
+
+	// Apply inverse rotation
+	rotated := make([]float32, n)
+	for i := 0; i < n; i++ {
+		var sum float32
+		for j := 0; j < n; j++ {
+			sum += rotationMatrix[j*n+i] * result[j]
+		}
+		rotated[i] = sum
+	}
+
+	return rotated
 }
 
 func QJLTransformSIMD(residual []float32, signMatrix []float32, rows, cols int) ([]int8, float32) {
