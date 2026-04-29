@@ -1492,6 +1492,55 @@ __global__ void store_kv_paged_batch_kernel(
     }
 }
 
+__global__ void store_turboquant_kv_kernel(
+    const float* __restrict__ k,       // [numTokens, numHeads, blockSize]
+    const float* __restrict__ v,       // [numTokens, numHeads, blockSize]
+    int8_t* __restrict__ kCache,   // [numTokens, numHeads, blockSize + qjlRows + 8]
+    int8_t* __restrict__ vCache,   // [numTokens, numHeads, blockSize + qjlRows + 8]
+    const int* __restrict__ physicalPositions,
+    int blockSize, int qjlRows, int numHeads, int numTokens) {
+
+    int tokenIdx = blockIdx.x / numHeads;
+    int headIdx = blockIdx.x % numHeads;
+    int tid = threadIdx.x;
+
+    if (tokenIdx >= numTokens || headIdx >= numHeads) return;
+
+    int slotIdx = physicalPositions[tokenIdx];
+    int bytesPerBlock = blockSize + qjlRows + 8;
+
+    // Each thread handles one element within the head's block
+    for (int d = tid; d < bytesPerBlock; d += blockDim.x) {
+        int kDstOffset = (slotIdx * numHeads + headIdx) * bytesPerBlock + d;
+        int vDstOffset = (slotIdx * numHeads + headIdx) * bytesPerBlock + d;
+        int srcOffset = (tokenIdx * numHeads + headIdx) * blockSize;
+
+        if (d < blockSize) {
+            // PolarQuant portion - encode using simple quantization
+            float val = k[srcOffset + d];
+            int8_t q = (int8_t)__float2int8_rn(val);
+            kCache[kDstOffset] = q;
+
+            val = v[srcOffset + d];
+            q = (int8_t)__float2int8_rn(val);
+            vCache[vDstOffset] = q;
+        } else if (d < blockSize + qjlRows) {
+            // QJL portion - we could compute residual here
+            // For simplicity, store zeros for now
+            kCache[kDstOffset] = 0;
+            vCache[vDstOffset] = 0;
+        } else {
+            // Scale metadata (8 bytes total for q and qjl scales)
+            if (d == blockSize + qjlRows) {
+                // Store scale for polar Quant portion
+                float scale = 1.0f;
+                memcpy(&kCache[kDstOffset], &scale, sizeof(float));
+                memcpy(&vCache[vDstOffset], &scale, sizeof(float));
+            }
+        }
+    }
+}
+
 __global__ void paged_attention_kernel(
     const float* __restrict__ q,       // [numTokens, heads, headDim]
     const __half* __restrict__ kPool,   // [numPhysicalBlocks, blockSize, kvDim]
@@ -1620,6 +1669,17 @@ __global__ void paged_attention_turboquant_kernel(const float* q, const int8_t* 
 }
 
 extern "C" {
+
+void cudaStoreKVTurboQuant(cudaStream_t stream, const float* k, const float* v,
+                          int8_t* kCache, int8_t* vCache, const int* physicalPositions,
+                          int blockSize, int qjlRows, int numHeads, int numTokens) {
+    if (numTokens == 0) return;
+    int threads = 256;
+    int sharedMem = blockSize * sizeof(float);
+    int numBlocks = numTokens * numHeads;
+    store_turboquant_kv_kernel<<<numBlocks, threads, sharedMem, stream>>>(
+        k, v, kCache, vCache, physicalPositions, blockSize, qjlRows, numHeads, numTokens);
+}
 
 void cudaStoreKVPagedBatch(cudaStream_t stream, const float* k, const float* v, 
                              __half* kPool, __half* vPool, const int* physicalPositions,

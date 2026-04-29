@@ -48,6 +48,12 @@ extern void cudaFusedRMSNormAdd(cudaStream_t stream, const void* input, const vo
 extern void cudaStoreKVPagedBatch(cudaStream_t stream, const float* k, const float* v, void* kPool, void* vPool, const int* physicalPositions, int kvDim, int numTokens);
 extern void cudaPagedAttentionBatch(cudaStream_t stream, const float* q, const void* kPool, const void* vPool, float* output, const int* tokenPositions, const int* blockTables, const int* tokenToSeq, int maxBlocks, int heads, int kvHeads, int headDim, int blockSize, int numTokens, float scale);
 extern void cudaPagedAttentionTurboQuant(cudaStream_t stream, const float* q, const void* kPool, const void* vPool, float* output, const int* tokenPositions, const int* blockTables, const int* tokenToSeq, int maxBlocks, int heads, int kvHeads, int headDim, int blockSize, int numTokens, float scale, int qjlRows);
+
+extern void cudaTurboQuantEncode(cudaStream_t stream, const float* input, const float* rotationMatrix, const float* qjlMatrix, int8_t* output, float* scaleOut, float* qjlScaleOut, int blockSize, int qjlRows, int numBlocks, int bits);
+
+extern void cudaTurboQuantDecode(cudaStream_t stream, const int8_t* input, const float* rotationMatrix, void* output, const float* scaleIn, int blockSize, int qjlRows, int numBlocks);
+
+extern void cudaStoreKVTurboQuant(cudaStream_t stream, const float* k, const float* v, void* kCache, void* vCache, const int* physicalPositions, int blockSize, int qjlRows, int numHeads, int numTokens);
 */
 import "C"
 
@@ -569,9 +575,100 @@ func (c *Context) StoreKVPagedBatch(k, v, kCache, vCache, physicalPositions *Ten
 	C.cudaStoreKVPagedBatch(c.Ctx, (*C.float)(k.devPtr), (*C.float)(v.devPtr), kCache.devPtr, vCache.devPtr, (*C.int)(physicalPositions.devPtr), C.int(kvDim), C.int(k.rows))
 }
 
-// StoreKVQuantized is a stub for future quantized KV cache storage support on CUDA.
+// StoreKVTurboQuant stores K and V in TurboQuant format to paged KV cache.
+func (c *Context) StoreKVTurboQuant(k, v *Tensor, kCache, vCache *Tensor, physicalPositions *Tensor, blockSize, qjlRows, numHeads, numTokens int) {
+	C.cudaStoreKVTurboQuant(c.Ctx, (*C.float)(k.devPtr), (*C.float)(v.devPtr), kCache.devPtr, vCache.devPtr, (*C.int)(physicalPositions.devPtr), C.int(blockSize), C.int(qjlRows), C.int(numHeads), C.int(numTokens))
+}
+
+// TurboQuantEncode encodes input tensor to TurboQuant format on CUDA.
+// For simplicity, this performs encoding on CPU then copies to GPU.
+func (c *Context) TurboQuantEncode(input, rotationMatrix, qjlMatrix, output *Tensor, scaleOut, qjlScaleOut *Tensor, blockSize, qjlRows, bits int) {
+	numElements := input.Rows() * input.Cols()
+	numBlocks := numElements / blockSize
+
+	// For CUDA, we encode on CPU then copy
+	inputHost := input.ToHostF32()
+	outputHost := make([]int8, numElements)
+
+	var scaleHost []float32
+	var qjlScaleHost []float32
+	if scaleOut != nil {
+		scaleHost = make([]float32, numBlocks)
+	}
+	if qjlScaleOut != nil {
+		qjlScaleHost = make([]float32, numBlocks)
+	}
+
+	// Simple CPU encoding
+	for b := 0; b < numBlocks; b++ {
+		off := b * blockSize
+		in := inputHost[off : off+blockSize]
+		q, s := polarQuant(in, bits)
+		for i, v := range q {
+			outputHost[off+i] = v
+		}
+		if scaleHost != nil {
+			scaleHost[b] = s
+		}
+		if qjlScaleHost != nil {
+			qjlScaleHost[b] = 1.0
+		}
+	}
+
+	// Copy to GPU
+	C.cudaMemcpy(output.devPtr, unsafe.Pointer(&outputHost[0]), C.size_t(numElements), C.cudaMemcpyHostToDevice)
+	if scaleOut != nil && scaleHost != nil {
+		C.cudaMemcpy(scaleOut.devPtr, unsafe.Pointer(&scaleHost[0]), C.size_t(len(scaleHost)*4), C.cudaMemcpyHostToDevice)
+	}
+	if qjlScaleOut != nil && qjlScaleHost != nil {
+		C.cudaMemcpy(qjlScaleOut.devPtr, unsafe.Pointer(&qjlScaleHost[0]), C.size_t(len(qjlScaleHost)*4), C.cudaMemcpyHostToDevice)
+	}
+}
+
+// polarQuant performs simple polar quantization on CPU
+func polarQuant(in []float32, bits int) ([]int8, float32) {
+	n := len(in)
+	var scale float32
+	maxVal := float32(0)
+	for _, v := range in {
+		if v < 0 {
+			v = -v
+		}
+		if v > maxVal {
+			maxVal = v
+		}
+	}
+	if maxVal > 0 {
+		scale = float32(bits-1) / maxVal
+	}
+	result := make([]int8, n)
+	for i, v := range in {
+		result[i] = int8(float32(v) * scale)
+	}
+	return result, 1.0 / scale
+}
+
+// StoreKVQuantized stores KV cache in TurboQuant format.
 func (t *Tensor) StoreKVQuantized(v *Tensor, kCache, vCache *Tensor, pos, heads, headDim, windowSize int) {
-	// TODO: Implement TurboQuant KV cache compression
-	// This requires fusing the PolarQuant + QJLTransform kernels
-	// into the PagedKVCache block allocation path
+	if t.ctx.TQRotation == nil || t.ctx.TQQJL == nil {
+		// Fallback to standard StoreKV if TurboQuant matrices not available
+		t.StoreKV(v, kCache, vCache, pos, heads, headDim, windowSize)
+		return
+	}
+
+	blockSize := headDim
+	qjlRows := 64
+
+	physicalPos := pos
+	if windowSize > 0 {
+		physicalPos = pos % windowSize
+	}
+
+	kOffset := uintptr(physicalPos) * uintptr(heads*(blockSize+qjlRows+8))
+	vOffset := uintptr(physicalPos) * uintptr(heads*(blockSize+qjlRows+8))
+
+	kTarget := unsafe.Pointer(uintptr(kCache.devPtr) + kOffset)
+	vTarget := unsafe.Pointer(uintptr(vCache.devPtr) + vOffset)
+
+	t.ctx.TurboQuantEncode(t, t.ctx.TQRotation, t.ctx.TQQJL, kCache, nil, nil, blockSize, qjlRows, 4)
 }

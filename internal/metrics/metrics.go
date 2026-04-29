@@ -154,7 +154,7 @@ var (
 		Help: "Total number of KV cache misses",
 	})
 
-	KVCacheEvictions = promauto.NewCounter(prometheus.CounterOpts{
+KVCacheEvictions = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "kv_cache_evictions_total",
 		Help: "Total number of KV cache evictions",
 	})

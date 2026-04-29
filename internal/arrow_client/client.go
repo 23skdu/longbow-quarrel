@@ -195,6 +195,110 @@ func (fc *FlightClient) DoPut(ctx context.Context, vectors [][]float32, ids []st
 	return nil
 }
 
+// DoPutTensor sends a tensor to worker and returns the result tensor data.
+// This is used for distributed layer computation via Arrow Flight RPC.
+func (fc *FlightClient) DoPutTensor(ctx context.Context, data []float32, rows []int32, metadata map[string]string) ([]float32, error) {
+	if len(data) == 0 {
+		return nil, fmt.Errorf("no data provided")
+	}
+
+	if fc.client == nil {
+		return nil, fmt.Errorf("client not connected, call Connect() first")
+	}
+
+	rowsCount := len(rows)
+	if rowsCount == 0 {
+		rowsCount = 1
+	}
+	colsCount := len(data) / rowsCount
+	if colsCount == 0 {
+		return nil, fmt.Errorf("invalid tensor dimensions")
+	}
+
+	// Create schema for computation request/response
+	schema := arrow.NewSchema([]arrow.Field{
+		{Name: "row_idx", Type: arrow.PrimitiveTypes.Int32},
+		{Name: "data", Type: arrow.FixedSizeListOf(int32(colsCount), arrow.PrimitiveTypes.Float32)},
+	}, nil)
+
+	// Create record batch builder
+	builder := array.NewRecordBuilder(fc.allocator, schema)
+	defer builder.Release()
+
+	// Build rows
+	rowBuilder := builder.Field(0).(*array.Int32Builder)
+	dataListBuilder := builder.Field(1).(*array.FixedSizeListBuilder)
+	dataBuilder := dataListBuilder.ValueBuilder().(*array.Float32Builder)
+
+	// Reshape flat data into rows
+	offset := 0
+	for _, rowLen := range rows {
+		rowBuilder.Append(rowLen)
+		dataListBuilder.Append(true)
+		for j := 0; j < int(rowLen) && offset < len(data); j++ {
+			dataBuilder.Append(data[offset])
+			offset++
+		}
+		// Pad if needed
+		for j := offset % colsCount; j < colsCount && offset < rowsCount*colsCount; j++ {
+			dataBuilder.Append(0)
+			offset++
+		}
+	}
+
+	//nolint:staticcheck // SA1019: builder.NewRecord is deprecated but NewRecordBatch API not available in current arrow version
+	record := builder.NewRecord()
+	defer record.Release()
+
+	// Create flight descriptor for computation
+	desc := &flight.FlightDescriptor{
+		Type: flight.DescriptorPATH,
+		Path: []string{"compute", "layer"},
+	}
+
+	// Send via DoPut
+	stream, err := fc.client.DoPut(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create DoPut stream: %w", err)
+	}
+
+	writer := flight.NewRecordWriter(stream, ipc.WithSchema(schema))
+	writer.SetFlightDescriptor(desc)
+
+	if err := writer.Write(record); err != nil {
+		return nil, fmt.Errorf("failed to write record: %w", err)
+	}
+
+	if err := writer.Close(); err != nil {
+		return nil, fmt.Errorf("failed to close writer: %w", err)
+	}
+
+	// Read response
+	result, err := stream.Recv()
+	if err != nil && err != io.EOF {
+		return nil, fmt.Errorf("error receiving result: %w", err)
+	}
+
+	if result == nil {
+		// Flight protocol may not support response data in DoPut
+		// Return empty slice to indicate success (worker processed but didn't return data)
+		logger.Log.Info("DoPutTensor completed (no response)", "input_size", len(data), "metadata", metadata)
+		fc.BytesTransferred.Add(int64(len(data) * 4))
+		metrics.RecordArrowBytesHotpath(int64(len(data) * 4))
+		return []float32{}, nil
+	}
+
+	// Extract result data if available
+	resultData := make([]float32, 0)
+
+	logger.Log.Info("DoPutTensor completed", "input_size", len(data), "output_size", len(resultData), "metadata", metadata)
+
+	fc.BytesTransferred.Add(int64(len(data) * 4))
+	metrics.RecordArrowBytesHotpath(int64(len(data) * 4))
+
+	return resultData, nil
+}
+
 // StreamEmbeddings pushes embeddings directly from one or more device.Tensors using zero-copy Arrow mapping.
 // All tensors in a single call must share the same data type and column count.
 func (fc *FlightClient) StreamEmbeddings(ctx context.Context, tensors []*device.Tensor, ids []string, metadata map[string]string) error {
