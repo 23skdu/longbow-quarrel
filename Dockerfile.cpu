@@ -1,0 +1,60 @@
+# =============================================================================
+# Longbow-Quarrel - CPU Build
+# =============================================================================
+# This Dockerfile builds Quarrel for generic CPU-only execution.
+# Uses pure Go with no CGO dependencies.
+#
+# Build:    docker build -f Dockerfile.cpu -t longbow-quarrel:cpu .
+# Run:      docker run -v $(pwd)/models:/data longbow-quarrel:cpu --model /data/model.gguf
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Build Stage: CPU Compilation
+# -----------------------------------------------------------------------------
+FROM golang:1.26-alpine AS cpu-builder
+
+# Install build dependencies
+RUN apk add --no-cache build-base git
+
+WORKDIR /app
+
+# Copy go mod files
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy source code
+COPY . .
+
+# Build without CGO (pure Go CPU)
+RUN CGO_ENABLED=0 GOOS=linux go build -o quarrel-cpu ./cmd/quarrel
+
+# -----------------------------------------------------------------------------
+# Runtime Stage: Minimal CPU Runtime
+# -----------------------------------------------------------------------------
+FROM alpine:latest
+
+WORKDIR /app
+
+# Copy binary
+COPY --from=cpu-builder /app/quarrel-cpu ./quarrel
+
+# Set default command
+CMD ["./quarrel", "--help"]
+
+# =============================================================================
+# Alternative: Build with SIMD optimizations
+# =============================================================================
+# For Linux with AVX2/AVX-512 support:
+#
+# FROM golang:1.26-alpine
+# RUN apk add --no-cache build-base gcc musl-dev
+# RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -o quarrel ./cmd/quarrel
+#
+# =============================================================================
+# Build Instructions
+# =============================================================================
+# Linux (CPU):
+#   docker build -f Dockerfile.cpu -t longbow-quarrel:cpu .
+#   docker run -v $(pwd)/models:/data longbow-quarrel:cpu --model /data/model.gguf
+#
+# =============================================================================

@@ -207,4 +207,211 @@ All major phases are complete.
 
 ---
 
+## Phase 9: SIMD Optimization Opportunities - IN PROGRESS
+
+### Implementation Status
+
+| Task | Status |
+|------|-------|
+| SIMD dispatcher (avx512.go) | ✅ COMPLETE |
+| Unit tests (avx512_test.go) | ✅ COMPLETE |
+| Fuzz tests (avx512_fuzz_test.go) | ✅ COMPLETE |
+| Benchmark tests | ✅ COMPLETE |
+| Prometheus metrics | ✅ COMPLETE |
+| SIMD metrics integration | ✅ IN PROGRESS |
+| NEON unit tests | ⏳ NOT_STARTED |
+| Actual kernel implementations | ⏳ NOT_STARTED |
+
+### Deep Code Analysis Summary
+
+After analyzing the codebase, the following hot-path operations are candidates for SIMD optimization:
+
+#### Priority 1: Critical Inference Loop (engine_cpu.go)
+
+These functions are called per-token per-layer and dominate execution time:
+
+| Function | Location | Current Implementation | SIMD Target |
+|---------|----------|------------------|------------|
+| `rmsNormCPU` | engine_cpu.go:484 | Sequential loop | AVX-512/NEON |
+| `attentionCPU` | engine_cpu.go:510 | O(n³) nested loops | AVX-512/NEON |
+| `matMulVec` | engine_cpu.go:441 | Basic matmul | AVX-512/NEON |
+| `swiGLU` | engine_cpu.go:469 | Sequential sigmoid*gate | AVX-512/NEON |
+| `sigmoid` | engine_cpu.go:500 | math.Exp call | AVX-512/NEON |
+
+#### Priority 2: Model Loading (gguf/dequant.go)
+
+These are called once per model load:
+
+| Function | Current | SIMD Target |
+|----------|---------|------------|
+| `DequantizeQ4K` | Scalar per-block | AVX-512/NEON |
+| `DequantizeQ6K` | Scalar per-block | AVX-512/NEON |
+| `DequantizeQ5_K` | Scalar per-block | AVX-512/NEON |
+| `DequantizeIQ4XS` | Scalar per-block | AVX-512/NEON |
+| `DequantizeQ2K` | Scalar per-block | AVX-512/NEON |
+
+#### Priority 3: KV Cache Operations (device/cpu.go)
+
+Called frequently during inference:
+
+| Function | SIMD Target |
+|----------|-------------|
+| `StoreKV` | AVX-512/NEON |
+| `TurboQuantEncode` | Alreadyhas SIMD, may need more kernels |
+| `TurboQuantDecode` | Already has SIMD, may need more kernels |
+| `AttentionPagedBatch` | AVX-512/NEON |
+
+#### Priority 4: New SIMD Module Dispatch (simd/avx512.go)
+
+Currently stub - needs actual implementations:
+
+| Function | Status | Notes |
+|----------|--------|-------|
+| `Softmax` | Stub | Needs AVX-512 + AVX-2 fallback |
+| `RMSNorm` | Stub | Needs kernel implementations |
+| `Matmul` | Stub | Needs AVX-512 VN/DPFMA |
+| `RoPE` | Stub | Needs fused sin/cos |
+| `FusedAttention` | Stub | Needs FlashAttention |
+| `FusedMLP` | Stub | Needs fused SiLU |
+
+---
+
+### Tasks: SIMD Optimization
+
+#### Subtask 1: Implement AVX-512 RMSNorm Kernel
+
+- **Status**: NOT_STARTED
+- **Location**: `internal/simd/avx512_avx2.c` (new file)
+- **Description**: Implement AVX-512 RMSNorm with AVX-2 fallback
+- **Reference**: `cudaFusedRMSNorm` in `internal/device/cuda_kernels.cu`
+- **Expected speedup**: 4-8x over scalar
+- **Subtasks**:
+  - [ ] Create `internal/simd/kernels_avx512.c` with RMSNorm AVX-512
+  - [ ] Add AVX-512 build flags to `simd` package
+  - [ ] Add runtime CPU feature detection (AVX-512 vs AVX-2 vs scalar)
+  - [ ] Add tests comparing output to scalar fallback
+
+#### Subtask 2: Implement Fast Softmax with AVX-512
+
+- **Status**: NOT_STARTED
+- **Location**: `internal/simd/avx512.go`
+- **Description**: Implement vectorized softmax with proper numerical stability
+- **Challenges**:
+  - Online softmax algorithm (max subtraction for stability)
+  - Horizontal reduction across SIMD lanes
+  - Variable-length array handling
+- **Subtasks**:
+  - [ ] Implement `softmax_avx512` in C
+  - [ ] Implement online softmax pattern for variable seqLen
+  - [ ] Add proper fallback to AVX-2 for small arrays
+  - [ ] Benchmark vs naive scalar
+
+#### Subtask 3: Optimize attentionCPU in engine_cpu.go
+
+- **Status**: NOT_STARTED
+- **Location**: `internal/engine/engine_cpu.go:510`
+- **Current**: Triple-nested loops O(seqLen² × headDim)
+- **Target**: Replace with SIMD batch operations
+- **Subtasks**:
+  - [ ] Profile current attentionCPU on real models
+  - [ ] Implement batched Q×K^T using SIMD
+  - [ ] Add Softmax integration
+  - [ ] Fuse with output projection
+
+#### Subtask 4: Implement AVX-512 Matmul Kernel
+
+- **Status**: NOT_STARTED
+- **Location**: `internal/simd/avx512.go`
+- **Description**: Matrix multiplication with AVX-512 VN and dot product
+- **Reference**: llama.cpp `ggml_mul_mat_avx512` in `ggml-avx512.c`
+- **Target**: Block-based matmul with proper cache blocking
+- **Subtasks**:
+  - [ ] Implement block-based matmul kernel
+  - [ ] Add prefetching hints
+  - [ ] Fuse with activation (ReLU, SiLU)
+
+#### Subtask 5: Implement TurboQuant AVX-512 Kernels
+
+- **Status**: PARTIAL
+- **Location**: `internal/simd/turboquant_avx.go`
+- **Description**: Complete TurboQuant SIMD implementations
+- **Subtasks**:
+  - [ ] Complete `PolarQuantSIMD` AVX-512
+  - [ ] Complete `PolarQuantVariant` AVX-512  
+  - [ ] Complete `DequantizeTurboQuant` AVX-512
+  - [ ] Add QJL transform with AVX-512
+  - [ ] Benchmark vs NEON version
+
+#### Subtask 6: Implement RoPE AVX-512
+
+- **Status**: NOT_STARTED
+- **Location**: `internal/simd/avx512.go`
+- **Description**: fused RoPE with sin/cos generation and application
+- **Subtasks**:
+  - [ ] Implement sin/cos table generation with AVX-512
+  - [ ] Implement complex multiplication pattern
+  - [ ] Add support for NT/NiT (neox) position encoding
+
+#### Subtask 7: Add NEON Fallback Optimizations
+
+- **Status**: PARTIAL
+- **Location**: `internal/simd/turboquant_neon.go`, `internal/device/cpu.go`
+- **Description**: Ensure arm64 has same optimizations as x86
+- **Subtasks**:
+  - [ ] Complete all TurboQuant NEON kernels
+  - [ ] Add RMSNorm NEON kernel
+  - [ ] Add Softmax NEON kernel
+  - [ ] Add attention NEON kernel
+
+#### Subtask 8: Runtime SIMD Detection
+
+- **Status**: IN_PROGRESS
+- **Location**: `internal/simd/avx512.go`
+- **Description**: Proper runtime feature detection
+- **Current**: Stub with simple detection
+- **Subtasks**:
+  - [ ] Add `/proc/cpuinfo` parsing (Linux)
+  - [ ] Add `sysctl` parsing (macOS)
+  - [ ] Add signal-based probing for containerized environments
+  - [ ] Add environment variable overrides (DISABLE_AVX512, etc.)
+
+---
+
+### Benchmark Targets
+
+| Operation | Current (scalar) | Target AVX-512 | Target NEON |
+|-----------|------------------|-----------------|-------------|
+| RMSNorm (4096) | ~50µs | ~8µs | ~12µs |
+| Softmax (4096) | ~30µs | ~5µs | ~8µs |
+| Attention (4096) | ~5000µs | ~200µs | ~400µs |
+| Matmul (4096²) | ~50000µs | ~3000µs | ~8000µs |
+| SwiGLU (4096) | ~40µs | ~6µs | ~10µs |
+
+---
+
+### Implementation Notes
+
+1. **Memory Alignment**: All SIMD kernels require 32-byte (AVX-512) or 16-byte (AVX-2/NEON) alignment
+2. **Loop unrolling**: Use `#pragma unroll` in C code for better instruction pipelining
+3. **Prefetching**: Add prefetch hints for matrix operations
+4. **Numerical stability**: Use online softmax pattern (subtract max before exp)
+5. **Graceful degradation**: Always have scalar fallback for edge cases
+
+---
+
+### Build Tags for SIMD
+
+```makefile
+# AVX-512 with auto-fallback
+CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -tags cgo .
+
+# Force AVX-2 only
+DISABLE_AVX512=1 CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build .
+
+# Pure scalar (no SIMD)
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build .
+```
+
+---
+
 #### Last updated: April 2026

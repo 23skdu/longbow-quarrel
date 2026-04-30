@@ -1,0 +1,119 @@
+# =============================================================================
+# Longbow-Quarrel - Google TPU Build
+# =============================================================================
+# This Dockerfile builds Quarrel with Google TPU/XLA acceleration.
+# Uses XLA (Accelerated Linear Algebra) for TPU execution.
+#
+# Build:    docker build -f Dockerfile.tpu -t longbow-quarrel:tpu .
+# Run:      docker run --privileged -v $(pwd)/models:/data longbow-quarrel:tpu --model /data/model.gguf
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Build Stage: TPU Compilation
+# -----------------------------------------------------------------------------
+FROM ubuntu:22.04 AS tpu-builder
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    golang-go \
+    git \
+    build-essential \
+    pkg-config \
+    wget \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Go 1.26 for XLA compatibility
+RUN wget -q https://go.dev/dl/go1.26.2.linux-amd64.tar.gz && \
+    rm -rf /usr/local/go && \
+    tar -C /usr/local -xzf go1.26.2.linux-amd64.tar.gz && \
+    rm go1.26.2.linux-amd64.tar.gz
+
+ENV PATH=/usr/local/go/bin:$PATH \
+    GO111MODULE=on
+
+# Install JAX with TPU support (includes libtpu)
+# JAX provides the TPU XLA backend
+RUN pip install --no-cache-dir jax[tpu]>=0.4.20 -f https://storage.googleapis.com/jax-releases/jax_lib.html
+
+# XLA/TPU environment setup
+ENV LIBTPU_INIT_ARGS="force_authoritative=true" \
+    TPU_NAME=localtpu \
+    XLA_FLAGS="--xla_tpu_enable_latency_hiding_communication=true"
+
+# Copy go mod files
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy source code
+COPY . .
+
+# Build with TPU support
+# Note: Uses custom tpu build tag or libtpu integration
+RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -tags tpu \
+    -o quarrel-tpu ./cmd/quarrel
+
+# -----------------------------------------------------------------------------
+# Runtime Stage: TPU Runtime
+# -----------------------------------------------------------------------------
+FROM ubuntu:22.04
+
+# Install TPU runtime dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.10 \
+    python3-pip \
+    libtpu0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install JAX runtime (libtpu)
+RUN pip3 install --no-cache-dir jax[tpu]>=0.4.20 -f https://storage.googleapis.com/jax-releases/jax_lib.html
+
+# XLA/TPU environment setup
+ENV LIBTPU_INIT_ARGS="force_authoritative=true" \
+    TPU_NAME=localtpu \
+    XLA_FLAGS="--xla_tpu_enable_latency_hiding_communication=true" \
+    LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/local/lib
+
+WORKDIR /app
+
+COPY --from=tpu-builder /app/quarrel-tpu ./quarrel
+
+CMD ["./quarrel", "--help"]
+
+# =============================================================================
+# Alternative: Cloud TPU Build
+# =============================================================================
+# For Google Cloud TPU v5e/v5p:
+#
+#   FROM gcr.io/deeplearning-platform-release/base:latest
+#   RUN pip install jax[tpu]
+#   COPY . .
+#   RUN CGO_ENABLED=1 go build -tags tpu -o quarrel-tpu ./cmd/quarrel
+#
+# =============================================================================
+# Build Instructions
+# =============================================================================
+# Local TPU:
+#   docker build -f Dockerfile.tpu -t longbow-quarrel:tpu .
+#   docker run --privileged -v $(pwd)/models:/data longbow-quarrel:tpu --model /data/model.gguf
+#
+# Cloud TPU:
+#   gcloud compute tpus zones us-central1-a list --accelerator-type v5e-256
+#   docker build -f Dockerfile.tpu -t longbow-quarrel:tpu .
+#   gcloud compute ssh <tpu-vm> --zone us-central1-a
+#   docker run --network=host -v $(pwd)/models:/data longbow-quarrel:tpu --model /data/model.gguf
+#
+# =============================================================================
+# TPU Requirements
+# =============================================================================
+# - Cloud TPU: v5e, v5p, or v4
+# - Local: USB TPU or PCIe TPU
+# - XLA: Latest stable
+# - Python: 3.10+
+#
+# Run with TPU:
+#   docker run --privileged -v /path/to/models:/data longbow-quarrel:tpu \
+#       --model /data/smollm2.gguf --prompt "Hello"
+#
+# =============================================================================

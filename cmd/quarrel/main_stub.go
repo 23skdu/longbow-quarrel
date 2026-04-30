@@ -1,5 +1,5 @@
-//go:build !cuda && !metal
-// +build !cuda,!metal
+//go:build !cuda && !metal && !tpu
+// +build !cuda,!metal,!tpu
 
 package main
 
