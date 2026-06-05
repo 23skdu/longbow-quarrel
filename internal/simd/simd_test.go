@@ -417,6 +417,177 @@ func BenchmarkMatMulLarge(b *testing.B) {
 	}
 }
 
+func TestRMSNorm(t *testing.T) {
+	input := []float32{1, 2, 3, 4}
+	weight := []float32{1, 1, 1, 1}
+	output := make([]float32, 4)
+	RMSNorm(input, weight, output, 1, 4, 1e-5)
+
+	sum := float32(0)
+	for _, v := range output {
+		sum += v * v
+	}
+	meanSq := sum / 4
+	if math.Abs(float64(meanSq-1)) > 1e-4 {
+		t.Errorf("RMSNorm output mean^2=%f, expected ~1", meanSq)
+	}
+}
+
+func TestRMSNormMultiRow(t *testing.T) {
+	input := []float32{1, 2, 3, 4, 5, 6, 7, 8}
+	weight := []float32{1, 1, 1, 1}
+	output := make([]float32, 8)
+	RMSNorm(input, weight, output, 2, 4, 1e-5)
+
+	if len(output) != 8 {
+		t.Fatalf("expected 8 outputs, got %d", len(output))
+	}
+	for _, v := range output {
+		if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
+			t.Errorf("unexpected NaN/Inf: %v", v)
+		}
+	}
+}
+
+func TestMatmulDefault(t *testing.T) {
+	a := []float32{1, 2, 3, 4}
+	b := []float32{5, 6, 7, 8}
+	c := make([]float32, 4)
+	Matmul(a, b, c, 2, 2, 2)
+	expected := []float32{19, 22, 43, 50}
+	for i := range c {
+		if c[i] != expected[i] {
+			t.Errorf("Matmul[%d] = %f, want %f", i, c[i], expected[i])
+		}
+	}
+}
+
+func TestMatmulDefaultNonSquare(t *testing.T) {
+	a := []float32{1, 2, 3, 4, 5, 6}
+	b := []float32{7, 8, 9, 10, 11, 12}
+	c := make([]float32, 4)
+	Matmul(a, b, c, 2, 2, 3)
+	expected := []float32{58, 64, 139, 154}
+	for i := range c {
+		if c[i] != expected[i] {
+			t.Errorf("Matmul[%d] = %f, want %f", i, c[i], expected[i])
+		}
+	}
+}
+
+func TestRoPE(t *testing.T) {
+	tensor := []float32{1, 0, 0, 1, 1, 0, 0, 1}
+	positions := []int{0, 1}
+	RoPE(tensor, positions, 1, 1, 2, 4, 10000.0)
+	for _, v := range tensor {
+		if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
+			t.Errorf("RoPE produced NaN/Inf: %v", v)
+		}
+	}
+}
+
+func TestRoPEEmpty(t *testing.T) {
+	RoPE(nil, nil, 0, 0, 0, 0, 10000.0)
+}
+
+func TestFusedAttention(t *testing.T) {
+	seqLen := 2
+	heads := 1
+	headDim := 4
+	q := []float32{1, 0, 0, 0, 0, 1, 0, 0}
+	k := []float32{1, 0, 0, 0, 0, 1, 0, 0}
+	v := []float32{1, 2, 3, 4, 5, 6, 7, 8}
+	output := make([]float32, 8)
+	FusedAttention(q, k, v, output, 1, heads, seqLen, seqLen, headDim, 0.5)
+	for _, val := range output {
+		if math.IsNaN(float64(val)) || math.IsInf(float64(val), 0) {
+			t.Errorf("FusedAttention produced NaN/Inf: %v", val)
+		}
+	}
+}
+
+func TestFusedAttentionMultiHead(t *testing.T) {
+	seqLen := 2
+	heads := 2
+	headDim := 2
+	q := make([]float32, seqLen*heads*headDim)
+	k := make([]float32, seqLen*heads*headDim)
+	v := make([]float32, seqLen*heads*headDim)
+	for i := range q {
+		q[i] = float32(i%3) / 3.0
+		k[i] = float32((i+1)%3) / 3.0
+		v[i] = float32(i) / 10.0
+	}
+	output := make([]float32, seqLen*heads*headDim)
+	FusedAttention(q, k, v, output, 1, heads, seqLen, seqLen, headDim, 0.5)
+	for _, val := range output {
+		if math.IsNaN(float64(val)) || math.IsInf(float64(val), 0) {
+			t.Errorf("FusedAttention multi-head produced NaN/Inf: %v", val)
+		}
+	}
+}
+
+func TestFusedMLP(t *testing.T) {
+	batch := 1
+	dim := 4
+	hiddenDim := 8
+	input := []float32{1, 2, 3, 4}
+	gateW := []float32{1, -1, 2, -2, 3, -3, 4, -4}
+	upW := make([]float32, batch*dim*hiddenDim)
+	downW := make([]float32, hiddenDim*dim)
+	for i := range upW {
+		upW[i] = float32(i) / float32(hiddenDim)
+	}
+	output := make([]float32, batch*dim)
+	FusedMLP(input, gateW, upW, downW, output, batch, dim, hiddenDim)
+	for _, val := range output {
+		if math.IsNaN(float64(val)) || math.IsInf(float64(val), 0) {
+			t.Errorf("FusedMLP produced NaN/Inf: %v", val)
+		}
+	}
+}
+
+func FuzzRMSNorm(f *testing.F) {
+	f.Add([]byte{0, 0, 128, 63, 0, 0, 0, 64}, []byte{0, 0, 128, 63, 0, 0, 0, 64}, int(1), int(2), float32(1e-5))
+	f.Fuzz(func(t *testing.T, inputBytes, weightBytes []byte, rows, cols int, eps float32) {
+		if rows <= 0 || cols <= 0 || rows*cols > 10000 {
+			return
+		}
+		if len(inputBytes) < rows*cols*4 || len(weightBytes) < cols*4 {
+			return
+		}
+		input := bytesToF32(inputBytes[:rows*cols*4])
+		weight := bytesToF32(weightBytes[:cols*4])
+		output := make([]float32, rows*cols)
+		RMSNorm(input, weight, output, rows, cols, eps)
+		for _, v := range output {
+			if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
+				t.Errorf("RMSNorm produced NaN/Inf")
+				break
+			}
+		}
+	})
+}
+
+func FuzzMatmulDefault(f *testing.F) {
+	f.Add([]byte{1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4, 0, 0, 0}, []byte{5, 0, 0, 0, 6, 0, 0, 0, 7, 0, 0, 0, 8, 0, 0, 0}, int(2), int(2), int(2))
+	f.Fuzz(func(t *testing.T, aBytes, bBytes []byte, m, n, k int) {
+		if m <= 0 || n <= 0 || k <= 0 || m*n*k > 100000 {
+			return
+		}
+		if len(aBytes) < m*k*4 || len(bBytes) < k*n*4 {
+			return
+		}
+		a := bytesToF32(aBytes[:m*k*4])
+		b := bytesToF32(bBytes[:k*n*4])
+		c := make([]float32, m*n)
+		Matmul(a, b, c, m, n, k)
+		if len(c) != m*n {
+			t.Errorf("expected length %d, got %d", m*n, len(c))
+		}
+	})
+}
+
 func BenchmarkSoftmaxLarge(b *testing.B) {
 	x := make([]float64, 16384)
 	for i := range x {

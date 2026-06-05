@@ -4,6 +4,132 @@ package simd
 
 import "math"
 
+// RMSNorm scalar fallback
+func RMSNorm(input, weight, output []float32, rows, cols int, eps float32) {
+	for r := 0; r < rows; r++ {
+		offset := r * cols
+		sum := float32(0.0)
+		for c := 0; c < cols; c++ {
+			v := input[offset+c]
+			sum += v * v
+		}
+		invNorm := float32(1.0) / (float32(math.Sqrt(float64(sum)/float64(cols)) + float64(eps)))
+		for c := 0; c < cols; c++ {
+			output[offset+c] = input[offset+c] * invNorm * weight[c]
+		}
+	}
+}
+
+// Matmul scalar fallback (C = A * B, A: m×k, B: k×n)
+func Matmul(a, b, c []float32, m, n, k int) {
+	for i := 0; i < m; i++ {
+		for j := 0; j < n; j++ {
+			sum := float32(0.0)
+			for kk := 0; kk < k; kk++ {
+				sum += a[i*k+kk] * b[kk*n+j]
+			}
+			c[i*n+j] = sum
+		}
+	}
+}
+
+// RoPE scalar fallback
+func RoPE(tensor []float32, positions []int, batch, heads, seqLen, headDim int, theta float32) {
+	for b := 0; b < batch; b++ {
+		for h := 0; h < heads; h++ {
+			for s := 0; s < seqLen; s++ {
+				pos := 0
+				if s < len(positions) {
+					pos = positions[s]
+				}
+				half := headDim / 2
+				for d := 0; d < half; d++ {
+					offset := b*heads*seqLen*headDim + h*seqLen*headDim + s*headDim
+					freq := float32(pos) / float32(math.Pow(float64(theta), float64(2*d)/float64(headDim)))
+					cos := float32(math.Cos(float64(freq)))
+					sin := float32(math.Sin(float64(freq)))
+					ei := offset + d
+					oi := offset + d + half
+					ev := tensor[ei]
+					od := tensor[oi]
+					tensor[ei] = ev*cos - od*sin
+					tensor[oi] = ev*sin + od*cos
+				}
+			}
+		}
+	}
+}
+
+// FusedAttention scalar fallback
+func FusedAttention(q, k, v, output []float32, batch, heads, seqLen, kvSeqLen, headDim int, scale float32) {
+	for b := 0; b < batch; b++ {
+		for h := 0; h < heads; h++ {
+			for s := 0; s < seqLen; s++ {
+				offset := b*heads*seqLen*headDim + h*seqLen*headDim + s*headDim
+				maxVal := float32(-math.MaxFloat32)
+				for kv := 0; kv < kvSeqLen; kv++ {
+					kvOff := b*heads*kvSeqLen*headDim + h*kvSeqLen*headDim + kv*headDim
+					dot := float32(0.0)
+					for d := 0; d < headDim; d++ {
+						dot += q[offset+d] * k[kvOff+d]
+					}
+					dot *= scale
+					if kv == 0 || dot > maxVal {
+						maxVal = dot
+					}
+				}
+				expSum := float32(0.0)
+				for kv := 0; kv < kvSeqLen; kv++ {
+					kvOff := b*heads*kvSeqLen*headDim + h*kvSeqLen*headDim + kv*headDim
+					dot := float32(0.0)
+					for d := 0; d < headDim; d++ {
+						dot += q[offset+d] * k[kvOff+d]
+					}
+					expSum += float32(math.Exp(float64(dot*scale - maxVal)))
+				}
+				if expSum > 0 {
+					for d := 0; d < headDim; d++ {
+						sum := float32(0.0)
+						for kv := 0; kv < kvSeqLen; kv++ {
+							kvOff := b*heads*kvSeqLen*headDim + h*kvSeqLen*headDim + kv*headDim
+							dot := float32(0.0)
+							for dd := 0; dd < headDim; dd++ {
+								dot += q[offset+dd] * k[kvOff+dd]
+							}
+							weight := float32(math.Exp(float64(dot*scale-maxVal))) / expSum
+							sum += weight * v[kvOff+d]
+						}
+						output[offset+d] = sum
+					}
+				}
+			}
+		}
+	}
+}
+
+// FusedMLP scalar fallback
+func FusedMLP(input, gateW, upW, downW, output []float32, batch, dim, hiddenDim int) {
+	for b := 0; b < batch; b++ {
+		inOff := b * dim
+		for d := 0; d < dim; d++ {
+			sum := float32(0.0)
+			for h := 0; h < hiddenDim; h++ {
+				g := gateW[h]
+				if g > 10.0 {
+					g = 10.0
+				}
+				if g < -10.0 {
+					g = -10.0
+				}
+				sig := float32(1.0) / (float32(1.0) + float32(math.Exp(float64(-g))))
+				val := upW[inOff+h] * g * sig
+				sum += val * downW[h*dim+d]
+			}
+			output[inOff+d] = sum
+		}
+	}
+}
+
 func Softmax(x []float64) {
 	if len(x) == 0 {
 		return

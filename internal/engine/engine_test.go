@@ -2,6 +2,7 @@ package engine
 
 import (
 	"encoding/binary"
+	"math"
 	"os"
 	"testing"
 
@@ -18,82 +19,113 @@ func generateTestGGUF(path string) error {
 	}
 	defer f.Close()
 
+	dim := uint64(128)
+	hiddenDim := uint64(512)
+	vocabSize := uint64(1)
+	numHeads := uint64(1)
+
+	normSize := dim
+	attnSize := dim * dim
+	ffnSize := dim * hiddenDim
+	embSize := vocabSize * dim
+
+	makeData := func(n uint64) []byte {
+		buf := make([]byte, n*4)
+		for i := uint64(0); i < n; i++ {
+			var v float32 = 0.01
+			if i%2 == 1 {
+				v = -0.01
+			}
+			binary.LittleEndian.PutUint32(buf[i*4:], math.Float32bits(v))
+		}
+		return buf
+	}
+
+	tensors := []struct {
+		name string
+		dims []uint64
+		data []byte
+	}{
+		{"token_embd.weight", []uint64{dim, vocabSize}, makeData(embSize)},
+		{"output.weight", []uint64{dim, vocabSize}, makeData(embSize)},
+		{"output_norm.weight", []uint64{dim}, makeData(normSize)},
+		{"blk.0.attn_q.weight", []uint64{dim, dim}, makeData(attnSize)},
+		{"blk.0.attn_k.weight", []uint64{dim, dim}, makeData(attnSize)},
+		{"blk.0.attn_v.weight", []uint64{dim, dim}, makeData(attnSize)},
+		{"blk.0.attn_output.weight", []uint64{dim, dim}, makeData(attnSize)},
+		{"blk.0.attn_norm.weight", []uint64{dim}, makeData(normSize)},
+		{"blk.0.ffn_gate.weight", []uint64{hiddenDim, dim}, makeData(ffnSize)},
+		{"blk.0.ffn_up.weight", []uint64{hiddenDim, dim}, makeData(ffnSize)},
+		{"blk.0.ffn_down.weight", []uint64{dim, hiddenDim}, makeData(ffnSize)},
+		{"blk.0.ffn_norm.weight", []uint64{dim}, makeData(normSize)},
+	}
+
 	// Header
 	binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMagic))
-	binary.Write(f, binary.LittleEndian, uint32(3)) // Version
-	binary.Write(f, binary.LittleEndian, uint64(12)) // Tensors
-	binary.Write(f, binary.LittleEndian, uint64(7))  // KVs
+	binary.Write(f, binary.LittleEndian, uint32(3))
+	binary.Write(f, binary.LittleEndian, uint64(len(tensors)))
+	binary.Write(f, binary.LittleEndian, uint64(8))
 
 	// KVs
-	// 1. Architecture
-	writeString(f, "general.architecture")
-	binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeString))
-	writeString(f, "llama")
+	writeKVString(f, "general.architecture", "llama")
+	writeKVStringArray(f, "tokenizer.ggml.tokens", []string{"dummy"})
+	writeKVU32(f, "llama.attention.head_count", uint32(numHeads))
+	writeKVU32(f, "llama.attention.head_count_kv", 1)
+	writeKVU32(f, "llama.context_length", 10)
+	writeKVU32(f, "llama.block_count", 1)
+	writeKVU32(f, "llama.embedding_length", uint32(dim))
+	writeKVU32(f, "llama.feed_forward_length", uint32(hiddenDim))
 
-	// 2. Tokenizer (Required by NewEngine)
-	writeString(f, "tokenizer.ggml.tokens")
-	binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeArray))
-	binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeString))
-	binary.Write(f, binary.LittleEndian, uint64(1))
-	writeString(f, "dummy")
+	// Tensor infos - compute data offsets relative to data start
+	var dataOffset uint64
 
-	// 3. Head Count
-	writeString(f, "llama.attention.head_count")
-	binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeUint32))
-	binary.Write(f, binary.LittleEndian, uint32(1))
-
-	// 4. KV Head Count
-	writeString(f, "llama.attention.head_count_kv")
-	binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeUint32))
-	binary.Write(f, binary.LittleEndian, uint32(1))
-
-	// 5. Context Length
-	writeString(f, "llama.context_length")
-	binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeUint32))
-	binary.Write(f, binary.LittleEndian, uint32(10))
-
-	// 6. Block Count
-	writeString(f, "llama.block_count")
-	binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeUint32))
-	binary.Write(f, binary.LittleEndian, uint32(1))
-
-	// 7. Embedding Length
-	writeString(f, "llama.embedding_length")
-	binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeUint32))
-	binary.Write(f, binary.LittleEndian, uint32(128))
-
-	// Tensors
-	writeTensor := func(name string, offset uint64) error {
-		writeString(f, name)
-		binary.Write(f, binary.LittleEndian, uint32(1))  // Dims
-		binary.Write(f, binary.LittleEndian, uint64(1))  // Ne[0]
-		binary.Write(f, binary.LittleEndian, uint32(0))  // Type F32
-		binary.Write(f, binary.LittleEndian, uint64(offset))
-		return nil
+	// Write tensor infos
+	for _, t := range tensors {
+		writeString(f, t.name)
+		binary.Write(f, binary.LittleEndian, uint32(len(t.dims)))
+		for _, d := range t.dims {
+			binary.Write(f, binary.LittleEndian, uint64(d))
+		}
+		binary.Write(f, binary.LittleEndian, uint32(0)) // F32 type
+		binary.Write(f, binary.LittleEndian, uint64(dataOffset))
+		dataOffset += uint64(len(t.data))
 	}
 
-	names := []string{
-		"token_embd.weight", "output.weight", "output_norm.weight",
-		"blk.0.attn_q.weight", "blk.0.attn_k.weight", "blk.0.attn_v.weight",
-		"blk.0.attn_output.weight", "blk.0.attn_norm.weight",
-		"blk.0.ffn_gate.weight", "blk.0.ffn_up.weight", "blk.0.ffn_down.weight",
-		"blk.0.ffn_norm.weight",
+	// Align to 32 bytes (GGUF standard alignment)
+	pos, _ := f.Seek(0, 1)
+	padding := (32 - pos%32) % 32
+	if padding > 0 {
+		f.Write(make([]byte, padding))
 	}
 
-	for i, n := range names {
-		writeTensor(n, uint64(i*32))
-	}
-
-	// Pad header
-	f.Write(make([]byte, 1024))
-
-	// Data
-	for range names {
-		binary.Write(f, binary.LittleEndian, float32(1.0))
-		f.Write(make([]byte, 28))
+	// Write tensor data at the correct position
+	for _, t := range tensors {
+		f.Write(t.data)
 	}
 
 	return nil
+}
+
+func writeKVString(f *os.File, key, value string) {
+	writeString(f, key)
+	binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeString))
+	writeString(f, value)
+}
+
+func writeKVStringArray(f *os.File, key string, values []string) {
+	writeString(f, key)
+	binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeArray))
+	binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeString))
+	binary.Write(f, binary.LittleEndian, uint64(len(values)))
+	for _, v := range values {
+		writeString(f, v)
+	}
+}
+
+func writeKVU32(f *os.File, key string, value uint32) {
+	writeString(f, key)
+	binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeUint32))
+	binary.Write(f, binary.LittleEndian, value)
 }
 
 func writeString(f *os.File, s string) error {

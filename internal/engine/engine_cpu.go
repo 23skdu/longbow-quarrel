@@ -434,11 +434,13 @@ func (e *CPUEngine) forward(tokens []int) []float32 {
 	}
 
 	if e.weights.OutputNorm != nil {
-		hidden = rmsNormCPU(hidden, e.weights.OutputNorm, e.config.Eps)
+		normed := make([]float32, len(hidden))
+		simd.RMSNorm(hidden, e.weights.OutputNorm, normed, 1, len(hidden), e.config.Eps)
+		hidden = normed
 	}
 
 	if e.weights.Output != nil {
-		logits := matMulVec(e.weights.Output, hidden)
+		logits := simd.MatVecMul(e.weights.Output, hidden, len(e.weights.Output)/len(hidden), len(hidden))
 		return logits
 	}
 
@@ -446,32 +448,34 @@ func (e *CPUEngine) forward(tokens []int) []float32 {
 }
 
 func (e *CPUEngine) applyLayerCPU(input []float32, layerIdx int) []float32 {
-	normed := rmsNormCPU(input, e.weights.AttnNorm[layerIdx], e.config.Eps)
+	normed := make([]float32, len(input))
+	simd.RMSNorm(input, e.weights.AttnNorm[layerIdx], normed, 1, len(input), e.config.Eps)
 
-	q := matMulVec(e.weights.AttnQ[layerIdx], normed)
-	k := matMulVec(e.weights.AttnK[layerIdx], normed)
-	v := matMulVec(e.weights.AttnV[layerIdx], normed)
+	cols := len(normed)
+	q := simd.MatVecMul(e.weights.AttnQ[layerIdx], normed, len(e.weights.AttnQ[layerIdx])/cols, cols)
+	k := simd.MatVecMul(e.weights.AttnK[layerIdx], normed, len(e.weights.AttnK[layerIdx])/cols, cols)
+	v := simd.MatVecMul(e.weights.AttnV[layerIdx], normed, len(e.weights.AttnV[layerIdx])/cols, cols)
 
 	attn := attentionCPU(q, k, v, e.config.Heads, e.config.KVHeads, e.config.HeadDim)
 
-	out := matMulVec(e.weights.AttnO[layerIdx], attn)
+	out := simd.MatVecMul(e.weights.AttnO[layerIdx], attn, len(e.weights.AttnO[layerIdx])/len(attn), len(attn))
 
 	residual := make([]float32, len(input))
 	for i := range residual {
 		residual[i] = input[i] + out[i]
 	}
 
-	normedFFN := rmsNormCPU(residual, e.weights.FfnNorm[layerIdx], e.config.Eps)
+	normedFFN := make([]float32, len(residual))
+	simd.RMSNorm(residual, e.weights.FfnNorm[layerIdx], normedFFN, 1, len(residual), e.config.Eps)
 
-	gate := matMulVec(e.weights.FfnGate[layerIdx], normedFFN)
-	up := matMulVec(e.weights.FfnUp[layerIdx], normedFFN)
+	colsFFN := len(normedFFN)
+	gate := simd.MatVecMul(e.weights.FfnGate[layerIdx], normedFFN, len(e.weights.FfnGate[layerIdx])/colsFFN, colsFFN)
+	up := simd.MatVecMul(e.weights.FfnUp[layerIdx], normedFFN, len(e.weights.FfnUp[layerIdx])/colsFFN, colsFFN)
 
 	swiGLU := make([]float32, len(gate))
-	for i := range swiGLU {
-		swiGLU[i] = gate[i] * sigmoid(gate[i]) * up[i]
-	}
+	simd.SwiGLU(gate, up, swiGLU)
 
-	down := matMulVec(e.weights.FfnDown[layerIdx], swiGLU)
+	down := simd.MatVecMul(e.weights.FfnDown[layerIdx], swiGLU, len(e.weights.FfnDown[layerIdx])/len(swiGLU), len(swiGLU))
 
 	result := make([]float32, len(residual))
 	for i := range result {
@@ -483,17 +487,7 @@ func (e *CPUEngine) applyLayerCPU(input []float32, layerIdx int) []float32 {
 
 func rmsNormCPU(input, weight []float32, eps float32) []float32 {
 	result := make([]float32, len(input))
-	sum := 0.0
-	for _, v := range input {
-		sum += float64(v * v)
-	}
-	sum /= float64(len(input))
-	sum += float64(eps)
-	norm := 1.0 / math.Sqrt(sum)
-
-	for i := range result {
-		result[i] = float32(float64(input[i]) * norm * float64(weight[i]))
-	}
+	simd.RMSNorm(input, weight, result, 1, len(input), eps)
 	return result
 }
 
