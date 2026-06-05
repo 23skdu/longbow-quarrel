@@ -1518,11 +1518,11 @@ __global__ void store_turboquant_kv_kernel(
         if (d < blockSize) {
             // PolarQuant portion - encode using simple quantization
             float val = k[srcOffset + d];
-            int8_t q = (int8_t)__float2int8_rn(val);
+            int8_t q = (int8_t)__float2int_rn(val);
             kCache[kDstOffset] = q;
 
             val = v[srcOffset + d];
-            q = (int8_t)__float2int8_rn(val);
+            q = (int8_t)__float2int_rn(val);
             vCache[vDstOffset] = q;
         } else if (d < blockSize + qjlRows) {
             // QJL portion - we could compute residual here

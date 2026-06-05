@@ -14,7 +14,7 @@
 # -----------------------------------------------------------------------------
 # Build Stage: Metal Compilation (cross-compile from Linux amd64 to darwin arm64)
 # -----------------------------------------------------------------------------
-FROM --platform=linux/amd64 golang:1.26-alpine AS metal-builder
+FROM --platform=linux/amd64 golang:1.26.3-alpine AS metal-builder
 
 # Install build dependencies for cross-compilation
 RUN apk add --no-cache build-base git clang llvm
@@ -36,7 +36,7 @@ RUN CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 CC=o64-clang go build -o quarrel-meta
 # -----------------------------------------------------------------------------
 # Build Stage: macOS Universal Binary (arm64 + x86_64)
 # -----------------------------------------------------------------------------
-FROM --platform=linux/amd64 golang:1.26-alpine AS universal-builder
+FROM --platform=linux/amd64 golang:1.26.3-alpine AS universal-builder
 
 RUN apk add --no-cache build-base git
 

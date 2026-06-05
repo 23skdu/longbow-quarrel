@@ -1,3 +1,5 @@
+//go:build !avx512
+
 package simd
 
 import (

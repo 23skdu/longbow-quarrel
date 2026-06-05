@@ -70,9 +70,11 @@ import (
 var globalContext *Context
 
 type Context struct {
-	Ctx    C.cudaStream_t
-	Cublas C.cublasHandle_t
-	pool   *tensorPool
+	Ctx         C.cudaStream_t
+	Cublas      C.cublasHandle_t
+	pool        *tensorPool
+	TQRotation *Tensor
+	TQQJL      *Tensor
 }
 
 func (ctx *Context) DeviceID() int {
@@ -94,15 +96,15 @@ type tensorPool struct {
 	free map[int][]*Tensor
 }
 
-func NewContext() (*Context, error) {
+func NewContext() *Context {
 	var stream C.cudaStream_t
 	if err := C.cudaStreamCreate(&stream); err != 0 {
-		return nil, fmt.Errorf("cudaStreamCreate failed: %v", err)
+		panic(fmt.Sprintf("cudaStreamCreate failed: %v", err))
 	}
 
 	var handle C.cublasHandle_t
 	if err := C.cublasCreate(&handle); err != 0 {
-		return nil, fmt.Errorf("cublasCreate failed: %v", err)
+		panic(fmt.Sprintf("cublasCreate failed: %v", err))
 	}
 	C.cublasSetStream(handle, stream)
 
@@ -114,7 +116,7 @@ func NewContext() (*Context, error) {
 		},
 	}
 	globalContext = ctx
-	return ctx, nil
+	return ctx
 }
 
 func (ctx *Context) Free() {
@@ -126,13 +128,18 @@ func (ctx *Context) Free() {
 	}
 }
 
+func (ctx *Context) NewTensorFP32(rows, cols int) *Tensor {
+	t, _ := ctx.NewTensor(rows, cols, DataTypeF32)
+	return t
+}
+
 func (ctx *Context) NewTensor(rows, cols int, dtype DataType) (*Tensor, error) {
 	size := rows * cols
 	var bytes int
 	switch dtype {
 	case DataTypeF16, DataTypeQ4K, DataTypeQ4_0, DataTypeQ6K, DataTypeQ8_0:
 		bytes = size * 2
-	case DataTypeF32:
+	case DataTypeF32, DataTypeI32:
 		bytes = size * 4
 	default:
 		bytes = size * 4
@@ -472,6 +479,14 @@ func (m *CUDAModel) GetEmbeddingTensor(token int) (*Tensor, error) {
 	return tokenEmb, nil
 }
 
+func (m *CUDAModel) GetTokenEmbdWeight() *Tensor {
+	t, ok := m.GetWeightTensor("token_embd.weight")
+	if !ok {
+		return nil
+	}
+	return t
+}
+
 func (m *CUDAModel) GetKCache(layer int) *Tensor {
 	if layer < 0 || layer >= len(m.KCache) {
 		return nil
@@ -558,6 +573,33 @@ func GetDeviceMemory(device int) (int64, error) {
 		return 0, fmt.Errorf("cudaGetDeviceProperties failed: %v", err)
 	}
 	return int64(prop.totalGlobalMem), nil
+}
+
+// Gather selects rows from src using index tensor and writes them to dst (CPU-mediated).
+// src: [numTokens, dim], index: [1, batchSize] with float32 row indices, dst: [batchSize, dim]
+func (c *Context) Gather(src, index, dst *Tensor, numTokens, batchSize, dim int) {
+	srcHost := src.ToHostF32()
+	idxHost := index.ToHostF32()
+	dstHost := make([]float32, batchSize*dim)
+	for i := 0; i < batchSize; i++ {
+		row := int(idxHost[i])
+		if row < 0 {
+			row = 0
+		}
+		if row >= numTokens {
+			row = numTokens - 1
+		}
+		copy(dstHost[i*dim:(i+1)*dim], srcHost[row*dim:(row+1)*dim])
+	}
+	dst.LoadFrom(dstHost)
+}
+
+// Slice extracts one row from source tensor and writes it to dst.
+// src: [batchSize, vocabSize] (logical), rowIdx: which row, dst: [1, vocabSize]
+func (c *Context) Slice(src *Tensor, dst *Tensor, rowIdx, vocabSize int) {
+	srcHost := src.ToHostF32()
+	rowData := srcHost[rowIdx*vocabSize : (rowIdx+1)*vocabSize]
+	dst.LoadFrom(rowData)
 }
 
 // AttentionPagedBatch performs paged attention across a batch of sequences on the GPU.
@@ -658,17 +700,6 @@ func (t *Tensor) StoreKVQuantized(v *Tensor, kCache, vCache *Tensor, pos, heads,
 
 	blockSize := headDim
 	qjlRows := 64
-
-	physicalPos := pos
-	if windowSize > 0 {
-		physicalPos = pos % windowSize
-	}
-
-	kOffset := uintptr(physicalPos) * uintptr(heads*(blockSize+qjlRows+8))
-	vOffset := uintptr(physicalPos) * uintptr(heads*(blockSize+qjlRows+8))
-
-	kTarget := unsafe.Pointer(uintptr(kCache.devPtr) + kOffset)
-	vTarget := unsafe.Pointer(uintptr(vCache.devPtr) + vOffset)
 
 	t.ctx.TurboQuantEncode(t, t.ctx.TQRotation, t.ctx.TQQJL, kCache, nil, nil, blockSize, qjlRows, 4)
 }

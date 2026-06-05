@@ -24,10 +24,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Go 1.26 for XLA compatibility
-RUN wget -q https://go.dev/dl/go1.26.2.linux-amd64.tar.gz && \
+RUN wget -q https://go.dev/dl/go1.26.3.linux-amd64.tar.gz && \
     rm -rf /usr/local/go && \
-    tar -C /usr/local -xzf go1.26.2.linux-amd64.tar.gz && \
-    rm go1.26.2.linux-amd64.tar.gz
+    tar -C /usr/local -xzf go1.26.3.linux-amd64.tar.gz && \
+    rm go1.26.3.linux-amd64.tar.gz
 
 ENV PATH=/usr/local/go/bin:$PATH \
     GO111MODULE=on

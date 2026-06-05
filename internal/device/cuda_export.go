@@ -7,7 +7,7 @@ import "C"
 // Export package provides C-compatible exports for vLLM integration
 
 // InitCUDA initializes the CUDA context for external use
-func InitCUDA() (*Context, error) {
+func InitCUDA() *Context {
 	return NewContext()
 }
 

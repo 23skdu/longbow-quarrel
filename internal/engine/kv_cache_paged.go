@@ -123,8 +123,8 @@ func (c *PagedKVCache) Init(ctx *device.Context, config config.Config) error {
 			k = ctx.NewTensorWithType(capacity, kvDim, device.DataTypeINT8)
 			v = ctx.NewTensorWithType(capacity, kvDim, device.DataTypeINT8)
 		} else {
-			k = ctx.NewTensor(capacity, kvDim)
-			v = ctx.NewTensor(capacity, kvDim)
+			k = ctx.NewTensorFP32(capacity, kvDim)
+			v = ctx.NewTensorFP32(capacity, kvDim)
 		}
 
 		if k == nil || v == nil {

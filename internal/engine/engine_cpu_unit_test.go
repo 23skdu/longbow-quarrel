@@ -7,12 +7,37 @@ import (
 	"github.com/23skdu/longbow-quarrel/internal/device"
 )
 
+func initCPUEngineWeights(e *CPUEngine, dim, layers, heads, kvHeads, headDim, hiddenDim int) {
+	w := e.weights
+	make2D := func(rows, cols int) [][]float32 {
+		s := make([][]float32, rows)
+		for i := range s {
+			s[i] = make([]float32, cols)
+		}
+		return s
+	}
+	w.AttnNorm = make2D(layers, dim)
+	w.AttnQ = make2D(layers, dim*(heads*headDim))
+	w.AttnK = make2D(layers, dim*(kvHeads*headDim))
+	w.AttnV = make2D(layers, dim*(kvHeads*headDim))
+	w.AttnO = make2D(layers, (heads*headDim)*dim)
+	w.FfnNorm = make2D(layers, dim)
+	w.FfnGate = make2D(layers, dim*hiddenDim)
+	w.FfnUp = make2D(layers, dim*hiddenDim)
+	w.FfnDown = make2D(layers, hiddenDim*dim)
+}
+
 func TestCPUEngine_ForwardBatch(t *testing.T) {
 	ctx := device.NewContext()
+	headDim := 32
 	cfg := config.Config{
-		Dim: 128,
-		Layers: 1,
+		Dim:       128,
+		Layers:    1,
 		VocabSize: 1000,
+		Heads:     4,
+		KVHeads:   4,
+		HeadDim:   headDim,
+		HiddenDim: 256,
 	}
 	
 	e := &CPUEngine{
@@ -27,6 +52,7 @@ func TestCPUEngine_ForwardBatch(t *testing.T) {
 	for i := range e.weights.TokenEmb {
 		e.weights.TokenEmb[i] = make([]float32, cfg.Dim)
 	}
+	initCPUEngineWeights(e, cfg.Dim, cfg.Layers, cfg.Heads, cfg.KVHeads, headDim, cfg.HiddenDim)
 	e.cache.Init(ctx, cfg)
 	
 	// Create a mock batch descriptor

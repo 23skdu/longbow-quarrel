@@ -78,12 +78,12 @@ func checkOutputNaNInf(data []float32, kernel string) {
 		if math.IsNaN(float64(v)) {
 			nanCount++
 		}
-		if math.IsInf(float64(v)) {
+		if math.IsInf(float64(v), 0) {
 			infCount++
 		}
 	}
 
-if nanCount > 0 {
+	if nanCount > 0 {
 		metrics.RecordSIMDNaN(kernel)
 	}
 	if infCount > 0 {
@@ -95,19 +95,3 @@ if nanCount > 0 {
 	}
 }
 
-func initSIMDMetrics() {
-	metrics.RecordSIMDLevel(GetSIMDLevel())
-}
-	if infCount > 0 {
-		metrics.RecordSIMDInf(kernel)
-	}
-}
-
-if nanCount > 0 || infCount > 0 {
-		metrics.RecordSIMDKernelError(kernel, "output_invalid")
-	}
-}
-
-func initSIMDMetrics() {
-	metrics.RecordSIMDLevel(GetSIMDLevel())
-}

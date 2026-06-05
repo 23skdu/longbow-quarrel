@@ -20,10 +20,7 @@ var (
 
 // Init initializes the CUDA device for vLLM operations
 func Init(deviceID int) error {
-	_, err := device.InitCUDA()
-	if err != nil {
-		return fmt.Errorf("failed to initialize CUDA context: %w", err)
-	}
+	device.InitCUDA()
 	initOnce = true
 	return nil
 }

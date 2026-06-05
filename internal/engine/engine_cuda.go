@@ -3,12 +3,9 @@
 package engine
 
 import (
-	"errors"
 	"fmt"
 	"log"
 	"math"
-	"math/rand"
-	"sort"
 	"sync"
 	"time"
 
@@ -99,7 +96,11 @@ var (
 	}, []string{"model"})
 )
 
+type CUDAStorage = device.CUDAModel
+type CUDAScratch = device.LayerScratch
+
 type cudaEngine struct {
+	mu           sync.Mutex
 	model        *gguf.GGUFFile
 	ctx          *device.Context
 	cuda         *CUDAStorage
@@ -110,6 +111,7 @@ type cudaEngine struct {
 	BatchManager *ContinuousBatchManager
 	stopChan     chan struct{}
 	doneChan     chan struct{}
+	lora         *LoRAManager
 }
 
 func NewcudaEngine(modelPath string, cfg config.Config) (Engine, error) {
@@ -124,12 +126,7 @@ func NewcudaEngine(modelPath string, cfg config.Config) (Engine, error) {
 		arch = v
 	}
 
-	ctx, err := device.NewContext()
-	if err != nil {
-		f.Close()
-		cudaEngineFailed.WithLabelValues(arch, "context_creation_failed").Inc()
-		return nil, fmt.Errorf("failed to create CUDA context: %w", err)
-	}
+	ctx := device.NewContext()
 
 	cudaModel, err := ctx.NewCUDAModel(f, true, cfg.KVCacheSize)
 	if err != nil {
@@ -256,7 +253,7 @@ func NewcudaEngine(modelPath string, cfg config.Config) (Engine, error) {
 		e.config.Gemma4FullHeadDim = 512
 	}
 
-	logger.Log.Info("CUDA engine initialized with PagedKVCache", "model", modelPath, "heads", heads, "kv_heads", kvHeads)
+	log.Printf("CUDA engine initialized with PagedKVCache: model=%s heads=%d kv_heads=%d", modelPath, heads, kvHeads)
 	
 	go e.runBatchLoop()
 
@@ -283,6 +280,13 @@ func (e *cudaEngine) Close() {
 	if e.model != nil {
 		e.model.Close()
 	}
+}
+
+func (e *cudaEngine) LoadAdapter(path, id string) error {
+	if e.lora == nil {
+		e.lora = NewLoRAManager()
+	}
+	return e.lora.LoadAdapter(e.ctx, path, id)
 }
 
 func (e *cudaEngine) SwapModel(newModelPath string, newConfig config.Config) error {
@@ -319,11 +323,7 @@ func (e *cudaEngine) SwapModel(newModelPath string, newConfig config.Config) err
 	}
 	e.model = f
 
-	ctx, err := device.NewContext()
-	if err != nil {
-		return fmt.Errorf("failed to create CUDA context: %w", err)
-	}
-	e.ctx = ctx
+	e.ctx = device.NewContext()
 
 	e.config = newConfig
 
@@ -429,7 +429,7 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 	numTokens := len(desc.Tokens)
 	
 	// 1. Prepare Metadata Tensors
-	tokenPosTensor := ctx.NewTensor(1, numTokens)
+	tokenPosTensor := ctx.NewTensorFP32(1, numTokens)
 	tokenPositions := make([]float32, numTokens)
 	for i, start := range desc.Offsets {
 		end := numTokens
@@ -441,17 +441,17 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 		}
 	}
 	if err := tokenPosTensor.LoadFrom(tokenPositions); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	defer tokenPosTensor.ReturnToPool()
 
-	tokenToSeqTensor := ctx.NewTensor(1, numTokens)
+	tokenToSeqTensor := ctx.NewTensorFP32(1, numTokens)
 	tokenToSeq := make([]float32, numTokens)
 	for i, val := range desc.TokenToSeq {
 		tokenToSeq[i] = float32(val)
 	}
 	if err := tokenToSeqTensor.LoadFrom(tokenToSeq); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	defer tokenToSeqTensor.ReturnToPool()
 
@@ -463,7 +463,7 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 		}
 	}
 	
-	blockTableTensor := ctx.NewTensor(batchSize, maxBlocks)
+	blockTableTensor := ctx.NewTensorFP32(batchSize, maxBlocks)
 	btData := make([]float32, batchSize*maxBlocks)
 	for i, seq := range desc.Sequences {
 		seqID := fmt.Sprintf("seq-%d", seq.ID)
@@ -473,19 +473,19 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 		}
 	}
 	if err := blockTableTensor.LoadFrom(btData); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	defer blockTableTensor.ReturnToPool()
 
 	// 2. Initial Embedding
 	// [numTokens, dim]
-	inputTokensTensor := ctx.NewTensor(1, numTokens)
+	inputTokensTensor := ctx.NewTensorFP32(1, numTokens)
 	inputTokensF := make([]float32, numTokens)
 	for i, t := range desc.Tokens {
 		inputTokensF[i] = float32(t)
 	}
 	if err := inputTokensTensor.LoadFrom(inputTokensF); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	defer inputTokensTensor.ReturnToPool()
 	
@@ -499,12 +499,22 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 	kvHeads := e.config.KVHeads
 	headDim := e.config.HeadDim
 	ropeTheta := e.config.RopeTheta
-	scale := float32(1.0 / math.Sqrt(float64(headDim)))
+	// Build integer position IDs for RoPE
+	posIds := make([]int, numTokens)
+	for i, start := range desc.Offsets {
+		end := numTokens
+		if i < batchSize-1 {
+			end = desc.Offsets[i+1]
+		}
+		for j := 0; j < end-start; j++ {
+			posIds[start+j] = desc.ContextLens[i] + j
+		}
+	}
 
 	for layer := 0; layer < e.config.Layers; layer++ {
 		// Batched RMSNorm
 		attnNormW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_norm.weight", layer))
-		normed := ctx.NewTensor(numTokens, dim)
+		normed := ctx.NewTensorFP32(numTokens, dim)
 		ctx.RMSNorm(hidden, attnNormW, normed, numTokens, dim, eps)
 		
 		// Batched Projections
@@ -518,14 +528,14 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 		normed.ReturnToPool()
 
 		// Batched RoPE
-		ctx.FusedRoPE(q, tokenPosTensor, numTokens, heads, 1, headDim, ropeTheta)
-		ctx.FusedRoPE(k, tokenPosTensor, numTokens, kvHeads, 1, headDim, ropeTheta)
+		ctx.FusedRoPE(q, posIds, numTokens, heads, 1, headDim, ropeTheta)
+		ctx.FusedRoPE(k, posIds, numTokens, kvHeads, 1, headDim, ropeTheta)
 
 		// Paged Attention (BATCHED)
 		kCache := e.cache.kPools[layer]
 		vCache := e.cache.vPools[layer]
 		
-		attnOut := ctx.NewTensor(numTokens, dim)
+		attnOut := ctx.NewTensorFP32(numTokens, dim)
 		
 		// Update Cache (StoreKV)
 		// We'll calculate physical positions for new tokens
@@ -539,9 +549,9 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 			offset := logicalPos % e.cache.blockSize
 			physPosData[i] = float32(table[blockIdx]*int32(e.cache.blockSize) + int32(offset))
 		}
-		physPosTensor := ctx.NewTensor(1, numTokens)
+		physPosTensor := ctx.NewTensorFP32(1, numTokens)
 		if err := physPosTensor.LoadFrom(physPosData); err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		
 		ctx.StoreKVPagedBatch(k, v, kCache, vCache, physPosTensor, kvHeads*headDim, batchSize)
@@ -577,19 +587,19 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 		}
 		lastHiddenIndices[i] = float32(idx)
 	}
-	lastHiddenIndicesTensor := ctx.NewTensor(1, batchSize)
+	lastHiddenIndicesTensor := ctx.NewTensorFP32(1, batchSize)
 	if err := lastHiddenIndicesTensor.LoadFrom(lastHiddenIndices); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	defer lastHiddenIndicesTensor.ReturnToPool()
 
 	// Gather last hidden states: [batchSize, dim]
-	lastHidden := ctx.NewTensor(batchSize, dim)
+	lastHidden := ctx.NewTensorFP32(batchSize, dim)
 	ctx.Gather(hidden, lastHiddenIndicesTensor, lastHidden, numTokens, batchSize, dim)
 
 	// Final Output Norm
 	outputNormW, _ := e.cuda.GetWeightTensor("output_norm.weight")
-	normedFinal := ctx.NewTensor(batchSize, dim)
+	normedFinal := ctx.NewTensorFP32(batchSize, dim)
 	ctx.RMSNorm(lastHidden, outputNormW, normedFinal, batchSize, dim, eps)
 	lastHidden.ReturnToPool()
 
@@ -605,7 +615,7 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 	// Split Logits into []*device.Tensor
 	results := make([]*device.Tensor, batchSize)
 	for i := 0; i < batchSize; i++ {
-		res := ctx.NewTensor(1, e.config.VocabSize)
+		res := ctx.NewTensorFP32(1, e.config.VocabSize)
 		ctx.Slice(logitsTensor, res, i, e.config.VocabSize)
 		results[i] = res
 	}
@@ -640,56 +650,6 @@ func (e *cudaEngine) inferInternal(inputTokens []int, tokensToGenerate int, samp
 	case err := <-errChan:
 		return nil, err
 	}
-}
-
-	result := make([]int, 0, tokensToGenerate)
-	sampler := NewSampler(samplerConfig)
-	startTime := time.Now()
-
-	cudaInferenceTotal.WithLabelValues(e.config.Architecture).Inc()
-	cudaBatchSize.WithLabelValues(e.config.Architecture).Observe(float64(len(inputTokens)))
-
-	allTokens := append([]int{}, inputTokens...)
-	var logits []float32
-	var err error
-
-	// Prompt processing
-	for pos, token := range inputTokens {
-		logits, err = e.forward(token, pos, allTokens)
-		if err != nil {
-			return nil, fmt.Errorf("forward pass failed at prompt pos %d: %w", pos, err)
-		}
-	}
-
-	// Generation loop
-	for gen := 0; gen < tokensToGenerate; gen++ {
-		if logitsCallback != nil {
-			logitsCallback(logits)
-		}
-
-		nextToken := sampler.Sample(logits, allTokens)
-		allTokens = append(allTokens, nextToken)
-		result = append(result, nextToken)
-		cudaTokensGenerated.WithLabelValues(e.config.Architecture).Inc()
-
-		if tokenCallback != nil {
-			tokenCallback(nextToken)
-		}
-
-		if len(allTokens) >= e.config.SeqLen {
-			break
-		}
-
-		logits, err = e.forward(nextToken, len(allTokens)-1, allTokens)
-		if err != nil {
-			return nil, fmt.Errorf("forward pass failed at gen step %d: %w", gen, err)
-		}
-	}
-
-	elapsed := time.Since(startTime)
-	log.Printf("Generated %d tokens in %.2fs (%.1f t/s)", len(result), elapsed.Seconds(), float64(len(result))/elapsed.Seconds())
-
-	return result, nil
 }
 
 func (e *cudaEngine) forward(token int, pos int, allTokens []int) ([]float32, error) {
@@ -793,120 +753,22 @@ func (e *cudaEngine) forward(token int, pos int, allTokens []int) ([]float32, er
 	return logitsTensor.ToHostF32(), nil
 }
 
-type Sampler struct {
-	config SamplerConfig
-	rng    *rand.Rand
-}
-
-func NewSampler(config SamplerConfig) *Sampler {
-	seed := config.Seed
-	if seed == 0 {
-		seed = time.Now().UnixNano()
-	}
-	return &Sampler{
-		config: config,
-		rng:    rand.New(rand.NewSource(seed)),
-	}
-}
-
-func (s *Sampler) Sample(logits []float32, history []int) int {
-	if len(logits) == 0 {
-		return 0
-	}
-
-	// Repetition penalty
-	if s.config.RepPenalty > 1.0 && len(history) > 0 {
-		seen := make(map[int]bool)
-		for _, t := range history {
-			seen[t] = true
+func (e *cudaEngine) forwardInternal(tokens []int, cacheOnly bool) []float32 {
+	var lastLogits []float32
+	for i, token := range tokens {
+		logits, err := e.forward(token, i, tokens[:i+1])
+		if err != nil {
+			return nil
 		}
-		for t := range seen {
-			if t < len(logits) {
-				if logits[t] > 0 {
-					logits[t] /= float32(s.config.RepPenalty)
-				} else {
-					logits[t] *= float32(s.config.RepPenalty)
-				}
-			}
+		if !cacheOnly {
+			lastLogits = logits
 		}
 	}
-
-	// Temperature=0: Greedy
-	if s.config.Temperature <= 0 {
-		maxIdx := 0
-		maxVal := logits[0]
-		for i, v := range logits {
-			if v > maxVal {
-				maxVal = v
-				maxIdx = i
-			}
-		}
-		return maxIdx
-	}
-
-	// Temperature scaling
-	for i := range logits {
-		logits[i] /= float32(s.config.Temperature)
-	}
-
-	// Softmax
-	maxLogit := logits[0]
-	for _, v := range logits {
-		if v > maxLogit {
-			maxLogit = v
-		}
-	}
-	sum := float64(0)
-	probs := make([]float64, len(logits))
-	for i, v := range logits {
-		probs[i] = math.Exp(float64(v - maxLogit))
-		sum += probs[i]
-	}
-	for i := range probs {
-		probs[i] /= sum
-	}
-
-	// Top-K
-	if s.config.TopK > 0 && s.config.TopK < len(probs) {
-		type score struct {
-			idx int
-			val float64
-		}
-		scores := make([]score, len(probs))
-		for i, v := range probs {
-			scores[i] = score{i, v}
-		}
-		sort.Slice(scores, func(i, j int) bool { return scores[i].val > scores[j].val })
-		
-		sumK := 0.0
-		for i := 0; i < s.config.TopK; i++ {
-			sumK += scores[i].val
-		}
-		r := s.rng.Float64() * sumK
-		acc := 0.0
-		for i := 0; i < s.config.TopK; i++ {
-			acc += scores[i].val
-			if r <= acc {
-				return scores[i].idx
-			}
-		}
-		return scores[0].idx
-	}
-
-	// Basic sampling
-	r := s.rng.Float64()
-	acc := 0.0
-	for i, v := range probs {
-		acc += v
-		if r <= acc {
-			return i
-		}
-	}
-	return 0
+	return lastLogits
 }
 
 func (e *cudaEngine) ForwardDraft(tokens []int) ([][]float32, error) {
-	if e.model == nil || e.weights == nil {
+	if e.model == nil || e.cuda == nil {
 		return nil, fmt.Errorf("model not initialized")
 	}
 

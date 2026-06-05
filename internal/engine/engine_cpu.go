@@ -678,7 +678,7 @@ func sampleFromDistCPU(probs []float32, r *rand.Rand) int {
 }
 
 func (e *CPUEngine) ForwardDraft(tokens []int) ([][]float32, error) {
-	if len(tokens) == 0 || len(e.weights.TokenEmb) == 0 {
+	if len(tokens) == 0 || e.weights == nil || len(e.weights.TokenEmb) == 0 {
 		return nil, nil
 	}
 	hiddenSize := len(e.weights.TokenEmb[0])

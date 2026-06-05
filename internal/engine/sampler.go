@@ -1,12 +1,15 @@
 package engine
 
 import (
+	"errors"
 	"log"
 	"math"
 	"math/rand"
 	"sort"
 	"time"
 )
+
+var ErrModelSwapped = errors.New("inference interrupted: engine model was swapped")
 
 type Sampler struct {
 	Config     SamplerConfig

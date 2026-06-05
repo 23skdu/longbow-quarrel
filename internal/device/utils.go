@@ -32,6 +32,7 @@ const (
 	DataTypeQ5_K DataType = 13
 	DataTypeQ2_K DataType = 14
 	DataTypeQ1_K DataType = 15
+	DataTypeI32   DataType = 16
 )
 
 // Reference implementation of Float32 <-> Float16
