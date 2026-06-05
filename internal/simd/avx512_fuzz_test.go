@@ -3,6 +3,7 @@
 package simd
 
 import (
+	"fmt"
 	"math"
 	"math/rand"
 	"testing"
@@ -245,7 +246,7 @@ func BenchmarkSoftmax_AVX512(b *testing.B) {
 	sizes := []int{64, 256, 1024, 4096, 16384}
 
 	for _, n := range sizes {
-		b.Run(func(b *testing.B) {
+		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
 			data := make([]float32, n)
 			rng := rand.New(rand.NewSource(42))
 			for i := range data {
@@ -267,7 +268,7 @@ func BenchmarkRMSNorm_AVX512(b *testing.B) {
 
 	for _, cfg := range configs {
 		rows, cols := cfg[0], cfg[1]
-		b.Run(func(b *testing.B) {
+		b.Run(fmt.Sprintf("%dx%d", rows, cols), func(b *testing.B) {
 			input := make([]float32, rows*cols)
 			weight := make([]float32, cols)
 			output := make([]float32, rows*cols)
@@ -293,7 +294,7 @@ func BenchmarkMatmul_AVX512(b *testing.B) {
 
 	for _, cfg := range configs {
 		m, n, k := cfg[0], cfg[1], cfg[2]
-		b.Run(func(b *testing.B) {
+		b.Run(fmt.Sprintf("%dx%dx%d", m, n, k), func(b *testing.B) {
 			a := make([]float32, m*k)
 			b := make([]float32, k*n)
 			c := make([]float32, m*n)
@@ -320,7 +321,7 @@ func BenchmarkFusedAttention_AVX512(b *testing.B) {
 	for _, cfg := range configs {
 		batch, heads, seqLen, headDim := cfg[0], cfg[1], cfg[2], cfg[3]
 		kvSeqLen := seqLen
-		b.Run(func(b *testing.B) {
+		b.Run(fmt.Sprintf("%dx%dx%dx%d", batch, heads, seqLen, headDim), func(b *testing.B) {
 			q := make([]float32, batch*heads*seqLen*headDim)
 			k := make([]float32, batch*heads*kvSeqLen*headDim)
 			v := make([]float32, batch*heads*kvSeqLen*headDim)
@@ -352,7 +353,7 @@ func BenchmarkFusedMLP_AVX512(b *testing.B) {
 
 	for _, cfg := range configs {
 		batch, dim, hiddenDim := cfg[0], cfg[1], cfg[2]
-		b.Run(func(b *testing.B) {
+		b.Run(fmt.Sprintf("%dx%dx%d", batch, dim, hiddenDim), func(b *testing.B) {
 			input := make([]float32, batch*dim)
 			gateW := make([]float32, hiddenDim)
 			upW := make([]float32, hiddenDim)
@@ -386,7 +387,7 @@ func BenchmarkRoPE_AVX512(b *testing.B) {
 
 	for _, cfg := range configs {
 		batch, heads, seqLen, headDim := cfg[0], cfg[1], cfg[2], cfg[3]
-		b.Run(func(b *testing.B) {
+		b.Run(fmt.Sprintf("%dx%dx%dx%d", batch, heads, seqLen, headDim), func(b *testing.B) {
 			tensor := make([]float32, batch*heads*seqLen*headDim)
 			positions := make([]int, seqLen)
 
