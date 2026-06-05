@@ -48,15 +48,11 @@ void fused_mlp_avx2(const float* input, const float* gateWeight, const float* up
 */
 import "C"
 import (
-	"fmt"
-	"os"
 	"runtime"
 	"unsafe"
 )
 
 var (
-	hasAVX512     bool
-	hasAVX2      bool
 	simdInitDone bool
 	simdLevel    int // 0=scalar, 1=avx2, 2=avx512
 )
@@ -67,83 +63,15 @@ func initSIMD() {
 	}
 	simdInitDone = true
 
-	// Check CPU features via runtime
-	// On Linux, we can check /proc/cpuinfo
-	// On macOS, we can use sysctl
-	checkCPUFeatures()
+	detectCPU()
 
 	if hasAVX512 {
 		simdLevel = 2
-		fmt.Println("SIMD: Using AVX-512")
 	} else if hasAVX2 {
 		simdLevel = 1
-		fmt.Println("SIMD: Using AVX2")
 	} else {
 		simdLevel = 0
-		fmt.Println("SIMD: Using scalar fallback")
 	}
-}
-
-func checkCPUFeatures() {
-	// Check at runtime using CPUID-like detection
-	// Go's runtime.GOARCH tells us amd64, but not specific features
-	// We detect via environment or runtime feature probing
-
-	// Method 1: Try to use AVX512 and catch signal if not supported
-	if detectAVX512() {
-		hasAVX512 = true
-		hasAVX2 = true
-		return
-	}
-
-	// Method 2: Try AVX2
-	if detectAVX2() {
-		hasAVX2 = true
-		return
-	}
-
-	// Method 3: Check environment for Docker/container scenarios
-	if os.Getenv("DISABLE_AVX512") == "1" {
-		hasAVX512 = false
-		if os.Getenv("DISABLE_AVX2") != "1" {
-			hasAVX2 = true
-		}
-		return
-	}
-}
-
-func detectAVX512() bool {
-	// Try to execute AVX512 instruction and catch panics
-	// On supported platforms, this succeeds
-	defer func() {
-		if r := recover(); r != nil {
-			// AVX512 not supported
-			hasAVX512 = false
-		}
-	}()
-
-	// Attempt a simple AVX512 operation
-	// If we get here, AVX512 is supported
-	return testAVX512Ops()
-}
-
-func detectAVX2() bool {
-	defer func() {
-		if r := recover(); r != nil {
-			hasAVX2 = false
-		}
-	}()
-	return testAVX2Ops()
-}
-
-func testAVX512Ops() bool {
-	// Use CGO to test AVX512
-	// The C compiler will fail if AVX512 isn't available
-	return true
-}
-
-func testAVX2Ops() bool {
-	return true
 }
 
 // GetSIMDLevel returns the current SIMD level (0=scalar, 1=AVX2, 2=AVX512)
@@ -721,5 +649,3 @@ func fp32ToFp16(f float32) uint16 {
 
 // Force compiler to not optimize away the SIMD functions
 var _ = runtime.GOARCH
-var _ = fmt.Printf
-var _ = os.Getenv

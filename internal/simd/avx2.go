@@ -17,14 +17,20 @@ import (
 	"unsafe"
 )
 
+func useAVX2() bool {
+	if !cpuInitDone {
+		detectCPU()
+	}
+	return cpuInitDone && hasAVX2
+}
+
 // SoftmaxAVX2 computes softmax using AVX2 intrinsics
 func SoftmaxAVX2(x []float32) {
 	if len(x) == 0 {
 		return
 	}
 
-	// Only use AVX2 for larger arrays where overhead is worth it
-	if len(x) >= 16 {
+	if useAVX2() && len(x) >= 16 {
 		C.softmax_avx2((*C.float)(unsafe.Pointer(&x[0])), C.int(len(x)))
 	} else {
 		softmaxScalar(x)
@@ -38,7 +44,7 @@ func SwiGLUAVX2(gate, up, out []float32) {
 		return
 	}
 
-	if n >= 16 {
+	if useAVX2() && n >= 16 {
 		C.swiglu_avx2(
 			(*C.float)(unsafe.Pointer(&gate[0])),
 			(*C.float)(unsafe.Pointer(&up[0])),
@@ -57,7 +63,7 @@ func Fp16ToFp32AVX2(src []uint16, dst []float32) {
 		return
 	}
 
-	if n >= 16 {
+	if useAVX2() && n >= 16 {
 		C.fp16_to_fp32_avx2(
 			(*C.uint16_t)(unsafe.Pointer(&src[0])),
 			(*C.float)(unsafe.Pointer(&dst[0])),
@@ -75,7 +81,7 @@ func Fp32ToFp16AVX2(src []float32, dst []uint16) {
 		return
 	}
 
-	if n >= 16 {
+	if useAVX2() && n >= 16 {
 		C.fp32_to_fp16_avx2(
 			(*C.float)(unsafe.Pointer(&src[0])),
 			(*C.uint16_t)(unsafe.Pointer(&dst[0])),
