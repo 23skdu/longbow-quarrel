@@ -19,6 +19,7 @@ func main() {
 	maxTokens := flag.Int("n", 50, "Maximum tokens to generate")
 	temp := flag.Float64("temp", 0.7, "Temperature for sampling")
 	topK := flag.Int("topk", 40, "Top-K sampling")
+	maxMemMB := flag.Int64("max-memory", 0, "Max memory in MB (0 = no limit)")
 	flag.Parse()
 
 	if *modelPath == "" {
@@ -85,13 +86,19 @@ func main() {
 
 	startTime := time.Now()
 
+	cfg := config.Default()
+	cfg.MaxMemoryMB = *maxMemMB
+	if cfg.MaxMemoryMB > 0 {
+		fmt.Printf("Memory limit: %d MB\n", cfg.MaxMemoryMB)
+	}
+
 	samplerCfg := engine.SamplerConfig{
 		Temperature: 0.8,
 		TopK:        40,
 		RepPenalty:  1.5,
 	}
 
-	e, err := engine.NewEngine(*modelPath, config.Default())
+	e, err := engine.NewEngine(*modelPath, cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to create engine: %v\n", err)
 		os.Exit(1)

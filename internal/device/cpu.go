@@ -3,6 +3,7 @@
 package device
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"runtime"
@@ -11,6 +12,8 @@ import (
 
 	"github.com/23skdu/longbow-quarrel/internal/simd"
 )
+
+var ErrOOM = errors.New("OOM: memory limit exceeded")
 
 type Context struct {
 	device     int
@@ -55,7 +58,34 @@ func (c *Context) LoadBuffer(t *Tensor, data []byte) {
 	}
 }
 
+func checkMem(bytes int) error {
+	maxMB := atomic.LoadInt64(&maxMemoryMB)
+	if maxMB == 0 {
+		return nil
+	}
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	if m.Alloc > uint64(maxMB)*1024*1024 {
+		runtime.GC()
+		runtime.ReadMemStats(&m)
+		if m.Alloc > uint64(maxMB)*1024*1024 {
+			return ErrOOM
+		}
+	}
+	if m.Alloc+uint64(bytes) > uint64(maxMB)*1024*1024 {
+		runtime.GC()
+		runtime.ReadMemStats(&m)
+		if m.Alloc+uint64(bytes) > uint64(maxMB)*1024*1024 {
+			return ErrOOM
+		}
+	}
+	return nil
+}
+
 func (c *Context) NewTensor(rows, cols int) *Tensor {
+	if err := checkMem(rows * cols * 4); err != nil {
+		panic(err)
+	}
 	return &Tensor{
 		ctx:      c,
 		data:     make([]float32, rows*cols),
@@ -77,6 +107,17 @@ func (c *Context) NewTensorPooled(rows, cols int) *Tensor {
 	return c.NewTensor(rows, cols)
 }
 func (c *Context) NewTurboTensor(rows, cols int, dt DataType, blockSize, qjlRows int) *Tensor {
+	if blockSize > 0 {
+		numElements := rows * cols
+		numBlocks := numElements / blockSize
+		if numElements%blockSize != 0 {
+			numBlocks++
+		}
+		bytesPerBlock := blockSize + qjlRows + 8
+		if err := checkMem(numBlocks * bytesPerBlock); err != nil {
+			panic(err)
+		}
+	}
 	t := &Tensor{
 		ctx:       c,
 		dims:      []int{rows, cols},
@@ -585,6 +626,7 @@ func (t *Tensor) NumElements() int {
 }
 
 var cpuAllocatedBytes int64
+var maxMemoryMB int64
 
 func CPUAllocatedBytes() int64 {
 	return atomic.LoadInt64(&cpuAllocatedBytes)
@@ -592,6 +634,10 @@ func CPUAllocatedBytes() int64 {
 
 func RecordMemory(n int64) {
 	atomic.AddInt64(&cpuAllocatedBytes, n)
+}
+
+func SetMaxMemoryMB(mb int64) {
+	atomic.StoreInt64(&maxMemoryMB, mb)
 }
 
 func (c *Context) SetNumThreads(n int) {

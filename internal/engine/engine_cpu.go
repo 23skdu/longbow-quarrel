@@ -55,6 +55,14 @@ func NewCPUEngine(modelPath string, cfg config.Config) (Engine, error) {
 		return nil, fmt.Errorf("failed to load GGUF: %w", err)
 	}
 
+	// Apply memory limit before any allocation
+	if cfg.MaxMemoryMB > 0 {
+		device.SetMaxMemoryMB(cfg.MaxMemoryMB)
+		if cfg.DebugMemory {
+			logger.Log.Info("memory limit set", "max_mb", cfg.MaxMemoryMB)
+		}
+	}
+
 	// Load Dimensions from GGUF into config
 	if v, ok := f.KV["llama.block_count"].(uint32); ok {
 		cfg.Layers = int(v)
@@ -72,6 +80,22 @@ func NewCPUEngine(modelPath string, cfg config.Config) (Engine, error) {
 	}
 	if cfg.Heads > 0 {
 		cfg.HeadDim = cfg.Dim / cfg.Heads
+	}
+
+	// Cap KV cache based on memory budget
+	if cfg.MaxMemoryMB > 0 && cfg.KVCacheSize == 0 {
+		// Estimate: each layer's KV cache = seqLen * kvHeads * headDim * 4 bytes * 2 (K+V)
+		// Aim to use at most 60% of budget for KV cache
+		estBytesPerToken := uint64(cfg.Layers) * uint64(cfg.KVHeads) * uint64(cfg.HeadDim) * 4 * 2
+		if estBytesPerToken > 0 {
+			maxTokensForKV := uint64(cfg.MaxMemoryMB) * 1024 * 1024 * 60 / 100 / estBytesPerToken
+			if maxTokensForKV < uint64(cfg.SeqLen) {
+				cfg.SeqLen = int(maxTokensForKV)
+				if cfg.DebugMemory {
+					logger.Log.Info("KV cache capped by memory limit", "seq_len", cfg.SeqLen)
+				}
+			}
+		}
 	}
 
 	weights, err := loadCPUWeights(f)

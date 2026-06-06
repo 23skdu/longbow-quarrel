@@ -79,6 +79,9 @@ type Config struct {
 	MaxBatchSize int
 	BlockSize    int
 	TotalBlocks  int
+
+	// Memory limits (0 = no limit)
+	MaxMemoryMB int64 // Soft limit for total process memory in MB; triggers GC+OOM error
 }
 
 type Gemma4Config struct {
