@@ -103,7 +103,7 @@ func (e *RemoteWorkerEngine) ForwardShardedLayer(ctx context.Context, layerIdx i
 	}
 
 	// Send input tensor to worker via DoPut
-	_, err := e.client.DoPutTensor(ctx, inputData, []int32{int32(input.Rows())}, meta)
+	_, err := e.client.DoPutTensor(ctx, inputData, []int32{int32(input.Rows())}, meta) // #nosec G115 -- safe: Rows() is bounded by model config
 	if err != nil {
 		return nil, fmt.Errorf("DoPutTensor failed: %w", err)
 	}

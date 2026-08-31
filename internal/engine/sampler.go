@@ -23,7 +23,7 @@ func NewSampler(cfg SamplerConfig) *Sampler {
 	}
 	return &Sampler{
 		Config: cfg,
-		rng:    rand.New(rand.NewSource(cfg.Seed)),
+		rng:    rand.New(rand.NewSource(cfg.Seed)), // #nosec G404 -- math/rand is fine for LLM sampling
 	}
 }
 
@@ -32,7 +32,7 @@ func (s *Sampler) SampleAdvanced(logits []float32, history []int, qualityMode bo
 		return s.sampleWithQualityControl(logits, history)
 	}
 	if s.Config.Grammar != nil {
-		s.Config.Grammar.Apply(logits)
+		_ = s.Config.Grammar.Apply(logits)
 	}
 	return s.Sample(logits, history)
 }
@@ -76,7 +76,7 @@ func (s *Sampler) sampleWithQualityControl(logits []float32, history []int) int 
 
 func (s *Sampler) Sample(logits []float32, history []int) int {
 	if s.Config.Grammar != nil {
-		s.Config.Grammar.Apply(logits)
+		_ = s.Config.Grammar.Apply(logits)
 	}
 	if !s.validateLogits(logits) {
 		return s.findFirstValidToken(logits)

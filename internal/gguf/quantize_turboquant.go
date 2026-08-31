@@ -153,10 +153,10 @@ func QuantizeTurboQuant(input []float32, rotationMatrix []float32, qjlMatrix []f
 		// Fill the result block
 		off := b * bytesPerBlock
 		for i := 0; i < blockSize; i++ {
-			result[off+i] = byte(q[i])
+			result[off+i] = byte(q[i]) // #nosec G115 -- int8 to byte for quantized data
 		}
 		for i := 0; i < qjlRows; i++ {
-			result[off+blockSize+i] = byte(qj[i])
+			result[off+blockSize+i] = byte(qj[i]) // #nosec G115 -- int8 to byte for quantized data
 		}
 		
 		setFloat32(result[off+blockSize+qjlRows:off+blockSize+qjlRows+4], s)
@@ -181,9 +181,9 @@ func DequantizeTurboQuant(data []byte, rotationMatrix []float32, qjlMatrix []flo
 		sj := getFloat32(data[off+blockSize+qjlRows+4 : off+blockSize+qjlRows+8])
 		
 		for i := 0; i < blockSize; i++ {
-			val := float32(int8(q[i])) * s
+			val := float32(int8(q[i])) * s // #nosec G115 -- byte to int8 for quantized data
 			if i < qjlRows {
-				val += float32(int8(qj[i])) * sj
+				val += float32(int8(qj[i])) * sj // #nosec G115 -- byte to int8 for quantized data
 			}
 			result[b*blockSize+i] = val
 		}
@@ -199,8 +199,8 @@ func getFloat32(b []byte) float32 {
 
 func setFloat32(b []byte, f float32) {
 	bits := math.Float32bits(f)
-	b[0] = byte(bits)
-	b[1] = byte(bits >> 8)
-	b[2] = byte(bits >> 16)
-	b[3] = byte(bits >> 24)
+	b[0] = byte(bits)      // #nosec G115 -- byte extraction from uint32
+	b[1] = byte(bits >> 8)  // #nosec G115 -- byte extraction from uint32
+	b[2] = byte(bits >> 16) // #nosec G115 -- byte extraction from uint32
+	b[3] = byte(bits >> 24) // #nosec G115 -- byte extraction from uint32
 }

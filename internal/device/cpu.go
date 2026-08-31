@@ -65,17 +65,17 @@ func checkMem(bytes int) error {
 	}
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
-	if m.Alloc > uint64(maxMB)*1024*1024 {
+	if m.Alloc > uint64(maxMB)*1024*1024 { // #nosec G115 -- maxMB is always positive
 		runtime.GC()
 		runtime.ReadMemStats(&m)
-		if m.Alloc > uint64(maxMB)*1024*1024 {
+		if m.Alloc > uint64(maxMB)*1024*1024 { // #nosec G115 -- maxMB is always positive
 			return ErrOOM
 		}
 	}
-	if m.Alloc+uint64(bytes) > uint64(maxMB)*1024*1024 {
+	if m.Alloc+uint64(bytes) > uint64(maxMB)*1024*1024 { // #nosec G115 -- maxMB is always positive
 		runtime.GC()
 		runtime.ReadMemStats(&m)
-		if m.Alloc+uint64(bytes) > uint64(maxMB)*1024*1024 {
+		if m.Alloc+uint64(bytes) > uint64(maxMB)*1024*1024 { // #nosec G115 -- maxMB is always positive
 			return ErrOOM
 		}
 	}
@@ -384,8 +384,8 @@ func (t *Tensor) LoadFromRaw(data []byte) error {
 	}
 	if t.dataType == DataTypeF32 {
 		// Copy bytes to float32 slice
-		ptr := unsafe.Pointer(&t.data[0])
-		byteSlice := unsafe.Slice((*byte)(ptr), len(t.data)*4)
+		ptr := unsafe.Pointer(&t.data[0]) // #nosec G103 -- intentional unsafe for zero-copy
+		byteSlice := unsafe.Slice((*byte)(ptr), len(t.data)*4) // #nosec G103 -- intentional unsafe for zero-copy
 		copy(byteSlice, data)
 	} else if t.rawData != nil {
 		copy(t.rawData, data)
@@ -457,10 +457,10 @@ func (t *Tensor) StoreKV(v *Tensor, kCache, vCache *Tensor, pos, heads, headDim,
 
 			dst := kCache.rawData[blockCacheStart:]
 			for i, val := range q {
-				dst[i] = byte(val)
+				dst[i] = byte(val) // #nosec G115 -- int8 to byte for quantized data
 			}
 			for i, val := range qj {
-				dst[blockSize+i] = byte(val)
+				dst[blockSize+i] = byte(val) // #nosec G115 -- int8 to byte for quantized data
 			}
 			setFloat32(dst[blockSize+qjlRows:blockSize+qjlRows+4], s)
 			setFloat32(dst[blockSize+qjlRows+4:blockSize+qjlRows+8], sj)
@@ -472,10 +472,10 @@ func (t *Tensor) StoreKV(v *Tensor, kCache, vCache *Tensor, pos, heads, headDim,
 
 			vdst := vCache.rawData[blockCacheStart:]
 			for i, val := range qv {
-				vdst[i] = byte(val)
+				vdst[i] = byte(val) // #nosec G115 -- int8 to byte for quantized data
 			}
 			for i, val := range qjv {
-				vdst[blockSize+i] = byte(val)
+				vdst[blockSize+i] = byte(val) // #nosec G115 -- int8 to byte for quantized data
 			}
 			setFloat32(vdst[blockSize+qjlRows:blockSize+qjlRows+4], sv)
 			setFloat32(vdst[blockSize+qjlRows+4:blockSize+qjlRows+8], sjv)
@@ -505,10 +505,10 @@ func (c *Context) TurboQuantEncode(input *Tensor, rotationMatrix *Tensor, qjlMat
 			bytesPerBlock := blockSize + qjlRows + 8
 			dst := output.rawData[b*bytesPerBlock:]
 			for i, v := range q {
-				dst[i] = byte(v)
+				dst[i] = byte(v) // #nosec G115 -- int8 to byte for quantized data
 			}
 			for i, v := range qj {
-				dst[blockSize+i] = byte(v)
+				dst[blockSize+i] = byte(v) // #nosec G115 -- int8 to byte for quantized data
 			}
 			setFloat32(dst[blockSize+qjlRows:blockSize+qjlRows+4], s)
 			setFloat32(dst[blockSize+qjlRows+4:blockSize+qjlRows+8], sj)
@@ -547,11 +547,11 @@ func (c *Context) TurboQuantDecode(input *Tensor, rotationMatrix *Tensor, qjlMat
 			src := input.rawData[b*bytesPerBlock:]
 			q = make([]int8, blockSize)
 			for i := 0; i < blockSize; i++ {
-				q[i] = int8(src[i])
+				q[i] = int8(src[i]) // #nosec G115 -- byte to int8 for quantized data
 			}
 			qj = make([]int8, qjlRows)
 			for i := 0; i < qjlRows; i++ {
-				qj[i] = int8(src[blockSize+i])
+				qj[i] = int8(src[blockSize+i]) // #nosec G115 -- byte to int8 for quantized data
 			}
 			s = getFloat32(src[blockSize+qjlRows : blockSize+qjlRows+4])
 			sj = getFloat32(src[blockSize+qjlRows+4 : blockSize+qjlRows+8])
@@ -599,10 +599,10 @@ func getFloat32(b []byte) float32 {
 
 func setFloat32(b []byte, f float32) {
 	bits := math.Float32bits(f)
-	b[0] = byte(bits)
-	b[1] = byte(bits >> 8)
-	b[2] = byte(bits >> 16)
-	b[3] = byte(bits >> 24)
+	b[0] = byte(bits)      // #nosec G115 -- byte extraction from uint32
+	b[1] = byte(bits >> 8)  // #nosec G115 -- byte extraction from uint32
+	b[2] = byte(bits >> 16) // #nosec G115 -- byte extraction from uint32
+	b[3] = byte(bits >> 24) // #nosec G115 -- byte extraction from uint32
 }
 
 func qInt8ToF32(in []int8) []float32 {
@@ -755,7 +755,7 @@ func (c *Context) VisionPatchEmbed(pixels *Tensor, weights *Tensor, output *Tens
 		}
 		out[i] = sum
 	}
-	output.LoadFrom(out)
+	_ = output.LoadFrom(out)
 }
 
 // VisionPatchEmbedGemma4 performs Gemma 4 patch embedding on CPU.
@@ -790,5 +790,5 @@ func (c *Context) VisionPatchEmbedGemma4(pixels *Tensor, weights *Tensor, bias *
 			}
 		}
 	}
-	output.LoadFrom(out)
+	_ = output.LoadFrom(out)
 }

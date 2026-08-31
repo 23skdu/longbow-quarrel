@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"errors"
 	"os"
 	"sync"
 
@@ -78,13 +79,18 @@ func InitTracer() func(context.Context) error {
 	tracer = tp.Tracer(tracerName)
 
 	return func(ctx context.Context) error {
+		var errs []error
 		if tp != nil {
-			tp.Shutdown(ctx)
+			if err := tp.Shutdown(ctx); err != nil {
+				errs = append(errs, err)
+			}
 		}
 		if mp != nil {
-			mp.Shutdown(ctx)
+			if err := mp.Shutdown(ctx); err != nil {
+				errs = append(errs, err)
+			}
 		}
-		return nil
+		return errors.Join(errs...)
 	}
 }
 

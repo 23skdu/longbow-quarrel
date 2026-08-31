@@ -25,7 +25,7 @@ func Float32ToFloat16(f float32) uint16 {
 		frac = 0
 	}
 
-	return sign | uint16(exp<<10) | uint16(frac>>13)
+	return sign | uint16(exp<<10) | uint16(frac>>13) // #nosec G115 -- safe bit manipulation for float16
 }
 
 func QuantizeWeightsToQ4K(weights []float32, numElements int) ([]byte, error) {

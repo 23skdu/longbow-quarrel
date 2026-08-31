@@ -475,7 +475,7 @@ func DequantizeQ8_0(data []byte, numElements int) []float32 {
 		qs := data[blockOffset+2 : blockOffset+34]
 
 		for j := 0; j < blockSize; j++ {
-			out[i*blockSize+j] = d * float32(int8(qs[j]))
+			out[i*blockSize+j] = d * float32(int8(qs[j])) // #nosec G115 -- byte to int8 for quantized data
 		}
 	}
 	return out
@@ -615,7 +615,7 @@ func DequantizeQ80(data []byte, numElements int) []float32 {
 		d := Float16ToFloat32(binary.LittleEndian.Uint16(data[off : off+2]))
 		qs := data[off+2 : off+34]
 		for j := 0; j < 32; j++ {
-			out[i*blockSize+j] = d * float32(int8(qs[j]))
+			out[i*blockSize+j] = d * float32(int8(qs[j])) // #nosec G115 -- byte to int8 for quantized data
 		}
 	}
 	return out

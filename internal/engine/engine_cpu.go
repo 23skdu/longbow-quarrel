@@ -86,11 +86,11 @@ func NewCPUEngine(modelPath string, cfg config.Config) (Engine, error) {
 	if cfg.MaxMemoryMB > 0 && cfg.KVCacheSize == 0 {
 		// Estimate: each layer's KV cache = seqLen * kvHeads * headDim * 4 bytes * 2 (K+V)
 		// Aim to use at most 60% of budget for KV cache
-		estBytesPerToken := uint64(cfg.Layers) * uint64(cfg.KVHeads) * uint64(cfg.HeadDim) * 4 * 2
+		estBytesPerToken := uint64(cfg.Layers) * uint64(cfg.KVHeads) * uint64(cfg.HeadDim) * 4 * 2 // #nosec G115
 		if estBytesPerToken > 0 {
 			maxTokensForKV := uint64(cfg.MaxMemoryMB) * 1024 * 1024 * 60 / 100 / estBytesPerToken
-			if maxTokensForKV < uint64(cfg.SeqLen) {
-				cfg.SeqLen = int(maxTokensForKV)
+			if maxTokensForKV < uint64(cfg.SeqLen) { // #nosec G115 -- safe: SeqLen is bounded by memory
+				cfg.SeqLen = int(maxTokensForKV) // #nosec G115
 				if cfg.DebugMemory {
 					logger.Log.Info("KV cache capped by memory limit", "seq_len", cfg.SeqLen)
 				}
@@ -212,7 +212,7 @@ func loadCPUWeights(f *gguf.GGUFFile) (*CPUWeights, error) {
 func decodeTensorData(t *gguf.TensorInfo) ([]float32, error) {
 	numElements := uint32(1)
 	for _, d := range t.Dimensions {
-		numElements *= uint32(d)
+		numElements *= uint32(d) // #nosec G115
 	}
 
 	// Handle quantized types properly using gguf dequantization

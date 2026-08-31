@@ -40,10 +40,10 @@ func (t *Tensor) ToArrowArray(allocator memory.Allocator) (*array.FixedSizeList,
 		// because most analytical consumers expect standard floating point arrays.
 		hostData := t.ToHostF32()
 		// Wrap the new slice. Note: This copy is intended for non-native Arrow formats.
-		ptr := unsafe.Pointer(&hostData[0])
+		ptr := unsafe.Pointer(&hostData[0]) // #nosec G103 -- intentional unsafe for zero-copy
 		size := len(hostData) * 4
 		arrowType = arrow.PrimitiveTypes.Float32
-		arrowBuf = memory.NewBufferBytes(unsafe.Slice((*byte)(ptr), size))
+		arrowBuf = memory.NewBufferBytes(unsafe.Slice((*byte)(ptr), size)) // #nosec G103 -- intentional unsafe for zero-copy
 	}
 
 	// Hotpath metric tracking (bytes exposed to Arrow)
@@ -78,7 +78,7 @@ func buildFixedSizeList(buf *memory.Buffer, rows, cols int, arrowType arrow.Data
 	})
 	_ = meta // metadata is consumed by Flight server via schema negotiation
 
-	listType := arrow.FixedSizeListOf(int32(cols), arrowType)
+	listType := arrow.FixedSizeListOf(int32(cols), arrowType) // #nosec G115 -- safe: cols is bounded by model config
 	
 	// 3. Construct the top-level list data
 	listData := array.NewData(

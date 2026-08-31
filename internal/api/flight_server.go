@@ -73,7 +73,7 @@ func (s *InferenceFlightServer) DoGet(tckt *flight.Ticket, stream flight.FlightS
 		builder := array.NewRecordBuilder(s.allocator, schema)
 		
 		tokenIDBuilder := builder.Field(0).(*array.Int32Builder)
-		tokenIDBuilder.Append(int32(token))
+		tokenIDBuilder.Append(int32(token)) // #nosec G115 -- safe: token IDs are bounded by vocab size
 		
 		// Ensure all fields have same row count
 		builder.Field(1).(*array.FixedSizeListBuilder).AppendNull()

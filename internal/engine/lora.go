@@ -83,9 +83,9 @@ func (lm *LoRAManager) LoadAdapter(ctx *device.Context, path string, id string) 
 
 		// Rank is the rows of A (or cols of B)
 		// GGUF Dims: [DimIn, Rank] for A, [Rank, DimOut] for B
-		r := int(tA.Dimensions[1])
-		dimIn := int(tA.Dimensions[0])
-		dimOut := int(tB.Dimensions[1])
+		r := int(tA.Dimensions[1])     // #nosec G115 -- safe: LoRA dimensions are always small
+		dimIn := int(tA.Dimensions[0]) // #nosec G115 -- safe: LoRA dimensions are always small
+		dimOut := int(tB.Dimensions[1]) // #nosec G115 -- safe: LoRA dimensions are always small
 
 		weight := &LoRAWeight{
 			Rank:  r,

@@ -47,7 +47,7 @@ func QuantizeQ6K(data []float32) []byte {
 
 		// Write scales at offset 192
 		for i := 0; i < 16; i++ {
-			out[blockOffset+192+i] = byte(scales[i])
+			out[blockOffset+192+i] = byte(scales[i]) // #nosec G115 -- int8 to byte for quantized data
 		}
 
 		// Write d at offset 208 (using local float32 to float16 conversion logic)

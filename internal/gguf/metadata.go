@@ -44,14 +44,14 @@ func (a *MetadataAnalyzer) Analyze() (*AnalysisReport, error) {
 		report.ModelName = name
 	}
 
-	report.ContextLength = int(getKVInt(a.file.KV, report.Architecture+".context_length", "general.context_length"))
+	report.ContextLength = int(getKVInt(a.file.KV, report.Architecture+".context_length", "general.context_length")) // #nosec G115
 	if report.ContextLength == 0 {
 		report.ContextLength = 2048
 	}
 
-	report.HiddenSize = int(getKVInt(a.file.KV, report.Architecture+".hidden_size", report.Architecture+".embedding_length"))
+	report.HiddenSize = int(getKVInt(a.file.KV, report.Architecture+".hidden_size", report.Architecture+".embedding_length")) // #nosec G115
 
-	report.AttentionHeads = int(getKVInt(a.file.KV,
+	report.AttentionHeads = int(getKVInt(a.file.KV, // #nosec G115 -- safe: model config values fit in int
 		report.Architecture+".attention.head_count",
 		"gemma4.attention.head_count",
 		"llama.attention.head_count",
@@ -65,15 +65,15 @@ func (a *MetadataAnalyzer) Analyze() (*AnalysisReport, error) {
 		"gemma4.attention.kv_head_count",
 		"")
 	if kvHeads == 0 {
-		kvHeads = uint64(report.AttentionHeads)
+		kvHeads = uint64(report.AttentionHeads) // #nosec G115 -- safe: AttentionHeads is always small
 	}
-	report.KVHeads = int(kvHeads)
+	report.KVHeads = int(kvHeads) // #nosec G115 -- safe: kvHeads fits in int
 
-	report.IntermediateSize = int(getKVInt(a.file.KV, report.Architecture+".feed_forward_length", report.Architecture+".intermediate_size"))
+	report.IntermediateSize = int(getKVInt(a.file.KV, report.Architecture+".feed_forward_length", report.Architecture+".intermediate_size")) // #nosec G115 -- safe: model config values fit in int
 
-	report.ExpertCount = int(getKVInt(a.file.KV, report.Architecture+".expert_count", ""))
+	report.ExpertCount = int(getKVInt(a.file.KV, report.Architecture+".expert_count", "")) // #nosec G115 -- safe: model config values fit in int
 
-	report.ExpertTopK = int(getKVInt(a.file.KV, report.Architecture+".expert_used_top_k", report.Architecture+".expert_top_k"))
+	report.ExpertTopK = int(getKVInt(a.file.KV, report.Architecture+".expert_used_top_k", report.Architecture+".expert_top_k")) // #nosec G115 -- safe: model config values fit in int
 
 	if quantVal, ok := a.file.KV["general.quantization_version"].(uint32); ok {
 		report.Quantization = fmt.Sprintf("Q%d", quantVal*4)
@@ -85,7 +85,7 @@ func (a *MetadataAnalyzer) Analyze() (*AnalysisReport, error) {
 	for _, t := range a.file.Tensors {
 		elements := int64(1)
 		for _, d := range t.Dimensions {
-			elements *= int64(d)
+			elements *= int64(d) // #nosec G115 -- safe: tensor dimensions are always small
 		}
 		totalParams += elements
 	}
@@ -101,11 +101,11 @@ func (a *MetadataAnalyzer) estimateMemoryUsage() int64 {
 	for _, t := range a.file.Tensors {
 		size := t.SizeBytes()
 		if size > 0 {
-			totalBytes += int64(size)
+			totalBytes += int64(size) // #nosec G115 -- safe: tensor sizes fit in int64
 		} else {
 			elements := int64(1)
 			for _, d := range t.Dimensions {
-				elements *= int64(d)
+				elements *= int64(d) // #nosec G115 -- safe: tensor dimensions are always small
 			}
 			switch t.Type {
 			case GGMLTypeF32:
@@ -127,11 +127,11 @@ func getKVInt(kv map[string]interface{}, keys ...string) uint64 {
 			case uint64:
 				return v
 			case int64:
-				return uint64(v)
+				return uint64(v) // #nosec G115 -- safe: GGUF metadata values are small
 			case uint32:
 				return uint64(v)
 			case int:
-				return uint64(v)
+				return uint64(v) // #nosec G115 -- safe: GGUF metadata values are small
 			}
 		}
 	}

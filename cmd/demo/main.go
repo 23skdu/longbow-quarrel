@@ -23,7 +23,7 @@ func main() {
 	fmt.Printf("Reading GGUF file: %s\n", modelPath)
 
 	// Try to read GGUF metadata
-	file, err := os.Open(modelPath)
+	file, err := os.Open(modelPath) // #nosec G304 G703 -- demo CLI, path from user arg
 	if err != nil {
 		log.Fatalf("Failed to open GGUF file: %v", err)
 	}

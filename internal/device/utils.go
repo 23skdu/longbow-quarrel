@@ -51,17 +51,17 @@ func Float32ToFloat16(f float32) uint16 {
 	case 0:
 		return uint16(sign << 15)
 	case 0xff:
-		return uint16((sign << 15) | 0x7c00 | (mant >> 13))
+		return uint16((sign << 15) | 0x7c00 | (mant >> 13)) // #nosec G115 -- safe bit manipulation
 	}
 
 	newExp := int(exp) - 127 + 15
 	if newExp < 0 {
 		return uint16(sign << 15) // Flush to zero
 	} else if newExp >= 31 {
-		return uint16((sign << 15) | 0x7c00) // Inf
+		return uint16((sign << 15) | 0x7c00) // Inf, #nosec G115 -- safe bit manipulation
 	}
 
-	return uint16((sign << 15) | (uint32(newExp) << 10) | (mant >> 13))
+	return uint16((sign << 15) | (uint32(newExp) << 10) | (mant >> 13)) // #nosec G115 -- safe bit manipulation
 }
 
 func Float16ToFloat32(f uint16) float32 {
@@ -102,5 +102,5 @@ func Float32SliceToBytes(s []float32) []byte {
 	if len(s) == 0 {
 		return nil
 	}
-	return unsafe.Slice((*byte)(unsafe.Pointer(&s[0])), len(s)*4)
+	return unsafe.Slice((*byte)(unsafe.Pointer(&s[0])), len(s)*4) // #nosec G103 G115 -- intentional unsafe for zero-copy conversion
 }

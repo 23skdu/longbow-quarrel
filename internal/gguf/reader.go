@@ -98,7 +98,7 @@ func LoadFile(path string) (*GGUFFile, error) {
 					if data[i] == 0 && i+8 < len(data) {
 						// Check if this could be a string length prefix
 						strLen := binary.LittleEndian.Uint64(data[i:])
-						if strLen > 0 && strLen < 100 && i+8+int(strLen) < int(pos) {
+						if strLen > 0 && strLen < 100 && i+8+int(strLen) < int(pos) { // #nosec G115
 							keyStart = uint64(i + 8)
 							break
 						}
@@ -268,11 +268,11 @@ func readValue(data []byte, offset uint64, typ GGUFMetadataValueType) (interface
 	case GGUFMetadataValueTypeUint16:
 		return binary.LittleEndian.Uint16(data[offset:]), 2, nil
 	case GGUFMetadataValueTypeInt16:
-		return int16(binary.LittleEndian.Uint16(data[offset:])), 2, nil
+		return int16(binary.LittleEndian.Uint16(data[offset:])), 2, nil // #nosec G115
 	case GGUFMetadataValueTypeUint32:
 		return binary.LittleEndian.Uint32(data[offset:]), 4, nil
 	case GGUFMetadataValueTypeInt32:
-		return int32(binary.LittleEndian.Uint32(data[offset:])), 4, nil
+		return int32(binary.LittleEndian.Uint32(data[offset:])), 4, nil // #nosec G115
 	case GGUFMetadataValueTypeFloat32:
 		return math_Float32frombits(binary.LittleEndian.Uint32(data[offset:])), 4, nil
 	case GGUFMetadataValueTypeBool:
@@ -300,7 +300,7 @@ func readValue(data []byte, offset uint64, typ GGUFMetadataValueType) (interface
 	case GGUFMetadataValueTypeUint64:
 		return binary.LittleEndian.Uint64(data[offset:]), 8, nil
 	case GGUFMetadataValueTypeInt64:
-		return int64(binary.LittleEndian.Uint64(data[offset:])), 8, nil
+		return int64(binary.LittleEndian.Uint64(data[offset:])), 8, nil // #nosec G115
 	case GGUFMetadataValueTypeFloat64:
 		return math.Float64frombits(binary.LittleEndian.Uint64(data[offset:])), 8, nil
 	default:

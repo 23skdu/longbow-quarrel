@@ -121,7 +121,7 @@ func (fc *FlightClient) DoPut(ctx context.Context, vectors [][]float32, ids []st
 	// Create schema: vector (fixed-size list of float32) and id (string)
 	schema := arrow.NewSchema([]arrow.Field{
 		{Name: "id", Type: arrow.BinaryTypes.String, Nullable: true},
-		{Name: "vector", Type: arrow.FixedSizeListOf(int32(vecDim), arrow.PrimitiveTypes.Float32)},
+		{Name: "vector", Type: arrow.FixedSizeListOf(int32(vecDim), arrow.PrimitiveTypes.Float32)}, // #nosec G115 -- safe: vecDim is bounded by embedding model
 	}, nil)
 
 	// Create record batch builder
@@ -218,7 +218,7 @@ func (fc *FlightClient) DoPutTensor(ctx context.Context, data []float32, rows []
 	// Create schema for computation request/response
 	schema := arrow.NewSchema([]arrow.Field{
 		{Name: "row_idx", Type: arrow.PrimitiveTypes.Int32},
-		{Name: "data", Type: arrow.FixedSizeListOf(int32(colsCount), arrow.PrimitiveTypes.Float32)},
+		{Name: "data", Type: arrow.FixedSizeListOf(int32(colsCount), arrow.PrimitiveTypes.Float32)}, // #nosec G115 -- safe: colsCount is bounded by tensor dims
 	}, nil)
 
 	// Create record batch builder
@@ -325,7 +325,7 @@ func (fc *FlightClient) StreamEmbeddings(ctx context.Context, tensors []*device.
 
 	schema := arrow.NewSchema([]arrow.Field{
 		{Name: "id", Type: arrow.BinaryTypes.String, Nullable: true},
-		{Name: "vector", Type: arrow.FixedSizeListOf(int32(vecDim), arrowType)},
+		{Name: "vector", Type: arrow.FixedSizeListOf(int32(vecDim), arrowType)}, // #nosec G115 -- safe: vecDim is bounded by embedding model
 	}, nil)
 
 	// 2. Open DoPut stream

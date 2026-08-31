@@ -24,7 +24,7 @@ func NewSpeculativeManager(target, draft Engine) *SpeculativeManager {
 	return &SpeculativeManager{
 		targetEngine: target,
 		draftEngine:  draft,
-		rng:          rand.New(rand.NewSource(time.Now().UnixNano())),
+		rng:          rand.New(rand.NewSource(time.Now().UnixNano())), // #nosec G404 -- math/rand is fine for speculative sampling
 	}
 }
 

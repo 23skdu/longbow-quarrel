@@ -301,12 +301,12 @@ func NewFP8Config(fp8Type FP8Type) FP8Config {
 
 func (c *FP8Config) MarshalBinary() ([]byte, error) {
 	data := make([]byte, 8)
-	data[0] = byte(c.Type)
+	data[0] = byte(c.Type) // #nosec G115 -- int to byte for FP8 config type
 	if c.PerTensor {
 		data[1] = 1
 	}
 	binary.LittleEndian.PutUint32(data[2:6], math.Float32bits(c.ScaleFloat32))
-	binary.LittleEndian.PutUint16(data[6:8], uint16(c.BlockSize))
+	binary.LittleEndian.PutUint16(data[6:8], uint16(c.BlockSize)) // #nosec G115 -- safe: BlockSize is always small
 	return data, nil
 }
 

@@ -96,7 +96,7 @@ func (c *PagedKVCache) Init(ctx *device.Context, config config.Config) error {
 	c.freeBlocks = make([]int32, c.totalBlocks)
 	c.blockRefs = make(map[int32]int)
 	for i := 0; i < c.totalBlocks; i++ {
-		c.freeBlocks[i] = int32(c.totalBlocks - 1 - i) // Stack order
+		c.freeBlocks[i] = int32(c.totalBlocks - 1 - i) // #nosec G115 -- safe: totalBlocks is bounded by memory
 		c.blockRefs[int32(i)] = 0
 	}
 
@@ -300,7 +300,9 @@ func (c *PagedKVCache) copyBlockData(layer int, srcBlock, dstBlock int32) error 
 		}
 	}
 
-	c.kPools[layer].LoadFrom(data)
+	if err := c.kPools[layer].LoadFrom(data); err != nil {
+		return err
+	}
 
 	if layer < len(c.vPools) && c.vPools[layer] != nil {
 		vPool := c.vPools[layer]
@@ -311,7 +313,9 @@ func (c *PagedKVCache) copyBlockData(layer int, srcBlock, dstBlock int32) error 
 					vData[(dstStart+row)*cols+col] = vData[(srcStart+row)*cols+col]
 				}
 			}
-			vPool.LoadFrom(vData)
+			if err := vPool.LoadFrom(vData); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -593,7 +597,7 @@ func (c *PagedKVCache) UpdateBatch(layer int, items []struct {
 			c.blockTables[item.SeqID] = table
 		}
 
-		physPositions[i] = int32(int64(table[logicalBlockIdx])*int64(c.blockSize) + int64(blockOffset))
+		physPositions[i] = int32(int64(table[logicalBlockIdx])*int64(c.blockSize) + int64(blockOffset)) // #nosec G115 -- safe: block positions are bounded
 	}
 	c.mu.Unlock()
 

@@ -90,8 +90,11 @@ type TensorParallelManager struct {
 }
 
 var tensorParallel *TensorParallelManager
+var multiGPUMu sync.Mutex // protects singleton initialization and config
 
 func NewTensorParallelManager(config *MultiGPUConfig) (*TensorParallelManager, error) {
+	multiGPUMu.Lock()
+	defer multiGPUMu.Unlock()
 	if tensorParallel != nil {
 		return tensorParallel, nil
 	}
@@ -280,6 +283,8 @@ type PipelineParallelManager struct {
 var pipelineParallel *PipelineParallelManager
 
 func NewPipelineParallelManager(config *MultiGPUConfig, numLayers int) (*PipelineParallelManager, error) {
+	multiGPUMu.Lock()
+	defer multiGPUMu.Unlock()
 	if pipelineParallel != nil {
 		return pipelineParallel, nil
 	}
@@ -426,6 +431,8 @@ type CrossGPUCommunicator struct {
 var crossGPU *CrossGPUCommunicator
 
 func NewCrossGPUCommunicator(config *MultiGPUConfig) (*CrossGPUCommunicator, error) {
+	multiGPUMu.Lock()
+	defer multiGPUMu.Unlock()
 	if crossGPU != nil {
 		return crossGPU, nil
 	}
@@ -623,6 +630,8 @@ type HybridParallelismManager struct {
 var hybridManager *HybridParallelismManager
 
 func NewHybridParallelismManager(config *MultiGPUConfig) (*HybridParallelismManager, error) {
+	multiGPUMu.Lock()
+	defer multiGPUMu.Unlock()
 	if hybridManager != nil {
 		return hybridManager, nil
 	}
@@ -737,10 +746,14 @@ func GetMultiGPUConfig() *MultiGPUConfig {
 }
 
 func SetMultiGPUConfig(config *MultiGPUConfig) {
+	multiGPUMu.Lock()
+	defer multiGPUMu.Unlock()
 	defaultMultiGPUConfig = config
 }
 
 func GetHybridManager() *HybridParallelismManager {
+	multiGPUMu.Lock()
+	defer multiGPUMu.Unlock()
 	return hybridManager
 }
 
@@ -766,6 +779,8 @@ func InitializeMultiGPU(config *MultiGPUConfig) error {
 }
 
 func ShutdownMultiGPU() {
+	multiGPUMu.Lock()
+	defer multiGPUMu.Unlock()
 	if hybridManager != nil {
 		hybridManager.Synchronize()
 		hybridManager = nil

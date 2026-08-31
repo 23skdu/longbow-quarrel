@@ -241,7 +241,7 @@ func Fp32ToFp16Func(src []float32, dst []uint16) {
 			} else if newExp <= 0 {
 				shift := uint32(1 - newExp)
 				m := mant | 0x800000
-				h = uint16(sign<<15) | uint16(m>>(9+shift))
+				h = uint16(sign<<15) | uint16(m>>(9+shift)) // #nosec G115 -- safe bit manipulation for float16
 			} else {
 				h = uint16(sign<<15) | uint16(newExp<<10) | uint16(mant>>13)
 			}
