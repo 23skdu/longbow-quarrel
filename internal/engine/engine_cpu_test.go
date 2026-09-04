@@ -463,6 +463,117 @@ func TestAttentionCPU(t *testing.T) {
 	}
 }
 
+func TestAttentionCPU_VariantsAndParity(t *testing.T) {
+	testCases := []struct {
+		name     string
+		numHeads int
+		kvHeads  int
+		headDim  int
+		seqLen   int
+	}{
+		{"MHA_small", 4, 4, 16, 4},
+		{"MHA_head64", 2, 2, 64, 8},
+		{"GQA_4to2", 4, 2, 32, 6},
+		{"MQA_4to1", 4, 1, 32, 5},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			qTotal := tc.seqLen * tc.numHeads * tc.headDim
+			kvTotal := tc.seqLen * tc.kvHeads * tc.headDim
+
+			q := make([]float32, qTotal)
+			k := make([]float32, kvTotal)
+			v := make([]float32, kvTotal)
+
+			for i := range q {
+				q[i] = float32((i%17)-8) / 10.0
+			}
+			for i := range k {
+				k[i] = float32((i%19)-9) / 10.0
+			}
+			for i := range v {
+				v[i] = float32((i%23)-11) / 10.0
+			}
+
+			outVec := attentionCPU(q, k, v, tc.numHeads, tc.kvHeads, tc.headDim)
+			if len(outVec) != qTotal {
+				t.Fatalf("expected output length %d, got %d", qTotal, len(outVec))
+			}
+
+			// If MHA, compare with scalar reference implementation
+			if tc.numHeads == tc.kvHeads {
+				outScalar := attentionCPUScalar(q, k, v, tc.numHeads, tc.kvHeads, tc.headDim)
+				for i := range outVec {
+					diff := math.Abs(float64(outVec[i] - outScalar[i]))
+					if diff > 1e-4 {
+						t.Errorf("[%s] mismatch at %d: vec=%v scalar=%v diff=%v", tc.name, i, outVec[i], outScalar[i], diff)
+					}
+				}
+			}
+
+			for i, val := range outVec {
+				if math.IsNaN(float64(val)) || math.IsInf(float64(val), 0) {
+					t.Fatalf("[%s] produced NaN/Inf at index %d: %v", tc.name, i, val)
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkAttentionCPU(b *testing.B) {
+	numHeads := 8
+	kvHeads := 2
+	headDim := 64
+	seqLen := 32
+	qTotal := seqLen * numHeads * headDim
+	kvTotal := seqLen * kvHeads * headDim
+
+	q := make([]float32, qTotal)
+	k := make([]float32, kvTotal)
+	v := make([]float32, kvTotal)
+	for i := range q {
+		q[i] = float32(i%headDim) / float32(headDim)
+	}
+	for i := range k {
+		k[i] = float32(i%headDim) / float32(headDim)
+	}
+	for i := range v {
+		v[i] = float32(i%headDim) / float32(headDim)
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = attentionCPU(q, k, v, numHeads, kvHeads, headDim)
+	}
+}
+
+func BenchmarkAttentionCPUScalar(b *testing.B) {
+	numHeads := 8
+	kvHeads := 8
+	headDim := 64
+	seqLen := 32
+	total := seqLen * numHeads * headDim
+
+	q := make([]float32, total)
+	k := make([]float32, total)
+	v := make([]float32, total)
+	for i := range q {
+		q[i] = float32(i%headDim) / float32(headDim)
+	}
+	for i := range k {
+		k[i] = float32(i%headDim) / float32(headDim)
+	}
+	for i := range v {
+		v[i] = float32(i%headDim) / float32(headDim)
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = attentionCPUScalar(q, k, v, numHeads, kvHeads, headDim)
+	}
+}
+
 func TestForwardDraft(t *testing.T) {
 	modelPath := "test_model_draft.gguf"
 	if err := generateTestGGUF(modelPath); err != nil {

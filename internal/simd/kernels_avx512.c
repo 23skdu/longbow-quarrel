@@ -108,16 +108,21 @@ void rmsnorm_avx512(const float* input, const float* weight, float* output,
 void matmul_avx512(const float* a, const float* b, float* c, int m, int n, int k) {
     for (int i = 0; i < m; i++) {
         for (int j = 0; j < n; j++) {
-            __m512 v_sum = _mm512_setzero_ps();
-            int kk = 0;
-            for (; kk <= k - 16; kk += 16) {
-                __m512 va = _mm512_loadu_ps(&a[i * k + kk]);
-                __m512 vb = _mm512_set1_ps(b[kk * n + j]);
-                v_sum = _mm512_fmadd_ps(va, vb, v_sum);
+            c[i * n + j] = 0.0f;
+        }
+        for (int kk = 0; kk < k; kk++) {
+            float a_val = a[i * k + kk];
+            __m512 va = _mm512_set1_ps(a_val);
+            int j = 0;
+            for (; j <= n - 16; j += 16) {
+                __m512 vc = _mm512_loadu_ps(&c[i * n + j]);
+                __m512 vb = _mm512_loadu_ps(&b[kk * n + j]);
+                vc = _mm512_fmadd_ps(va, vb, vc);
+                _mm512_storeu_ps(&c[i * n + j], vc);
             }
-            float sum = _mm512_reduce_add_ps(v_sum);
-            for (; kk < k; kk++) sum += a[i * k + kk] * b[kk * n + j];
-            c[i * n + j] = sum;
+            for (; j < n; j++) {
+                c[i * n + j] += a_val * b[kk * n + j];
+            }
         }
     }
 }
@@ -140,9 +145,13 @@ void rope_avx512(float* tensor, const int* posIds, int batch, int heads,
             }
 }
 
+#define MAX_STATIC_ATTN_WEIGHTS_AVX512 8192
+_Thread_local static float tl_attn_weights_avx512[MAX_STATIC_ATTN_WEIGHTS_AVX512];
+
 void fused_attention_avx512(const float* q, const float* k, const float* v,
                             float* output, int batch, int heads, int seqLen,
                             int kvSeqLen, int headDim, float scale) {
+    float* weights = (kvSeqLen <= MAX_STATIC_ATTN_WEIGHTS_AVX512) ? tl_attn_weights_avx512 : (float*)malloc(kvSeqLen * sizeof(float));
     for (int b = 0; b < batch; b++)
         for (int h = 0; h < heads; h++)
             for (int s = 0; s < seqLen; s++) {
@@ -174,27 +183,49 @@ void fused_attention_avx512(const float* q, const float* k, const float* v,
                     }
                     float dot = _mm512_reduce_add_ps(v_sum);
                     for (; d < headDim; d++) dot += q[offset + d] * k[kvOff + d];
-                    exp_sum += expf(dot * scale - max_val);
+                    float w = expf(dot * scale - max_val);
+                    weights[kv] = w;
+                    exp_sum += w;
                 }
                 float inv_sum = (exp_sum > 0.0f) ? 1.0f / exp_sum : 0.0f;
-                for (int d = 0; d < headDim; d++) {
-                    float attn_sum = 0.0f;
-                    for (int kv = 0; kv < kvSeqLen; kv++) {
-                        int kvOff = b*heads*kvSeqLen*headDim + h*kvSeqLen*headDim + kv*headDim;
-                        float dot = 0.0f;
-                        for (int dd = 0; dd < headDim; dd++)
-                            dot += q[offset + dd] * k[kvOff + dd];
-                        attn_sum += expf(dot*scale - max_val) * inv_sum * v[kvOff + d];
+                for (int kv = 0; kv < kvSeqLen; kv++) {
+                    weights[kv] *= inv_sum;
+                }
+                int d = 0;
+                for (; d <= headDim - 16; d += 16) {
+                    _mm512_storeu_ps(&output[offset + d], _mm512_setzero_ps());
+                }
+                for (; d < headDim; d++) {
+                    output[offset + d] = 0.0f;
+                }
+                for (int kv = 0; kv < kvSeqLen; kv++) {
+                    int kvOff = b*heads*kvSeqLen*headDim + h*kvSeqLen*headDim + kv*headDim;
+                    float w = weights[kv];
+                    __m512 vw = _mm512_set1_ps(w);
+                    int dd = 0;
+                    for (; dd <= headDim - 16; dd += 16) {
+                        __m512 vo = _mm512_loadu_ps(&output[offset + dd]);
+                        __m512 vv = _mm512_loadu_ps(&v[kvOff + dd]);
+                        vo = _mm512_fmadd_ps(vw, vv, vo);
+                        _mm512_storeu_ps(&output[offset + dd], vo);
                     }
-                    output[offset + d] = attn_sum;
+                    for (; dd < headDim; dd++) {
+                        output[offset + dd] += w * v[kvOff + dd];
+                    }
                 }
             }
+    if (weights != tl_attn_weights_avx512) {
+        free(weights);
+    }
 }
+
+#define MAX_STATIC_HIDDEN_AVX512 32768
+_Thread_local static float tl_temp_avx512[MAX_STATIC_HIDDEN_AVX512];
 
 void fused_mlp_avx512(const float* input, const float* gateWeight,
                       const float* upWeight, const float* downWeight,
                       float* output, int batch, int dim, int hiddenDim) {
-    float* temp = (float*)malloc(hiddenDim * sizeof(float));
+    float* temp = (hiddenDim <= MAX_STATIC_HIDDEN_AVX512) ? tl_temp_avx512 : (float*)malloc(hiddenDim * sizeof(float));
     if (!temp) return;
     for (int b = 0; b < batch; b++) {
         int inOff = b * dim;
@@ -206,7 +237,7 @@ void fused_mlp_avx512(const float* input, const float* gateWeight,
             __m512 neg_g = _mm512_sub_ps(_mm512_setzero_ps(), g);
             __m512 sig = _mm512_div_ps(_mm512_set1_ps(1.0f),
                           _mm512_add_ps(_mm512_set1_ps(1.0f), fast_exp_avx512(neg_g)));
-            __m512 up = _mm512_loadu_ps(&upWeight[inOff + h]);
+            __m512 up = _mm512_loadu_ps(&upWeight[h]);
             __m512 res = _mm512_mul_ps(up, g);
             res = _mm512_mul_ps(res, sig);
             _mm512_storeu_ps(&temp[h], res);
@@ -214,7 +245,7 @@ void fused_mlp_avx512(const float* input, const float* gateWeight,
         for (; h < hiddenDim; h++) {
             float gv = gateWeight[h];
             if (gv > 10.0f) gv = 10.0f; if (gv < -10.0f) gv = -10.0f;
-            temp[h] = upWeight[inOff + h] * gv * (1.0f / (1.0f + expf(-gv)));
+            temp[h] = upWeight[h] * gv * (1.0f / (1.0f + expf(-gv)));
         }
         int d = 0;
         for (; d <= dim - 16; d += 16) {
@@ -232,7 +263,7 @@ void fused_mlp_avx512(const float* input, const float* gateWeight,
             output[inOff + d] = sum;
         }
     }
-    free(temp);
+    if (temp != tl_temp_avx512) free(temp);
 }
 
 void fp16_to_fp32_avx512(const uint16_t* src, float* dst, int n) {

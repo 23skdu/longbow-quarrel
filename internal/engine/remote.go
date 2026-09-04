@@ -11,9 +11,10 @@ import (
 // RemoteWorkerEngine is an implementation of DistributedEngine that
 // offloads execution to a remote Arrow Flight worker node.
 type RemoteWorkerEngine struct {
-	client *arrow_client.FlightClient
-	config config.Config
-	role   ShardRole
+	client    *arrow_client.FlightClient
+	config    config.Config
+	role      ShardRole
+	deviceCtx *device.Context
 }
 
 func NewRemoteWorkerEngine(host string, port int, cfg config.Config) (*RemoteWorkerEngine, error) {
@@ -21,12 +22,26 @@ func NewRemoteWorkerEngine(host string, port int, cfg config.Config) (*RemoteWor
 	if err != nil {
 		return nil, err
 	}
-	
+
 	return &RemoteWorkerEngine{
 		client: client,
 		config: cfg,
 		role:   RoleWorker,
 	}, nil
+}
+
+func (e *RemoteWorkerEngine) SetDeviceContext(ctx *device.Context) {
+	e.deviceCtx = ctx
+}
+
+func (e *RemoteWorkerEngine) Close() {
+	if e.deviceCtx != nil {
+		e.deviceCtx.Free()
+		e.deviceCtx = nil
+	}
+	if e.client != nil {
+		_ = e.client.Close()
+	}
 }
 
 func (e *RemoteWorkerEngine) ShardRole() ShardRole {
@@ -95,20 +110,42 @@ func (e *RemoteWorkerEngine) ForwardShardedLayer(ctx context.Context, layerIdx i
 
 	// Prepare metadata for layer computation
 	meta := map[string]string{
-		"layer_idx":  fmt.Sprintf("%d", layerIdx),
-		"col_start":  fmt.Sprintf("%d", colStart),
-		"col_end":    fmt.Sprintf("%d", colEnd),
+		"layer_idx": fmt.Sprintf("%d", layerIdx),
+		"col_start": fmt.Sprintf("%d", colStart),
+		"col_end":   fmt.Sprintf("%d", colEnd),
 		"rows":      fmt.Sprintf("%d", input.Rows()),
 		"cols":      fmt.Sprintf("%d", input.Cols()),
 	}
 
 	// Send input tensor to worker via DoPut
-	_, err := e.client.DoPutTensor(ctx, inputData, []int32{int32(input.Rows())}, meta) // #nosec G115 -- safe: Rows() is bounded by model config
+	resultData, err := e.client.DoPutTensor(ctx, inputData, []int32{int32(input.Rows())}, meta) // #nosec G115 -- safe: Rows() is bounded by model config
 	if err != nil {
 		return nil, fmt.Errorf("DoPutTensor failed: %w", err)
 	}
 
-	// Note: Returns nil as placeholder - full implementation would receive result from worker
-	// This is a skeletal implementation for the P0 blocker
-	return nil, nil
+	if e.deviceCtx == nil {
+		e.deviceCtx = device.NewContext()
+	}
+
+	rows := input.Rows()
+	if rows <= 0 {
+		rows = 1
+	}
+	cols := colEnd - colStart
+	if cols <= 0 {
+		cols = input.Cols()
+	}
+	if len(resultData) > 0 && rows > 0 {
+		cols = len(resultData) / rows
+	}
+
+	outTensor := e.deviceCtx.NewTensorFP32(rows, cols)
+	if len(resultData) > 0 {
+		if err := outTensor.LoadFrom(resultData); err != nil {
+			outTensor.Free()
+			return nil, fmt.Errorf("failed to load shard result into tensor: %w", err)
+		}
+	}
+
+	return outTensor, nil
 }

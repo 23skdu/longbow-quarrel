@@ -6,14 +6,13 @@ package simd
 #cgo CFLAGS: -mavx2
 #include <stdint.h>
 
-void softmax_avx2(float* x, int n);
-void swiglu_avx2(const float* gate, const float* up, float* out, int n);
-void fp16_to_fp32_avx2(const uint16_t* src, float* dst, int n);
-void fp32_to_fp16_avx2(const float* src, uint16_t* dst, int n);
+void softmax_avx2(float* x, long n);
+void swiglu_avx2(const float* gate, const float* up, float* out, long n);
+void fp16_to_fp32_avx2(const uint16_t* src, float* dst, long n);
+void fp32_to_fp16_avx2(const float* src, uint16_t* dst, long n);
 */
 import "C"
 import (
-	"math"
 	"unsafe"
 )
 
@@ -31,7 +30,7 @@ func SoftmaxAVX2(x []float32) {
 	}
 
 	if useAVX2() && len(x) >= 16 {
-		C.softmax_avx2((*C.float)(unsafe.Pointer(&x[0])), C.int(len(x)))
+		C.softmax_avx2((*C.float)(unsafe.Pointer(&x[0])), C.long(len(x)))
 	} else {
 		softmaxScalar(x)
 	}
@@ -49,7 +48,7 @@ func SwiGLUAVX2(gate, up, out []float32) {
 			(*C.float)(unsafe.Pointer(&gate[0])),
 			(*C.float)(unsafe.Pointer(&up[0])),
 			(*C.float)(unsafe.Pointer(&out[0])),
-			C.int(n),
+			C.long(n),
 		)
 	} else {
 		swigluScalar(gate, up, out)
@@ -67,7 +66,7 @@ func Fp16ToFp32AVX2(src []uint16, dst []float32) {
 		C.fp16_to_fp32_avx2(
 			(*C.uint16_t)(unsafe.Pointer(&src[0])),
 			(*C.float)(unsafe.Pointer(&dst[0])),
-			C.int(n),
+			C.long(n),
 		)
 	} else {
 		fp16ToFp32Scalar(src, dst)
@@ -85,129 +84,9 @@ func Fp32ToFp16AVX2(src []float32, dst []uint16) {
 		C.fp32_to_fp16_avx2(
 			(*C.float)(unsafe.Pointer(&src[0])),
 			(*C.uint16_t)(unsafe.Pointer(&dst[0])),
-			C.int(n),
+			C.long(n),
 		)
 	} else {
 		fp32ToFp16Scalar(src, dst)
 	}
-}
-
-// Scalar fallback implementations
-func softmaxScalar(x []float32) {
-	if len(x) == 0 {
-		return
-	}
-
-	max := x[0]
-	for _, v := range x {
-		if v > max {
-			max = v
-		}
-	}
-
-	sum := float32(0.0)
-	for i := range x {
-		x[i] = fastExp(x[i] - max)
-		sum += x[i]
-	}
-
-	if sum > 0 {
-		invSum := float32(1.0) / sum
-		for i := range x {
-			x[i] *= invSum
-		}
-	}
-}
-
-func swigluScalar(gate, up, out []float32) {
-	for i := 0; i < len(gate); i++ {
-		g := gate[i]
-		if g > 10.0 {
-			g = 10.0
-		}
-		if g < -10.0 {
-			g = -10.0
-		}
-		sigmoid := float32(1.0) / (float32(1.0) + fastExp(-g))
-		out[i] = up[i] * g * sigmoid
-	}
-}
-
-func fp16ToFp32Scalar(src []uint16, dst []float32) {
-	for i := 0; i < len(src); i++ {
-		dst[i] = fp16ToFp32(src[i])
-	}
-}
-
-func fp32ToFp16Scalar(src []float32, dst []uint16) {
-	for i := 0; i < len(src); i++ {
-		dst[i] = fp32ToFp16(src[i])
-	}
-}
-
-// Fast approximate exp for scalar fallback
-func fastExp(x float32) float32 {
-	return float32(math.Exp(float64(x)))
-}
-
-// FP16 to FP32 conversion
-func fp16ToFp32(h uint16) float32 {
-	sign := uint32(h>>15) & 0x1
-	exp := uint32(h>>10) & 0x1F
-	mant := uint32(h) & 0x3FF
-
-	var f32 uint32
-	if exp == 0 {
-		if mant == 0 {
-			f32 = sign << 31
-		} else {
-			shift := uint32(0)
-			m := mant
-			for m < 0x400 {
-				m <<= 1
-				shift++
-			}
-			m = (m & 0x3FF) << 13
-			e := uint32(127 - 14 - shift)
-			f32 = (sign << 31) | (e << 23) | m
-		}
-	} else if exp == 31 {
-		if mant == 0 {
-			f32 = (sign << 31) | 0x7F800000
-		} else {
-			f32 = (sign << 31) | 0x7F800000 | (mant << 13)
-		}
-	} else {
-		newExp := exp - 15 + 127
-		f32 = (sign << 31) | (newExp << 23) | (mant << 13)
-	}
-
-	return *(*float32)(unsafe.Pointer(&f32))
-}
-
-// FP32 to FP16 conversion
-func fp32ToFp16(f float32) uint16 {
-	bits := *(*uint32)(unsafe.Pointer(&f))
-	sign := bits >> 31
-	exp := (bits >> 23) & 0xFF
-	mant := bits & 0x7FFFFF
-
-	var h uint16
-	if exp == 0 {
-		h = 0
-	} else if exp == 255 {
-		h = uint16(sign<<15) | 0x7C00 | uint16(mant>>9)
-	} else {
-		newExp := int(exp) - 127 + 15
-		if newExp >= 31 {
-			h = uint16(sign<<15) | 0x7C00
-		} else if newExp <= 0 {
-			shift := uint32(1 - newExp)
-			m := mant | 0x800000
-			h = uint16(sign<<15) | uint16(m>>(9+shift))
-		} else {
-			h = uint16(sign<<15) | uint16(newExp<<10) | uint16(mant>>13)
-		}
-	}
-	return h
 }

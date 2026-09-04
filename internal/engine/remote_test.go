@@ -53,3 +53,34 @@ func TestRemoteWorkerEngine_ForwardShardedLayer_ValidInput(t *testing.T) {
 		t.Error("Expected error when client is nil")
 	}
 }
+
+func TestRemoteWorkerEngine_LifecycleAndRole(t *testing.T) {
+	ctx := device.NewContext()
+	cfg := conf.Config{
+		HiddenDim: 128,
+		Layers:    4,
+	}
+
+	eng := &RemoteWorkerEngine{
+		config: cfg,
+		role:   RoleWorker,
+	}
+
+	if eng.ShardRole() != RoleWorker {
+		t.Errorf("Expected role %v, got %v", RoleWorker, eng.ShardRole())
+	}
+
+	if eng.Config().HiddenDim != 128 {
+		t.Errorf("Expected HiddenDim 128, got %d", eng.Config().HiddenDim)
+	}
+
+	eng.SetDeviceContext(ctx)
+	if eng.deviceCtx == nil {
+		t.Error("deviceCtx was not set")
+	}
+
+	eng.Close()
+	if eng.deviceCtx != nil {
+		t.Error("deviceCtx should be nil after Close()")
+	}
+}

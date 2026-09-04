@@ -122,7 +122,7 @@ func FusedMLP(input, gateW, upW, downW, output []float32, batch, dim, hiddenDim 
 					g = -10.0
 				}
 				sig := float32(1.0) / (float32(1.0) + float32(math.Exp(float64(-g))))
-				val := upW[inOff+h] * g * sig
+				val := upW[h] * g * sig
 				sum += val * downW[h*dim+d]
 			}
 			output[inOff+d] = sum

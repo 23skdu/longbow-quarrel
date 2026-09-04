@@ -90,10 +90,9 @@ func PolarQuantVariant(input []float32, rotationMatrix []float32, n int, tqType 
 // DequantizeTurboQuant reconstructs float32 from TurboQuant-encoded data
 func DequantizeTurboQuant(quantized []int8, scale float32, rotationMatrix []float32, n int) []float32 {
 	result := make([]float32, n)
-	invScale := 1.0 / scale
 
 	for i := 0; i < n; i++ {
-		result[i] = float32(quantized[i]) * invScale
+		result[i] = float32(quantized[i]) * scale
 	}
 
 	rotated := make([]float32, n)

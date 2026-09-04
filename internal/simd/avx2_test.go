@@ -210,8 +210,7 @@ func BenchmarkSoftmaxAVX2(b *testing.B) {
 		data[i] = float32(i % 100)
 	}
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		input := make([]float32, len(data))
 		copy(input, data)
 		SoftmaxAVX2(input)
@@ -227,8 +226,20 @@ func BenchmarkSwiGLUAVX2(b *testing.B) {
 		up[i] = float32(i % 100)
 	}
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		SwiGLUAVX2(gate, up, out)
+	}
+}
+
+func TestUseAVX2(t *testing.T) {
+	detectCPU()
+	if hasAVX2 {
+		if !useAVX2() {
+			t.Error("useAVX2() should return true when hasAVX2 is true")
+		}
+	} else {
+		if useAVX2() {
+			t.Error("useAVX2() should return false when hasAVX2 is false")
+		}
 	}
 }

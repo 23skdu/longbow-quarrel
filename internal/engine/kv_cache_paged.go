@@ -1,13 +1,17 @@
 package engine
 
 import (
+	"encoding/binary"
 	"fmt"
+	"math"
 	"sync"
+	"time"
 
 	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/device"
 	"github.com/23skdu/longbow-quarrel/internal/logger"
 	"github.com/23skdu/longbow-quarrel/internal/metrics"
+	"github.com/23skdu/longbow-quarrel/internal/simd"
 )
 
 // PagedKVCache implements a block-based KV cache inspired by PagedAttention.
@@ -108,13 +112,16 @@ func (c *PagedKVCache) Init(ctx *device.Context, config config.Config) error {
 	c.vPools = make([]*device.Tensor, c.layers)
 
 	c.qjlRows = 32 // Default for many models
+	if ctx.TQQJL != nil && ctx.TQQJL.Rows() > 0 {
+		c.qjlRows = ctx.TQQJL.Rows()
+	}
 
 	kvDim := c.kvHeads * c.headDim
 	if c.Precision == device.DataTypeTQ1_0 || c.Precision == device.DataTypeTQ2_0 {
 		// TurboQuant Block Structure: [headDim int8][qjlRows int8][8 bytes metadata]
-		// We'll allocate a single INT8 tensor for the whole pool
+		// Each token slot stores c.kvHeads blocks
 		tqBlockSize := c.headDim + c.qjlRows + 8
-		kvDim = tqBlockSize
+		kvDim = tqBlockSize * c.kvHeads
 	}
 
 	for i := 0; i < c.layers; i++ {
@@ -135,10 +142,25 @@ func (c *PagedKVCache) Init(ctx *device.Context, config config.Config) error {
 		c.vPools[i] = v
 	}
 
-	// Initialize TurboQuant matrices from device context if available
-	if (c.Precision == device.DataTypeTQ1_0 || c.Precision == device.DataTypeTQ2_0) && ctx.TQRotation != nil && ctx.TQQJL != nil {
-		c.tqRotation = ctx.TQRotation
-		c.tqQJL = ctx.TQQJL
+	// Initialize TurboQuant matrices from device context or fallbacks if available
+	if c.Precision == device.DataTypeTQ1_0 || c.Precision == device.DataTypeTQ2_0 {
+		if ctx.TQRotation != nil && ctx.TQQJL != nil {
+			c.tqRotation = ctx.TQRotation
+			c.tqQJL = ctx.TQQJL
+		} else {
+			rotData := device.GetPrecomputedRotation(c.headDim)
+			qjlData := device.GetPrecomputedQJLSigns(c.qjlRows * c.headDim)
+			rot := ctx.NewTensorFP32(c.headDim, c.headDim)
+			if rot != nil {
+				_ = rot.LoadFrom(rotData)
+				c.tqRotation = rot
+			}
+			qjl := ctx.NewTensorFP32(c.qjlRows, c.headDim)
+			if qjl != nil {
+				_ = qjl.LoadFrom(qjlData)
+				c.tqQJL = qjl
+			}
+		}
 		logger.Log.Debug("PagedKVCache initialized with TurboQuant matrices", "head_dim", c.headDim, "qjl_rows", c.qjlRows)
 	}
 
@@ -168,20 +190,98 @@ func (c *PagedKVCache) encodeKVTurboQuant(k, v, kCache, vCache *device.Tensor, p
 		return
 	}
 
+	startTime := time.Now()
+
 	blockSize := c.headDim
 	qjlRows := c.qjlRows
+	if qjlRows == 0 {
+		qjlRows = 32
+	}
 
-	// Use context's TurboQuant encode for the full K/V tensors
-	// The actual encoding is handled by the device context
+	bits := 2
+	if c.Precision == device.DataTypeTQ2_0 {
+		bits = 4
+	}
+
 	kHost := k.ToHostF32()
 	vHost := v.ToHostF32()
+	posHost := physicalPositions.ToHostF32()
+	rotData := c.tqRotation.ToHostF32()
+	qjlData := c.tqQJL.ToHostF32()
 
-	// The encoding is done per-block through the context
-	// This is a simplified implementation - proper implementation uses GPU kernels
-	_ = kHost
-	_ = vHost
-	_ = blockSize
-	_ = qjlRows
+	if len(qjlData) > 0 && blockSize > 0 {
+		availRows := len(qjlData) / blockSize
+		if qjlRows > availRows {
+			qjlRows = availRows
+		}
+	}
+	bytesPerBlock := blockSize + qjlRows + 8
+
+	numTokens := len(posHost)
+	if numTokens == 0 && k.Rows() > 0 {
+		numTokens = k.Rows()
+	}
+
+	bytesPerToken := c.kvHeads * bytesPerBlock
+	kRaw := kCache.RawData()
+	vRaw := vCache.RawData()
+
+	for b := 0; b < numTokens; b++ {
+		pPos := 0
+		if b < len(posHost) {
+			pPos = int(posHost[b])
+		}
+		dstTokenStart := pPos * bytesPerToken
+
+		for h := 0; h < c.kvHeads; h++ {
+			srcOffset := b*(c.kvHeads*c.headDim) + h*c.headDim
+			if srcOffset+c.headDim > len(kHost) || srcOffset+c.headDim > len(vHost) {
+				continue
+			}
+
+			kHead := kHost[srcOffset : srcOffset+c.headDim]
+			vHead := vHost[srcOffset : srcOffset+c.headDim]
+
+			dstHeadStart := dstTokenStart + h*bytesPerBlock
+			if dstHeadStart+bytesPerBlock > len(kRaw) || dstHeadStart+bytesPerBlock > len(vRaw) {
+				continue
+			}
+
+			// PolarQuant + QJL for K
+			qK, sK, resK := simd.PolarQuantSIMD(kHead, rotData, blockSize, bits)
+			qjK, sjK := simd.QJLTransformSIMD(resK, qjlData, qjlRows, blockSize)
+
+			kDst := kRaw[dstHeadStart : dstHeadStart+bytesPerBlock]
+			for i, val := range qK {
+				kDst[i] = byte(val) // #nosec G115 -- int8 to byte for quantized data
+			}
+			for i, val := range qjK {
+				kDst[blockSize+i] = byte(val) // #nosec G115 -- int8 to byte for quantized data
+			}
+			binary.LittleEndian.PutUint32(kDst[blockSize+qjlRows:blockSize+qjlRows+4], math.Float32bits(sK))
+			binary.LittleEndian.PutUint32(kDst[blockSize+qjlRows+4:blockSize+qjlRows+8], math.Float32bits(sjK))
+
+			// PolarQuant + QJL for V
+			qV, sV, resV := simd.PolarQuantSIMD(vHead, rotData, blockSize, bits)
+			qjV, sjV := simd.QJLTransformSIMD(resV, qjlData, qjlRows, blockSize)
+
+			vDst := vRaw[dstHeadStart : dstHeadStart+bytesPerBlock]
+			for i, val := range qV {
+				vDst[i] = byte(val) // #nosec G115 -- int8 to byte for quantized data
+			}
+			for i, val := range qjV {
+				vDst[blockSize+i] = byte(val) // #nosec G115 -- int8 to byte for quantized data
+			}
+			binary.LittleEndian.PutUint32(vDst[blockSize+qjlRows:blockSize+qjlRows+4], math.Float32bits(sV))
+			binary.LittleEndian.PutUint32(vDst[blockSize+qjlRows+4:blockSize+qjlRows+8], math.Float32bits(sjV))
+		}
+	}
+
+	_ = kCache.LoadFrom(kRaw)
+	_ = vCache.LoadFrom(vRaw)
+
+	compressionRatio := float64(c.headDim*4) / float64(bytesPerBlock)
+	metrics.RecordTurboQuantBatch(compressionRatio, time.Since(startTime).Seconds())
 }
 
 // Allocate reserves blocks for a sequence to accommodate numTokens.

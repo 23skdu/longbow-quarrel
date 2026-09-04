@@ -105,8 +105,8 @@ func TestDequantizeTurboQuant(t *testing.T) {
 
 	// Verify values reconstruct correctly
 	for i := 0; i < 5; i++ {
-		expected := float32(quantized[i]) * (1.0 / scale)
-		if math.Abs(float64(reconstructed[i]-expected)) > 0.1 {
+		expected := float32(quantized[i]) * scale
+		if math.Abs(float64(reconstructed[i]-expected)) > 0.01 {
 			t.Errorf("DequantizeTurboQuant[%d]: got %v, want %v", i, reconstructed[i], expected)
 		}
 	}
@@ -121,8 +121,7 @@ func BenchmarkPolarQuantSIMD(b *testing.B) {
 		rotation[i] = 0.1
 	}
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_, _, _ = PolarQuantSIMD(input, rotation, n, bits)
 	}
 }
@@ -140,8 +139,7 @@ func BenchmarkTurboQuantVariants(b *testing.B) {
 	for i, tt := range variants {
 		tt := tt
 		b.Run(names[i], func(b *testing.B) {
-			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
+			for b.Loop() {
 				_, _, _ = PolarQuantVariant(input, rotation, n, tt)
 			}
 		})

@@ -2,6 +2,7 @@ package simd
 
 import (
 	"os"
+	"os/exec"
 	"runtime"
 	"strings"
 )
@@ -62,9 +63,17 @@ func detectCPU() {
 }
 
 func readCPUFlags() string {
-	if runtime.GOOS != "linux" {
+	switch runtime.GOOS {
+	case "linux":
+		return readCPUFlagsLinux()
+	case "darwin":
+		return readCPUFlagsDarwin()
+	default:
 		return ""
 	}
+}
+
+func readCPUFlagsLinux() string {
 	data, err := os.ReadFile("/proc/cpuinfo")
 	if err != nil {
 		return ""
@@ -78,6 +87,66 @@ func readCPUFlags() string {
 		}
 	}
 	return ""
+}
+
+func readCPUFlagsDarwin() string {
+	cmd := exec.Command("sysctl", "-a")
+	out, err := cmd.Output()
+	if err != nil {
+		cmd = exec.Command("sysctl", "hw.optional")
+		out, err = cmd.Output()
+		if err != nil {
+			return ""
+		}
+	}
+	return parseDarwinSysctl(string(out))
+}
+
+func parseDarwinSysctl(data string) string {
+	var sb strings.Builder
+	lines := strings.Split(data, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		idx := strings.IndexAny(line, ":=")
+		if idx < 0 {
+			continue
+		}
+		key := strings.TrimSpace(line[:idx])
+		val := strings.TrimSpace(line[idx+1:])
+		if val != "1" {
+			continue
+		}
+		switch strings.ToLower(key) {
+		case "hw.optional.avx2_0":
+			sb.WriteString("avx2 ")
+		case "hw.optional.avx512f":
+			sb.WriteString("avx512f ")
+		case "hw.optional.avx512bw":
+			sb.WriteString("avx512bw ")
+		case "hw.optional.avx512dq":
+			sb.WriteString("avx512dq ")
+		case "hw.optional.avx512vl":
+			sb.WriteString("avx512vl ")
+		case "hw.optional.fma":
+			sb.WriteString("fma ")
+		case "hw.optional.neon", "hw.optional.arm64":
+			sb.WriteString("neon ")
+		case "hw.optional.arm.feat_dotprod", "hw.optional.armfe_dotprod":
+			sb.WriteString("asimddp ")
+		case "hw.optional.vaes":
+			sb.WriteString("vaes ")
+		case "hw.optional.vpclmulqdq":
+			sb.WriteString("vpclmulqdq ")
+		case "hw.optional.gfni":
+			sb.WriteString("gfni ")
+		case "hw.optional.avxvnni":
+			sb.WriteString("avx_vnni ")
+		}
+	}
+	return sb.String()
 }
 
 func containsFlag(flags, flag string) bool {

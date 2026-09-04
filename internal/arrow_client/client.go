@@ -179,6 +179,11 @@ func (fc *FlightClient) DoPut(ctx context.Context, vectors [][]float32, ids []st
 		return fmt.Errorf("failed to close writer: %w", err)
 	}
 
+	// Close sending direction to notify server of EOF
+	if err := stream.CloseSend(); err != nil {
+		return fmt.Errorf("failed to close send stream: %w", err)
+	}
+
 	// Wait for acknowledgment (optional)
 	_, err = stream.Recv()
 	if err != nil && err != io.EOF {
@@ -271,6 +276,11 @@ func (fc *FlightClient) DoPutTensor(ctx context.Context, data []float32, rows []
 
 	if err := writer.Close(); err != nil {
 		return nil, fmt.Errorf("failed to close writer: %w", err)
+	}
+
+	// Close sending direction to notify server of EOF
+	if err := stream.CloseSend(); err != nil {
+		return nil, fmt.Errorf("failed to close send stream: %w", err)
 	}
 
 	// Read response

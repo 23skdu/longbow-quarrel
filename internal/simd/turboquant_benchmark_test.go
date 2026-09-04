@@ -18,8 +18,7 @@ func BenchmarkQJLTransformSIMD(b *testing.B) {
 		sign[i] = rand.Float32()
 	}
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_, _ = QJLTransformSIMD(residual, sign, rows, cols)
 	}
 }
@@ -36,8 +35,7 @@ func BenchmarkEndToEndInferenceStep(b *testing.B) {
 	rot := make([]float32, dim*dim)
 	qjl := make([]float32, 64*dim)
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		// Mock storing all layers
 		for l := 0; l < layers; l++ {
 			for h := 0; h < heads; h++ {

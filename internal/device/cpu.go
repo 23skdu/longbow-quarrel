@@ -151,6 +151,8 @@ func (c *Context) NewTensorWithType(rows, cols int, dt DataType) *Tensor {
 	}
 	numElements := rows * cols
 	switch dt {
+	case DataTypeINT8:
+		t.rawData = make([]byte, numElements)
 	case DataTypeF32:
 		t.data = make([]float32, numElements)
 	default:

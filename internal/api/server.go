@@ -25,6 +25,13 @@ type TokenizerShim interface {
 	GetVocab() []string
 }
 
+func (s *Server) getUsedMemory() int64 {
+	if s != nil && s.UsedMemory != nil {
+		return s.UsedMemory()
+	}
+	return 0
+}
+
 type HealthResponse struct {
 	Status      string `json:"status"`
 	MemoryUsed  int64  `json:"memory_used"`
@@ -34,7 +41,7 @@ type HealthResponse struct {
 
 // HealthzEndpoint enables Kubernetes liveness/readiness orchestration probes.
 func (s *Server) HealthzEndpoint(w http.ResponseWriter, r *http.Request) {
-	used := s.UsedMemory()
+	used := s.getUsedMemory()
 
 	loadPercent := 0
 	if s.MaxMemory > 0 {
@@ -84,7 +91,7 @@ func InitServer(maxMemory int64, memCallback func() int64, e engine.Engine, t To
 func (s *Server) runResourceMonitor() {
 	ticker := time.NewTicker(1 * time.Second)
 	for range ticker.C {
-		used := s.UsedMemory()
+		used := s.getUsedMemory()
 		if s.MaxMemory > 0 {
 			load := float64(used) / float64(s.MaxMemory)
 			if load >= 0.95 {
@@ -130,7 +137,7 @@ func (s *Server) CompletionsHandler(w http.ResponseWriter, r *http.Request) {
 	_ = ctx
 
 	// Graceful Degradation: Fast-fail if OOM risk
-	used := s.UsedMemory()
+	used := s.getUsedMemory()
 	if s.MaxMemory > 0 && float64(used)/float64(s.MaxMemory) >= 0.95 {
 		http.Error(w, "Service Unavailable: OOM Imminent (Memory at 95%+)", http.StatusServiceUnavailable)
 		return

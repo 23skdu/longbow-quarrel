@@ -525,12 +525,129 @@ func sigmoid(x float32) float32 {
 	return float32(1.0 / (1.0 + math.Exp(-float64(x))))
 }
 
+func vecDot(a, b []float32) float32 {
+	n := len(a)
+	var s0, s1, s2, s3, s4, s5, s6, s7 float32
+	i := 0
+	for ; i <= n-8; i += 8 {
+		s0 += a[i+0] * b[i+0]
+		s1 += a[i+1] * b[i+1]
+		s2 += a[i+2] * b[i+2]
+		s3 += a[i+3] * b[i+3]
+		s4 += a[i+4] * b[i+4]
+		s5 += a[i+5] * b[i+5]
+		s6 += a[i+6] * b[i+6]
+		s7 += a[i+7] * b[i+7]
+	}
+	sum := ((s0 + s1) + (s2 + s3)) + ((s4 + s5) + (s6 + s7))
+	for ; i < n; i++ {
+		sum += a[i] * b[i]
+	}
+	return sum
+}
+
+func vecFMA(dst, src []float32, weight float32) {
+	n := len(dst)
+	i := 0
+	for ; i <= n-8; i += 8 {
+		dst[i+0] += weight * src[i+0]
+		dst[i+1] += weight * src[i+1]
+		dst[i+2] += weight * src[i+2]
+		dst[i+3] += weight * src[i+3]
+		dst[i+4] += weight * src[i+4]
+		dst[i+5] += weight * src[i+5]
+		dst[i+6] += weight * src[i+6]
+		dst[i+7] += weight * src[i+7]
+	}
+	for ; i < n; i++ {
+		dst[i] += weight * src[i]
+	}
+}
+
 func attentionCPU(q, k, v []float32, numHeads, kvHeads, headDim int) []float32 {
+	if numHeads <= 0 || headDim <= 0 || len(q) == 0 {
+		return make([]float32, len(q))
+	}
+	seqLen := len(q) / (numHeads * headDim)
+	if seqLen <= 0 {
+		return make([]float32, len(q))
+	}
+	if kvHeads <= 0 {
+		kvHeads = numHeads
+	}
+
+	scale := float32(1.0 / math.Sqrt(float64(headDim)))
+	result := make([]float32, len(q))
+	kvStride := headDim * seqLen
+	totalKHeads := len(k) / kvStride
+	if totalKHeads <= 0 {
+		totalKHeads = 1
+	}
+
+	scores := make([]float32, seqLen)
+
+	for h := 0; h < numHeads; h++ {
+		qHead := q[h*kvStride : (h+1)*kvStride]
+
+		// Support GQA / MQA mapping
+		var kh int
+		if totalKHeads == numHeads {
+			kh = h
+		} else {
+			kvPerHead := numHeads / kvHeads
+			if kvPerHead < 1 {
+				kvPerHead = 1
+			}
+			kh = h / kvPerHead
+			if kh >= totalKHeads {
+				kh = totalKHeads - 1
+			}
+		}
+
+		kHead := k[kh*kvStride : (kh+1)*kvStride]
+		vHead := v[kh*kvStride : (kh+1)*kvStride]
+
+		for i := 0; i < seqLen; i++ {
+			qVec := qHead[i*headDim : (i+1)*headDim]
+
+			var maxScore float32 = -math.MaxFloat32
+			for j := 0; j <= i; j++ {
+				kVec := kHead[j*headDim : (j+1)*headDim]
+				score := vecDot(qVec, kVec) * scale
+				scores[j] = score
+				if score > maxScore {
+					maxScore = score
+				}
+			}
+
+			var sumExp float32
+			for j := 0; j <= i; j++ {
+				w := float32(math.Exp(float64(scores[j] - maxScore)))
+				scores[j] = w
+				sumExp += w
+			}
+
+			invSum := float32(1.0)
+			if sumExp > 0 {
+				invSum = 1.0 / sumExp
+			}
+
+			outVec := result[h*kvStride+i*headDim : h*kvStride+(i+1)*headDim]
+			for j := 0; j <= i; j++ {
+				w := scores[j] * invSum
+				vVec := vHead[j*headDim : (j+1)*headDim]
+				vecFMA(outVec, vVec, w)
+			}
+		}
+	}
+
+	return result
+}
+
+func attentionCPUScalar(q, k, v []float32, numHeads, kvHeads, headDim int) []float32 {
 	headSize := headDim
 	seqLen := len(q) / (numHeads * headDim)
-
 	scale := 1.0 / math.Sqrt(float64(headDim))
-
 	result := make([]float32, len(q))
 
 	for h := 0; h < numHeads; h++ {
@@ -548,7 +665,7 @@ func attentionCPU(q, k, v []float32, numHeads, kvHeads, headDim int) []float32 {
 					dot += float64(qHead[i*headDim+d]) * float64(kHead[j*headDim+d])
 				}
 				score := dot * scale
-				if j == i || score > maxScore {
+				if j == 0 || score > maxScore {
 					maxScore = score
 				}
 			}

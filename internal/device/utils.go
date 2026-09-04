@@ -58,7 +58,7 @@ func Float32ToFloat16(f float32) uint16 {
 	if newExp < 0 {
 		return uint16(sign << 15) // Flush to zero
 	} else if newExp >= 31 {
-		return uint16((sign << 15) | 0x7c00) // Inf, #nosec G115 -- safe bit manipulation
+		return uint16((sign << 15) | 0x7c00) // #nosec G115 -- safe bit manipulation
 	}
 
 	return uint16((sign << 15) | (uint32(newExp) << 10) | (mant >> 13)) // #nosec G115 -- safe bit manipulation

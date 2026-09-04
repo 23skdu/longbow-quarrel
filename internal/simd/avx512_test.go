@@ -134,8 +134,8 @@ func TestSwiGLU_Random(t *testing.T) {
 	SwiGLU(gate, up, out)
 
 	for i, v := range out {
-		if math.IsInf(float64(v)) || math.IsNaN(float64(v)) {
-			t.Errorf("SwiGLU()[%d] = %v (Inf=%v, NaN=%v)", i, v, math.IsInf(float64(v)), math.IsNaN(float64(v)))
+		if math.IsInf(float64(v), 0) || math.IsNaN(float64(v)) {
+			t.Errorf("SwiGLU()[%d] = %v (Inf=%v, NaN=%v)", i, v, math.IsInf(float64(v), 0), math.IsNaN(float64(v)))
 		}
 		if v < -1e6 || v > 1e6 {
 			t.Errorf("SwiGLU()[%d] out of range: %v", i, v)
@@ -195,7 +195,7 @@ func TestFp16ToFp32(t *testing.T) {
 			Fp16ToFp32(src, dst)
 
 			for i, h := range src {
-				if math.IsInf(float64(dst[i])) && !math.IsInf(float64(fp16ToFp32(h))) {
+				if math.IsInf(float64(dst[i]), 0) && !math.IsInf(float64(fp16ToFp32(h)), 0) {
 					t.Errorf("Fp16ToFp32()[%d] = Inf, want %v", i, fp16ToFp32(h))
 				}
 				if math.IsNaN(float64(dst[i])) && !math.IsNaN(float64(fp16ToFp32(h))) {
@@ -315,8 +315,8 @@ func TestRMSNorm(t *testing.T) {
 			RMSNorm(input, weight, output, rows, cols, tt.eps)
 
 			for i := range output {
-				if math.IsInf(float64(output[i])) || math.IsNaN(float64(output[i])) {
-					t.Errorf("RMSNorm()[%d] = %v (Inf=%v, NaN=%v)", i, output[i], math.IsInf(float64(output[i])), math.IsNaN(float64(output[i])))
+				if math.IsInf(float64(output[i]), 0) || math.IsNaN(float64(output[i])) {
+					t.Errorf("RMSNorm()[%d] = %v (Inf=%v, NaN=%v)", i, output[i], math.IsInf(float64(output[i]), 0), math.IsNaN(float64(output[i])))
 				}
 			}
 		})
@@ -373,7 +373,7 @@ func TestMatmul(t *testing.T) {
 			Matmul(a, b, c, tt.m, tt.n, tt.k)
 
 			for i := range c {
-				if math.IsInf(float64(c[i])) || math.IsNaN(float64(c[i])) {
+				if math.IsInf(float64(c[i]), 0) || math.IsNaN(float64(c[i])) {
 					t.Errorf("Matmul()[%d] = %v", i, c[i])
 				}
 			}
@@ -431,8 +431,8 @@ func TestFusedAttention(t *testing.T) {
 			FusedAttention(q, k, v, output, tt.batch, tt.heads, tt.seqLen, kvSeqLen, tt.headDim, tt.scale)
 
 			for i, o := range output {
-				if math.IsInf(float64(o)) || math.IsNaN(float64(o)) {
-					t.Errorf("FusedAttention()[%d] = %v (Inf=%v, NaN=%v)", i, o, math.IsInf(float64(o)), math.IsNaN(float64(o)))
+				if math.IsInf(float64(o), 0) || math.IsNaN(float64(o)) {
+					t.Errorf("FusedAttention()[%d] = %v (Inf=%v, NaN=%v)", i, o, math.IsInf(float64(o), 0), math.IsNaN(float64(o)))
 				}
 			}
 		})
@@ -485,7 +485,7 @@ func TestFusedMLP(t *testing.T) {
 			FusedMLP(input, gateW, upW, downW, output, tt.batch, tt.dim, tt.hiddenDim)
 
 			for i, o := range output {
-				if math.IsInf(float64(o)) || math.IsNaN(float64(o)) {
+				if math.IsInf(float64(o), 0) || math.IsNaN(float64(o)) {
 					t.Errorf("FusedMLP()[%d] = %v", i, o)
 				}
 			}
@@ -537,7 +537,7 @@ func TestRoPE(t *testing.T) {
 			RoPE(tensor, positions, tt.batch, tt.heads, tt.seqLen, tt.headDim, tt.theta)
 
 			for i, v := range tensor {
-				if math.IsInf(float64(v)) || math.IsNaN(float64(v)) {
+				if math.IsInf(float64(v), 0) || math.IsNaN(float64(v)) {
 					t.Errorf("RoPE()[%d] = %v", i, v)
 				}
 			}

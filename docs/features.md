@@ -132,6 +132,6 @@ A high-performance LLM inference engine written in Go with native GPU accelerati
 - **102 test files** with unit, integration, fuzz, smoke, and E2E tests
 - **3 fuzz test suites** covering KV cache, sampler, and engine hot-swap
 - **Playwright E2E** for WebUI validation
-- **CI/CD** — GitHub Actions matrix across Go 1.24/1.25/1.26, daily scheduled runs
+- **CI/CD** — GitHub Actions pipeline on Go 1.27, daily scheduled runs
 - **Coverage** — ~46.8% overall (config 100%, logger 100%, metrics 88.2%)
 - **Benchmarks** — Go benchmarks with llama.cpp comparison baselines

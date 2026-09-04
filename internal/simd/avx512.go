@@ -9,19 +9,19 @@ package simd
 
 // AVX-512 Softmax
 void softmax_avx512(float* x, int n);
-void softmax_avx2(float* x, int n);
+void softmax_avx2(float* x, long n);
 
 // AVX-512 SwiGLU
 void swiglu_avx512(const float* gate, const float* up, float* out, int n);
-void swiglu_avx2(const float* gate, const float* up, float* out, int n);
+void swiglu_avx2(const float* gate, const float* up, float* out, long n);
 
 // AVX-512 FP16 conversion
 void fp16_to_fp32_avx512(const uint16_t* src, float* dst, int n);
 void fp32_to_fp16_avx512(const float* src, uint16_t* dst, int n);
 
 // AVX-512 fallback to AVX2
-void fp16_to_fp32_avx2(const uint16_t* src, float* dst, int n);
-void fp32_to_fp16_avx2(const float* src, uint16_t* dst, int n);
+void fp16_to_fp32_avx2(const uint16_t* src, float* dst, long n);
+void fp32_to_fp16_avx2(const float* src, uint16_t* dst, long n);
 
 // AVX-512 RMSNorm
 void rmsnorm_avx512(const float* input, const float* weight, float* output, int rows, int cols, float eps);
@@ -48,6 +48,7 @@ void fused_mlp_avx2(const float* input, const float* gateWeight, const float* up
 */
 import "C"
 import (
+	"math"
 	"runtime"
 	"unsafe"
 )
@@ -103,7 +104,7 @@ func Softmax(x []float32) {
 		fallthrough
 	case 1:
 		if len(x) >= 16 {
-			C.softmax_avx2((*C.float)(unsafe.Pointer(&x[0])), C.int(len(x)))
+			C.softmax_avx2((*C.float)(unsafe.Pointer(&x[0])), C.long(len(x)))
 			return
 		}
 		fallthrough
@@ -141,7 +142,7 @@ func SwiGLU(gate, up, out []float32) {
 				(*C.float)(unsafe.Pointer(&gate[0])),
 				(*C.float)(unsafe.Pointer(&up[0])),
 				(*C.float)(unsafe.Pointer(&out[0])),
-				C.int(n),
+				C.long(n),
 			)
 			return
 		}
@@ -149,6 +150,16 @@ func SwiGLU(gate, up, out []float32) {
 	default:
 		swigluScalar(gate, up, out)
 	}
+}
+
+// SoftmaxAVX2 provides AVX2/AVX512 compatibility shim
+func SoftmaxAVX2(x []float32) {
+	Softmax(x)
+}
+
+// SwiGLUAVX2 provides AVX2/AVX512 compatibility shim
+func SwiGLUAVX2(gate, up, out []float32) {
+	SwiGLU(gate, up, out)
 }
 
 // Fp16ToFp32 selects the best available implementation
@@ -178,7 +189,7 @@ func Fp16ToFp32(src []uint16, dst []float32) {
 			C.fp16_to_fp32_avx2(
 				(*C.uint16_t)(unsafe.Pointer(&src[0])),
 				(*C.float)(unsafe.Pointer(&dst[0])),
-				C.int(n),
+				C.long(n),
 			)
 			return
 		}
@@ -215,7 +226,7 @@ func Fp32ToFp16(src []float32, dst []uint16) {
 			C.fp32_to_fp16_avx2(
 				(*C.float)(unsafe.Pointer(&src[0])),
 				(*C.uint16_t)(unsafe.Pointer(&dst[0])),
-				C.int(n),
+				C.long(n),
 			)
 			return
 		}
@@ -552,7 +563,6 @@ func fusedMLPScalar(input, gateW, upW, downW, output []float32, batch, dim, hidd
 	temp := make([]float32, hiddenDim)
 	for b := 0; b < batch; b++ {
 		inOffset := b * dim
-		outOffset := b * hiddenDim
 
 		// Gate + SiLU
 		for h := 0; h < hiddenDim; h++ {
@@ -564,7 +574,7 @@ func fusedMLPScalar(input, gateW, upW, downW, output []float32, batch, dim, hidd
 				g = -10.0
 			}
 			sigmoid := float32(1.0) / (float32(1.0) + fastExp(-g))
-			temp[h] = upW[inOffset+h] * g * sigmoid
+			temp[h] = upW[h] * g * sigmoid
 		}
 
 		// Down projection
@@ -573,7 +583,7 @@ func fusedMLPScalar(input, gateW, upW, downW, output []float32, batch, dim, hidd
 			for h := 0; h < hiddenDim; h++ {
 				sum += temp[h] * downW[h*dim+d]
 			}
-			output[outOffset+d] = sum
+			output[inOffset+d] = sum
 		}
 	}
 }

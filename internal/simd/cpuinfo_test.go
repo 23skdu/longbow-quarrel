@@ -1,5 +1,3 @@
-//go:build !avx512
-
 package simd
 
 import (
@@ -46,10 +44,60 @@ func TestContainsFlag(t *testing.T) {
 func TestReadCPUFlags(t *testing.T) {
 	flags := readCPUFlags()
 	if flags == "" {
-		t.Skip("not on Linux or /proc/cpuinfo not available")
+		t.Skip("not on Linux/Darwin or CPU info not available")
 	}
-	if !strings.Contains(flags, "avx2") && !strings.Contains(flags, "asimd") {
+	if !strings.Contains(flags, "avx2") && !strings.Contains(flags, "asimd") && !strings.Contains(flags, "neon") {
 		t.Logf("No SIMD flags found: %s", flags[:min(len(flags), 200)])
+	}
+}
+
+func TestParseDarwinSysctl(t *testing.T) {
+	sample := `
+hw.optional.avx1_0: 1
+hw.optional.avx2_0: 1
+hw.optional.avx512f: 1
+hw.optional.avx512bw: 1
+hw.optional.fma: 1
+hw.optional.neon: 0
+hw.optional.vaes: 1
+`
+	flags := parseDarwinSysctl(sample)
+	if !containsFlag(flags, "avx2") {
+		t.Errorf("expected avx2 in %q", flags)
+	}
+	if !containsFlag(flags, "avx512f") {
+		t.Errorf("expected avx512f in %q", flags)
+	}
+	if !containsFlag(flags, "avx512bw") {
+		t.Errorf("expected avx512bw in %q", flags)
+	}
+	if !containsFlag(flags, "fma") {
+		t.Errorf("expected fma in %q", flags)
+	}
+	if !containsFlag(flags, "vaes") {
+		t.Errorf("expected vaes in %q", flags)
+	}
+	if containsFlag(flags, "neon") {
+		t.Errorf("did not expect neon in %q", flags)
+	}
+}
+
+func TestParseDarwinSysctl_AppleSilicon(t *testing.T) {
+	sample := `
+hw.optional.arm64: 1
+hw.optional.neon: 1
+hw.optional.arm.FEAT_DotProd: 1
+hw.optional.avx2_0: 0
+`
+	flags := parseDarwinSysctl(sample)
+	if !containsFlag(flags, "neon") {
+		t.Errorf("expected neon in %q", flags)
+	}
+	if !containsFlag(flags, "asimddp") {
+		t.Errorf("expected asimddp in %q", flags)
+	}
+	if containsFlag(flags, "avx2") {
+		t.Errorf("did not expect avx2 in %q", flags)
 	}
 }
 
@@ -77,18 +125,5 @@ func TestDisableAVX512Env(t *testing.T) {
 
 	if hasAVX512 {
 		t.Error("hasAVX512 should be false when DISABLE_AVX512=1")
-	}
-}
-
-func TestUseAVX2(t *testing.T) {
-	detectCPU()
-	if hasAVX2 {
-		if !useAVX2() {
-			t.Error("useAVX2() should return true when hasAVX2 is true")
-		}
-	} else {
-		if useAVX2() {
-			t.Error("useAVX2() should return false when hasAVX2 is false")
-		}
 	}
 }

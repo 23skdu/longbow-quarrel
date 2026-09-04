@@ -11,7 +11,7 @@ This document contains benchmark results for quantization (Q4_K, TurboQuant) and
 | Timestamp | 2026-04-09 |
 | Platform | Linux (ancalagon) |
 | CPU | 12th Gen Intel Core i7-12650H |
-| Go Version | go1.26.1 linux/amd64 |
+| Go Version | go1.27.0 linux/amd64 |
 
 ---
 

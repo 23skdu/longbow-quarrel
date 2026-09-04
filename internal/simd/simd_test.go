@@ -367,7 +367,8 @@ func TestFp16ToFp32Normal(t *testing.T) {
 }
 
 func TestFp32ToFp16EdgeCases(t *testing.T) {
-	src := []float32{0.0, -0.0, 1.5, -1.5, 0.0001, 65504.0, -65504.0, float32(math.Inf(1)), float32(math.Inf(-1)), float32(math.NaN())}
+	negZero := float32(math.Copysign(0.0, -1.0))
+	src := []float32{0.0, negZero, 1.5, -1.5, 0.0001, 65504.0, -65504.0, float32(math.Inf(1)), float32(math.Inf(-1)), float32(math.NaN())}
 	dst := make([]uint16, len(src))
 	Fp32ToFp16(src, dst)
 
@@ -382,7 +383,8 @@ func TestFp32ToFp16EdgeCases(t *testing.T) {
 }
 
 func TestFp32ToFp16Zero(t *testing.T) {
-	src := []float32{0.0, -0.0}
+	negZero := float32(math.Copysign(0.0, -1.0))
+	src := []float32{0.0, negZero}
 	dst := make([]uint16, len(src))
 	Fp32ToFp16(src, dst)
 	if dst[0] != 0 {
@@ -411,8 +413,7 @@ func BenchmarkMatMulLarge(b *testing.B) {
 		bb[i] = float32(i % 100)
 	}
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		MatMul(a, bb, n, n, n)
 	}
 }
@@ -594,8 +595,7 @@ func BenchmarkSoftmaxLarge(b *testing.B) {
 		x[i] = float64(i%100) / 10.0
 	}
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		Softmax(x)
 	}
 }
@@ -606,8 +606,7 @@ func BenchmarkSoftmaxF32Large(b *testing.B) {
 		x[i] = float32(i%100) / 10.0
 	}
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		SoftmaxF32(x)
 	}
 }
