@@ -1,6 +1,6 @@
 # Longbow-Quarrel Architecture
 
-Comprehensive architectural overview of Longbow-Quarrel (v0.2.0), covering execution pipelines, memory layout, hybrid layer offloading, and multi-backend acceleration.
+Comprehensive architectural overview of Longbow-Quarrel (v0.3.0), covering execution pipelines, memory layout, hybrid layer offloading, and multi-backend acceleration.
 
 ---
 
@@ -35,8 +35,9 @@ Comprehensive architectural overview of Longbow-Quarrel (v0.2.0), covering execu
 │        NVIDIA CUDA GPU         │ │       Host CPU SIMD          │
 │   (internal/device/cuda.go)    │ │   (internal/simd/)           │
 │ - Tensor Cores / cuDNN         │ │ - AVX-512 / AVX2 / ARM NEON  │
-│ - Flash Attention              │ │ - MatVecMul Q8_0, Q4_K, Q6_K │
-│ - libcuda_kernels.a            │ │ - TurboQuant (Polar + QJL)   │
+│ - Flash Attention              │ │ - MatVecMul Q8_0,Q4_K,Q6_K   │
+│ - libcuda_kernels.a            │ │   Q2_K,Q3_K,Q4_0,Q5_0,Q5_K  │
+│                                │ │   Q6_K, BF16                │
 └────────────────────────────────┘ └──────────────────────────────┘
 ```
 
@@ -53,6 +54,12 @@ Longbow-Quarrel eliminates this overhead via:
      - `gguf.MatVecMulQ8_0(data, vector, rows, cols)`
      - `gguf.MatVecMulQ4_K(data, vector, rows, cols)`
      - `gguf.MatVecMulQ6_K(data, vector, rows, cols)`
+     - `gguf.MatVecMulQ2_K(data, vector, rows, cols)`
+     - `gguf.MatVecMulQ3_K(data, vector, rows, cols)`
+     - `gguf.MatVecMulQ4_0(data, vector, rows, cols)`
+     - `gguf.MatVecMulQ5_0(data, vector, rows, cols)`
+     - `gguf.MatVecMulQ5_K(data, vector, rows, cols)`
+     - `gguf.MatVecMulBF16(data, vector, rows, cols)`
    - No floating-point weight buffers are allocated on the Go heap.
 2. **On-Demand Token Embedding Lookup:**
    - Reads only the specific token's embedding vector (e.g. 2,560 elements = 10 KB) directly from mmap rather than materializing the full vocabulary embedding table (150,000 × 2,560 × 4 bytes = 1.5 GB).
@@ -101,7 +108,21 @@ Quarrel dynamically parses model metadata across model families without hardcode
 
 ---
 
-## 5. SIMD Vector Acceleration (`internal/simd/`)
+## 5. PromptCache & Chat Template Pipeline
+
+Longbow-Quarrel implements a two-stage prompt preparation pipeline:
+
+1. **Radix-Tree Prefix Caching (`prompt_cache.go`):**
+   - Tokenized prompt segments are stored in a radix tree keyed by token ID sequences. Common prefixes (system prompts, repeated conversation turns) are cached so that only the delta of new tokens requires tokenization and prompt construction on subsequent requests.
+   - Cache entries are evicted LRU when total cached token count exceeds the configurable budget. Subtrees are shared by reference, allowing zero-copy prefix reuse across concurrent requests.
+
+2. **Jinja2 Chat Template Rendering (`prompt_wrapper.go`):**
+   - Model chat templates are parsed and rendered using a lightweight Jinja2-compatible template engine. This replaces the legacy switch-case approach, enabling per-model template fidelity without hardcoding.
+   - Template output (system prompt, user/assistant turn markers, stop tokens) is tokenized and fed into the prefix cache, completing the pipeline from raw chat messages to a cache-optimized token sequence.
+
+---
+
+## 6. SIMD Vector Acceleration (`internal/simd/`)
 
 | Vector ISA | Optimized Kernels | Strategy |
 |------------|-------------------|----------|
@@ -109,10 +130,11 @@ Quarrel dynamically parses model metadata across model families without hardcode
 | **AVX2** | TurboQuant Inverse Rotation, SwiGLU, RMSNorm | 8-lane `_mm256_fmadd_ps` with contiguous memory traversal |
 | **ARM NEON** | TurboQuant Inverse Rotation, PolarQuant | 4-lane `vfmaq_f32` with contiguous row-major loads |
 | **Generic** | Portable pure Go fallbacks | Exact mathematical parity with SIMD implementations |
+| **Generic** | MatMul (VecDotF32 inner loop) | B transpose + VecDotF32 for cache-friendly column access |
 
 ---
 
-## 6. Directory Layout
+## 7. Directory Layout
 
 ```
 internal/
@@ -126,9 +148,15 @@ internal/
     interface.go   # Core engine interface contracts
     kv_cache.go    # Contiguous & sliding window KV cache
     kv_cache_paged.go # Paged virtual memory KV cache
+    kv_cache_sliding_window.go # Sliding window KV cache with attention sink
+    lora.go        # LoRA adapter management
+    prompt_cache.go # Radix-tree prefix caching
+    prompt_wrapper.go # Jinja2 chat template renderer
+    speculative.go # Speculative decoding manager
+    continuous_batching.go # Continuous batching with preemption
   gguf/
-    dequant.go     # Scalar reference dequantization & MatVecMulQ8_0
-    dequant_simd.go# SIMD batch dequant & zero-copy MatVecMulQ4_K, MatVecMulQ6_K
+    dequant.go     # Scalar dequant + BF16/F16 + MatVecMulQ8_0
+    dequant_simd.go# SIMD dequant + zero-copy MatVecMul for all quant formats
     reader.go      # Binary GGUF parser & tensor mmap indexer
   models/
     resolver.go    # Universal multi-engine cache resolver
@@ -138,3 +166,15 @@ internal/
     turboquant_neon.c   # ARM NEON TurboQuant kernel
   tokenizer/       # Fast BPE & SentencePiece tokenizer
 ```
+
+---
+
+## 8. LoRA Adapter Architecture
+
+Longbow-Quarrel supports Low-Rank Adaptation (LoRA) adapters with backend-specific load strategies:
+
+- **CPU (`lora.go`):** Adapters are merged on load — the low-rank weight matrices are decompressed and fused into the base model's weight tensors at initialization time. This avoids runtime dispatch overhead and integrates seamlessly with the zero-copy matvec pipeline, since the merged weights are written back into the memory-mapped base model region.
+
+- **Metal / CUDA:** Adapters are kept as separate weight tensors and dispatched at runtime. During forward pass, the LoRA projection (A→down, B→up) is executed as a fused matmul on the accelerator, and the output is added to the base model activation. This avoids re-mapping the full base model and enables hot-swapping adapters without reloading the base weights.
+
+Adapter metadata (rank, alpha, target modules) is read from the GGUF file's `lora_adapter` metadata keys and validated against the base model's layer structure at load time.

@@ -1,4 +1,4 @@
-# Longbow-Quarrel Features (v0.2.0)
+# Longbow-Quarrel Features (v0.3.0)
 
 A high-performance, memory-efficient LLM inference engine written in Go with native GPU acceleration and advanced SIMD vectorization.
 
@@ -14,6 +14,10 @@ A high-performance, memory-efficient LLM inference engine written in Go with nat
 - **Token Generation Loop** — Autoregressive sampling with temperature, top-K, top-P (nucleus), and repetition penalty.
 - **Batched Inference** — Continuous batching with iteration-level preemption and per-sequence KV cache isolation.
 - **Streaming Output** — Real-time token streaming via Server-Sent Events (SSE) and WebSocket.
+- **Jinja2 Chat Template Rendering** — Auto-applies `tokenizer.chat_template` from GGUF KV metadata with lightweight Jinja2 subset renderer (`{% for %}`, `{% if %}`, `{% set %}`, `{{ var }}`). Falls back to simple template when not available.
+- **PromptCache (Radix-Tree Prefix Caching)** — Shared prompt prefix caching across requests for reduced TTFT. Populated after sequence completion in CPU, CUDA, and Metal engines.
+- **Speculative Decoding** — Multi-token draft forward pass with real logit output (not stubs). Acceptance ratio computed by SpeculativeManager.
+- **LoRA Adapter Loading** — CPU merge-on-load strategy fusing A×B×α/r delta weights into CPUWeights at load time. Supports .gguf sidecar format. Also supported on Metal and CUDA.
 
 ---
 
@@ -24,8 +28,13 @@ A high-performance, memory-efficient LLM inference engine written in Go with nat
 | **Q8_0** | ✅ | ✅ | ✅ (`MatVecMulQ8_0`) | Primary zero-copy quantized format |
 | **Q4_K** | ✅ | ✅ | ✅ (`MatVecMulQ4_K`) | SIMD unrolled batch dequant & zero-copy matvec |
 | **Q6_K** | ✅ | ✅ | ✅ (`MatVecMulQ6_K`) | SIMD unrolled batch dequant & zero-copy matvec |
-| **Q3_K** | - | ✅ | - | Low-bit K-quant |
-| **FP16 / FP32** | ✅ | ✅ | ✅ (`simd.MatVecMul`) | Native floating point precision |
+| **Q2_K** | - | ✅ | ✅ (`MatVecMulQ2_K`) | via matVecMulGeneric |
+| **Q3_K** | - | ✅ | ✅ (`MatVecMulQ3_K`) | via matVecMulGeneric |
+| **Q4_0** | - | ✅ | ✅ (`MatVecMulQ4_0`) | via matVecMulGeneric |
+| **Q5_0** | - | ✅ | ✅ (`MatVecMulQ5_0`) | via matVecMulGeneric |
+| **Q5_K** | - | ✅ | ✅ (`MatVecMulQ5_K`) | via matVecMulGeneric |
+| **BF16** | ✅ | ✅ | ✅ (`MatVecMulBF16`) | BFloat16 — zero-copy parallel |
+| **FP16 / FP32** | ✅ | ✅ | ✅ (`MatVecMul`) | Native floating point precision |
 | **FP8 (E4M3 / E5M2)** | ✅ | ✅ | - | NVIDIA H100 Hopper Tensor Core format |
 | **TurboQuant** | ✅ | ✅ | - | 8x KV cache compression (PolarQuant + QJL) |
 
@@ -58,6 +67,7 @@ A high-performance, memory-efficient LLM inference engine written in Go with nat
 - **Sliding Window Attention** — Fixed-window attention for long contexts (Mistral 4096, Gemma 4 hybrid).
 - **TurboQuant Compression** — 8x KV cache compression with PolarQuant and QJL residual matrices.
 - **Per-Sequence Tracking** — Independent cache position and sequence rollback support (`RollbackKV`).
+- **PromptCache Integration** — Radix-tree prefix caching for repeated/shared prompts. Inserted after CompleteSequence in all engines.
 
 ---
 
@@ -69,6 +79,7 @@ A high-performance, memory-efficient LLM inference engine written in Go with nat
   - `quarrel_layer_offload_transfers_total`: Host-device activation transfer counter.
   - `quarrel_layer_offload_duration_seconds`: CPU layer execution latency histogram.
   - `inference_tokens_total`, `inference_duration_seconds`, `gpu_memory_allocated_bytes`.
+  - `speculative_tokens_accepted_total`, `speculative_tokens_rejected_total`.
   - Paged KV cache hit/miss/eviction rates and out-of-bounds protection counters.
 - **Quality & Numerical Stability Auditing**: NaN/Inf detection, activation health logging, and logit distribution validation.
 
@@ -82,6 +93,7 @@ A high-performance, memory-efficient LLM inference engine written in Go with nat
   - `FuzzPolarQuant` & `FuzzQJLTransform` — Validates SIMD TurboQuant vector operations against mathematical boundaries.
   - `FuzzDequantizeQ4K_SIMD` & `FuzzDequantizeQ6K_SIMD` — Validates SIMD dequantization parity against scalar baselines.
   - `FuzzPagedKVCache` & `FuzzSampler` — Validates concurrency and input edge cases.
+  - `FuzzMatMul` — Validates MatMul with VecDotF32 inner loop against reference implementation.
 - **Security & Concurrency Audits**:
   - `go vet ./...` & `go vet -tags cuda ./...` — Clean (0 warnings).
   - `gosec` — Clean (0 vulnerabilities, 114 verified `#nosec` directives).

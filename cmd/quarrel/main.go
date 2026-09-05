@@ -45,6 +45,7 @@ var (
 	flightAddr       = flag.String("flight", ":50051", "Address to serve Arrow Flight inference")
 	numGPULayers     = flag.Int("ngl", -1, "Number of layers to offload to GPU (-1 for all)")
 	gpuLayers        = flag.Int("gpu-layers", -1, "Alias for -ngl")
+	loraPath         = flag.String("lora", "", "Path to LoRA adapter .gguf file (optional)")
 )
 
 func main() {
@@ -126,6 +127,14 @@ func main() {
 		log.Fatalf("Failed to initialize engine: %v", err)
 	}
 	defer e.Close()
+
+	if *loraPath != "" {
+		if err := e.LoadAdapter(*loraPath, "cli-lora"); err != nil {
+			logger.Log.Warn("Failed to load LoRA adapter", "error", err)
+		} else {
+			fmt.Printf("Loaded LoRA adapter: %s\n", *loraPath)
+		}
+	}
 
 	fmt.Printf("GPU Memory: %.1f MB\n", float64(device.CUDAAllocatedBytes())/1e6)
 

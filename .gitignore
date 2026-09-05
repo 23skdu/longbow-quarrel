@@ -3,7 +3,10 @@ bench*
 perf*
 bin/
 comp*
+!docs/comparison.md
 *.json
+!grafana/*.json
+!cmd/webui/api/*.yaml
 *.exe
 *.dll
 *.so
@@ -45,7 +48,6 @@ cmd/webui/webui
 *.prof
 *.pprof
 *.bin
-*.json
 test.gguf
 
 # Model files (GGUF)

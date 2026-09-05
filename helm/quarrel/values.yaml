@@ -4,7 +4,6 @@ image:
   repository: ghcr.io/23skdu/longbow-quarrel
   pullPolicy: IfNotPresent
   tag: "latest"
-  cudaTag: "cuda"
 
 model:
   name: "smollm2:135m-instruct"
@@ -51,14 +50,21 @@ monitoring:
 
 engine:
   maxBatchSize: 16
+  ngl: -1
+  temperature: 0.7
+  topK: 40
+  topP: 0.95
+  minP: 0.0
+  repPenalty: 1.1
+  lora: ""
   kvCache:
     blockSize: 16
     totalBlocks: 256
 
 securityContext:
-  runAsNonRoot: false
-  runAsUser: 0
-  fsGroup: 0
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
 
 podAnnotations: {}
   # prometheus.io/scrape: "true"

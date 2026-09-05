@@ -68,11 +68,13 @@ curl -X POST http://localhost:8080/v1/completions \
   }'
 ```
 
-**Extensions (Phase 3):**
+**Chat Template Rendering:**
+Quarrel automatically applies the `tokenizer.chat_template` Jinja2 string from GGUF KV metadata when processing chat messages. This ensures correct prompt formatting for Llama 3, Qwen, Gemma, Mistral, and other instruction-tuned models. No additional configuration is needed — the template is detected and applied server-side.
+
+**Extensions (Implemented):**
 - `"adapter"`: (string) ID of a previously loaded LoRA adapter.
-- `"speculative"`: (bool) Enable accelerated speculative decoding.
+- `"speculative"`: (bool) Enable speculative decoding with multi-token draft verification.
 - `"draft_k"`: (int, optional) Number of tokens to draft per step (default: 4).
-- `"num_paths"`: (int, optional) Number of parallel sampling paths (default: 1).
 
 ### Custom Endpoints
 

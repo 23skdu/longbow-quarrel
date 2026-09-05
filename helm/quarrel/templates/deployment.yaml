@@ -35,12 +35,28 @@ spec:
             - "-model"
             - "{{ .Values.model.name }}"
             {{- end }}
+            - "-ngl"
+            - "{{ .Values.engine.ngl }}"
             - "-max-batch-size"
             - "{{ .Values.engine.maxBatchSize }}"
             - "-block-size"
             - "{{ .Values.engine.kvCache.blockSize }}"
             - "-total-blocks"
             - "{{ .Values.engine.kvCache.totalBlocks }}"
+            - "-temp"
+            - "{{ .Values.engine.temperature }}"
+            - "-topk"
+            - "{{ .Values.engine.topK }}"
+            - "-topp"
+            - "{{ .Values.engine.topP }}"
+            - "-min-p"
+            - "{{ .Values.engine.minP }}"
+            - "-rep-penalty"
+            - "{{ .Values.engine.repPenalty }}"
+            {{- if .Values.engine.lora }}
+            - "-lora"
+            - "{{ .Values.engine.lora }}"
+            {{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.service.port }}

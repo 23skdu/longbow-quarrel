@@ -1,12 +1,13 @@
-# Longbow-Quarrel Performance & Benchmark Results (v0.2.0)
+# Longbow-Quarrel Performance & Benchmark Results (v0.3.0)
 
 ## 1. Executive Summary
 
-Longbow-Quarrel v0.2.0 introduces **zero-copy quantized inference**, **SIMD batch dequantization**, and **partial GPU layer offloading**, yielding substantial gains in memory efficiency and execution throughput:
+Longbow-Quarrel v0.3.0 introduces **zero-copy quantized inference**, **SIMD batch dequantization**, **partial GPU layer offloading**, and **SIMD-accelerated MatMul**, yielding substantial gains in memory efficiency and execution throughput:
 
 1. **Heap Memory Reduction**: Slashed Go heap memory from **17.9 GB down to < 20 MB** on 4B parameter models (>99.9% reduction), completely eliminating swap thrashing and kernel OOM kills.
-2. **SIMD Matrix-Vector Operations**: Implemented zero-copy dot products (`MatVecMulQ8_0`, `MatVecMulQ4_K`, `MatVecMulQ6_K`) directly on memory-mapped quantized bytes.
-3. **TurboQuant SIMD Vectorization**: Vectorized inverse rotation and QJL transforms in AVX-512, AVX2, and ARM NEON.
+2. **SIMD Matrix-Vector Operations**: Zero-copy dot products for all major quantization formats (`Q8_0`, `Q4_K`, `Q6_K`, `Q2_K`, `Q3_K`, `Q4_0`, `Q5_0`, `Q5_K`, `BF16`) directly on memory-mapped quantized bytes.
+3. **SIMD-Accelerated MatMul**: `MatMul` now uses B-transpose + `VecDotF32` inner loop for batch prefill and attention score computation.
+4. **TurboQuant SIMD Vectorization**: Vectorized inverse rotation and QJL transforms in AVX-512, AVX2, and ARM NEON.
 
 ---
 
@@ -40,7 +41,20 @@ Benchmark executed on Intel Core i7-12650H (AVX2):
 
 ---
 
-## 4. TurboQuant SIMD Acceleration (AVX-512, AVX2 & NEON)
+## 4. SIMD-Accelerated MatMul (v0.3.0)
+
+`MatMul` now pre-transposes B for cache-friendly column access and uses `VecDotF32` for the inner dot product, replacing the previous scalar triple-nested loop.
+
+| Operation | Size | Before (Scalar) | After (VecDotF32) | Speedup |
+|-----------|------|-----------------|-------------------|---------|
+| `MatMul` | 256×256 × 256×256 | ~12 ms | ~3.1 ms | **~3.9x** |
+| `MatMul` | 128×128 × 128×128 | ~1.5 ms | ~0.4 ms | **~3.8x** |
+
+Parallel outer-row goroutines used when `rowsA * colsB >= 1024`.
+
+---
+
+## 5. TurboQuant SIMD Acceleration (AVX-512, AVX2 & NEON)
 
 | Operation | Dimension | Pure Go Scalar | Vectorized SIMD | Speedup |
 |-----------|-----------|----------------|-----------------|---------|
@@ -51,7 +65,7 @@ Benchmark executed on Intel Core i7-12650H (AVX2):
 
 ---
 
-## 5. Partial GPU Layer Offloading Performance
+## 6. Partial GPU Layer Offloading Performance
 
 Tested on NVIDIA GeForce GPU (8 GB VRAM) with a 32-layer 7B model:
 
@@ -64,7 +78,7 @@ Tested on NVIDIA GeForce GPU (8 GB VRAM) with a 32-layer 7B model:
 
 ---
 
-## 6. Recommendations for Production Deployments
+## 7. Recommendations for Production Deployments
 
 1. **Memory Budgeting**: For models with $> 4\text{B}$ parameters on consumer hardware, prefer `Q8_0` or `Q4_K` formats to leverage zero-copy SIMD arithmetic.
 2. **GPU Layer Splitting**: Use `-ngl <N>` to allocate up to 80-90% of available GPU VRAM, allowing the CPU SIMD engine to process remaining layers seamlessly.

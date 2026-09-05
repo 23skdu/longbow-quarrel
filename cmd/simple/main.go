@@ -29,6 +29,7 @@ func main() {
 	streamOutput := flag.Bool("stream", false, "Stream tokens as they are generated")
 	maxMemMB := flag.Int64("max-memory", 0, "Max memory in MB (0 = no limit)")
 	numGPULayers := flag.Int("ngl", -1, "Number of GPU layers to offload (-1 for all)")
+	loraPath := flag.String("lora", "", "Path to LoRA adapter .gguf file (optional)")
 	flag.Parse()
 
 	if *modelPath == "" {
@@ -111,6 +112,14 @@ func main() {
 		os.Exit(1)
 	}
 	defer e.Close()
+
+	if *loraPath != "" {
+		if err := e.LoadAdapter(*loraPath, "cli-lora"); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to load LoRA adapter: %v\n", err)
+		} else {
+			fmt.Printf("Loaded LoRA adapter: %s\n", *loraPath)
+		}
+	}
 
 	var resultTokens []int
 	if *streamOutput {

@@ -16,7 +16,7 @@ resources:
     memory: "8Gi"
 ```
 
-> **Note on Zero-Copy Inference (v0.2.0):** With direct memory-mapped matrix-vector multiplication (`MatVecMulQ8_0`, `MatVecMulQ4_K`), RAM allocations on the Go heap remain `< 50 MB` even for 4B–8B models. The requested memory primarily accommodates OS page cache and the paged KV cache. When GPU VRAM is limited, use `-ngl <layers>` to offload a portion of layers to GPU while running remaining layers on host CPU.
+> **Note on Zero-Copy Inference (v0.3.0):** With direct memory-mapped matrix-vector multiplication (`MatVecMulQ8_0`, `MatVecMulQ4_K`, `MatVecMulQ6_K`, `MatVecMulQ2_K`, `MatVecMulQ3_K`, `MatVecMulQ4_0`, `MatVecMulQ5_0`, `MatVecMulQ5_K`, `MatVecMulBF16`), RAM allocations on the Go heap remain `< 50 MB` even for 4B–8B models. The requested memory primarily accommodates OS page cache and the paged KV cache. When GPU VRAM is limited, use `-ngl <layers>` to offload a portion of layers to GPU while running remaining layers on host CPU.
 
 
 ## 2. Health & Readiness Probes
