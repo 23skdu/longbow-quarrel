@@ -1,4 +1,4 @@
-//go:build !metal
+//go:build !metal && !cuda && !tpu
 package device
 
 import (

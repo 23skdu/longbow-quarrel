@@ -8,6 +8,7 @@ comp*
 *.dll
 *.so
 *.dylib
+*.a
 *.test
 *.out
 coverage.out

@@ -126,6 +126,13 @@ func NewcudaEngine(modelPath string, cfg config.Config) (Engine, error) {
 		arch = v
 	}
 
+	modelCfg := ExtractModelConfig(f)
+	if cfg.KVCacheSize > 0 {
+		modelCfg.KVCacheSize = cfg.KVCacheSize
+		modelCfg.SeqLen = cfg.KVCacheSize
+	}
+	cfg = modelCfg
+
 	ctx := device.NewContext()
 
 	cudaModel, err := ctx.NewCUDAModel(f, true, cfg.KVCacheSize)
@@ -153,65 +160,16 @@ func NewcudaEngine(modelPath string, cfg config.Config) (Engine, error) {
 		log.Printf("Warning: failed to load tokenizer: %v", err)
 	}
 
-	layers := 1
-	if v, ok := f.KV["llama.block_count"].(uint32); ok {
-		layers = int(v)
-	}
-
-	vocabSize := 49152
-	if v, ok := f.KV["llama.vocab_size"].(uint32); ok {
-		vocabSize = int(v)
-	}
-
-	heads := 32
-	if val, ok := getKV(f, "llama.attention.head_count", "gemma4.attention.head_count", "qwen2.attention.head_count", "qwen3moe.attention.head_count"); ok {
-		heads = int(toFloat64(val))
-	}
-
-	kvHeads := heads
-	if val, ok := getKV(f, "llama.attention.head_count_kv", "gemma4.attention.head_count_kv", "gemma4.attention.kv_head_count", "qwen3moe.attention.head_count_kv"); ok {
-		if arr, ok := val.([]interface{}); ok {
-			maxVal := 0
-			for _, v := range arr {
-				iv := int(toFloat64(v))
-				if iv > maxVal {
-					maxVal = iv
-				}
-			}
-			kvHeads = maxVal
-		} else {
-			kvHeads = int(toFloat64(val))
-		}
-	}
-	if kvHeads <= 0 {
-		kvHeads = heads
-	}
-
-	dim := 2048
-	if val, ok := getKV(f, "llama.embedding_length", "gemma4.embedding_length", "qwen2.embedding_length", "qwen3moe.embedding_length"); ok {
-		dim = int(toFloat64(val))
-	}
-
-	headDim := dim / heads
-	hiddenDim := dim * 4
-	if val, ok := getKV(f, "llama.feed_forward_length", "gemma4.feed_forward_length", "qwen2.feed_forward_length", "qwen3moe.feed_forward_length"); ok {
-		hiddenDim = int(toFloat64(val))
-	}
-
-	ropeTheta := 10000.0
-	if val, ok := getKV(f, "llama.rope.freq_base", "qwen3moe.rope.freq_base", "gemma4.rope.freq_base", "qwen2.rope.freq_base"); ok {
-		ropeTheta = toFloat64(val)
-	}
-
-	eps := float32(1e-5)
-	if val, ok := getKV(f, "llama.attention.layer_norm_rms_epsilon", "qwen3moe.attention.layer_norm_rms_epsilon", "gemma4.attention.layer_norm_rms_epsilon"); ok {
-		eps = float32(toFloat64(val))
-	}
-
-	seqLen := 2048
-	if val, ok := getKV(f, "llama.context_length", "qwen3moe.context_length", "gemma4.context_length", "qwen2.context_length"); ok {
-		seqLen = int(toFloat64(val))
-	}
+	layers := cfg.Layers
+	vocabSize := cfg.VocabSize
+	heads := cfg.Heads
+	kvHeads := cfg.KVHeads
+	dim := cfg.Dim
+	headDim := cfg.HeadDim
+	hiddenDim := cfg.HiddenDim
+	ropeTheta := cfg.RopeTheta
+	eps := cfg.Eps
+	seqLen := cfg.SeqLen
 
 	isGemma4 := arch == "gemma4"
 	e := &cudaEngine{
@@ -429,15 +387,15 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 	numTokens := len(desc.Tokens)
 	
 	// 1. Prepare Metadata Tensors
-	tokenPosTensor := ctx.NewTensorFP32(1, numTokens)
-	tokenPositions := make([]float32, numTokens)
+	tokenPosTensor := ctx.NewTensorI32(1, numTokens)
+	tokenPositions := make([]int32, numTokens)
 	for i, start := range desc.Offsets {
 		end := numTokens
 		if i < batchSize-1 {
 			end = desc.Offsets[i+1]
 		}
 		for j := 0; j < end-start; j++ {
-			tokenPositions[start+j] = float32(desc.ContextLens[i] + j)
+			tokenPositions[start+j] = int32(desc.ContextLens[i] + j)
 		}
 	}
 	if err := tokenPosTensor.LoadFrom(tokenPositions); err != nil {
@@ -445,15 +403,27 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 	}
 	defer tokenPosTensor.ReturnToPool()
 
-	tokenToSeqTensor := ctx.NewTensorFP32(1, numTokens)
-	tokenToSeq := make([]float32, numTokens)
+	tokenToSeqTensor := ctx.NewTensorI32(1, numTokens)
+	tokenToSeq := make([]int32, numTokens)
 	for i, val := range desc.TokenToSeq {
-		tokenToSeq[i] = float32(val)
+		tokenToSeq[i] = int32(val)
 	}
 	if err := tokenToSeqTensor.LoadFrom(tokenToSeq); err != nil {
 		return nil, err
 	}
 	defer tokenToSeqTensor.ReturnToPool()
+
+	// Ensure KV blocks are allocated for all active sequences
+	for _, seq := range desc.Sequences {
+		seqID := fmt.Sprintf("seq-%d", seq.ID)
+		tokensNeeded := seq.Pos + 1
+		if len(seq.Tokens) > tokensNeeded {
+			tokensNeeded = len(seq.Tokens)
+		}
+		if err := e.cache.Allocate(seqID, tokensNeeded); err != nil {
+			return nil, fmt.Errorf("failed to allocate KV cache blocks for %s: %w", seqID, err)
+		}
+	}
 
 	// Pack block tables
 	maxBlocks := 0
@@ -463,13 +433,13 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 		}
 	}
 	
-	blockTableTensor := ctx.NewTensorFP32(batchSize, maxBlocks)
-	btData := make([]float32, batchSize*maxBlocks)
+	blockTableTensor := ctx.NewTensorI32(batchSize, maxBlocks)
+	btData := make([]int32, batchSize*maxBlocks)
 	for i, seq := range desc.Sequences {
 		seqID := fmt.Sprintf("seq-%d", seq.ID)
 		table := e.cache.blockTables[seqID]
 		for j, bidx := range table {
-			btData[i*maxBlocks+j] = float32(bidx)
+			btData[i*maxBlocks+j] = bidx
 		}
 	}
 	if err := blockTableTensor.LoadFrom(btData); err != nil {
@@ -479,17 +449,10 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 
 	// 2. Initial Embedding
 	// [numTokens, dim]
-	inputTokensTensor := ctx.NewTensorFP32(1, numTokens)
-	inputTokensF := make([]float32, numTokens)
-	for i, t := range desc.Tokens {
-		inputTokensF[i] = float32(t)
-	}
-	if err := inputTokensTensor.LoadFrom(inputTokensF); err != nil {
+	hidden, err := e.cuda.GetBatchEmbedding(desc.Tokens, e.config.VocabSize)
+	if err != nil {
 		return nil, err
 	}
-	defer inputTokensTensor.ReturnToPool()
-	
-	hidden, _ := ctx.MatmulF16(inputTokensTensor, e.cuda.GetTokenEmbdWeight())
 	defer hidden.ReturnToPool()
 
 	// 3. Layer Loop
@@ -539,7 +502,7 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 		
 		// Update Cache (StoreKV)
 		// We'll calculate physical positions for new tokens
-		physPosData := make([]float32, numTokens)
+		physPosData := make([]int32, numTokens)
 		for i, seqIdx := range desc.TokenToSeq {
 			seq := desc.Sequences[seqIdx]
 			seqID := fmt.Sprintf("seq-%d", seq.ID)
@@ -547,9 +510,11 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 			logicalPos := desc.ContextLens[seqIdx] + (i - desc.Offsets[seqIdx])
 			blockIdx := logicalPos / e.cache.blockSize
 			offset := logicalPos % e.cache.blockSize
-			physPosData[i] = float32(table[blockIdx]*int32(e.cache.blockSize) + int32(offset))
+			if blockIdx < len(table) {
+				physPosData[i] = table[blockIdx]*int32(e.cache.blockSize) + int32(offset)
+			}
 		}
-		physPosTensor := ctx.NewTensorFP32(1, numTokens)
+		physPosTensor := ctx.NewTensorI32(1, numTokens)
 		if err := physPosTensor.LoadFrom(physPosData); err != nil {
 			return nil, err
 		}
@@ -579,15 +544,15 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 
 	// 4. Extract Last Logits
 	// We need the hidden states of the last token for each sequence in the batch
-	lastHiddenIndices := make([]float32, batchSize)
+	lastHiddenIndices := make([]int32, batchSize)
 	for i := 0; i < batchSize; i++ {
 		idx := numTokens - 1
 		if i < batchSize-1 {
 			idx = desc.Offsets[i+1] - 1
 		}
-		lastHiddenIndices[i] = float32(idx)
+		lastHiddenIndices[i] = int32(idx)
 	}
-	lastHiddenIndicesTensor := ctx.NewTensorFP32(1, batchSize)
+	lastHiddenIndicesTensor := ctx.NewTensorI32(1, batchSize)
 	if err := lastHiddenIndicesTensor.LoadFrom(lastHiddenIndices); err != nil {
 		return nil, err
 	}
@@ -599,7 +564,16 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 
 	// Final Output Norm
 	outputNormW, _ := e.cuda.GetWeightTensor("output_norm.weight")
+	if outputNormW == nil {
+		outputNormW, _ = e.cuda.GetWeightTensor("norm.weight")
+	}
+	if outputNormW == nil {
+		outputNormW, _ = e.cuda.GetWeightTensor("model.norm.weight")
+	}
 	normedFinal := ctx.NewTensorFP32(batchSize, dim)
+	if normedFinal == nil {
+		return nil, fmt.Errorf("failed to allocate normedFinal tensor")
+	}
 	ctx.RMSNorm(lastHidden, outputNormW, normedFinal, batchSize, dim, eps)
 	lastHidden.ReturnToPool()
 

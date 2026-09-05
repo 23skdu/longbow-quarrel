@@ -1,3 +1,5 @@
+//go:build !cuda && !metal && !tpu
+
 package device
 
 // MockContext implements a generic backend for testing orchestrator logic

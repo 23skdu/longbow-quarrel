@@ -86,10 +86,18 @@ metal-darwin-amd64:
 # NVIDIA CUDA builds (linux/amd64)
 nvidia: nvidia-cuda
 
-nvidia-cuda:
+internal/device/libcuda_kernels.a: internal/device/cuda_kernels.cu
+	@echo "Compiling CUDA kernels..."
+	nvcc -c -O3 -Xcompiler -fPIC internal/device/cuda_kernels.cu -o internal/device/cuda_kernels.o
+	ar rcs internal/device/libcuda_kernels.a internal/device/cuda_kernels.o
+	rm -f internal/device/cuda_kernels.o
+
+CUDA_LDFLAGS ?= -s -w
+
+nvidia-cuda: internal/device/libcuda_kernels.a
 	@echo "Building $(BINARY_NAME) for linux/amd64 (CUDA)..."
 	CGO_ENABLED=1 GOOS=linux GOARCH=amd64 $(GO) build -tags cuda \
-		-ldflags "$(LDFLAGS) -X main.Version=$(VERSION) -X main.BuildTime=$(BUILD_TIME)" \
+		-ldflags "$(CUDA_LDFLAGS) -X main.Version=$(VERSION) -X main.BuildTime=$(BUILD_TIME)" \
 		-o $(BIN_DIR)/$(BINARY_NAME)-linux-amd64-cuda ./cmd/quarrel
 
 # TPU builds (linux/amd64)

@@ -75,7 +75,9 @@ func (a *MetadataAnalyzer) Analyze() (*AnalysisReport, error) {
 
 	report.ExpertTopK = int(getKVInt(a.file.KV, report.Architecture+".expert_used_top_k", report.Architecture+".expert_top_k")) // #nosec G115 -- safe: model config values fit in int
 
-	if quantVal, ok := a.file.KV["general.quantization_version"].(uint32); ok {
+	if len(a.file.Tensors) > 0 {
+		report.Quantization = a.file.Tensors[0].Type.String()
+	} else if quantVal, ok := a.file.KV["general.quantization_version"].(uint32); ok {
 		report.Quantization = fmt.Sprintf("Q%d", quantVal*4)
 	} else {
 		report.Quantization = "Unknown"

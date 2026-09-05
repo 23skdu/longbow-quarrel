@@ -133,6 +133,11 @@ func (ctx *Context) NewTensorFP32(rows, cols int) *Tensor {
 	return t
 }
 
+func (ctx *Context) NewTensorI32(rows, cols int) *Tensor {
+	t, _ := ctx.NewTensor(rows, cols, DataTypeI32)
+	return t
+}
+
 func (ctx *Context) NewTensor(rows, cols int, dtype DataType) (*Tensor, error) {
 	size := rows * cols
 	var bytes int
@@ -147,6 +152,7 @@ func (ctx *Context) NewTensor(rows, cols int, dtype DataType) (*Tensor, error) {
 
 	var ptr unsafe.Pointer
 	if err := C.cudaMalloc(&ptr, C.size_t(bytes)); err != 0 {
+		fmt.Printf("cudaMalloc FAILED: bytes=%d cudaError=%d\n", bytes, int(err))
 		return nil, fmt.Errorf("cudaMalloc failed: %v", err)
 	}
 
@@ -158,6 +164,17 @@ func (ctx *Context) NewTensor(rows, cols int, dtype DataType) (*Tensor, error) {
 		ctx:       ctx,
 		sizeBytes: bytes,
 	}, nil
+}
+
+func (ctx *Context) NewTensorFromData(rows, cols int, dtype DataType, data []byte) (*Tensor, error) {
+	t, err := ctx.NewTensor(rows, cols, dtype)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > 0 {
+		C.cudaMemcpy(t.devPtr, unsafe.Pointer(&data[0]), C.size_t(len(data)), C.cudaMemcpyHostToDevice)
+	}
+	return t, nil
 }
 
 func (ctx *Context) NewTensorWithType(rows, cols int, dtype DataType) *Tensor {
@@ -247,6 +264,16 @@ func (t *Tensor) LoadFrom(data interface{}) error {
 		if t.dataType == DataTypeF16 {
 			return fmt.Errorf("direct load of []float32 to F16 tensor not supported")
 		}
+	case []int32:
+		src = unsafe.Pointer(&d[0])
+		bytes = len(d) * 4
+	case []int:
+		i32s := make([]int32, len(d))
+		for i, v := range d {
+			i32s[i] = int32(v)
+		}
+		src = unsafe.Pointer(&i32s[0])
+		bytes = len(i32s) * 4
 	case []uint16:
 		src = unsafe.Pointer(&d[0])
 		bytes = len(d) * 2
@@ -262,6 +289,11 @@ func (t *Tensor) LoadFrom(data interface{}) error {
 	}
 	return nil
 }
+
+func (t *Tensor) LoadFromF32(data []float32) error {
+	return t.LoadFrom(data)
+}
+
 func (t *Tensor) ToHost() []float32 {
 	return t.ToHostF32()
 }
@@ -346,8 +378,24 @@ func (ctx *Context) FusedMLP(input, gateW, upW, downW, output *Tensor, batch, di
 	C.cudaFusedMLP(ctx.Ctx, input.devPtr, gateW.devPtr, upW.devPtr, downW.devPtr, output.devPtr, C.int(batch), C.int(dim), C.int(hiddenDim))
 }
 
+func (ctx *Context) FusedRMSNormAdd(input, hidden, weight, output *Tensor, batch, dim int, eps float32) {
+	C.cudaFusedRMSNormAdd(ctx.Ctx, input.devPtr, hidden.devPtr, weight.devPtr, output.devPtr, C.int(batch), C.int(dim), C.float(eps))
+}
+
+func (ctx *Context) FusedSwiGLU(gate, up, output *Tensor, rows, size int) {
+	C.cudaSwiGLU((*C.float)(gate.devPtr), (*C.float)(up.devPtr), (*C.float)(output.devPtr), C.int(rows*size), ctx.Ctx)
+}
+
 func (ctx *Context) Synchronize() {
 	C.cudaStreamSynchronize(ctx.Ctx)
+}
+
+func (ctx *Context) CheckError(tag string) error {
+	ctx.Synchronize()
+	if err := C.cudaGetLastError(); err != 0 {
+		return fmt.Errorf("CUDA error at %s: code %d", tag, int(err))
+	}
+	return nil
 }
 
 // CUDAModel and Weight Loading
@@ -383,7 +431,10 @@ func (ctx *Context) NewCUDAModel(f *gguf.GGUFFile, preDequantize bool, kvCacheSi
 		}
 		numElements := rows * cols
 		var dPtr unsafe.Pointer
-		C.cudaMalloc(&dPtr, C.size_t(numElements*2))
+		if errCode := C.cudaMalloc(&dPtr, C.size_t(numElements*2)); errCode != 0 {
+			m.Free()
+			return nil, fmt.Errorf("cudaMalloc failed for tensor %s (%d elements, %d bytes): cuda error %d", name, numElements, numElements*2, errCode)
+		}
 		var hostFP16 []uint16
 		switch tensor.Type {
 		case gguf.GGMLTypeF32:
@@ -415,17 +466,18 @@ func (ctx *Context) NewCUDAModel(f *gguf.GGUFFile, preDequantize bool, kvCacheSi
 		}
 	}
 
-	layers := 0
-	if v, ok := f.KV["llama.block_count"].(uint32); ok {
-		layers = int(v)
+	arch := "llama"
+	if v, ok := f.KV["general.architecture"].(string); ok {
+		arch = v
 	}
-	heads := 32
-	if v, ok := f.KV["llama.attention.head_count"].(uint32); ok {
-		heads = int(v)
+	layers := getCudaKVInt(f.KV, arch+".block_count", "llama.block_count")
+	heads := getCudaKVInt(f.KV, arch+".attention.head_count", "llama.attention.head_count")
+	if heads == 0 {
+		heads = 32
 	}
-	dim := 2048
-	if v, ok := f.KV["llama.embedding_length"].(uint32); ok {
-		dim = int(v)
+	dim := getCudaKVInt(f.KV, arch+".embedding_length", "llama.embedding_length")
+	if dim == 0 {
+		dim = 2048
 	}
 	headDim := dim / heads
 
@@ -437,6 +489,32 @@ func (ctx *Context) NewCUDAModel(f *gguf.GGUFFile, preDequantize bool, kvCacheSi
 	}
 
 	return m, nil
+}
+
+func getCudaKVInt(kv map[string]interface{}, keys ...string) int {
+	for _, key := range keys {
+		val, ok := kv[key]
+		if !ok {
+			continue
+		}
+		switch v := val.(type) {
+		case uint32:
+			return int(v)
+		case int32:
+			return int(v)
+		case uint64:
+			return int(v)
+		case int64:
+			return int(v)
+		case int:
+			return v
+		case float64:
+			return int(v)
+		case float32:
+			return int(v)
+		}
+	}
+	return 0
 }
 
 func (m *CUDAModel) Free() {
@@ -455,6 +533,12 @@ func (m *CUDAModel) GetWeightTensor(name string) (*Tensor, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	w, ok := m.Weights[name]
+	if !ok {
+		// Fallback for tied embeddings
+		if name == "output.weight" || name == "lm_head.weight" {
+			w, ok = m.Weights["token_embd.weight"]
+		}
+	}
 	if !ok {
 		return nil, false
 	}
@@ -477,6 +561,28 @@ func (m *CUDAModel) GetEmbeddingTensor(token int) (*Tensor, error) {
 	srcPtr := unsafe.Pointer(uintptr(embWeight.devPtr) + offset)
 	C.cudaMemcpy(tokenEmb.devPtr, srcPtr, C.size_t(embWeight.rows*2), C.cudaMemcpyDeviceToDevice)
 	return tokenEmb, nil
+}
+
+func (m *CUDAModel) GetBatchEmbedding(tokens []int, vocabSize int) (*Tensor, error) {
+	embWeight, ok := m.GetWeightTensor("token_embd.weight")
+	if !ok {
+		return nil, fmt.Errorf("embedding weight not found")
+	}
+	dim := embWeight.rows
+	numTokens := len(tokens)
+	out := m.Ctx.NewTensorPooled(numTokens, dim)
+	for i, tok := range tokens {
+		tIdx := tok
+		if tIdx < 0 || tIdx >= vocabSize {
+			tIdx = 0
+		}
+		offsetSrc := uintptr(tIdx) * uintptr(dim) * 2
+		offsetDst := uintptr(i) * uintptr(dim) * 2
+		srcPtr := unsafe.Pointer(uintptr(embWeight.devPtr) + offsetSrc)
+		dstPtr := unsafe.Pointer(uintptr(out.devPtr) + offsetDst)
+		C.cudaMemcpyAsync(dstPtr, srcPtr, C.size_t(dim*2), C.cudaMemcpyDeviceToDevice, m.Ctx.Ctx)
+	}
+	return out, nil
 }
 
 func (m *CUDAModel) GetTokenEmbdWeight() *Tensor {
@@ -579,10 +685,24 @@ func GetDeviceMemory(device int) (int64, error) {
 // src: [numTokens, dim], index: [1, batchSize] with float32 row indices, dst: [batchSize, dim]
 func (c *Context) Gather(src, index, dst *Tensor, numTokens, batchSize, dim int) {
 	srcHost := src.ToHostF32()
-	idxHost := index.ToHostF32()
+	var idxHost []int
+	if index.dataType == DataTypeI32 {
+		i32s := make([]int32, batchSize)
+		C.cudaMemcpy(unsafe.Pointer(&i32s[0]), index.devPtr, C.size_t(batchSize*4), C.cudaMemcpyDeviceToHost)
+		idxHost = make([]int, batchSize)
+		for i, v := range i32s {
+			idxHost[i] = int(v)
+		}
+	} else {
+		f32s := index.ToHostF32()
+		idxHost = make([]int, batchSize)
+		for i, v := range f32s {
+			idxHost[i] = int(v)
+		}
+	}
 	dstHost := make([]float32, batchSize*dim)
 	for i := 0; i < batchSize; i++ {
-		row := int(idxHost[i])
+		row := idxHost[i]
 		if row < 0 {
 			row = 0
 		}

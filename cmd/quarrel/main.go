@@ -12,12 +12,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/device"
 	"github.com/23skdu/longbow-quarrel/internal/engine"
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
 	"github.com/23skdu/longbow-quarrel/internal/logger"
-	"github.com/23skdu/longbow-quarrel/internal/ollama"
+	"github.com/23skdu/longbow-quarrel/internal/models"
 	"github.com/23skdu/longbow-quarrel/internal/tokenizer"
 	"github.com/23skdu/longbow-quarrel/internal/metrics"
 	"github.com/23skdu/longbow-quarrel/internal/api"
@@ -54,9 +53,9 @@ func main() {
 	fmt.Printf("=== Longbow-Quarrel CUDA ===\n")
 	fmt.Printf("Model: %s\n", *modelPath)
 
-	resolvedPath, err := ollama.ResolveModelPath(*modelPath)
+	resolvedPath, err := models.ResolveModelPath(*modelPath)
 	if err == nil {
-		logger.Log.Info("Resolved Ollama model", "original", *modelPath, "resolved", resolvedPath)
+		logger.Log.Info("Resolved model path", "original", *modelPath, "resolved", resolvedPath)
 		*modelPath = resolvedPath
 	}
 
@@ -72,31 +71,17 @@ func main() {
 	}
 	fmt.Printf("Architecture: %s\n", arch)
 
-	layers := 0
-	if v, ok := f.KV["llama.block_count"].(uint32); ok {
-		layers = int(v)
+	engineConfig := engine.ExtractModelConfig(f)
+	if *kvCacheSize > 0 {
+		engineConfig.KVCacheSize = *kvCacheSize
+		engineConfig.SeqLen = *kvCacheSize
 	}
-	fmt.Printf("Layers: %d\n", layers)
 
-	vocabSize := 0
-	if v, ok := f.KV["llama.vocab_size"].(uint32); ok {
-		vocabSize = int(v)
-	}
-	fmt.Printf("Vocab: %d\n", vocabSize)
+	fmt.Printf("Layers: %d\n", engineConfig.Layers)
+	fmt.Printf("Vocab: %d\n", engineConfig.VocabSize)
+	fmt.Printf("Dim: %d, Heads: %d, KV Heads: %d\n", engineConfig.Dim, engineConfig.Heads, engineConfig.KVHeads)
 
 	fmt.Printf("\n=== Initializing CUDA Backend ===\n")
-
-	ctx := device.NewContext()
-	defer ctx.Free()
-
-	cudaModel, err := ctx.NewCUDAModel(f, true, *kvCacheSize)
-	if err != nil {
-		log.Fatalf("Failed to load model to GPU: %v", err)
-	}
-	defer cudaModel.Free()
-
-	fmt.Printf("GPU Memory: %.1f MB\n", float64(device.CUDAAllocatedBytes())/1e6)
-	fmt.Printf("KV Cache: %d layers\n", len(cudaModel.KCache))
 
 	go func() {
 		http.Handle("/metrics", promhttp.Handler())
@@ -117,18 +102,13 @@ func main() {
 		log.Fatalf("Failed to initialize tokenizer: %v", err)
 	}
 
-	engineConfig := config.Config{
-		KVCacheSize: *kvCacheSize,
-		SeqLen:      *kvCacheSize,
-	}
-	// Note: In a real implementation, we would extend config.Config to include these fields.
-	// For now, we rely on the engine implementation using these defaults or being updated to use them.
-
 	e, err := engine.NewEngine(*modelPath, engineConfig)
 	if err != nil {
 		log.Fatalf("Failed to initialize engine: %v", err)
 	}
 	defer e.Close()
+
+	fmt.Printf("GPU Memory: %.1f MB\n", float64(device.CUDAAllocatedBytes())/1e6)
 
 	// Initialize and start Arrow Flight Server
 	flightServer := api.NewInferenceFlightServer(*flightAddr, e, tok)

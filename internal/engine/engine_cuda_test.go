@@ -114,7 +114,7 @@ func TestCUDASampler(t *testing.T) {
 		logits[i] = float32(i) - 50
 	}
 
-	token := sampler.Sample(logits)
+	token := sampler.Sample(logits, nil)
 	if token < 0 || token >= 100 {
 		t.Errorf("Invalid token sampled: %d", token)
 	}
@@ -128,7 +128,7 @@ func TestCUDASampler(t *testing.T) {
 		RepPenalty:  1.0,
 		Seed:        42,
 	})
-	token2 := sampler2.Sample(logits)
+	token2 := sampler2.Sample(logits, nil)
 
 	if token != token2 {
 		t.Error("Seeded sampling not reproducible")

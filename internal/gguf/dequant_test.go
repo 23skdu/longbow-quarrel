@@ -79,3 +79,42 @@ func TestDequantizeQ8_0(t *testing.T) {
 	
 	DequantizeBlock(input, dst, GGMLTypeQ8_0)
 }
+
+func TestMatVecMulQ8_0(t *testing.T) {
+	// Create 2 rows, 64 cols (2 blocks per row, 68 bytes per row = 136 bytes)
+	rows := 2
+	cols := 64
+	data := make([]byte, rows*(cols/32)*34)
+	
+	// Set scale = 1.0 (float16: 0x3C00) for all blocks
+	for b := 0; b < rows*(cols/32); b++ {
+		data[b*34] = 0x00
+		data[b*34+1] = 0x3C
+		// Set values to 1, 2, 3...
+		for j := 0; j < 32; j++ {
+			data[b*34+2+j] = byte(j + 1)
+		}
+	}
+
+	vector := make([]float32, cols)
+	for i := range vector {
+		vector[i] = 1.0
+	}
+
+	res := MatVecMulQ8_0(data, vector, rows, cols)
+	if len(res) != rows {
+		t.Fatalf("expected %d rows, got %d", rows, len(res))
+	}
+
+	dequant := DequantizeQ8_0(data, rows*cols)
+	for r := 0; r < rows; r++ {
+		var expected float32
+		for c := 0; c < cols; c++ {
+			expected += dequant[r*cols+c] * vector[c]
+		}
+		diff := math.Abs(float64(res[r] - expected))
+		if diff > 1e-4 {
+			t.Errorf("row %d: got %f, want %f (diff %f)", r, res[r], expected, diff)
+		}
+	}
+}

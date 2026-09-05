@@ -1,4 +1,4 @@
-//go:build !metal
+//go:build !metal && !cuda && !tpu
 package device
 
 import (
@@ -15,7 +15,7 @@ func TestCPU_ReferenceKernels(t *testing.T) {
 	sumSquare := float32(0)
 	for _, v := range output { sumSquare += v * v }
 	// mean square should be approx 1.0
-	if math_abs(float64(sumSquare/3.0 - 1.0)) > 1e-3 {
+	if math.Abs(float64(sumSquare/3.0 - 1.0)) > 1e-3 {
 		t.Errorf("CPURMSNorm output not normalized: mean square = %f", sumSquare/3.0)
 	}
 

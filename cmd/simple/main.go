@@ -10,6 +10,7 @@ import (
 	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/engine"
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
+	"github.com/23skdu/longbow-quarrel/internal/models"
 	"github.com/23skdu/longbow-quarrel/internal/tokenizer"
 )
 
@@ -25,6 +26,11 @@ func main() {
 	if *modelPath == "" {
 		fmt.Fprintln(os.Stderr, "Error: --model flag is required")
 		os.Exit(1)
+	}
+
+	resolved, err := models.ResolveModelPath(*modelPath)
+	if err == nil {
+		*modelPath = resolved
 	}
 
 	fmt.Printf("=== Longbow-Quarrel Cross-Platform CLI ===\n")
@@ -45,25 +51,12 @@ func main() {
 	fmt.Printf("GGUF Version: %d\n", f.Header.Version)
 	fmt.Printf("Tensors: %d\n", len(f.Tensors))
 
-	arch, ok := f.KV["general.architecture"]
-	if ok {
-		fmt.Printf("Architecture: %v\n", arch)
-	}
-
-	vocabSize, ok := f.KV["llama.vocab_size"]
-	if ok {
-		fmt.Printf("Vocab Size: %v\n", vocabSize)
-	}
-
-	layers, ok := f.KV["llama.block_count"]
-	if ok {
-		fmt.Printf("Layers: %v\n", layers)
-	}
-
-	dim, ok := f.KV["llama.embedding_length"]
-	if ok {
-		fmt.Printf("Embedding Dim: %v\n", dim)
-	}
+	mCfg := engine.ExtractModelConfig(f)
+	fmt.Printf("Architecture: %s\n", mCfg.Architecture)
+	fmt.Printf("Layers: %d\n", mCfg.Layers)
+	fmt.Printf("Embedding Dim: %d\n", mCfg.Dim)
+	fmt.Printf("Heads: %d (KV: %d, HeadDim: %d)\n", mCfg.Heads, mCfg.KVHeads, mCfg.HeadDim)
+	fmt.Printf("Vocab Size: %d\n", mCfg.VocabSize)
 
 	fmt.Println()
 	fmt.Println("Loading tokenizer...")

@@ -1,3 +1,5 @@
+//go:build !cuda && !metal && !tpu
+
 package engine
 
 import (
@@ -94,7 +96,7 @@ func TestPagedKVCache_TurboQuantEncode(t *testing.T) {
 	}
 
 	// Test encoding path exists
-	if cache.kPools == nil || len(cache.kPools) == 0 {
+	if len(cache.kPools) == 0 {
 		t.Fatal("KV pools should be allocated")
 	}
 

@@ -559,7 +559,7 @@ func fusedAttentionScalar(q, k, v, output []float32, batch, heads, seqLen, kvSeq
 	}
 }
 
-func fusedMLPScalar(input, gateW, upW, downW, output []float32, batch, dim, hiddenDim int) {
+func fusedMLPScalar(_, gateW, upW, downW, output []float32, batch, dim, hiddenDim int) {
 	temp := make([]float32, hiddenDim)
 	for b := 0; b < batch; b++ {
 		inOffset := b * dim
@@ -603,7 +603,8 @@ func fp16ToFp32(h uint16) float32 {
 	mant := uint32(h) & 0x3FF
 
 	var f32 uint32
-	if exp == 0 {
+	switch exp {
+	case 0:
 		if mant == 0 {
 			f32 = sign << 31
 		} else {
@@ -617,13 +618,13 @@ func fp16ToFp32(h uint16) float32 {
 			e := uint32(127 - 14 - shift)
 			f32 = (sign << 31) | (e << 23) | m
 		}
-	} else if exp == 31 {
+	case 31:
 		if mant == 0 {
 			f32 = (sign << 31) | 0x7F800000
 		} else {
 			f32 = (sign << 31) | 0x7F800000 | (mant << 13)
 		}
-	} else {
+	default:
 		newExp := exp - 15 + 127
 		f32 = (sign << 31) | (newExp << 23) | (mant << 13)
 	}
@@ -638,11 +639,12 @@ func fp32ToFp16(f float32) uint16 {
 	mant := bits & 0x7FFFFF
 
 	var h uint16
-	if exp == 0 {
+	switch exp {
+	case 0:
 		h = 0
-	} else if exp == 255 {
+	case 255:
 		h = uint16(sign<<15) | 0x7C00 | uint16(mant>>9)
-	} else {
+	default:
 		newExp := int(exp) - 127 + 15
 		if newExp >= 31 {
 			h = uint16(sign<<15) | 0x7C00

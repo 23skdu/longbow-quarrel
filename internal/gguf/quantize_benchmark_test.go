@@ -23,7 +23,7 @@ func BenchmarkQuantizeQ4K_256(b *testing.B) {
 	}
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_, err := QuantizeWeightsToQ4K(src, len(src))
 		if err != nil {
 			b.Fatalf("QuantizeWeightsToQ4K failed: %v", err)
@@ -38,7 +38,7 @@ func BenchmarkQuantizeQ4K_512(b *testing.B) {
 	}
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_, err := QuantizeWeightsToQ4K(src, len(src))
 		if err != nil {
 			b.Fatalf("QuantizeWeightsToQ4K failed: %v", err)
@@ -53,7 +53,7 @@ func BenchmarkQuantizeQ4K_1024(b *testing.B) {
 	}
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_, err := QuantizeWeightsToQ4K(src, len(src))
 		if err != nil {
 			b.Fatalf("QuantizeWeightsToQ4K failed: %v", err)
@@ -68,7 +68,7 @@ func BenchmarkQuantizeQ4K_2048(b *testing.B) {
 	}
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_, err := QuantizeWeightsToQ4K(src, len(src))
 		if err != nil {
 			b.Fatalf("QuantizeWeightsToQ4K failed: %v", err)
@@ -83,7 +83,7 @@ func BenchmarkQuantizeQ4K_4096(b *testing.B) {
 	}
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_, err := QuantizeWeightsToQ4K(src, len(src))
 		if err != nil {
 			b.Fatalf("QuantizeWeightsToQ4K failed: %v", err)
@@ -103,7 +103,7 @@ func BenchmarkDequantizeQ4K_256(b *testing.B) {
 	}
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_, err := DequantizeWeightsFromQ4K(data, 1, 256)
 		if err != nil {
 			b.Fatalf("DequantizeWeightsFromQ4K failed: %v", err)
@@ -123,7 +123,7 @@ func BenchmarkDequantizeQ4K_512(b *testing.B) {
 	}
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_, err := DequantizeWeightsFromQ4K(data, 1, 512)
 		if err != nil {
 			b.Fatalf("DequantizeWeightsFromQ4K failed: %v", err)
@@ -143,7 +143,7 @@ func BenchmarkDequantizeQ4K_1024(b *testing.B) {
 	}
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_, err := DequantizeWeightsFromQ4K(data, 1, 1024)
 		if err != nil {
 			b.Fatalf("DequantizeWeightsFromQ4K failed: %v", err)
@@ -163,7 +163,7 @@ func BenchmarkDequantizeQ4K_2048(b *testing.B) {
 	}
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_, err := DequantizeWeightsFromQ4K(data, 1, 2048)
 		if err != nil {
 			b.Fatalf("DequantizeWeightsFromQ4K failed: %v", err)
@@ -183,7 +183,7 @@ func BenchmarkDequantizeQ4K_4096(b *testing.B) {
 	}
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_, err := DequantizeWeightsFromQ4K(data, 1, 4096)
 		if err != nil {
 			b.Fatalf("DequantizeWeightsFromQ4K failed: %v", err)
@@ -202,7 +202,7 @@ func BenchmarkQuantizeQ4K_RoundTrip(b *testing.B) {
 			}
 
 			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
+			for b.Loop() {
 				data, err := QuantizeWeightsToQ4K(src, len(src))
 				if err != nil {
 					b.Fatalf("QuantizeWeightsToQ4K failed: %v", err)
@@ -243,7 +243,7 @@ func BenchmarkTurboQuant_PolarQuant(b *testing.B) {
 	}
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_, _, _, err := PolarQuant(src, rot, blockSize, 4)
 		if err != nil {
 			b.Fatalf("PolarQuant failed: %v", err)
@@ -270,7 +270,7 @@ func BenchmarkTurboQuant_QJLTransform(b *testing.B) {
 	}
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_, _, err := QJLTransform(residual, qjl, qjlRows, blockSize)
 		if err != nil {
 			b.Fatalf("QJLTransform failed: %v", err)
@@ -303,7 +303,7 @@ func BenchmarkTurboQuant_Full(b *testing.B) {
 	}
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_, err := QuantizeTurboQuant(src, rot, qjl, blockSize, 4)
 		if err != nil {
 			b.Fatalf("QuantizeTurboQuant failed: %v", err)

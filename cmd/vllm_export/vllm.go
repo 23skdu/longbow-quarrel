@@ -47,7 +47,7 @@ func GetDeviceMemory(deviceID int) (int64, error) {
 
 // GetMemoryInfo returns memory information for vLLM
 func GetMemoryInfo() (free int64, total int64, err error) {
-	ctx := device.GetCUDAContext()
+	ctx := device.GetContext()
 	if ctx == nil {
 		return 0, 0, fmt.Errorf("CUDA context not initialized")
 	}
@@ -149,7 +149,7 @@ func MatMul(a, b, c unsafe.Pointer, m, n, k int, transA, transB bool) {
 
 // Synchronize waits for all CUDA operations to complete
 func Synchronize() {
-	ctx := device.GetCUDAContext()
+	ctx := device.GetContext()
 	if ctx != nil {
 		ctx.Synchronize()
 	}

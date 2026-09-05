@@ -139,7 +139,7 @@ func (sm *SpeculativeManager) GenerateSpeculative(ctx context.Context, seq *Sequ
 	return sm.GenerateSpeculativeMultiPath(ctx, seq)
 }
 
-func rejectSample(targetLogits []float32, draftToken int, cfg SamplerConfig, rng *rand.Rand) (accepted bool, correctedToken int) {
+func rejectSample(targetLogits []float32, draftToken int, _ SamplerConfig, rng *rand.Rand) (accepted bool, correctedToken int) {
 	if draftToken >= len(targetLogits) {
 		return false, 0
 	}

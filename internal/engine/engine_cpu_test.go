@@ -543,7 +543,7 @@ func BenchmarkAttentionCPU(b *testing.B) {
 	}
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_ = attentionCPU(q, k, v, numHeads, kvHeads, headDim)
 	}
 }
@@ -569,7 +569,7 @@ func BenchmarkAttentionCPUScalar(b *testing.B) {
 	}
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_ = attentionCPUScalar(q, k, v, numHeads, kvHeads, headDim)
 	}
 }

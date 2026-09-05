@@ -499,8 +499,7 @@ func BenchmarkRoPE_AVX512(b *testing.B) {
 }
 
 func BenchmarkSIMDLevelDetection(b *testing.B) {
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		GetSIMDLevel()
 	}
 }

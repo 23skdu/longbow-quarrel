@@ -4,6 +4,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"runtime"
+	"sync"
 )
 
 const (
@@ -479,6 +481,62 @@ func DequantizeQ8_0(data []byte, numElements int) []float32 {
 		}
 	}
 	return out
+}
+
+// MatVecMulQ8_0 performs matrix-vector multiplication directly on Q8_0 quantized data
+// without materializing the dequantized weights in memory.
+// matrix shape is [rows, cols], vector length is cols.
+func MatVecMulQ8_0(data []byte, vector []float32, rows, cols int) []float32 {
+	result := make([]float32, rows)
+	const blockSize = 32
+	const blockSizeBytes = 34
+	if cols%blockSize != 0 || len(vector) < cols {
+		return result
+	}
+	blocksPerRow := cols / blockSize
+	rowBytes := blocksPerRow * blockSizeBytes
+
+	parallelism := runtime.NumCPU()
+	if parallelism <= 0 || rows < 32 {
+		parallelism = 1
+	}
+	chunkSize := (rows + parallelism - 1) / parallelism
+
+	var wg sync.WaitGroup
+	for c := 0; c < parallelism; c++ {
+		startRow := c * chunkSize
+		if startRow >= rows {
+			break
+		}
+		endRow := startRow + chunkSize
+		if endRow > rows {
+			endRow = rows
+		}
+		wg.Add(1)
+		go func(rStart, rEnd int) {
+			defer wg.Done()
+			for i := rStart; i < rEnd; i++ {
+				rowOffset := i * rowBytes
+				if rowOffset+rowBytes > len(data) {
+					break
+				}
+				var rowSum float32
+				for b := 0; b < blocksPerRow; b++ {
+					bOffset := rowOffset + b*blockSizeBytes
+					d := Float16ToFloat32(binary.LittleEndian.Uint16(data[bOffset : bOffset+2]))
+					vBase := b * blockSize
+					var blockSum float32
+					for j := 0; j < 32; j++ {
+						blockSum += float32(int8(data[bOffset+2+j])) * vector[vBase+j] // #nosec G115
+					}
+					rowSum += d * blockSum
+				}
+				result[i] = rowSum
+			}
+		}(startRow, endRow)
+	}
+	wg.Wait()
+	return result
 }
 
 // DequantizeQ4_0 converts Q4_0 data to Float32.

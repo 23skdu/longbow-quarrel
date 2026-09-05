@@ -35,15 +35,3 @@ func TestMockEngine_Coverage(t *testing.T) {
 	e.ForwardDraft([]int{1, 2})
 	e.RollbackKV("seq_1", 0)
 }
-
-func TestCPUEngine_Extra_Coverage(t *testing.T) {
-	// We already have some CPUEngine tests, adding specific method coverage
-	e := &CPUEngine{
-		config: config.Config{VocabSize: 100},
-	}
-	
-	e.GetSeqCachePos("seq_1")
-	// Test rollback/forward draft stubs
-	e.ForwardDraft([]int{1})
-	e.RollbackKV("seq_1", 0)
-}

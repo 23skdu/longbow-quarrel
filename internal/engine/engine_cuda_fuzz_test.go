@@ -120,7 +120,7 @@ func FuzzCUDASampler(f *testing.F) {
 			logits[i] = float32(i%10) - 5
 		}
 
-		token := sampler.Sample(logits)
+		token := sampler.Sample(logits, nil)
 		if token < 0 || token >= 50 {
 			t.Errorf("Invalid token sampled: %d", token)
 		}

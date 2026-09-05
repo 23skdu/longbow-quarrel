@@ -6,11 +6,7 @@ import (
 )
 
 func TestCUDA_TurboQuantEncode(t *testing.T) {
-	ctx, err := NewContext()
-	if err != nil {
-		t.Skip("CUDA not available")
-		return
-	}
+	ctx := NewContext()
 	defer ctx.Free()
 
 	blockSize := 64
@@ -18,20 +14,14 @@ func TestCUDA_TurboQuantEncode(t *testing.T) {
 	numBlocks := 4
 
 	// Setup TurboQuant matrices
-	rot, err := ctx.NewTensorFP32(blockSize, blockSize)
-	if err != nil {
-		t.Fatal(err)
-	}
+	rot := ctx.NewTensorFP32(blockSize, blockSize)
 	rotData := make([]float32, blockSize*blockSize)
 	for i := 0; i < blockSize; i++ {
 		rotData[i*blockSize+i] = 1.0
 	}
 	rot.LoadFrom(rotData)
 
-	qjl, err := ctx.NewTensorFP32(qjlRows, blockSize)
-	if err != nil {
-		t.Fatal(err)
-	}
+	qjl := ctx.NewTensorFP32(qjlRows, blockSize)
 	qjlData := make([]float32, qjlRows*blockSize)
 	qjl.LoadFrom(qjlData)
 

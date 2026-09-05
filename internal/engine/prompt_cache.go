@@ -154,7 +154,10 @@ func (pc *PromptCache) removeLRU() {
 	}
 }
 
-func (pc *PromptCache) currentBlockCount() int {
+// CurrentBlockCount returns the current number of cached physical blocks in LRU.
+func (pc *PromptCache) CurrentBlockCount() int {
+	pc.mu.RLock()
+	defer pc.mu.RUnlock()
 	return pc.lruSize
 }
 
@@ -175,17 +178,9 @@ func (pc *PromptCache) Evict(kvCache *PagedKVCache) int {
 			}
 		}
 
-		pc.lruSize -= len(node.PhysicalBlocks)
 		node.PhysicalBlocks = nil
 		node.RefCount = 0
-
-		if pc.lruTail.prev != nil {
-			pc.lruTail.prev.next = nil
-			pc.lruTail = pc.lruTail.prev
-		} else {
-			pc.lruHead = nil
-			pc.lruTail = nil
-		}
+		pc.removeLRU()
 	}
 
 	return freed

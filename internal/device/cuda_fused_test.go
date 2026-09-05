@@ -17,10 +17,7 @@ func float32ToBytes(f32 []float32) []byte {
 }
 
 func TestCUDARMSNorm(t *testing.T) {
-	ctx, err := NewContext()
-	if err != nil {
-		t.Fatalf("Failed to create CUDA context: %v", err)
-	}
+	ctx := NewContext()
 	defer ctx.Free()
 
 	rows, cols := 4, 2048
@@ -52,10 +49,7 @@ func TestCUDARMSNorm(t *testing.T) {
 }
 
 func TestCUDASwiGLU(t *testing.T) {
-	ctx, err := NewContext()
-	if err != nil {
-		t.Fatalf("Failed to create CUDA context: %v", err)
-	}
+	ctx := NewContext()
 	defer ctx.Free()
 
 	rows, size := 4, 8192
@@ -69,10 +63,8 @@ func TestCUDASwiGLU(t *testing.T) {
 	gateTensor, _ := ctx.NewTensorFromData(rows, size, DataTypeF32, float32ToBytes(gate))
 	upTensor, _ := ctx.NewTensorFromData(rows, size, DataTypeF32, float32ToBytes(up))
 	downTensor, _ := ctx.NewTensor(rows, size, DataTypeF32)
-	downWeight, _ := ctx.NewTensor(size*4, size, DataTypeF32)
-	inputTensor, _ := ctx.NewTensor(rows, size, DataTypeF32)
 
-	ctx.FusedSwiGLU(inputTensor, gateTensor, upTensor, downWeight, downTensor, rows, size, size*4)
+	ctx.FusedSwiGLU(gateTensor, upTensor, downTensor, rows, size)
 	ctx.Synchronize()
 
 	output := downTensor.ToHostF32()
@@ -85,10 +77,7 @@ func TestCUDASwiGLU(t *testing.T) {
 }
 
 func TestCUDALayerScratch(t *testing.T) {
-	ctx, err := NewContext()
-	if err != nil {
-		t.Fatalf("Failed to create CUDA context: %v", err)
-	}
+	ctx := NewContext()
 	defer ctx.Free()
 
 	qNormDim := 512
@@ -99,14 +88,12 @@ func TestCUDALayerScratch(t *testing.T) {
 		t.Errorf("Layer scratch is nil")
 	}
 
-	t.Logf("Layer scratch structure created: Logits len=%d", len(scratch.Logits))
+	defer scratch.Free()
+	t.Logf("Layer scratch structure created successfully")
 }
 
 func BenchmarkCUDAKernel(b *testing.B) {
-	ctx, err := NewContext()
-	if err != nil {
-		b.Fatalf("Failed to create CUDA context: %v", err)
-	}
+	ctx := NewContext()
 	defer ctx.Free()
 
 	rows, cols := 32, 4096
@@ -127,7 +114,7 @@ func BenchmarkCUDAKernel(b *testing.B) {
 	eps := float32(1e-5)
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		ctx.FusedRMSNormAdd(inputTensor, hiddenTensor, weightTensor, outputTensor, rows, cols, eps)
 		ctx.Synchronize()
 	}

@@ -5,6 +5,7 @@ import (
 	"math"
 	"strings"
 
+	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
 	"github.com/23skdu/longbow-quarrel/internal/tokenizer"
 )
@@ -28,19 +29,128 @@ func getKV(f *gguf.GGUFFile, keys ...string) (interface{}, bool) {
 		}
 	}
 
-	// Try dynamic architecture detection
-	if arch, ok := f.KV["general.architecture"].(string); ok && len(keys) > 0 {
-		// Replace "llama." prefix with architecture name
-		primaryKey := keys[0]
-		if strings.Contains(primaryKey, "llama.") {
-			archKey := strings.Replace(primaryKey, "llama.", arch+".", 1)
-			if val, ok := f.KV[archKey]; ok {
-				return val, true
+	// Try dynamic architecture detection across all keys
+	if arch, ok := f.KV["general.architecture"].(string); ok && arch != "" {
+		for _, key := range keys {
+			if strings.Contains(key, "llama.") {
+				archKey := strings.Replace(key, "llama.", arch+".", 1)
+				if val, ok := f.KV[archKey]; ok {
+					return val, true
+				}
+			}
+			// Try prepending arch if key starts with common parameter names
+			if !strings.Contains(key, ".") {
+				archKey := arch + "." + key
+				if val, ok := f.KV[archKey]; ok {
+					return val, true
+				}
 			}
 		}
 	}
 
 	return nil, false
+}
+
+// ExtractModelConfig extracts and normalizes model hyperparameters from a GGUF file
+// supporting LLaMA, Mistral, Qwen (qwen2, qwen35), Gemma, and Nemotron.
+func ExtractModelConfig(f *gguf.GGUFFile) config.Config {
+	cfg := config.Default()
+	arch := "unknown"
+	if v, ok := f.KV["general.architecture"].(string); ok {
+		arch = v
+	}
+	cfg.Architecture = arch
+
+	// Block Count / Layers
+	if val, ok := getKV(f, arch+".block_count", "llama.block_count", "general.block_count"); ok {
+		cfg.Layers = int(toFloat64(val))
+	}
+	if cfg.Layers <= 0 {
+		cfg.Layers = 1
+	}
+
+	// Embedding Dim
+	if val, ok := getKV(f, arch+".embedding_length", arch+".hidden_size", "llama.embedding_length"); ok {
+		cfg.Dim = int(toFloat64(val))
+	}
+	if cfg.Dim <= 0 {
+		cfg.Dim = 2048
+	}
+
+	// Attention Heads
+	if val, ok := getKV(f, arch+".attention.head_count", "llama.attention.head_count"); ok {
+		cfg.Heads = int(toFloat64(val))
+	}
+	if cfg.Heads <= 0 {
+		cfg.Heads = 32
+	}
+
+	// KV Heads
+	if val, ok := getKV(f, arch+".attention.head_count_kv", arch+".attention.kv_head_count", "llama.attention.head_count_kv"); ok {
+		cfg.KVHeads = int(toFloat64(val))
+	}
+	if cfg.KVHeads <= 0 {
+		cfg.KVHeads = cfg.Heads
+	}
+
+	// HeadDim
+	if cfg.Heads > 0 {
+		cfg.HeadDim = cfg.Dim / cfg.Heads
+	}
+	if cfg.HeadDim <= 0 {
+		if val, ok := getKV(f, arch+".attention.key_length", arch+".attention.head_dim"); ok {
+			cfg.HeadDim = int(toFloat64(val))
+		}
+	}
+	if cfg.HeadDim <= 0 {
+		cfg.HeadDim = 128
+	}
+
+	// HiddenDim (FFN)
+	if val, ok := getKV(f, arch+".feed_forward_length", arch+".intermediate_size", "llama.feed_forward_length"); ok {
+		cfg.HiddenDim = int(toFloat64(val))
+	}
+	if cfg.HiddenDim <= 0 {
+		cfg.HiddenDim = 4 * cfg.Dim
+	}
+
+	// Context Length / SeqLen
+	if val, ok := getKV(f, arch+".context_length", "llama.context_length", "general.context_length"); ok {
+		cfg.SeqLen = int(toFloat64(val))
+	}
+	if cfg.SeqLen <= 0 {
+		cfg.SeqLen = 2048
+	}
+
+	// RoPE Frequency Base
+	if val, ok := getKV(f, arch+".rope.freq_base", "llama.rope.freq_base"); ok {
+		cfg.RopeTheta = float32(toFloat64(val))
+	}
+	if cfg.RopeTheta <= 0 {
+		cfg.RopeTheta = 10000.0
+	}
+
+	// RMSNorm Epsilon
+	if val, ok := getKV(f, arch+".attention.layer_norm_rms_epsilon", "llama.attention.layer_norm_rms_epsilon"); ok {
+		cfg.Eps = float32(toFloat64(val))
+	}
+	if cfg.Eps <= 0 {
+		cfg.Eps = 1e-5
+	}
+
+	// Vocab Size
+	if val, ok := getKV(f, arch+".vocab_size", "llama.vocab_size"); ok {
+		cfg.VocabSize = int(toFloat64(val))
+	}
+	if cfg.VocabSize <= 0 {
+		if tokens, ok := f.KV["tokenizer.ggml.tokens"].([]interface{}); ok {
+			cfg.VocabSize = len(tokens)
+		} else {
+			cfg.VocabSize = 32000
+		}
+	}
+
+	return cfg
 }
 
 func toFloat64(v interface{}) float64 {
