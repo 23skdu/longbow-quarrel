@@ -149,6 +149,10 @@ docker-nvidia:
 	@echo "Building Docker image for NVIDIA CUDA..."
 	docker build -f Dockerfile.nvidia -t $(BINARY_NAME):nvidia .
 
+docker-webui:
+	@echo "Building Docker image for WebUI..."
+	docker build -f Dockerfile.webui -t $(BINARY_NAME):webui .
+
 docker-tpu:
 	@echo "Building Docker image for TPU..."
 	docker build -f Dockerfile.tpu -t $(BINARY_NAME):tpu .

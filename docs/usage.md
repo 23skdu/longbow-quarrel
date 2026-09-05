@@ -178,3 +178,46 @@ docker run --gpus all -p 8080:8080 -v ~/.cache:/root/.cache \
   ghcr.io/23skdu/longbow-quarrel:cuda-latest \
   -model mistral -gpu-layers 32
 ```
+
+---
+
+## 9. Cloud Deployment (Kubernetes)
+
+### Resource Limits
+Define strict memory limits to prevent OOM kills. The engine engages fault tolerance at 95% of configured limits.
+
+```yaml
+resources:
+  limits:
+    memory: "16Gi"
+    nvidia.com/gpu: 1
+  requests:
+    cpu: "4"
+    memory: "8Gi"
+```
+
+> **Note:** With zero-copy inference, RAM allocations remain `< 50 MB` even for 4B–8B models. Requested memory accommodates OS page cache and the paged KV cache.
+
+### Health & Readiness Probes
+```yaml
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: 8080
+  initialDelaySeconds: 30
+  periodSeconds: 10
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: 8080
+  initialDelaySeconds: 60
+  periodSeconds: 5
+```
+
+### Graceful Degradation
+When memory pressure exceeds 95% of `MaxMemory`, the engine returns `503` for new requests while keeping `/healthz` alive to prevent pod restarts. Normal operation resumes automatically when memory is freed.
+
+### Distributed Sharding (Arrow Flight)
+For multi-GPU sharding, configure:
+- `QUARREL_SHARD_ROLE`: `master` or `worker`
+- `QUARREL_WORKER_ADDRS`: Comma-separated list of worker Flight endpoints

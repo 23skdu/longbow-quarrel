@@ -23,8 +23,8 @@
 ### Architecture & Extensibility
 | Priority | Item | Files | Description |
 |----------|------|-------|-------------|
-| P1 | Remote worker engine completion | `internal/engine/remote.go` | Implement `Infer`, `InferWithCallback`, `ForwardShard` for multi-node gRPC |
-| P1 | NCCL integration | `internal/device/cuda.go` | Replace stubs with actual NCCL library linking for multi-GPU allreduce |
+| P1 | Remote worker engine completion | `internal/engine/remote.go` | ✅ Done — `Infer`, `InferWithCallback`, `ForwardShard`, `ForwardBatch` via Arrow Flight RPC |
+| P1 | NCCL integration | `internal/device/multi_gpu.go`, `internal/device/nccl.go` | ✅ Done — real NCCL `allreduce`/`broadcast`/`allgather` with `nccl` build tag, stub fallback |
 | P1 | TPU/XLA backend validation | `cmd/quarrel/main_tpu.go` | Test and validate Google TPU inference path |
 | P1 | Grammar-constrained sampling expansion | `internal/sampler/` | Add support for regex and CFG grammars beyond JSON |
 

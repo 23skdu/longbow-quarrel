@@ -55,23 +55,248 @@ func (e *RemoteWorkerEngine) SyncWeights(ctx context.Context) error {
 }
 
 func (e *RemoteWorkerEngine) ForwardShard(ctx context.Context, input *device.Tensor) (*device.Tensor, error) {
-	// Push input tensor to worker, worker returns result shard
-	// This uses the StreamEmbeddings or similar logic
-	return nil, fmt.Errorf("ForwardShard not yet implemented over Flight")
+	if e.client == nil {
+		return nil, fmt.Errorf("worker client not connected")
+	}
+
+	if input == nil {
+		return nil, fmt.Errorf("input tensor is nil")
+	}
+
+	hiddenSize := e.config.Dim
+	if hiddenSize <= 0 {
+		hiddenSize = input.Cols()
+	}
+
+	current := input
+	for layerIdx := 0; layerIdx < e.config.Layers; layerIdx++ {
+		output, err := e.ForwardShardedLayer(ctx, layerIdx, 0, hiddenSize, current)
+		if err != nil {
+			return nil, fmt.Errorf("ForwardShardedLayer failed at layer %d: %w", layerIdx, err)
+		}
+		if layerIdx > 0 {
+			current.Free()
+		}
+		current = output
+	}
+
+	return current, nil
 }
 
 func (e *RemoteWorkerEngine) Infer(tokens []int, count int, cfg SamplerConfig) ([]int, error) {
-	// Remote inference via Flight DoGet
-	// The worker's Flight server handles the actual generation
-	return nil, fmt.Errorf("remote Infer requires secondary Flight stream implementation")
+	if e.client == nil {
+		return nil, fmt.Errorf("worker client not connected")
+	}
+
+	if len(tokens) == 0 {
+		return nil, fmt.Errorf("no input tokens provided")
+	}
+
+	ctx := context.Background()
+
+	// Encode tokens as float32 vectors for Arrow Flight transport
+	vectors := make([][]float32, len(tokens))
+	ids := make([]string, len(tokens))
+	for i, t := range tokens {
+		vectors[i] = []float32{float32(t)}
+		ids[i] = fmt.Sprintf("tok-%d", i)
+	}
+
+	// Build inference metadata for the worker
+	meta := map[string]string{
+		"op":           "infer",
+		"count":        fmt.Sprintf("%d", count),
+		"temperature":  fmt.Sprintf("%f", cfg.Temperature),
+		"top_k":        fmt.Sprintf("%d", cfg.TopK),
+		"top_p":        fmt.Sprintf("%f", cfg.TopP),
+		"rep_penalty":  fmt.Sprintf("%f", cfg.RepPenalty),
+		"presence_pen": fmt.Sprintf("%f", cfg.PresencePenalty),
+		"freq_penalty": fmt.Sprintf("%f", cfg.FrequencyPenalty),
+		"seed":         fmt.Sprintf("%d", cfg.Seed),
+		"min_p":        fmt.Sprintf("%f", cfg.MinP),
+	}
+
+	// Send encoded tokens via Flight DoPut as a record batch
+	if err := e.client.DoPut(ctx, vectors, ids, meta); err != nil {
+		return nil, fmt.Errorf("DoPut failed for inference: %w", err)
+	}
+
+	// Retrieve generated token IDs via Flight DoGet
+	result, err := e.client.DoGet(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("DoGet failed for inference results: %w", err)
+	}
+
+	// Convert result vectors back to token IDs
+	generated := make([]int, 0, len(result.Vectors))
+	for _, vec := range result.Vectors {
+		if len(vec) > 0 {
+			generated = append(generated, int(vec[0]))
+		}
+	}
+
+	return generated, nil
 }
 
-func (e *RemoteWorkerEngine) InferWithCallback(tokens []int, count int, cfg SamplerConfig, callback func(int)) (int, error) {
-	return 0, fmt.Errorf("streaming remote inference not yet implemented")
+func (e *RemoteWorkerEngine) InferWithCallback(tokens []int, count int, cfg SamplerConfig, callback func(int)) ([]int, error) {
+	if e.client == nil {
+		return nil, fmt.Errorf("worker client not connected")
+	}
+
+	if len(tokens) == 0 {
+		return nil, fmt.Errorf("no input tokens provided")
+	}
+
+	ctx := context.Background()
+
+	// Encode tokens as float32 vectors for Arrow Flight transport
+	vectors := make([][]float32, len(tokens))
+	ids := make([]string, len(tokens))
+	for i, t := range tokens {
+		vectors[i] = []float32{float32(t)}
+		ids[i] = fmt.Sprintf("tok-%d", i)
+	}
+
+	// Build inference metadata including streaming mode
+	meta := map[string]string{
+		"op":           "infer_stream",
+		"count":        fmt.Sprintf("%d", count),
+		"temperature":  fmt.Sprintf("%f", cfg.Temperature),
+		"top_k":        fmt.Sprintf("%d", cfg.TopK),
+		"top_p":        fmt.Sprintf("%f", cfg.TopP),
+		"rep_penalty":  fmt.Sprintf("%f", cfg.RepPenalty),
+		"presence_pen": fmt.Sprintf("%f", cfg.PresencePenalty),
+		"freq_penalty": fmt.Sprintf("%f", cfg.FrequencyPenalty),
+		"seed":         fmt.Sprintf("%d", cfg.Seed),
+		"min_p":        fmt.Sprintf("%f", cfg.MinP),
+		"stream":       "true",
+	}
+
+	// Send encoded tokens via Flight DoPut as a record batch
+	if err := e.client.DoPut(ctx, vectors, ids, meta); err != nil {
+		return nil, fmt.Errorf("DoPut failed for streaming inference: %w", err)
+	}
+
+	// Retrieve generated token IDs via Flight DoGet
+	result, err := e.client.DoGet(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("DoGet failed for streaming inference results: %w", err)
+	}
+
+	// Convert result vectors to token IDs and invoke the callback for each
+	generated := make([]int, 0, len(result.Vectors))
+	for _, vec := range result.Vectors {
+		if len(vec) > 0 {
+			tok := int(vec[0])
+			generated = append(generated, tok)
+			if callback != nil {
+				callback(tok)
+			}
+		}
+	}
+
+	return generated, nil
 }
 
 func (e *RemoteWorkerEngine) ForwardBatch(batch *BatchDescriptor) ([]*device.Tensor, error) {
-	return nil, fmt.Errorf("distributed ForwardBatch requires multi-node gRPC coordination")
+	if batch == nil || len(batch.Sequences) == 0 {
+		return nil, nil
+	}
+
+	batchSize := len(batch.Sequences)
+	results := make([]*device.Tensor, batchSize)
+	ctx := context.Background()
+
+	hiddenSize := e.config.Dim
+	if hiddenSize <= 0 {
+		hiddenSize = 576
+	}
+
+	for idx := range batch.Sequences {
+		seq := batch.Sequences[idx]
+		if seq == nil {
+			for j := 0; j < idx; j++ {
+				if results[j] != nil {
+					results[j].Free()
+				}
+			}
+			return nil, fmt.Errorf("nil sequence at index %d", idx)
+		}
+
+		start := batch.Offsets[idx]
+		var end int
+		if idx < batchSize-1 {
+			end = batch.Offsets[idx+1]
+		} else {
+			end = len(batch.Tokens)
+		}
+
+		seqTokens := batch.Tokens[start:end]
+		if len(seqTokens) == 0 {
+			for j := 0; j < idx; j++ {
+				if results[j] != nil {
+					results[j].Free()
+				}
+			}
+			return nil, fmt.Errorf("empty tokens for sequence %d", idx)
+		}
+
+		// Encode tokens as float32 for Flight transport
+		tokenData := make([]float32, len(seqTokens))
+		for i, t := range seqTokens {
+			tokenData[i] = float32(t)
+		}
+
+		meta := map[string]string{
+			"op":          "forward_batch",
+			"seq_idx":     fmt.Sprintf("%d", idx),
+			"context_len": fmt.Sprintf("%d", batch.ContextLens[idx]),
+			"hidden_size": fmt.Sprintf("%d", hiddenSize),
+			"token_count": fmt.Sprintf("%d", len(seqTokens)),
+		}
+		if idx < len(batch.IsDecode) {
+			meta["is_decode"] = fmt.Sprintf("%v", batch.IsDecode[idx])
+		}
+		if idx < len(batch.AdapterIDs) && batch.AdapterIDs[idx] != "" {
+			meta["adapter_id"] = batch.AdapterIDs[idx]
+		}
+
+		// Forward each sequence through the remote worker via DoPutTensor
+		resultData, err := e.client.DoPutTensor(ctx, tokenData, []int32{int32(len(seqTokens))}, meta)
+		if err != nil {
+			for j := 0; j < idx; j++ {
+				if results[j] != nil {
+					results[j].Free()
+				}
+			}
+			return nil, fmt.Errorf("ForwardBatch DoPutTensor failed for sequence %d: %w", idx, err)
+		}
+
+		if e.deviceCtx == nil {
+			e.deviceCtx = device.NewContext()
+		}
+
+		cols := hiddenSize
+		if len(resultData) > 0 && len(resultData) <= hiddenSize {
+			cols = len(resultData)
+		}
+
+		tensor := e.deviceCtx.NewTensorFP32(1, cols)
+		if len(resultData) > 0 {
+			if err := tensor.LoadFrom(resultData); err != nil {
+				tensor.Free()
+				for j := 0; j < idx; j++ {
+					if results[j] != nil {
+						results[j].Free()
+					}
+				}
+				return nil, fmt.Errorf("failed to load result for sequence %d: %w", idx, err)
+			}
+		}
+		results[idx] = tensor
+	}
+
+	return results, nil
 }
 
 func (e *RemoteWorkerEngine) Config() config.Config {

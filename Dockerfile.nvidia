@@ -1,33 +1,29 @@
 # =============================================================================
 # Longbow-Quarrel - NVIDIA CUDA Build
 # =============================================================================
-# This Dockerfile builds Quarrel with CUDA acceleration for NVIDIA GPUs.
+# This Dockerfile builds Quarrel with CUDA + NCCL acceleration for NVIDIA GPUs.
 # Requires NVIDIA Container Toolkit for GPU access.
 #
-# Build:    docker build -f Dockerfile.cuda -t longbow-quarrel:cuda .
-# Run:      docker run --gpus all -it longbow-quarrel:cuda --model /data/model.gguf
+# Build:    docker build -f Dockerfile.nvidia -t longbow-quarrel:nvidia .
+# Run:      docker run --gpus all -it longbow-quarrel:nvidia --model /data/model.gguf
 # =============================================================================
 
 # -----------------------------------------------------------------------------
-# Build Stage: CUDA Compilation
+# Build Stage: CUDA + NCCL Compilation
 # -----------------------------------------------------------------------------
 FROM nvidia/cuda:12.4.0-devel-ubuntu22.04 AS cuda-builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    golang-go \
     git \
     build-essential \
     pkg-config \
     wget \
     libcudnn9-dev-cuda-12 \
+    libnccl2-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Install CUDA stub library for linking
-RUN echo "INPUT(-lcudart)" > /usr/lib/x86_64-linux-gnu/libcuda.a && \
-    ln -sf /usr/lib/x86_64-linux-gnu/libcuda.a /usr/lib/x86_64-linux-gnu/libcuda.so
-
-# Install a more recent Go version
+# Install Go
 RUN wget -q https://go.dev/dl/go1.27.0.linux-amd64.tar.gz && \
     rm -rf /usr/local/go && \
     tar -C /usr/local -xzf go1.27.0.linux-amd64.tar.gz && \
@@ -40,7 +36,8 @@ ENV CUDA_PATH=/usr/local/cuda \
     PATH=/usr/local/cuda/bin:$PATH \
     GO111MODULE=on
 
-ENV CGO_LDFLAGS="-L/usr/local/cuda/lib64 -L/usr/lib/x86_64-linux-gnu -lcudart -lcublas -lcudnn" \
+# CGO flags: CUDA + cuBLAS + cuDNN + NCCL
+ENV CGO_LDFLAGS="-L/usr/local/cuda/lib64 -L/usr/lib/x86_64-linux-gnu -lcudart -lcublas -lcudnn -lnccl" \
     CGO_CFLAGS="-I/usr/local/cuda/include"
 
 WORKDIR /app
@@ -52,18 +49,19 @@ RUN go mod download
 # Copy source code
 COPY . .
 
-# Build with CUDA support
-RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -tags cuda \
-    -o quarrel-cuda ./cmd/quarrel
+# Build with CUDA + NCCL support
+RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -tags "cuda,nccl" \
+    -o quarrel-nvidia ./cmd/quarrel
 
 # -----------------------------------------------------------------------------
 # Runtime Stage: Minimal CUDA Runtime
 # -----------------------------------------------------------------------------
 FROM nvidia/cuda:12.4.0-runtime-ubuntu22.04
 
-# Install cuDNN runtime
+# Install cuDNN + NCCL runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libcudnn9-cuda-12 \
+    libnccl2 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -72,8 +70,11 @@ WORKDIR /app
 COPY --from=cuda-builder /usr/local/cuda/lib64/libcudart.so* /usr/local/cuda/lib64/
 COPY --from=cuda-builder /usr/local/cuda/lib64/libcuda.so* /usr/lib/x86_64-linux-gnu/
 
-# Copy the CUDA binary and kernels
-COPY --from=cuda-builder /app/quarrel-cuda ./quarrel
+# Copy NCCL library
+COPY --from=cuda-builder /usr/lib/x86_64-linux-gnu/libnccl.so* /usr/lib/x86_64-linux-gnu/
+
+# Copy the binary and kernels
+COPY --from=cuda-builder /app/quarrel-nvidia ./quarrel
 COPY --from=cuda-builder /app/internal/device/libcuda_kernels.so /usr/local/lib/libcuda_kernels.so
 
 # Set library path
@@ -83,21 +84,6 @@ ENV LD_LIBRARY_PATH=/usr/local/lib:/usr/local/cuda/lib64:/usr/lib/x86_64-linux-g
 CMD ["./quarrel", "--help"]
 
 # =============================================================================
-# Alternative: Multi-stage with CPU fallback
-# =============================================================================
-# For deployments that need both CUDA and CPU backends, use:
-#
-# FROM nvidia/cuda:12.4-devel-ubuntu22.04 AS builder
-# ... (same as above) ...
-# RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -tags cuda \
-#     -o quarrel ./cmd/simple
-#
-# FROM ubuntu:22.04
-# RUN apt-get install -y --no-install-recommends libcuda1 libcublas-12-4
-# COPY --from=builder /app/quarrel .
-# CMD ["./quarrel"]
-#
-# =============================================================================
 # GPU Requirements
 # =============================================================================
 # - NVIDIA Driver: 550.54.14+ (for CUDA 12.4)
@@ -105,7 +91,7 @@ CMD ["./quarrel", "--help"]
 # - Supported GPUs: Volta, Turing, Ampere, Ada Lovelace, Hopper
 #
 # Run with GPU access:
-#   docker run --gpus all -v /path/to/models:/data longbow-quarrel:cuda \
+#   docker run --gpus all -v /path/to/models:/data longbow-quarrel:nvidia \
 #       --model /data/smollm2.gguf --prompt "Hello"
 #
 # =============================================================================

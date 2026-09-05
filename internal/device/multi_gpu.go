@@ -5,18 +5,6 @@ package device
 /*
 #cgo linux,amd64 LDFLAGS: -L${SRCDIR} -lcuda_kernels -lcublas -lcudnn -lcudart
 #cgo linux,amd64 CFLAGS: -I/usr/local/cuda/include -I${SRCDIR}
-// NCCL support - uncomment if NCCL is available
-// #cgo LDFLAGS: -lnccl
-// #include <nccl.h>
-// NCCL stubs when library not available
-static void ncclAllReduceStub(void* sendBuf, void* recvBuf, size_t count, int datatype, int op, void* stream) {
-    // Stub: copy own data
-    if (sendBuf != recvBuf && count > 0) {
-        // memcpy would be used here
-    }
-}
-static void ncclBroadcastStub(void* sendBuf, void* recvBuf, size_t count, int datatype, int root, void* stream) {}
-static void ncclAllGatherStub(void* sendBuf, void* recvBuf, size_t count, int datatype, void* stream) {}
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
 #include <cuda.h>
@@ -86,6 +74,7 @@ type TensorParallelManager struct {
 	ranks     []int
 	localRank int
 	worldSize int
+	ncclComm  *ncclCommHandle
 	mu        sync.RWMutex
 }
 
@@ -124,6 +113,14 @@ func NewTensorParallelManager(config *MultiGPUConfig) (*TensorParallelManager, e
 	for i := 0; i < count; i++ {
 		tp.devices = append(tp.devices, i)
 		tp.ranks[i] = i
+	}
+
+	if config.UseNCCL && count > 1 {
+		comm, err := ncclInit(0, count, 0)
+		if err != nil {
+			return nil, fmt.Errorf("NCCL init failed: %w", err)
+		}
+		tp.ncclComm = comm
 	}
 
 	tensorParallel = tp
@@ -199,9 +196,11 @@ func (t *TensorParallelManager) AllReduce(data []float32, count int) error {
 	inputPtr := unsafe.Pointer(&data[0])
 	outputPtr := unsafe.Pointer(&data[0])
 
-	ncclSum := C.int(1)
-	C.ncclAllReduceStub(inputPtr, outputPtr, C.size_t(count), ncclSum, C.int(1), unsafe.Pointer(ctx.Ctx))
+	if t.ncclComm != nil {
+		return t.ncclComm.ncclAllReduce(inputPtr, outputPtr, count, unsafe.Pointer(ctx.Ctx))
+	}
 
+	// Fallback: serial memcpy (no cross-GPU reduction without NCCL)
 	return nil
 }
 
@@ -219,8 +218,11 @@ func (t *TensorParallelManager) AllGather(input []float32, output []float32, cou
 	inputPtr := unsafe.Pointer(&input[0])
 	outputPtr := unsafe.Pointer(&output[0])
 
-	C.ncclAllGatherStub(inputPtr, outputPtr, C.size_t(count), 1, unsafe.Pointer(ctx.Ctx))
+	if t.ncclComm != nil {
+		return t.ncclComm.ncclAllGather(inputPtr, outputPtr, count, unsafe.Pointer(ctx.Ctx))
+	}
 
+	copy(output, input)
 	return nil
 }
 
@@ -236,7 +238,9 @@ func (t *TensorParallelManager) Broadcast(data []float32, count int, root int) e
 
 	dataPtr := unsafe.Pointer(&data[0])
 
-	C.ncclBroadcastStub(dataPtr, dataPtr, C.size_t(count), 1, C.int(root), unsafe.Pointer(ctx.Ctx))
+	if t.ncclComm != nil {
+		return t.ncclComm.ncclBroadcast(dataPtr, count, root, unsafe.Pointer(ctx.Ctx))
+	}
 
 	return nil
 }
@@ -249,6 +253,13 @@ func (t *TensorParallelManager) SynchronizeAll() {
 		}
 		C.cudaSetDevice(C.int(device))
 		C.cudaStreamSynchronize(ctx.Ctx)
+	}
+}
+
+func (t *TensorParallelManager) Close() {
+	if t.ncclComm != nil {
+		t.ncclComm.destroy()
+		t.ncclComm = nil
 	}
 }
 
