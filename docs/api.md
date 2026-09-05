@@ -31,6 +31,9 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 }
 ```
 
+> **Note on `model` parameter:** Supports fuzzy model names (e.g. `"Qwen3.5"`, `"mistral:latest"`, `"Llama-3.2-3B"`) which automatically resolve across `~/.cache/llmfit/models/`, `~/.cache/llama.cpp/`, `~/.cache/huggingface/hub/`, and `~/.ollama/models/`, in addition to exact paths.
+
+
 **Response:**
 ```json
 {

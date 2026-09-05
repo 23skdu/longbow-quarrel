@@ -29,71 +29,9 @@ var (
 		Help: "Total number of CUDA engine initialization failures",
 	}, []string{"model", "error_type"})
 
-	cudaInferenceTotal = promauto.NewCounterVec(prometheus.CounterOpts{
-		Name: "quarrel_cuda_inference_total",
-		Help: "Total number of CUDA inference calls",
-	}, []string{"model"})
-
-	cudaInferenceDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
-		Name:    "quarrel_cuda_inference_duration_seconds",
-		Help:    "Duration of CUDA inference calls",
-		Buckets: []float64{0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0},
-	}, []string{"model"})
-
-	cudaTokensGenerated = promauto.NewCounterVec(prometheus.CounterOpts{
-		Name: "quarrel_cuda_tokens_generated_total",
-		Help: "Total number of tokens generated on CUDA",
-	}, []string{"model"})
-
-	cudaTokensPerSecond = promauto.NewHistogramVec(prometheus.HistogramOpts{
-		Name:    "quarrel_cuda_tokens_per_second",
-		Help:    "Tokens generated per second",
-		Buckets: []float64{10, 50, 100, 200, 500, 1000},
-	}, []string{"model"})
-
-	cudaLayerLatency = promauto.NewHistogramVec(prometheus.HistogramOpts{
-		Name:    "quarrel_cuda_layer_latency_seconds",
-		Help:    "Latency per transformer layer",
-		Buckets: []float64{0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1},
-	}, []string{"model", "layer"})
-
 	cudaMemoryUsage = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "quarrel_cuda_memory_bytes",
 		Help: "Current CUDA memory usage",
-	}, []string{"model"})
-
-	cudaKVCacheHits = promauto.NewCounterVec(prometheus.CounterOpts{
-		Name: "quarrel_cuda_kv_cache_hits_total",
-		Help: "Total number of KV cache hits",
-	}, []string{"model"})
-
-	cudaKVCacheMisses = promauto.NewCounterVec(prometheus.CounterOpts{
-		Name: "quarrel_cuda_kv_cache_misses_total",
-		Help: "Total number of KV cache misses",
-	}, []string{"model"})
-
-	cudaDequantizationTime = promauto.NewHistogramVec(prometheus.HistogramOpts{
-		Name:    "quarrel_cuda_dequantization_seconds",
-		Help:    "Time spent dequantizing weights",
-		Buckets: []float64{0.0001, 0.001, 0.01, 0.1},
-	}, []string{"model", "quantization_type"})
-
-	cudaAttentionTime = promauto.NewHistogramVec(prometheus.HistogramOpts{
-		Name:    "quarrel_cuda_attention_seconds",
-		Help:    "Time spent in attention computation",
-		Buckets: []float64{0.0001, 0.001, 0.01, 0.1, 0.5},
-	}, []string{"model"})
-
-	cudaSamplingTime = promauto.NewHistogramVec(prometheus.HistogramOpts{
-		Name:    "quarrel_cuda_sampling_seconds",
-		Help:    "Time spent in sampling",
-		Buckets: []float64{0.00001, 0.0001, 0.001, 0.01},
-	}, []string{"model"})
-
-	cudaBatchSize = promauto.NewHistogramVec(prometheus.HistogramOpts{
-		Name:    "quarrel_cuda_batch_size",
-		Help:    "Number of tokens in a batch",
-		Buckets: []float64{1, 2, 4, 8, 16, 32},
 	}, []string{"model"})
 )
 
@@ -677,7 +615,7 @@ func (e *cudaEngine) inferInternal(inputTokens []int, tokensToGenerate int, samp
 	}
 }
 
-func (e *cudaEngine) forward(token int, pos int, allTokens []int) ([]float32, error) {
+func (e *cudaEngine) forward(token int, pos int, _ []int) ([]float32, error) {
 	ctx := e.cuda.Ctx
 	dim := e.config.Dim
 	hiddenDim := e.config.HiddenDim

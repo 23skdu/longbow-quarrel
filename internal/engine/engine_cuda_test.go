@@ -340,7 +340,7 @@ func BenchmarkCUDAInference(b *testing.B) {
 	}
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_, err := e.Infer(tokens, 10, samplerCfg)
 		if err != nil {
 			b.Fatalf("Inference failed: %v", err)

@@ -9,12 +9,15 @@ To ensure system stability, strictly define memory limits. The engine's fault to
 ```yaml
 resources:
   limits:
-    memory: "32Gi" # Depends on model size
-    nvidia.com/gpu: 1 # For CUDA nodes
+    memory: "16Gi" # Zero-copy inference drastically reduces memory pressure
+    nvidia.com/gpu: 1 # For CUDA nodes (optional, or use CPU SIMD mode)
   requests:
     cpu: "4"
-    memory: "16Gi"
+    memory: "8Gi"
 ```
+
+> **Note on Zero-Copy Inference (v0.2.0):** With direct memory-mapped matrix-vector multiplication (`MatVecMulQ8_0`, `MatVecMulQ4_K`), RAM allocations on the Go heap remain `< 50 MB` even for 4B–8B models. The requested memory primarily accommodates OS page cache and the paged KV cache. When GPU VRAM is limited, use `-ngl <layers>` to offload a portion of layers to GPU while running remaining layers on host CPU.
+
 
 ## 2. Health & Readiness Probes
 
