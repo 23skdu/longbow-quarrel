@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"strings"
+	"sync"
+	"time"
 
 	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/device"
@@ -13,8 +16,6 @@ import (
 	"github.com/23skdu/longbow-quarrel/internal/logger"
 	"github.com/23skdu/longbow-quarrel/internal/simd"
 	"github.com/23skdu/longbow-quarrel/internal/tokenizer"
-	"sync"
-	"time"
 )
 
 type CPUEngine struct {
@@ -245,11 +246,22 @@ func (e *CPUEngine) runBatchLoop() {
 				case seq.Result <- seq.Tokens:
 				default:
 				}
+				// Populate PromptCache so repeated/shared prompts skip prefill
+				if e.PromptCache != nil && e.cache != nil {
+					promptLen := seq.Pos
+					if promptLen > 0 && promptLen <= len(seq.Tokens) {
+						blocks := e.cache.GetSequenceBlocks(fmt.Sprintf("%d", seq.ID))
+						if len(blocks) > 0 {
+							e.PromptCache.Insert(seq.Tokens[:promptLen], blocks)
+						}
+					}
+				}
 				e.BatchManager.CompleteSequence(seq.ID, e.cache)
 				e.kvMu.Lock()
 				delete(e.seqKVCaches, fmt.Sprintf("seq-%d", seq.ID))
 				e.kvMu.Unlock()
 			}
+
 		}
 	}
 }
@@ -284,10 +296,16 @@ func (e *CPUEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, error
 				e.seqKVCaches = make(map[string]*CPUKVCache)
 			}
 			kvCache, ok := e.seqKVCaches[seqIDStr]
-			if !ok || kvCache == nil {
-				kvCache = NewCPUKVCache(e.config.Layers)
+			if !ok {
+				windowSize := e.config.WindowSize
+				if windowSize > 0 {
+					kvCache = NewCPUKVCacheWithWindow(e.config.Layers, windowSize)
+				} else {
+					kvCache = NewCPUKVCache(e.config.Layers)
+				}
 				e.seqKVCaches[seqIDStr] = kvCache
 			}
+
 			e.kvMu.Unlock()
 
 			hiddenSize := e.config.Dim
@@ -498,24 +516,54 @@ func applyTopKCPU(logits []float32, k int) []float32 {
 	return logits
 }
 
+// applyTopPCPU applies Top-P (nucleus) filtering: sorts tokens by softmax probability,
+// accumulates the CDF, and sets logits[i] = -Inf for all tokens outside the nucleus.
 func applyTopPCPU(logits []float32, p float64) []float32 {
-	probs := softmaxCPU(logits)
-	cumSum := 0.0
-	cutoff := p
+	if p >= 1.0 || len(logits) == 0 {
+		return logits
+	}
 
+	// Compute softmax probabilities
+	probs := softmaxCPU(logits)
+
+	// Build index-sorted list by descending probability
+	type idxProb struct {
+		idx  int
+		prob float32
+	}
+	sorted := make([]idxProb, len(probs))
 	for i, prob := range probs {
-		if prob > 0 {
-			cumSum += float64(prob)
-			if cumSum <= cutoff {
-				logits[i] = float32(float64(logits[i]) * p / cutoff)
-			} else {
-				logits[i] = float32(-math.Inf(1))
-			}
+		sorted[i] = idxProb{idx: i, prob: prob}
+	}
+	// Partial insertion sort (efficient for large vocab with skewed distributions)
+	for i := 1; i < len(sorted); i++ {
+		for j := i; j > 0 && sorted[j].prob > sorted[j-1].prob; j-- {
+			sorted[j], sorted[j-1] = sorted[j-1], sorted[j]
 		}
 	}
 
-	return logits
+	// Mark tokens inside nucleus
+	cumSum := float64(0)
+	inNucleus := make([]bool, len(logits))
+	for _, ip := range sorted {
+		cumSum += float64(ip.prob)
+		inNucleus[ip.idx] = true
+		if cumSum >= p {
+			break
+		}
+	}
+
+	// Zero out tokens outside nucleus
+	result := make([]float32, len(logits))
+	copy(result, logits)
+	for i := range result {
+		if !inNucleus[i] {
+			result[i] = float32(math.Inf(-1))
+		}
+	}
+	return result
 }
+
 
 func softmaxCPU(logits []float32) []float32 {
 	probs := make([]float32, len(logits))
@@ -536,26 +584,64 @@ func sampleFromDistCPU(probs []float32, r *rand.Rand) int {
 	return len(probs) - 1
 }
 
+// ForwardDraft performs a multi-token speculative forward pass on the CPU engine,
+// returning one logit vector per draft position (up to draftCount tokens beyond the prompt).
+// This enables the SpeculativeManager to compute real acceptance ratios.
 func (e *CPUEngine) ForwardDraft(tokens []int) ([][]float32, error) {
-	if len(tokens) == 0 || e.weights == nil || (len(e.weights.TokenEmb) == 0 && e.weights.RawTokenEmb == nil) {
+	if len(tokens) == 0 || e.weights == nil {
 		return nil, nil
 	}
+	if len(e.weights.TokenEmb) == 0 && e.weights.RawTokenEmb == nil {
+		return nil, nil
+	}
+
 	hiddenSize := e.config.Dim
-	if len(e.weights.TokenEmb) > 0 && len(e.weights.TokenEmb[0]) > 0 {
-		hiddenSize = len(e.weights.TokenEmb[0])
+	if hiddenSize <= 0 {
+		hiddenSize = 576
 	}
-	draftCount := 4
-	drafts := make([][]float32, draftCount)
-	for i := range drafts {
-		drafts[i] = make([]float32, hiddenSize)
+
+	// Use up to the last draftCount token positions from the input token sequence.
+	// For speculative decoding, we want logits at positions [len(tokens)-draftK .. len(tokens)-1].
+	const draftCount = 4
+	startIdx := len(tokens) - draftCount
+	if startIdx < 0 {
+		startIdx = 0
 	}
-	lastToken := tokens[len(tokens)-1]
-	tokEmb := e.weights.GetTokenEmbedding(lastToken, hiddenSize)
-	for i := 0; i < draftCount; i++ {
-		copy(drafts[i], tokEmb)
+	draftTokens := tokens[startIdx:]
+
+	// Fresh KV cache for the draft pass (includes the full prefix context)
+	kvCache := NewCPUKVCache(e.config.Layers)
+
+	var results [][]float32
+
+	// Process all tokens, collecting logits for draft positions
+	for pos, tok := range tokens {
+		hidden := e.weights.GetTokenEmbedding(tok, hiddenSize)
+		for layerIdx := 0; layerIdx < e.config.Layers; layerIdx++ {
+			hidden = ApplyLayerCPUKV(e.weights, hidden, layerIdx, pos, kvCache, e.config)
+		}
+
+		// Only collect logits for draft positions (last draftCount tokens)
+		isDraftPos := pos >= len(tokens)-len(draftTokens)
+		if isDraftPos {
+			normed := hidden
+			if e.weights.OutputNorm != nil {
+				normed = make([]float32, len(hidden))
+				simd.RMSNorm(hidden, e.weights.OutputNorm, normed, 1, len(hidden), e.config.Eps)
+			}
+			var logits []float32
+			if len(e.weights.Output) > 0 || e.weights.RawOutput != nil {
+				logits = e.weights.MatVec(e.weights.Output, e.weights.RawOutput, normed)
+			} else {
+				logits = normed
+			}
+			results = append(results, logits)
+		}
 	}
-	return drafts, nil
+
+	return results, nil
 }
+
 
 func (e *CPUEngine) RollbackKV(seqID string, newPos int) error {
 	var cacheErr error
@@ -581,6 +667,143 @@ func (e *CPUEngine) RollbackKV(seqID string, newPos int) error {
 	return cacheErr
 }
 
+// LoadAdapter implements CPU LoRA merge-on-load.
+// The LoRA delta (A × B × alpha/rank) is fused directly into the CPUWeights
+// float32 matrices at load time, so there is zero inference-time overhead.
+// Supports .gguf sidecar format (tensor names: "blk.N.attn_q.lora_A.weight" etc.).
 func (e *CPUEngine) LoadAdapter(path, id string) error {
-	return nil // Not supported on CPU for now
+	f, err := gguf.LoadFile(path)
+	if err != nil {
+		return fmt.Errorf("cpu lora: failed to load %s: %w", path, err)
+	}
+	defer f.Close()
+
+	alpha := float32(8.0)
+	if a, ok := f.KV["adapter.lora_alpha"].(float32); ok {
+		alpha = a
+	}
+
+	// Group tensors by base name (e.g., "blk.0.attn_q")
+	typeA := make(map[string]*gguf.TensorInfo)
+	typeB := make(map[string]*gguf.TensorInfo)
+	for _, t := range f.Tensors {
+		switch {
+		case strings.HasSuffix(t.Name, ".lora_A.weight"):
+			typeA[strings.TrimSuffix(t.Name, ".lora_A.weight")] = t
+		case strings.HasSuffix(t.Name, ".lora_B.weight"):
+			typeB[strings.TrimSuffix(t.Name, ".lora_B.weight")] = t
+		}
+	}
+
+	for base, tA := range typeA {
+		tB, ok := typeB[base]
+		if !ok {
+			continue
+		}
+		dimIn := int(tA.Dimensions[0])   // #nosec G115
+		rank := int(tA.Dimensions[1])    // #nosec G115
+		dimOut := int(tB.Dimensions[1])  // #nosec G115
+
+		aData, err2 := decodeTensorData(tA)
+		if err2 != nil || len(aData) != dimIn*rank {
+			continue
+		}
+		bData, err2 := decodeTensorData(tB)
+		if err2 != nil || len(bData) != rank*dimOut {
+			continue
+		}
+
+		// delta[i][j] = sum_r(A[i][r] * B[r][j]) * alpha / rank
+		// A: [dimIn x rank], B: [rank x dimOut]  → delta: [dimOut x dimIn] (row-major weight shape)
+		scale := alpha / float32(rank)
+		delta := make([]float32, dimOut*dimIn)
+		for o := 0; o < dimOut; o++ {
+			for i := 0; i < dimIn; i++ {
+				var s float32
+				for r := 0; r < rank; r++ {
+					s += aData[i*rank+r] * bData[r*dimOut+o]
+				}
+				delta[o*dimIn+i] = s * scale
+			}
+		}
+
+		// Map base name to CPUWeights field
+		var layer int
+		layerKey := ""
+		if n, err3 := fmt.Sscanf(base, "blk.%d.", &layer); n == 1 && err3 == nil {
+			// Extract projection name
+			suffix := base[len(fmt.Sprintf("blk.%d.", layer)):]
+			switch {
+			case suffix == "attn_q" || suffix == "self_attn.q_proj":
+				layerKey = "attn_q"
+			case suffix == "attn_k" || suffix == "self_attn.k_proj":
+				layerKey = "attn_k"
+			case suffix == "attn_v" || suffix == "self_attn.v_proj":
+				layerKey = "attn_v"
+			case suffix == "attn_output" || suffix == "self_attn.o_proj":
+				layerKey = "attn_o"
+			case suffix == "ffn_gate" || suffix == "mlp.gate_proj":
+				layerKey = "ffn_gate"
+			case suffix == "ffn_up" || suffix == "mlp.up_proj":
+				layerKey = "ffn_up"
+			case suffix == "ffn_down" || suffix == "mlp.down_proj":
+				layerKey = "ffn_down"
+			}
+		}
+
+		if layerKey == "" || layer >= e.config.Layers {
+			continue
+		}
+
+		// Merge delta into the target weight slice
+		e.mergeLoRADelta(layer, layerKey, delta)
+	}
+
+	return nil
 }
+
+// mergeLoRADelta adds a LoRA delta matrix into the corresponding CPUWeights slice.
+// This is safe to call only before inference starts (no mutex needed at load time).
+func (e *CPUEngine) mergeLoRADelta(layer int, key string, delta []float32) {
+	if e.weights == nil {
+		return
+	}
+	var target []float32
+	switch key {
+	case "attn_q":
+		if layer < len(e.weights.AttnQ) {
+			target = e.weights.AttnQ[layer]
+		}
+	case "attn_k":
+		if layer < len(e.weights.AttnK) {
+			target = e.weights.AttnK[layer]
+		}
+	case "attn_v":
+		if layer < len(e.weights.AttnV) {
+			target = e.weights.AttnV[layer]
+		}
+	case "attn_o":
+		if layer < len(e.weights.AttnO) {
+			target = e.weights.AttnO[layer]
+		}
+	case "ffn_gate":
+		if layer < len(e.weights.FfnGate) {
+			target = e.weights.FfnGate[layer]
+		}
+	case "ffn_up":
+		if layer < len(e.weights.FfnUp) {
+			target = e.weights.FfnUp[layer]
+		}
+	case "ffn_down":
+		if layer < len(e.weights.FfnDown) {
+			target = e.weights.FfnDown[layer]
+		}
+	}
+	if target == nil || len(target) != len(delta) {
+		return
+	}
+	for i := range target {
+		target[i] += delta[i]
+	}
+}
+

@@ -12,6 +12,7 @@ type GGMLType uint32
 const (
 	GGMLTypeF32      GGMLType = 0
 	GGMLTypeF16      GGMLType = 1
+	GGMLTypeBF16     GGMLType = 30 // BFloat16 used in Gemma3, Mistral Nemo, modern GGUF
 	GGMLTypeQ4_0     GGMLType = 2
 	GGMLTypeQ4_1     GGMLType = 3
 	GGMLTypeQ5_0     GGMLType = 6

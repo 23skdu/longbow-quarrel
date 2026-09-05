@@ -273,6 +273,8 @@ func decodeTensorData(t *gguf.TensorInfo) ([]float32, error) {
 		return gguf.DequantizeQ3K(t.Data, int(numElements)), nil
 	case gguf.GGMLTypeQ5_K:
 		return gguf.DequantizeQ5K(t.Data, int(numElements)), nil
+	case gguf.GGMLTypeQ4_0:
+		return gguf.DequantizeQ4_0(t.Data, int(numElements)), nil
 	case gguf.GGMLTypeF32:
 		data := make([]float32, numElements)
 		for i := uint32(0); i < numElements; i++ {
@@ -286,9 +288,11 @@ func decodeTensorData(t *gguf.TensorInfo) ([]float32, error) {
 		for i := uint32(0); i < numElements; i++ {
 			offset := uint64(i) * 2
 			bits := uint16(t.Data[offset]) | uint16(t.Data[offset+1])<<8
-			data[i] = float32(bits) / 32767.0
+			data[i] = gguf.Float16ToFloat32(bits)
 		}
 		return data, nil
+	case gguf.GGMLTypeBF16:
+		return gguf.DequantizeBF16(t.Data, int(numElements)), nil
 	default:
 		return make([]float32, numElements), nil
 	}
@@ -303,6 +307,7 @@ type CPUKVCache struct {
 	mu     sync.Mutex
 	Keys   [][]float32 // [layerIdx] -> flattened [numTokens * kvHeads * headDim]
 	Values [][]float32 // [layerIdx] -> flattened [numTokens * kvHeads * headDim]
+	MaxLen int         // 0 = unbounded; >0 = sliding-window eviction with attention-sink
 }
 
 // NewCPUKVCache creates a per-sequence KV cache for CPU execution.
@@ -314,6 +319,14 @@ func NewCPUKVCache(numLayers int) *CPUKVCache {
 		Keys:   make([][]float32, numLayers),
 		Values: make([][]float32, numLayers),
 	}
+}
+
+// NewCPUKVCacheWithWindow creates a sliding-window KV cache.
+// windowSize=0 disables eviction (same as NewCPUKVCache).
+func NewCPUKVCacheWithWindow(numLayers, windowSize int) *CPUKVCache {
+	c := NewCPUKVCache(numLayers)
+	c.MaxLen = windowSize
+	return c
 }
 
 // Reset clears all cached keys and values.
@@ -530,6 +543,28 @@ func attentionCPUKV(q, k, v []float32, layerIdx, pos int, kv *CPUKVCache, numHea
 	}
 	kv.Keys[layerIdx] = append(kv.Keys[layerIdx], k[:kvDim]...)
 	kv.Values[layerIdx] = append(kv.Values[layerIdx], v[:kvDim]...)
+
+	// Sliding-window eviction with attention sink:
+	// If MaxLen > 0 and we exceed the window, evict the oldest token
+	// while always preserving position 0 (the attention sink).
+	if kv.MaxLen > 0 {
+		numSlots := len(kv.Keys[layerIdx]) / kvDim
+		for numSlots > kv.MaxLen {
+			// Preserve slot 0 (attention sink); evict slot 1
+			if numSlots <= 1 {
+				break
+			}
+			// Remove element at index 1 (keep [0] and [2:])
+			keys := kv.Keys[layerIdx]
+			vals := kv.Values[layerIdx]
+			copy(keys[kvDim:], keys[kvDim*2:])
+			kv.Keys[layerIdx] = keys[:len(keys)-kvDim]
+			copy(vals[kvDim:], vals[kvDim*2:])
+			kv.Values[layerIdx] = vals[:len(vals)-kvDim]
+			numSlots--
+		}
+	}
+
 	cachedK := kv.Keys[layerIdx]
 	cachedV := kv.Values[layerIdx]
 	kv.mu.Unlock()
@@ -713,19 +748,33 @@ func (w *CPUWeights) MatVec(f32Weight []float32, raw *gguf.TensorInfo, x []float
 		if len(raw.Dimensions) > 1 {
 			rows = int(raw.Dimensions[1]) // #nosec G115 -- safe: tensor dimensions fit in int
 		}
-		if raw.Type == gguf.GGMLTypeQ8_0 {
+		switch raw.Type {
+		case gguf.GGMLTypeQ8_0:
 			return gguf.MatVecMulQ8_0(raw.Data, x, rows, cols)
-		}
-		if raw.Type == gguf.GGMLTypeQ4_K {
+		case gguf.GGMLTypeQ4_K:
 			return gguf.MatVecMulQ4_K(raw.Data, x, rows, cols)
-		}
-		if raw.Type == gguf.GGMLTypeQ6_K {
+		case gguf.GGMLTypeQ6_K:
 			return gguf.MatVecMulQ6_K(raw.Data, x, rows, cols)
+		case gguf.GGMLTypeBF16:
+			return gguf.MatVecMulBF16(raw.Data, x, rows, cols)
+		case gguf.GGMLTypeQ4_0:
+			return gguf.MatVecMulQ4_0(raw.Data, x, rows, cols)
+		case gguf.GGMLTypeQ5_0:
+			return gguf.MatVecMulQ5_0(raw.Data, x, rows, cols)
+		case gguf.GGMLTypeQ2_K:
+			return gguf.MatVecMulQ2_K(raw.Data, x, rows, cols)
+		case gguf.GGMLTypeQ3_K:
+			return gguf.MatVecMulQ3_K(raw.Data, x, rows, cols)
+		case gguf.GGMLTypeQ5_K:
+			return gguf.MatVecMulQ5_K(raw.Data, x, rows, cols)
+		default:
+			// Fallback: dequantize then matvecmul for F16, BF16, F32, and any unrecognized type
+			data, err := decodeTensorData(raw)
+			if err == nil && len(data) > 0 {
+				return simd.MatVecMul(data, x, len(data)/cols, cols)
+			}
 		}
-		data, err := decodeTensorData(raw)
-		if err == nil && len(data) > 0 {
-			return simd.MatVecMul(data, x, len(data)/cols, cols)
-		}
+
 	}
 	return nil
 }

@@ -357,8 +357,19 @@ func (e *cudaEngine) runBatchLoop() {
 				case seq.Result <- seq.Tokens:
 				default:
 				}
+				// Populate PromptCache so repeated/shared prompts skip prefill
+				if e.PromptCache != nil && e.cache != nil {
+					promptLen := seq.Pos
+					if promptLen > 0 && promptLen <= len(seq.Tokens) {
+						blocks := e.cache.GetSequenceBlocks(fmt.Sprintf("%d", seq.ID))
+						if len(blocks) > 0 {
+							e.PromptCache.Insert(seq.Tokens[:promptLen], blocks)
+						}
+					}
+				}
 				e.BatchManager.CompleteSequence(seq.ID, e.cache)
 			}
+
 		}
 	}
 }
