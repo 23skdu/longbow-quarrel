@@ -33,14 +33,18 @@ var (
 	blockSize    = flag.Int("block-size", 16, "Paged attention block size")
 	totalBlocks  = flag.Int("total-blocks", 256, "Total number of physical blocks in paged cache")
 
-	temperature  = flag.Float64("temp", 0.7, "Temperature for sampling")
-	topK         = flag.Int("topk", 40, "Top-K sampling")
-	topP         = flag.Float64("topp", 0.95, "Top-P sampling")
-	repPenalty   = flag.Float64("rep-penalty", 1.1, "Repetition penalty")
-	streamOutput = flag.Bool("stream", false, "Stream tokens as they are generated")
-	flightAddr   = flag.String("flight", ":50051", "Address to serve Arrow Flight inference")
-	numGPULayers = flag.Int("ngl", -1, "Number of layers to offload to GPU (-1 for all)")
-	_            = flag.Int("gpu-layers", -1, "Alias for -ngl")
+	temperature      = flag.Float64("temp", 0.7, "Temperature for sampling")
+	topK             = flag.Int("topk", 40, "Top-K sampling")
+	topP             = flag.Float64("topp", 0.95, "Top-P sampling")
+	repPenalty       = flag.Float64("rep-penalty", 1.1, "Repetition penalty")
+	presencePenalty  = flag.Float64("presence-penalty", 0.0, "Presence penalty")
+	frequencyPenalty = flag.Float64("frequency-penalty", 0.0, "Frequency penalty")
+	minP             = flag.Float64("min-p", 0.0, "Min-P sampling threshold")
+	seed             = flag.Int64("seed", 0, "Random seed (0 for auto)")
+	streamOutput     = flag.Bool("stream", false, "Stream tokens as they are generated")
+	flightAddr       = flag.String("flight", ":50051", "Address to serve Arrow Flight inference")
+	numGPULayers     = flag.Int("ngl", -1, "Number of layers to offload to GPU (-1 for all)")
+	gpuLayers        = flag.Int("gpu-layers", -1, "Alias for -ngl")
 )
 
 func main() {
@@ -77,6 +81,9 @@ func main() {
 	if *kvCacheSize > 0 {
 		engineConfig.KVCacheSize = *kvCacheSize
 		engineConfig.SeqLen = *kvCacheSize
+	}
+	if *gpuLayers >= 0 && *numGPULayers < 0 {
+		*numGPULayers = *gpuLayers
 	}
 	if *numGPULayers >= 0 {
 		engineConfig.NumGPULayers = *numGPULayers
@@ -134,10 +141,14 @@ func main() {
 	fmt.Printf("Prompt tokens: %d\n", len(promptTokens))
 
 	samplerConfig := engine.SamplerConfig{
-		Temperature: *temperature,
-		TopK:        *topK,
-		TopP:        *topP,
-		RepPenalty:  *repPenalty,
+		Temperature:      *temperature,
+		TopK:             *topK,
+		TopP:             *topP,
+		RepPenalty:       *repPenalty,
+		PresencePenalty:  *presencePenalty,
+		FrequencyPenalty: *frequencyPenalty,
+		MinP:             *minP,
+		Seed:             *seed,
 	}
 
 	startTime := time.Now()

@@ -243,6 +243,8 @@ func (t *Tensor) Free() {
 
 func (t *Tensor) DataType() DataType { return t.dataType }
 
+func (t *Tensor) IsDevice() bool { return true }
+
 func (t *Tensor) Rows() int            { return t.rows }
 func (t *Tensor) Cols() int            { return t.cols }
 func (t *Tensor) Data() unsafe.Pointer { return t.devPtr }
@@ -318,6 +320,20 @@ func (t *Tensor) ToHostF32() []float32 {
 	}
 
 	return result
+}
+
+func (t *Tensor) ToHostFP16() []uint16 {
+	size := t.rows * t.cols
+	hostF16 := make([]uint16, size)
+	if t.dataType == DataTypeF16 {
+		C.cudaMemcpy(unsafe.Pointer(&hostF16[0]), t.devPtr, C.size_t(size*2), C.cudaMemcpyDeviceToHost)
+	} else {
+		hostF32 := t.ToHostF32()
+		for i, v := range hostF32 {
+			hostF16[i] = Float32ToFloat16(v)
+		}
+	}
+	return hostF16
 }
 
 func (t *Tensor) StoreKV(v *Tensor, kCache, vCache *Tensor, pos, heads, headDim, windowSize int) {

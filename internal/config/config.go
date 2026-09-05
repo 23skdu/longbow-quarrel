@@ -38,6 +38,8 @@ type Config struct {
 	Eps          float32
 	RopeTheta    float32
 	WindowSize   int
+	EOSTokenID   int
+	StopTokens   []int
 
 	PrecisionMode PrecisionMode
 	KVCacheType   KVCacheType
@@ -179,6 +181,7 @@ func Default() Config {
 		SeqLen:        2048,
 		Eps:           1e-5,
 		RopeTheta:     10000.0,
+		EOSTokenID:    2,
 		PrecisionMode: PrecisionAuto,
 
 		DebugEmbedding:   false,

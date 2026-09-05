@@ -150,6 +150,14 @@ func ExtractModelConfig(f *gguf.GGUFFile) config.Config {
 		}
 	}
 
+	// EOS Token ID
+	if val, ok := getKV(f, "tokenizer.ggml.eos_token_id", arch+".eos_token_id"); ok {
+		cfg.EOSTokenID = int(toFloat64(val))
+	}
+	if cfg.EOSTokenID <= 0 {
+		cfg.EOSTokenID = 2
+	}
+
 	return cfg
 }
 

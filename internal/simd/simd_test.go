@@ -878,4 +878,21 @@ func TestFp32ToFp16_DefaultScalar(t *testing.T) {
 	fp32ToFp16Scalar(src, dst)
 }
 
+func TestVecDotF32_And_VecFMAF32(t *testing.T) {
+	a := []float32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
+	b := []float32{2, 3, 4, 5, 6, 7, 8, 9, 10, 11}
+	dot := VecDotF32(a, b)
+	// 2 + 6 + 12 + 20 + 30 + 42 + 56 + 72 + 90 + 110 = 440
+	var expectedDot float32 = 440.0
+	if math.Abs(float64(dot-expectedDot)) > 1e-4 {
+		t.Errorf("VecDotF32 got %f, want %f", dot, expectedDot)
+	}
 
+	dst := make([]float32, 10)
+	VecFMAF32(dst, a, 2.0)
+	for i, v := range dst {
+		if v != a[i]*2.0 {
+			t.Errorf("VecFMAF32 at %d got %f, want %f", i, v, a[i]*2.0)
+		}
+	}
+}

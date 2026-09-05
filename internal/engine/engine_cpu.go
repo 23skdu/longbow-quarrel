@@ -25,6 +25,10 @@ type CPUEngine struct {
 	ctx     *device.Context
 	cache   *PagedKVCache
 
+	PromptCache  *PromptCache
+	seqKVCaches  map[string]*CPUKVCache
+	kvMu         sync.Mutex
+
 	BatchManager *ContinuousBatchManager
 	stopChan     chan struct{}
 	doneChan     chan struct{}
@@ -129,6 +133,8 @@ func NewCPUEngine(modelPath string, cfg config.Config) (Engine, error) {
 		tok:          tok,
 		ctx:          ctx,
 		cache:        cache,
+		PromptCache:  NewPromptCache(),
+		seqKVCaches:  make(map[string]*CPUKVCache),
 		BatchManager: NewContinuousBatchManager(),
 		stopChan:     make(chan struct{}),
 		doneChan:     make(chan struct{}),
@@ -144,7 +150,14 @@ func (e *CPUEngine) Config() config.Config {
 }
 
 func (e *CPUEngine) GetSeqCachePos(seqID string) int {
-	// CPU engine doesn't have a sophisticated KV cache yet
+	e.kvMu.Lock()
+	defer e.kvMu.Unlock()
+	if c, ok := e.seqKVCaches[seqID]; ok && c != nil {
+		kvDim := e.config.KVHeads * e.config.HeadDim
+		if kvDim > 0 && len(c.Keys) > 0 && len(c.Keys[0]) > 0 {
+			return len(c.Keys[0]) / kvDim
+		}
+	}
 	return 0
 }
 
@@ -178,8 +191,8 @@ func (e *CPUEngine) runBatchLoop() {
 		default:
 		}
 
-		// 1. Pull active sequences
-		desc, _ := e.BatchManager.Step(16, e.cache, nil) // No PromptCache for CPU yet
+		// 1. Pull active sequences with prompt prefix cache support
+		desc, _ := e.BatchManager.Step(16, e.cache, e.PromptCache)
 		if desc == nil || len(desc.Sequences) == 0 {
 			time.Sleep(10 * time.Millisecond)
 			continue
@@ -225,13 +238,17 @@ func (e *CPUEngine) runBatchLoop() {
 				seq.TokenCallback(token)
 			}
 
-			// Termination
-			if token == 2 || len(seq.Tokens) >= seq.MaxTokens {
+			// Dynamic EOS & termination handling
+			isEOS := (e.tok != nil && e.tok.IsEOS(token)) || token == e.config.EOSTokenID || token == 2
+			if isEOS || len(seq.Tokens) >= seq.MaxTokens {
 				select {
 				case seq.Result <- seq.Tokens:
 				default:
 				}
 				e.BatchManager.CompleteSequence(seq.ID, e.cache)
+				e.kvMu.Lock()
+				delete(e.seqKVCaches, fmt.Sprintf("seq-%d", seq.ID))
+				e.kvMu.Unlock()
 			}
 		}
 	}
@@ -241,13 +258,15 @@ func (e *CPUEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, error
 	batchSize := len(desc.Sequences)
 	results := make([]*device.Tensor, batchSize)
 
-	// Use a WaitGroup to parallelize sequence processing
 	var wg sync.WaitGroup
 	wg.Add(batchSize)
 
 	for i := range desc.Sequences {
 		go func(idx int) {
 			defer wg.Done()
+
+			seq := desc.Sequences[idx]
+			seqIDStr := fmt.Sprintf("seq-%d", seq.ID)
 
 			start := desc.Offsets[idx]
 			var end int
@@ -258,13 +277,51 @@ func (e *CPUEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, error
 			}
 
 			seqTokens := desc.Tokens[start:end]
+			basePos := desc.ContextLens[idx]
 
-			// For CPUEngine, each sequence is processed by a separate worker thread
-			// In a production engine, this would call SIMD-optimized layer kernels.
-			hidden := e.forward(seqTokens)
+			e.kvMu.Lock()
+			if e.seqKVCaches == nil {
+				e.seqKVCaches = make(map[string]*CPUKVCache)
+			}
+			kvCache, ok := e.seqKVCaches[seqIDStr]
+			if !ok || kvCache == nil {
+				kvCache = NewCPUKVCache(e.config.Layers)
+				e.seqKVCaches[seqIDStr] = kvCache
+			}
+			e.kvMu.Unlock()
 
-			res := e.ctx.NewTensorFP32(1, len(hidden))
-			_ = res.LoadFrom(hidden) // Ignoring here for now as forward already produced the data
+			hiddenSize := e.config.Dim
+			if hiddenSize <= 0 {
+				hiddenSize = 576
+			}
+
+			var logits []float32
+			for t, tok := range seqTokens {
+				pos := basePos + t
+				hidden := e.weights.GetTokenEmbedding(tok, hiddenSize)
+
+				for layerIdx := 0; layerIdx < e.config.Layers; layerIdx++ {
+					hidden = ApplyLayerCPUKV(e.weights, hidden, layerIdx, pos, kvCache, e.config)
+				}
+
+				// Only compute output norm and logits for the last token in chunk
+				if t == len(seqTokens)-1 {
+					if e.weights.OutputNorm != nil {
+						normed := make([]float32, len(hidden))
+						simd.RMSNorm(hidden, e.weights.OutputNorm, normed, 1, len(hidden), e.config.Eps)
+						hidden = normed
+					}
+
+					if len(e.weights.Output) > 0 || e.weights.RawOutput != nil {
+						logits = e.weights.MatVec(e.weights.Output, e.weights.RawOutput, hidden)
+					} else {
+						logits = hidden
+					}
+				}
+			}
+
+			res := e.ctx.NewTensorFP32(1, len(logits))
+			_ = res.LoadFrom(logits)
 			results[idx] = res
 		}(i)
 	}
@@ -307,7 +364,20 @@ func (e *CPUEngine) SwapModel(modelPath string, cfg config.Config) error {
 	if err != nil {
 		return err
 	}
-	*e = *(newEngine.(*CPUEngine))
+	cpuEng := newEngine.(*CPUEngine)
+	e.kvMu.Lock()
+	e.model = cpuEng.model
+	e.config = cpuEng.config
+	e.weights = cpuEng.weights
+	e.tok = cpuEng.tok
+	e.ctx = cpuEng.ctx
+	e.cache = cpuEng.cache
+	e.PromptCache = cpuEng.PromptCache
+	e.seqKVCaches = cpuEng.seqKVCaches
+	e.BatchManager = cpuEng.BatchManager
+	e.stopChan = cpuEng.stopChan
+	e.doneChan = cpuEng.doneChan
+	e.kvMu.Unlock()
 	return nil
 }
 
@@ -317,16 +387,18 @@ func (e *CPUEngine) forward(tokens []int) []float32 {
 		hiddenSize = 576
 	}
 
-	hidden := make([]float32, hiddenSize)
-
-	if len(tokens) > 0 {
-		lastToken := tokens[len(tokens)-1]
-		tokVec := e.weights.GetTokenEmbedding(lastToken, hiddenSize)
-		copy(hidden, tokVec)
+	if len(tokens) == 0 {
+		return make([]float32, hiddenSize)
 	}
 
-	for layerIdx := 0; layerIdx < e.config.Layers; layerIdx++ {
-		hidden = e.applyLayerCPU(hidden, layerIdx)
+	kvCache := NewCPUKVCache(e.config.Layers)
+	var hidden []float32
+
+	for pos, tok := range tokens {
+		hidden = e.weights.GetTokenEmbedding(tok, hiddenSize)
+		for layerIdx := 0; layerIdx < e.config.Layers; layerIdx++ {
+			hidden = ApplyLayerCPUKV(e.weights, hidden, layerIdx, pos, kvCache, e.config)
+		}
 	}
 
 	if e.weights.OutputNorm != nil {
@@ -364,6 +436,16 @@ func sigmoid(x float32) float32 {
 }
 
 func (e *CPUEngine) Close() {
+	if e.stopChan != nil {
+		select {
+		case <-e.stopChan:
+		default:
+			close(e.stopChan)
+		}
+	}
+	if e.doneChan != nil {
+		<-e.doneChan
+	}
 	if e.cache != nil {
 		e.cache.Free()
 	}
@@ -373,6 +455,9 @@ func (e *CPUEngine) Close() {
 	if e.model != nil {
 		_ = e.model.Close()
 	}
+	e.kvMu.Lock()
+	e.seqKVCaches = nil
+	e.kvMu.Unlock()
 	logger.Log.Info("CPU engine closed")
 }
 
@@ -473,10 +558,27 @@ func (e *CPUEngine) ForwardDraft(tokens []int) ([][]float32, error) {
 }
 
 func (e *CPUEngine) RollbackKV(seqID string, newPos int) error {
-	if e.cache == nil {
-		return fmt.Errorf("cache not initialized")
+	var cacheErr error
+	if e.cache != nil {
+		cacheErr = e.cache.RollbackKV(seqID, newPos)
 	}
-	return e.cache.RollbackKV(seqID, newPos)
+	e.kvMu.Lock()
+	defer e.kvMu.Unlock()
+	if c, ok := e.seqKVCaches[seqID]; ok && c != nil {
+		kvDim := e.config.KVHeads * e.config.HeadDim
+		if kvDim > 0 {
+			targetLen := newPos * kvDim
+			for l := range c.Keys {
+				if targetLen <= len(c.Keys[l]) {
+					c.Keys[l] = c.Keys[l][:targetLen]
+				}
+				if targetLen <= len(c.Values[l]) {
+					c.Values[l] = c.Values[l][:targetLen]
+				}
+			}
+		}
+	}
+	return cacheErr
 }
 
 func (e *CPUEngine) LoadAdapter(path, id string) error {

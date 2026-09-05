@@ -20,6 +20,13 @@ func main() {
 	maxTokens := flag.Int("n", 50, "Maximum tokens to generate")
 	temp := flag.Float64("temp", 0.7, "Temperature for sampling")
 	topK := flag.Int("topk", 40, "Top-K sampling")
+	topP := flag.Float64("topp", 0.95, "Top-P sampling")
+	repPenalty := flag.Float64("rep-penalty", 1.1, "Repetition penalty")
+	presencePenalty := flag.Float64("presence-penalty", 0.0, "Presence penalty")
+	frequencyPenalty := flag.Float64("frequency-penalty", 0.0, "Frequency penalty")
+	minP := flag.Float64("min-p", 0.0, "Min-P sampling threshold")
+	seed := flag.Int64("seed", 0, "Random seed (0 for auto)")
+	streamOutput := flag.Bool("stream", false, "Stream tokens as they are generated")
 	maxMemMB := flag.Int64("max-memory", 0, "Max memory in MB (0 = no limit)")
 	numGPULayers := flag.Int("ngl", -1, "Number of GPU layers to offload (-1 for all)")
 	flag.Parse()
@@ -39,7 +46,7 @@ func main() {
 	fmt.Printf("NumCPU: %d\n", runtime.NumCPU())
 	fmt.Printf("Model: %s\n", *modelPath)
 	fmt.Printf("Prompt: %s\n", *prompt)
-	fmt.Printf("Temp: %.2f, TopK: %d, MaxTokens: %d\n", *temp, *topK, *maxTokens)
+	fmt.Printf("Temp: %.2f, TopK: %d, TopP: %.2f, MaxTokens: %d\n", *temp, *topK, *topP, *maxTokens)
 	fmt.Println()
 
 	f, err := gguf.LoadFile(*modelPath)
@@ -88,9 +95,14 @@ func main() {
 	}
 
 	samplerCfg := engine.SamplerConfig{
-		Temperature: 0.8,
-		TopK:        40,
-		RepPenalty:  1.5,
+		Temperature:      *temp,
+		TopK:             *topK,
+		TopP:             *topP,
+		RepPenalty:       *repPenalty,
+		PresencePenalty:  *presencePenalty,
+		FrequencyPenalty: *frequencyPenalty,
+		MinP:             *minP,
+		Seed:             *seed,
 	}
 
 	e, err := engine.NewEngine(*modelPath, cfg)
@@ -100,18 +112,31 @@ func main() {
 	}
 	defer e.Close()
 
-	resultTokens, err := e.Infer(inputTokens, *maxTokens, samplerCfg)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Inference failed: %v\n", err)
-		os.Exit(1)
+	var resultTokens []int
+	if *streamOutput {
+		fmt.Printf("\nGenerating:\n")
+		resultTokens, err = e.InferWithCallback(inputTokens, *maxTokens, samplerCfg, func(tokenID int) {
+			fmt.Print(tok.Decode([]int{tokenID}))
+		})
+		fmt.Println()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Inference failed: %v\n", err)
+			os.Exit(1)
+		}
+	} else {
+		resultTokens, err = e.Infer(inputTokens, *maxTokens, samplerCfg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Inference failed: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Generated: ")
+		for _, tokenID := range resultTokens {
+			fmt.Printf("%d:%s ", tokenID, tok.Decode([]int{tokenID}))
+		}
+		fmt.Println()
 	}
 
 	elapsed := time.Since(startTime)
-	fmt.Printf("Generated: ")
-	for _, tokenID := range resultTokens {
-		fmt.Printf("%d:%s ", tokenID, tok.Decode([]int{tokenID}))
-	}
-	fmt.Println()
 	fmt.Printf("Generated %d tokens in %v (%.2f tokens/s)\n", len(resultTokens), elapsed, float64(len(resultTokens))/elapsed.Seconds())
 
 	fullText := *prompt + tok.Decode(resultTokens)

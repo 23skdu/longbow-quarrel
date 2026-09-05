@@ -124,3 +124,146 @@ func TestCPUEngine_Lifecycle(t *testing.T) {
 	e.cache.Init(ctx, config.Config{Layers: 1})
 	e.Close() // Should not panic
 }
+
+func TestCPUEngine_PrefillAndKVCache(t *testing.T) {
+	ctx := device.NewContext()
+	defer ctx.Free()
+
+	headDim := 16
+	cfg := config.Config{
+		Dim:       64,
+		Layers:    2,
+		VocabSize: 50,
+		Heads:     4,
+		KVHeads:   2,
+		HeadDim:   headDim,
+		HiddenDim: 128,
+		RopeTheta: 10000.0,
+		Eps:       1e-5,
+	}
+
+	e := &CPUEngine{
+		ctx:          ctx,
+		config:       cfg,
+		cache:        &PagedKVCache{},
+		seqKVCaches:  make(map[string]*CPUKVCache),
+		weights: &CPUWeights{
+			TokenEmb: make([][]float32, 50),
+		},
+		BatchManager: NewContinuousBatchManager(),
+	}
+	for i := range e.weights.TokenEmb {
+		e.weights.TokenEmb[i] = make([]float32, cfg.Dim)
+		for j := range e.weights.TokenEmb[i] {
+			e.weights.TokenEmb[i][j] = float32(i+1) * 0.01
+		}
+	}
+	initCPUEngineWeights(e, cfg.Dim, cfg.Layers, cfg.Heads, cfg.KVHeads, headDim, cfg.HiddenDim)
+	_ = e.cache.Init(ctx, cfg)
+	_ = e.cache.Allocate("seq-42", 10)
+
+	desc := &BatchDescriptor{
+		Sequences: []*Sequence{
+			{ID: 42, MaxTokens: 20, Pos: 0},
+		},
+		Tokens:      []int{5, 10, 15},
+		Offsets:     []int{0},
+		TokenToSeq:  []int{0, 0, 0},
+		ContextLens: []int{0},
+	}
+
+	results, err := e.ForwardBatch(desc)
+	if err != nil {
+		t.Fatalf("ForwardBatch failed: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	logits := results[0].ToHostF32()
+	results[0].Free()
+	if len(logits) != cfg.Dim {
+		t.Fatalf("expected logits dim %d, got %d", cfg.Dim, len(logits))
+	}
+
+	// Verify KV cache was populated for all 3 tokens
+	cachedPos := e.GetSeqCachePos("seq-42")
+	if cachedPos != 3 {
+		t.Errorf("expected cached position 3, got %d", cachedPos)
+	}
+
+	// Now decode 1 token at pos 3
+	descDecode := &BatchDescriptor{
+		Sequences: []*Sequence{
+			{ID: 42, MaxTokens: 20, Pos: 3},
+		},
+		Tokens:      []int{20},
+		Offsets:     []int{0},
+		TokenToSeq:  []int{0},
+		ContextLens: []int{3},
+	}
+	results2, err := e.ForwardBatch(descDecode)
+	if err != nil {
+		t.Fatalf("ForwardBatch decode failed: %v", err)
+	}
+	results2[0].Free()
+
+	// Verify KV cache grew to 4 tokens
+	cachedPos2 := e.GetSeqCachePos("seq-42")
+	if cachedPos2 != 4 {
+		t.Errorf("expected cached position 4, got %d", cachedPos2)
+	}
+
+	// Test RollbackKV to position 2
+	err = e.RollbackKV("seq-42", 2)
+	if err != nil {
+		t.Fatalf("RollbackKV failed: %v", err)
+	}
+	cachedPos3 := e.GetSeqCachePos("seq-42")
+	if cachedPos3 != 2 {
+		t.Errorf("expected cached position 2 after rollback, got %d", cachedPos3)
+	}
+}
+
+func TestCPUEngine_Forward_MultiToken(t *testing.T) {
+	ctx := device.NewContext()
+	defer ctx.Free()
+
+	headDim := 16
+	cfg := config.Config{
+		Dim:       64,
+		Layers:    1,
+		VocabSize: 50,
+		Heads:     2,
+		KVHeads:   2,
+		HeadDim:   headDim,
+		HiddenDim: 64,
+		RopeTheta: 10000.0,
+		Eps:       1e-5,
+	}
+
+	e := &CPUEngine{
+		ctx:    ctx,
+		config: cfg,
+		weights: &CPUWeights{
+			TokenEmb: make([][]float32, 50),
+		},
+	}
+	for i := range e.weights.TokenEmb {
+		e.weights.TokenEmb[i] = make([]float32, cfg.Dim)
+		for j := range e.weights.TokenEmb[i] {
+			e.weights.TokenEmb[i][j] = float32(i + j)
+		}
+	}
+	initCPUEngineWeights(e, cfg.Dim, cfg.Layers, cfg.Heads, cfg.KVHeads, headDim, cfg.HiddenDim)
+
+	out := e.forward([]int{1, 2, 3})
+	if len(out) != cfg.Dim {
+		t.Fatalf("expected output length %d, got %d", cfg.Dim, len(out))
+	}
+	for i, v := range out {
+		if v != v { // NaN check
+			t.Fatalf("NaN encountered in forward output at %d", i)
+		}
+	}
+}
+

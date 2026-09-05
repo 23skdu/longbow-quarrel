@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"sync"
 
 	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
@@ -297,8 +298,44 @@ func containsStr(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(s) > len(substr) && (s[:len(substr)] == substr || containsStr(s[1:], substr)))
 }
 
+// CPUKVCache stores key and value representations across layers for a sequence.
+type CPUKVCache struct {
+	mu     sync.Mutex
+	Keys   [][]float32 // [layerIdx] -> flattened [numTokens * kvHeads * headDim]
+	Values [][]float32 // [layerIdx] -> flattened [numTokens * kvHeads * headDim]
+}
+
+// NewCPUKVCache creates a per-sequence KV cache for CPU execution.
+func NewCPUKVCache(numLayers int) *CPUKVCache {
+	if numLayers <= 0 {
+		numLayers = 1
+	}
+	return &CPUKVCache{
+		Keys:   make([][]float32, numLayers),
+		Values: make([][]float32, numLayers),
+	}
+}
+
+// Reset clears all cached keys and values.
+func (c *CPUKVCache) Reset() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i := range c.Keys {
+		c.Keys[i] = c.Keys[i][:0]
+		c.Values[i] = c.Values[i][:0]
+	}
+}
+
 // ApplyLayerCPU executes a single transformer layer on CPU for CPUEngine or layer offloading.
 func ApplyLayerCPU(w *CPUWeights, input []float32, layerIdx int, cfg config.Config) []float32 {
+	return ApplyLayerCPUKV(w, input, layerIdx, 0, nil, cfg)
+}
+
+// ApplyLayerCPUKV executes a single transformer layer on CPU with rotary embeddings and KV cache.
+func ApplyLayerCPUKV(w *CPUWeights, input []float32, layerIdx int, pos int, kv *CPUKVCache, cfg config.Config) []float32 {
 	if layerIdx < 0 || w == nil || len(input) == 0 {
 		return input
 	}
@@ -355,7 +392,24 @@ func ApplyLayerCPU(w *CPUWeights, input []float32, layerIdx int, cfg config.Conf
 			k = kNormed
 		}
 
-		attn := attentionCPU(q, k, v, cfg.Heads, cfg.KVHeads, cfg.HeadDim)
+		// Apply Rotary Positional Embeddings (RoPE)
+		ropeTheta := cfg.RopeTheta
+		if ropeTheta <= 0 {
+			ropeTheta = 10000.0
+		}
+		if cfg.HeadDim > 0 && cfg.Heads > 0 && len(q) >= cfg.Heads*cfg.HeadDim {
+			simd.RoPE(q, []int{pos}, 1, cfg.Heads, 1, cfg.HeadDim, ropeTheta)
+		}
+		if cfg.HeadDim > 0 && cfg.KVHeads > 0 && len(k) >= cfg.KVHeads*cfg.HeadDim {
+			simd.RoPE(k, []int{pos}, 1, cfg.KVHeads, 1, cfg.HeadDim, ropeTheta)
+		}
+
+		var attn []float32
+		if kv != nil {
+			attn = attentionCPUKV(q, k, v, layerIdx, pos, kv, cfg.Heads, cfg.KVHeads, cfg.HeadDim)
+		} else {
+			attn = attentionCPU(q, k, v, cfg.Heads, cfg.KVHeads, cfg.HeadDim)
+		}
 		out = w.MatVec(oWeight, rawO, attn)
 	} else if w.HasSSM(layerIdx) {
 		var qkvWeight, gateWeight, ssmOutWeight []float32
@@ -445,42 +499,95 @@ func ApplyLayerCPU(w *CPUWeights, input []float32, layerIdx int, cfg config.Conf
 }
 
 func vecDot(a, b []float32) float32 {
-	n := len(a)
-	var s0, s1, s2, s3, s4, s5, s6, s7 float32
-	i := 0
-	for ; i <= n-8; i += 8 {
-		s0 += a[i+0] * b[i+0]
-		s1 += a[i+1] * b[i+1]
-		s2 += a[i+2] * b[i+2]
-		s3 += a[i+3] * b[i+3]
-		s4 += a[i+4] * b[i+4]
-		s5 += a[i+5] * b[i+5]
-		s6 += a[i+6] * b[i+6]
-		s7 += a[i+7] * b[i+7]
-	}
-	sum := ((s0 + s1) + (s2 + s3)) + ((s4 + s5) + (s6 + s7))
-	for ; i < n; i++ {
-		sum += a[i] * b[i]
-	}
-	return sum
+	return simd.VecDotF32(a, b)
 }
 
 func vecFMA(dst, src []float32, weight float32) {
-	n := len(dst)
-	i := 0
-	for ; i <= n-8; i += 8 {
-		dst[i+0] += weight * src[i+0]
-		dst[i+1] += weight * src[i+1]
-		dst[i+2] += weight * src[i+2]
-		dst[i+3] += weight * src[i+3]
-		dst[i+4] += weight * src[i+4]
-		dst[i+5] += weight * src[i+5]
-		dst[i+6] += weight * src[i+6]
-		dst[i+7] += weight * src[i+7]
+	simd.VecFMAF32(dst, src, weight)
+}
+
+func attentionCPUKV(q, k, v []float32, layerIdx, pos int, kv *CPUKVCache, numHeads, kvHeads, headDim int) []float32 {
+	if numHeads <= 0 || headDim <= 0 || len(q) == 0 {
+		return make([]float32, len(q))
 	}
-	for ; i < n; i++ {
-		dst[i] += weight * src[i]
+	if kvHeads <= 0 {
+		kvHeads = numHeads
 	}
+
+	kvDim := kvHeads * headDim
+	if len(k) < kvDim || len(v) < kvDim {
+		return make([]float32, len(q))
+	}
+
+	kv.mu.Lock()
+	if layerIdx >= len(kv.Keys) {
+		newKeys := make([][]float32, layerIdx+1)
+		newVals := make([][]float32, layerIdx+1)
+		copy(newKeys, kv.Keys)
+		copy(newVals, kv.Values)
+		kv.Keys = newKeys
+		kv.Values = newVals
+	}
+	kv.Keys[layerIdx] = append(kv.Keys[layerIdx], k[:kvDim]...)
+	kv.Values[layerIdx] = append(kv.Values[layerIdx], v[:kvDim]...)
+	cachedK := kv.Keys[layerIdx]
+	cachedV := kv.Values[layerIdx]
+	kv.mu.Unlock()
+
+	numCached := len(cachedK) / kvDim
+	if numCached <= 0 {
+		return make([]float32, len(q))
+	}
+
+	scale := float32(1.0 / math.Sqrt(float64(headDim)))
+	result := make([]float32, numHeads*headDim)
+	scores := make([]float32, numCached)
+
+	kvPerHead := numHeads / kvHeads
+	if kvPerHead < 1 {
+		kvPerHead = 1
+	}
+
+	for h := 0; h < numHeads; h++ {
+		qHead := q[h*headDim : (h+1)*headDim]
+		kh := h / kvPerHead
+		if kh >= kvHeads {
+			kh = kvHeads - 1
+		}
+
+		var maxScore float32 = -math.MaxFloat32
+		for j := 0; j < numCached; j++ {
+			kOffset := j*kvDim + kh*headDim
+			kVec := cachedK[kOffset : kOffset+headDim]
+			s := simd.VecDotF32(qHead, kVec) * scale
+			scores[j] = s
+			if s > maxScore {
+				maxScore = s
+			}
+		}
+
+		var sumExp float32
+		for j := 0; j < numCached; j++ {
+			w := float32(math.Exp(float64(scores[j] - maxScore)))
+			scores[j] = w
+			sumExp += w
+		}
+
+		invSum := float32(1.0)
+		if sumExp > 0 {
+			invSum = 1.0 / sumExp
+		}
+
+		outHead := result[h*headDim : (h+1)*headDim]
+		for j := 0; j < numCached; j++ {
+			w := scores[j] * invSum
+			vOffset := j*kvDim + kh*headDim
+			vVec := cachedV[vOffset : vOffset+headDim]
+			simd.VecFMAF32(outHead, vVec, w)
+		}
+	}
+
+	return result
 }
 
 func attentionCPU(q, k, v []float32, numHeads, kvHeads, headDim int) []float32 {

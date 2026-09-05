@@ -159,3 +159,91 @@ func TestTokenizerNewFromGGUF_Errors(t *testing.T) {
 	}
 }
 
+func TestTokenizer_DynamicEOS(t *testing.T) {
+	// 1. Explicit metadata eos_token_id (uint32)
+	f1 := &gguf.GGUFFile{KV: map[string]interface{}{
+		"tokenizer.ggml.tokens":       []interface{}{"hello", "world", "<|im_end|>"},
+		"tokenizer.ggml.eos_token_id": uint32(2),
+	}}
+	tk1, err := NewFromGGUF(f1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !tk1.IsEOS(2) {
+		t.Errorf("expected token 2 to be EOS")
+	}
+	if tk1.IsEOS(0) {
+		t.Errorf("expected token 0 not to be EOS")
+	}
+
+	// 2. Vocab detection of Qwen / LLaMA / Gemma tokens
+	f2 := &gguf.GGUFFile{KV: map[string]interface{}{
+		"tokenizer.ggml.tokens": []interface{}{
+			"hello",          // 0
+			"<|im_end|>",     // 1
+			"<|endoftext|>",  // 2
+			"<end_of_turn>",  // 3
+			"</s>",           // 4
+			"<|eot_id|>",     // 5
+		},
+	}}
+	tk2, err := NewFromGGUF(f2)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for id := 1; id <= 5; id++ {
+		if !tk2.IsEOS(id) {
+			t.Errorf("expected token %d to be recognized as EOS", id)
+		}
+	}
+	eosIDs := tk2.GetEOSTokenIDs()
+	if len(eosIDs) != 5 {
+		t.Errorf("expected 5 EOS IDs, got %d", len(eosIDs))
+	}
+
+	// 3. Fallback to 2 when no EOS token is present
+	f3 := &gguf.GGUFFile{KV: map[string]interface{}{
+		"tokenizer.ggml.tokens": []interface{}{"a", "b", "c"},
+	}}
+	tk3, err := NewFromGGUF(f3)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !tk3.IsEOS(2) {
+		t.Errorf("expected fallback EOS token 2")
+	}
+
+	// 4. Add custom EOS token
+	tk3.AddEOSTokenID(10)
+	if !tk3.IsEOS(10) {
+		t.Errorf("expected added EOS token 10")
+	}
+
+	// 5. Test with nil EOSTokenIDs
+	tkNil := &Tokenizer{}
+	if !tkNil.IsEOS(2) || tkNil.IsEOS(1) {
+		t.Errorf("expected nil EOSTokenIDs fallback to 2")
+	}
+	tkNil.AddEOSTokenID(99)
+	if !tkNil.IsEOS(99) {
+		t.Errorf("expected token 99 after AddEOSTokenID on nil map")
+	}
+
+	// 6. Test various numeric types for eos_token_id
+	types := []interface{}{
+		int32(10), int64(11), float64(12), int(13), uint64(14),
+	}
+	for _, numVal := range types {
+		fNum := &gguf.GGUFFile{KV: map[string]interface{}{
+			"tokenizer.ggml.tokens":       []interface{}{"token"},
+			"tokenizer.ggml.eos_token_id": numVal,
+		}}
+		tkNum, err := NewFromGGUF(fNum)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(tkNum.GetEOSTokenIDs()) == 0 {
+			t.Errorf("expected non-empty EOS tokens for %T", numVal)
+		}
+	}
+}

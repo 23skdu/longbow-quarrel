@@ -38,12 +38,18 @@ func (s *Sampler) SampleAdvanced(logits []float32, history []int, qualityMode bo
 }
 
 func (s *Sampler) sampleWithQualityControl(logits []float32, history []int) int {
+	if len(logits) == 0 {
+		return 0
+	}
 	if !s.validateLogits(logits) {
 		return s.findFirstValidToken(logits)
 	}
 
 	if s.Config.RepPenalty > 1.0 && len(history) > 0 {
 		s.applySmartRepetitionPenalty(logits, history)
+	}
+	if (s.Config.PresencePenalty != 0 || s.Config.FrequencyPenalty != 0) && len(history) > 0 {
+		s.applyPresenceAndFrequencyPenalty(logits, history)
 	}
 
 	temp := s.calculateAdaptiveTemperature(logits)
@@ -75,6 +81,9 @@ func (s *Sampler) sampleWithQualityControl(logits []float32, history []int) int 
 }
 
 func (s *Sampler) Sample(logits []float32, history []int) int {
+	if len(logits) == 0 {
+		return 0
+	}
 	if s.Config.Grammar != nil {
 		_ = s.Config.Grammar.Apply(logits)
 	}
@@ -84,6 +93,9 @@ func (s *Sampler) Sample(logits []float32, history []int) int {
 
 	if s.Config.RepPenalty > 1.0 && len(history) > 0 {
 		s.applyRepetitionPenalty(logits, history)
+	}
+	if (s.Config.PresencePenalty != 0 || s.Config.FrequencyPenalty != 0) && len(history) > 0 {
+		s.applyPresenceAndFrequencyPenalty(logits, history)
 	}
 
 	temp := s.Config.Temperature
@@ -149,6 +161,9 @@ func (s *Sampler) Sample(logits []float32, history []int) int {
 }
 
 func (s *Sampler) validateLogits(logits []float32) bool {
+	if len(logits) == 0 {
+		return false
+	}
 	for _, v := range logits {
 		if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
 			return false
@@ -166,7 +181,29 @@ func (s *Sampler) findFirstValidToken(logits []float32) int {
 	return 0
 }
 
+func (s *Sampler) applyPresenceAndFrequencyPenalty(logits []float32, history []int) {
+	if len(history) == 0 || (s.Config.PresencePenalty == 0 && s.Config.FrequencyPenalty == 0) {
+		return
+	}
+	counts := make(map[int]int)
+	for _, id := range history {
+		counts[id]++
+	}
+	for id, count := range counts {
+		if id >= 0 && id < len(logits) {
+			penalty := float32(s.Config.PresencePenalty + s.Config.FrequencyPenalty*float64(count))
+			logits[id] -= penalty
+		}
+	}
+}
+
 func (s *Sampler) applyTemperatureAndSoftmax(logits []float32, temperature float64) []float64 {
+	if len(logits) == 0 {
+		return nil
+	}
+	if temperature <= 0 {
+		temperature = 1.0
+	}
 	probs := make([]float64, len(logits))
 	maxLogit := float64(logits[0])
 	for _, v := range logits {
@@ -176,24 +213,26 @@ func (s *Sampler) applyTemperatureAndSoftmax(logits []float32, temperature float
 	}
 
 	for i, v := range logits {
-		probs[i] = float64(v) / temperature
-	}
-
-	maxVal := probs[0]
-	for _, v := range probs {
-		if v > maxVal {
-			maxVal = v
+		scaled := (float64(v) - maxLogit) / temperature
+		// Numerical clamp [-60.0, 60.0] to prevent exp overflow/underflow
+		if scaled < -60.0 {
+			scaled = -60.0
+		} else if scaled > 60.0 {
+			scaled = 60.0
 		}
+		probs[i] = math.Exp(scaled)
 	}
 
 	sum := 0.0
-	for i := range probs {
-		probs[i] = math.Exp(probs[i] - maxVal)
-		sum += probs[i]
+	for _, p := range probs {
+		sum += p
 	}
 
-	for i := range probs {
-		probs[i] /= sum
+	if sum > 0 && !math.IsNaN(sum) && !math.IsInf(sum, 0) {
+		invSum := 1.0 / sum
+		for i := range probs {
+			probs[i] *= invSum
+		}
 	}
 
 	return probs
@@ -210,6 +249,9 @@ func (s *Sampler) filterValidCandidates(probs []float64) []tokenProb {
 }
 
 func (s *Sampler) sampleFromCandidates(candidates []tokenProb) int {
+	if len(candidates) == 0 {
+		return 0
+	}
 	sum := 0.0
 	for _, c := range candidates {
 		sum += c.prob
@@ -325,7 +367,7 @@ type tokenProb struct {
 
 func argMax(logits []float32) int {
 	if len(logits) == 0 {
-		panic("argMax: empty logits slice")
+		return 0
 	}
 
 	maxIdx := 0

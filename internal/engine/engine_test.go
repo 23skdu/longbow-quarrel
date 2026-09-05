@@ -177,8 +177,8 @@ func TestEngineLifecycle(t *testing.T) {
 		t.Logf("Inference returned error (expected for empty/stub engine): %v", err)
 	}
 
-	if len(outputTokens) != 0 && len(outputTokens) != 10 {
-		t.Errorf("Expected 0 or 10 tokens, got %d", len(outputTokens))
+	if len(outputTokens) > 10 {
+		t.Errorf("Expected at most 10 tokens, got %d", len(outputTokens))
 	}
 }
 

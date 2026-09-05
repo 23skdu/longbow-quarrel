@@ -18,32 +18,55 @@ func (t *Tensor) ToArrowArray(allocator memory.Allocator) (*array.FixedSizeList,
 		allocator = memory.DefaultAllocator
 	}
 
-	rawData := t.RawData()
-	if len(rawData) == 0 {
-		return nil, fmt.Errorf("tensor provides no raw data for Arrow conversion")
-	}
-
 	var arrowType arrow.DataType
 	var arrowBuf *memory.Buffer
 
-	switch t.dataType {
-	case DataTypeF32:
-		arrowType = arrow.PrimitiveTypes.Float32
-		// Zero-copy wrap of the raw memory
-		arrowBuf = memory.NewBufferBytes(rawData)
-	case DataTypeF16:
-		arrowType = arrow.FixedWidthTypes.Float16
-		// Zero-copy wrap of the raw memory
-		arrowBuf = memory.NewBufferBytes(rawData)
-	default:
-		// For quantized or other types, we must currently fall back to an F32 host copy
-		// because most analytical consumers expect standard floating point arrays.
-		hostData := t.ToHostF32()
-		// Wrap the new slice. Note: This copy is intended for non-native Arrow formats.
-		ptr := unsafe.Pointer(&hostData[0]) // #nosec G103 -- intentional unsafe for zero-copy
-		size := len(hostData) * 4
-		arrowType = arrow.PrimitiveTypes.Float32
-		arrowBuf = memory.NewBufferBytes(unsafe.Slice((*byte)(ptr), size)) // #nosec G103 -- intentional unsafe for zero-copy
+	if t.IsDevice() {
+		switch t.dataType {
+		case DataTypeF16:
+			hostF16 := t.ToHostFP16()
+			if len(hostF16) == 0 {
+				return nil, fmt.Errorf("tensor provides no host data for Arrow conversion")
+			}
+			ptr := unsafe.Pointer(&hostF16[0]) // #nosec G103 -- intentional unsafe for zero-copy
+			size := len(hostF16) * 2
+			arrowType = arrow.FixedWidthTypes.Float16
+			arrowBuf = memory.NewBufferBytes(unsafe.Slice((*byte)(ptr), size)) // #nosec G103 -- intentional unsafe for zero-copy
+		default:
+			hostData := t.ToHostF32()
+			if len(hostData) == 0 {
+				return nil, fmt.Errorf("tensor provides no host data for Arrow conversion")
+			}
+			ptr := unsafe.Pointer(&hostData[0]) // #nosec G103 -- intentional unsafe for zero-copy
+			size := len(hostData) * 4
+			arrowType = arrow.PrimitiveTypes.Float32
+			arrowBuf = memory.NewBufferBytes(unsafe.Slice((*byte)(ptr), size)) // #nosec G103 -- intentional unsafe for zero-copy
+		}
+	} else {
+		rawData := t.RawData()
+		if len(rawData) == 0 {
+			return nil, fmt.Errorf("tensor provides no raw data for Arrow conversion")
+		}
+
+		switch t.dataType {
+		case DataTypeF32:
+			arrowType = arrow.PrimitiveTypes.Float32
+			// Zero-copy wrap of the raw memory
+			arrowBuf = memory.NewBufferBytes(rawData)
+		case DataTypeF16:
+			arrowType = arrow.FixedWidthTypes.Float16
+			// Zero-copy wrap of the raw memory
+			arrowBuf = memory.NewBufferBytes(rawData)
+		default:
+			// For quantized or other types, we must currently fall back to an F32 host copy
+			// because most analytical consumers expect standard floating point arrays.
+			hostData := t.ToHostF32()
+			// Wrap the new slice. Note: This copy is intended for non-native Arrow formats.
+			ptr := unsafe.Pointer(&hostData[0]) // #nosec G103 -- intentional unsafe for zero-copy
+			size := len(hostData) * 4
+			arrowType = arrow.PrimitiveTypes.Float32
+			arrowBuf = memory.NewBufferBytes(unsafe.Slice((*byte)(ptr), size)) // #nosec G103 -- intentional unsafe for zero-copy
+		}
 	}
 
 	// Hotpath metric tracking (bytes exposed to Arrow)

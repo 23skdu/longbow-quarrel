@@ -244,6 +244,8 @@ func (t *Tensor) ZeroInit() {
 
 func (t *Tensor) DataType() DataType { return t.dataType }
 
+func (t *Tensor) IsDevice() bool { return false }
+
 func (t *Tensor) Rows() int {
 	if len(t.dims) < 1 {
 		return 0

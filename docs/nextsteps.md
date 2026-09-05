@@ -1,155 +1,144 @@
 # Longbow-Quarrel - Next Steps & Roadmap
 
-## P0 Blockers for Next Release (Improvement Plan)
+## P0 Blockers for This Release (Performance, Accuracy & Coherence Improvement Plan)
 
-Following deep code analysis, profiling, and model deployment testing with local GGUF models (`Huihui-Qwen3.5-4B-Claude-4.6-Opus-abliterated.Q8_0.gguf`), the following P0 blockers have been identified and implemented to ensure stability, multi-architecture compatibility, and memory safety:
-
----
-
-### 1. Memory-Efficient Zero-Copy Quantized Inference (Fix CPU RAM Exhaustion / OOM) [COMPLETED]
-- **Severity:** P0 Blocker (System OOM / Thrashing / Freezing)
-- **Location:** `internal/engine/engine_cpu.go`, `internal/gguf/dequant.go`, `internal/gguf/dequant_test.go`
-- **Root Cause & Fix:**
-  - Previously, `loadCPUWeights` dequantized every single tensor upfront into `[]float32` slices on the Go heap. For a 4B parameter model in Q8_0 (4.4 GB on disk), dequantizing all weights upfront allocated **17.9 GB of heap memory**, exceeding physical RAM (22 GB) when desktop applications are open and causing the system to swap thrash and invoke the kernel OOM killer.
-  - Implemented `gguf.MatVecMulQ8_0(data []byte, vector []float32, rows, cols int) []float32`, performing direct matrix-vector dot products on the mmapped quantized bytes without materializing dequantized weights on the heap.
-  - Implemented row-on-demand token embedding lookup in `GetTokenEmbedding(tokenId, hiddenSize)`, reading only the requested token's embedding vector (10 KB) directly from mmap.
-  - Retained `F32` small RMSNorm weights while keeping all 2D projection matrices (`AttnQ`, `AttnK`, `AttnV`, `AttnO`, `FfnGate`, `FfnUp`, `FfnDown`, `AttnQKV`, `AttnGate`, `SSMOut`, `Output`) in zero-copy raw mmap format.
-  - **Result:** Reduced memory usage from **17.9 GB down to < 20 MB** (99.9% reduction). Inference runs instantly without OOM or disk swapping (verified: 5 tokens generated in 3.65s on CPU with 17 GiB RAM free).
+Following deep code analysis, profiling, and model deployment testing across local GGUF models, the following 10 P0 blockers have been established to fundamentally elevate Quarrel's inference speed, contextual accuracy, and semantic coherence:
 
 ---
 
-### 2. Universal Multi-Engine Model Cache Resolver [COMPLETED]
-- **Severity:** P0 Blocker (Model Discovery Broken)
-- **Location:** `internal/models/resolver.go`, `internal/models/resolver_test.go`
-- **Root Cause & Fix:**
-  - Quarrel previously only resolved models from `~/.ollama/models/`. Any model downloaded via `llama.cpp` (`~/.cache/llama.cpp/`), `llmfit` (`~/.cache/llmfit/models/`), or `huggingface-cli` (`~/.cache/huggingface/hub/`) could not be discovered unless the user provided a full absolute path.
-  - Implemented `models.ResolveModelPath(input string) (string, error)` with support for:
-    1. Exact filesystem paths (relative and absolute).
-    2. Universal cache directories: `~/.cache/llmfit/models/`, `~/.cache/llama.cpp/`, `~/.cache/huggingface/hub/`, and `~/.ollama/models/`.
-    3. Case-insensitive prefix and substring matching (e.g., `-model Huihui-Qwen3.5` resolves immediately to `/home/rsd/.cache/llmfit/models/Huihui-Qwen3.5-4B-Claude-4.6-Opus-abliterated.Q8_0.gguf`).
-  - Integrated into both `cmd/simple/main.go` and `cmd/quarrel/main.go`.
-  - **Verification:** Unit tests in `internal/models/resolver_test.go` pass; tested CLI commands resolve model accurately.
-
----
-
-### 3. Multi-Architecture Dynamic Metadata Extraction [COMPLETED]
-- **Severity:** P0 Blocker (Architecture Breakdown / Silent Degradation)
-- **Location:** `internal/engine/engine_utils.go`, `internal/engine/engine_cuda.go`, `internal/device/cuda.go`
-- **Root Cause & Fix:**
-  - Architecture metadata extraction in `engine_cpu.go`, `engine_cuda.go`, `cuda.go`, and `cmd/quarrel/main.go` was hardcoded to `llama.*` keys with brittle type assertions `.(uint32)`.
-  - For models like `qwen35` or other architectures, `block_count`, `embedding_length`, `head_count`, and `vocab_size` failed to match, defaulting `dim`, `heads`, and `layers` to fallback values (0 or 1), causing dummy repetitive tokens or out-of-bounds panics.
-  - Implemented `ExtractModelConfig(f *gguf.GGUFFile) config.Config` which dynamically inspects `general.architecture` (e.g. `qwen35`, `qwen2`, `gemma4`, `mistral`, `llama`) and resolves architecture-prefixed keys with fallback to standard keys, supporting `uint32`, `int32`, `uint64`, `int64`, `float64`, and array formats.
-  - **Verification:** Tested against both Qwen 3.5 and LLaMA metadata models (`TestExtractModelConfig_Qwen35`, `TestExtractModelConfig_Llama`).
-
----
-
-### 4. Eliminate CUDA Double-Allocation & VRAM Exhaustion in `cmd/quarrel` [COMPLETED]
-- **Severity:** P0 Blocker (GPU Out-Of-Memory Crash)
-- **Location:** `cmd/quarrel/main.go`, `internal/device/cuda.go`
-- **Root Cause & Fix:**
-  - `cmd/quarrel/main.go` line 92 called `ctx.NewCUDAModel(f, true, *kvCacheSize)` and line 127 called `engine.NewEngine(...)` which called `ctx.NewCUDAModel` a second time. This double-allocated the model in VRAM (allocating ~16 GB on an 8 GB GPU), causing cublas init to fail with `panic: cublasCreate failed: 3`.
-  - Removed redundant `cudaModel` allocation in `cmd/quarrel/main.go` and delegated model lifecycle to `engine.NewEngine`.
-  - Added explicit error checking on `C.cudaMalloc` return codes in `NewCUDAModel`, gracefully freeing previously allocated GPU tensors on allocation failure instead of proceeding with dangling null pointers.
-  - Added tied embedding fallback in `GetWeightTensor` for models where `output.weight` is tied with `token_embd.weight`.
-
----
-
-### 5. Automated CUDA Kernel Compilation in Makefile [COMPLETED]
-- **Severity:** P0 Blocker (CUDA Build Failure)
-- **Location:** `Makefile`
-- **Root Cause & Fix:**
-  - `make nvidia` failed with `-lcuda_kernels: No such file or directory` because `internal/device/libcuda_kernels.a` was never compiled from `cuda_kernels.cu`.
-  - Added build target for `internal/device/libcuda_kernels.a` using `nvcc -c -O3 -Xcompiler -fPIC` and `ar rcs`.
-  - Configured dynamic `CUDA_LDFLAGS ?= -s -w` for `nvidia-cuda` target, avoiding static linking conflicts with system NVIDIA CUDA/cuBLAS shared libraries.
-  - **Verification:** `make nvidia` succeeds and compiles `bin/quarrel-linux-amd64-cuda`.
-
----
-
-### 6. Qwen 3.5 Hybrid Linear/Full Attention Architecture Support [COMPLETED]
-- **Severity:** P0 Blocker (Model Execution Failure on Linear/Hybrid Architectures)
+### 1. Sequential Prompt Prefill & Context Awareness in `CPUEngine`
+- **Impact Area:** Coherence, Accuracy, Memory
+- **Severity:** P0 Blocker (Prompt Amnesia)
 - **Location:** `internal/engine/engine_cpu.go`
-- **Root Cause & Fix:**
-  - Qwen 3.5 utilizes a hybrid linear-attention architecture: 32 layers total, where every 4th layer (`layer % 4 == 3`: layers 3, 7, 11, 15, 19, 23, 27, 31) is Full Self-Attention with Q/K RMSNorm, and all other 24 layers are GatedDeltaNet SSM linear attention (`attn_qkv`, `ssm_conv1d`, `ssm_out`, `ssm_a`, `ssm_alpha`, `ssm_beta`, `ssm_dt`, `ssm_norm`).
-  - Implemented hybrid layer dispatch in `applyLayerCPU`:
-    - Checks for full attention weights (`HasFullAttn`) and executes vectorized multi-head attention with per-head Q/K RMS normalization.
-    - Checks for SSM weights (`HasSSM`) and executes linear projection and GatedDeltaNet activation.
-    - Executes SwiGLU FFN projection across both full and linear attention layers.
+- **Description:** Currently, `CPUEngine.forward(tokens)` only processes `tokens[len(tokens)-1]` and discards all preceding prompt tokens $0 \dots N-2$. The model generates responses without conditioning on the prompt text.
+- **Target Implementation:**
+  - Implement full sequential prompt prefill in `CPUEngine.forward` to process all prompt tokens through the transformer stack.
+  - Track sequence position `pos` across prefill and incremental generation steps.
+  - Return output logits conditioned on the complete prompt context.
 
 ---
 
-### 7. Modernize Benchmarks & Clean IDE Warnings [COMPLETED]
-- **Severity:** Code Quality & Maintenance
-- **Location:** `internal/engine/engine_cpu_test.go`, `internal/engine/prompt_wrapper_test.go`, `internal/gguf/quantize_benchmark_test.go`, `internal/engine/prompt_cache.go`, `internal/engine/speculative.go`, `internal/engine/kv_cache_turboquant_test.go`
-- **Fix:**
-  - Modernized benchmark loops using Go 1.24+ `b.Loop()`.
-  - Refactored `PromptCache.Evict` to reuse `removeLRU()` and exported `CurrentBlockCount()`.
-  - Silenced unused parameter `cfg` in `speculative.go:rejectSample`.
-  - Omitted redundant nil check before slice length in `kv_cache_turboquant_test.go`.
+### 2. Rotary Position Embeddings (RoPE) in CPU Layer Pipeline
+- **Impact Area:** Accuracy & Semantic Quality
+- **Severity:** P0 Blocker (Missing Positional Geometry)
+- **Location:** `internal/engine/cpu_weights.go`, `internal/simd/`
+- **Description:** `ApplyLayerCPU` performs Q, K, V projections and RMS normalization, but completely omits rotary position embeddings ($Q_{\text{rot}}, K_{\text{rot}}$). Without RoPE on CPU, tokens lose all positional relationships, degrading grammar and coherence.
+- **Target Implementation:**
+  - Call `simd.Rope` on $Q$ and $K$ heads at token position `pos` with frequency base `cfg.RopeTheta` inside `ApplyLayerCPU`.
+  - Ensure correct head dimension and rotary frequency calculation across Llama, Qwen, Mistral, and Gemma.
 
 ---
 
-## Roadmap: SIMD & Acceleration Optimization (Phase 9) [COMPLETED]
-
-| Task | Priority | Status | Target Location |
-|------|----------|--------|-----------------|
-| Partial GPU Layer Offloading (Split layers across VRAM and RAM) | P1 | COMPLETED | `internal/engine/engine_cuda.go`, `internal/engine/cpu_weights.go`, `internal/device/cuda.go` |
-| Complete TurboQuant AVX-512 Kernels | P1 | COMPLETED | `internal/simd/turboquant_avx512.c`, `internal/simd/turboquant_avx2.c` |
-| NEON Kernels Unit Tests & Benchmarks | P1 | COMPLETED | `internal/simd/turboquant_neon.c`, `internal/simd/turboquant_neon_test.go` |
-| AVX-512 / SIMD GGUF Dequantization Kernels (Q4_K, Q6_K) | P2 | COMPLETED | `internal/gguf/dequant_simd.go`, `internal/gguf/dequant_simd_test.go` |
-
----
-
-### 8. Partial GPU Layer Offloading (Hybrid VRAM / CPU RAM Execution) [COMPLETED]
-- **Severity:** Feature / Resource Constraint Relief (Permits running large models exceeding GPU VRAM)
-- **Location:** `internal/engine/engine_cuda.go`, `internal/engine/cpu_weights.go`, `internal/device/cuda.go`, `internal/metrics/metrics.go`, `cmd/quarrel/main.go`, `cmd/simple/main.go`
-- **Implementation:**
-  - Extracted neutral `CPUWeights` struct and `ApplyLayerCPU` pipeline into `internal/engine/cpu_weights.go` (compatible with both standard and CUDA builds without circular build tags).
-  - Configured `cuda.NewCUDAModel` to allocate GPU layer weights and KV caches only for layers $0 \le L < \text{numGPULayers}$.
-  - Configured `cudaEngine` in `engine_cuda.go` to dispatch layers dynamically: GPU for layers $< \text{numGPULayers}$ and CPU for remaining layers $\ge \text{numGPULayers}$. Activations are transferred between GPU VRAM and CPU host memory via `hidden.ToHostF32()` and `hidden.LoadFrom()`.
-  - Added CLI flags `-ngl` / `-gpu-layers` to both `cmd/quarrel` and `cmd/simple`.
-  - Added Prometheus metrics in `internal/metrics/metrics.go`:
-    - `quarrel_gpu_layers_active`: Gauge tracking number of layers offloaded to GPU.
-    - `quarrel_cpu_layers_active`: Gauge tracking number of layers retained on CPU.
-    - `quarrel_layer_offload_transfers_total`: Counter tracking host-device activation roundtrips.
-    - `quarrel_layer_offload_duration_seconds`: Histogram tracking CPU layer execution latency.
-  - **Verification:** Unit tests and continuous fuzz tests in `internal/engine/layer_offload_test.go` (`TestApplyLayerCPU_Basic`, `TestLayerOffloadMetrics`, `FuzzApplyLayerCPU` with 81,000+ executions).
+### 3. Layer-Level KV Cache Accumulation for Multi-Token CPU Attention
+- **Impact Area:** Coherence & Context Retention
+- **Severity:** P0 Blocker (No Attention Memory)
+- **Location:** `internal/engine/cpu_weights.go`, `internal/engine/engine_cpu.go`
+- **Description:** `ApplyLayerCPU` computes self-attention solely on the current token query $Q$ with current key/value $K_t, V_t$. Prior keys and values are neither stored nor retrieved, preventing the model from attending to preceding text.
+- **Target Implementation:**
+  - Add sequence-aware per-layer Key/Value cache management (`LayerKVCache`) in CPU execution.
+  - Store $K_t, V_t$ at each position and layer; compute scaled dot-product attention across all cached keys $K_{0:t}$ and values $V_{0:t}$.
+  - Support sequence resetting and rollback upon generation completion.
 
 ---
 
-### 9. Complete TurboQuant AVX-512 & AVX2 Kernels [COMPLETED]
-- **Severity:** Performance / Algorithmic Correctness
-- **Location:** `internal/simd/turboquant_avx512.c`, `internal/simd/turboquant_avx2.c`, `internal/simd/turboquant_fuzz_test.go`
-- **Implementation:**
-  - Implemented vectorized step 3 inverse rotation in `turboquant_avx512.c` using `_mm512_fmadd_ps` with contiguous row-major linear combinations:
-    $$\vec{\text{residual}} = \sum_{j=0}^{n-1} \text{res\_rotated}[j] \cdot \vec{R}_{j,:}$$
-    broadcasting scalar $\text{res\_rotated}[j]$ across 16-lane AVX-512 SIMD vectors.
-  - Fixed scalar `norm_sq` accumulation bug in `qjl_transform_avx512`.
-  - Vectorized inverse rotation in `turboquant_avx2.c` using `_mm256_fmadd_ps` with contiguous row-major traversal, replacing the strided column bug.
-  - **Verification:** Continuous fuzz testing in `internal/simd/turboquant_fuzz_test.go` (`FuzzPolarQuant`, `FuzzQJLTransform` with 218,000+ iterations passing with zero memory safety or mathematical parity issues).
+### 4. Multi-Model Dynamic EOS & Stop Token Detection
+- **Impact Area:** Coherence & Termination Stability
+- **Severity:** P0 Blocker (Runaway Generation Loop)
+- **Location:** `internal/tokenizer/tokenizer.go`, `internal/engine/engine_utils.go`, `internal/engine/engine_cpu.go`, `internal/engine/engine_cuda.go`
+- **Description:** Inference loops currently hardcode `token == 2` as the only end-of-sequence condition. Qwen models (EOS=151643, 151645), Gemma models (EOS=1, 107), and LLaMA 3 models (EOS=128001, 128009) never terminate naturally, causing endless repetitive rambling until hitting `MaxTokens`.
+- **Target Implementation:**
+  - Extract `tokenizer.ggml.eos_token_id` and architecture-specific EOS tokens in `ExtractModelConfig` and `tokenizer.Tokenizer`.
+  - Expose `Tokenizer.IsEOS(tokenID int) bool` and `Tokenizer.GetEOSTokenIDs() []int`.
+  - Check dynamic EOS tokens in both CPU and CUDA generation loops.
 
 ---
 
-### 10. NEON Kernels Unit Tests & Benchmarks [COMPLETED]
-- **Severity:** ARM64 Compatibility & Parity Testing
-- **Location:** `internal/simd/turboquant_neon.c`, `internal/simd/turboquant_neon_test.go`
-- **Implementation:**
-  - Vectorized step 3 inverse rotation in `turboquant_neon.c` using `vld1q_f32`, `vdupq_n_f32`, and `vfmaq_f32`.
-  - Created comprehensive test suite in `internal/simd/turboquant_neon_test.go`:
-    - `TestNeonKernels_Correctness`: Validates PolarQuant and QJLTransform across powers of two (16, 32, 64, 128, 256) and odd/unaligned sizes (67, 125).
-    - `BenchmarkNeonPolarQuant` and `BenchmarkNeonQJLTransform` across multiple vector dimensions.
-  - **Verification:** Verified ARM64 cross-compilation with `GOARCH=arm64 go test -c ./internal/simd` and verified full execution pass on host.
+### 5. Advanced Sampling: Presence, Frequency, and Min-P Penalties
+- **Impact Area:** Accuracy, Creativity & Vocabulary Control
+- **Severity:** P0 Blocker (Topic Looping & Repetition)
+- **Location:** `internal/engine/sampler.go`, `internal/engine/sampler_config.go`
+- **Description:** `SamplerConfig` currently lacks presence and frequency penalties (OpenAI/llama.cpp standards). Repetition penalty alone fails to prevent semantic repetition and word loops.
+- **Target Implementation:**
+  - Add `PresencePenalty float64` and `FrequencyPenalty float64` to `SamplerConfig`.
+  - Track token occurrence frequencies across `history` and apply linear penalties to logits before probability transformation.
+  - Enforce Min-P filtering relative to top candidate probability.
 
 ---
 
-### 11. SIMD & AVX-512 GGUF Dequantization Kernels (Q4_K, Q6_K) [COMPLETED]
-- **Severity:** Inference Throughput (CPU Token Generation Latency)
-- **Location:** `internal/gguf/dequant_simd.go`, `internal/gguf/dequant_simd_test.go`
-- **Implementation:**
-  - Implemented unrolled batch dequantization functions `DequantizeQ4K_SIMD` and `DequantizeQ6K_SIMD` processing 256-weight superblocks with 8-fold loop unrolling, batch scale computation, and direct FP32 conversion.
-  - Implemented zero-copy matrix-vector multiplication kernels `MatVecMulQ4_K` and `MatVecMulQ6_K`, allowing direct dot-product calculation between quantized GGUF weights and activation vectors without materializing dequantized weights on the heap.
-  - Integrated into `ApplyLayerCPU` in `internal/engine/cpu_weights.go` for zero-copy CPU weight multiplication.
-  - **Verification:** Parity unit tests, zero-copy matrix-vector tests, benchmarks, and fuzz tests (`FuzzDequantizeQ4K_SIMD`, `FuzzDequantizeQ6K_SIMD` with 303,000+ executions) in `internal/gguf/dequant_simd_test.go`.
+### 6. Empty Logit Slice Guards, Finite Clamping, and Softmax Stability
+- **Impact Area:** Stability & Numerical Precision
+- **Severity:** P0 Blocker (Panic & NaN Ingestion)
+- **Location:** `internal/engine/sampler.go`, `internal/simd/simd.go`
+- **Description:** `applyTemperatureAndSoftmax` indexes `logits[0]` unconditionally without checking `len(logits) == 0`. Unclamped extreme logits (>1e4 or <-1e4) cause `math.Exp` overflow/underflow to $\pm\infty$ or NaN.
+- **Target Implementation:**
+  - Guard empty logit slices across all sampler helper functions.
+  - Implement numerical clamping $[-60.0, 60.0]$ prior to exponentiation.
+  - Provide fallback to greedy argmax with warning logging if all probabilities are zero or NaN.
 
 ---
 
-#### Last updated: September 2026 (v0.2.0 Release - Zero-Copy Inference, SIMD Optimization & Layer Offloading)
+### 7. Radix-Tree `PromptCache` Integration in `CPUEngine` & `cudaEngine`
+- **Impact Area:** Performance (Time-to-First-Token / TTFT)
+- **Severity:** P0 Blocker (Redundant Prompt Computations)
+- **Location:** `internal/engine/engine_cpu.go`, `internal/engine/engine_cuda.go`
+- **Description:** `PromptCache` is implemented in `internal/engine/prompt_cache.go` with LRU eviction and prefix matching, but `CPUEngine` and `cudaEngine` pass `nil` into `BatchManager.Step`, disabling prefix caching entirely.
+- **Target Implementation:**
+  - Instantiate `PromptCache` on `CPUEngine` and `cudaEngine`.
+  - Pass `e.PromptCache` into `BatchManager.Step`.
+  - Reuse cached prompt prefix blocks across multi-turn conversations and shared prompts.
+
+---
+
+### 8. Multi-Threaded Parallel Matrix-Vector Multiplication for Large Matrices
+- **Impact Area:** Performance (CPU Generation Throughput)
+- **Severity:** P0 Blocker (Single-Core CPU Bottleneck)
+- **Location:** `internal/engine/cpu_weights.go`, `internal/gguf/dequant.go`
+- **Description:** Single-vector matrix multiplication runs sequentially on a single CPU thread, severely restricting token throughput for large models (4B-8B) with large hidden dimensions.
+- **Target Implementation:**
+  - Partition matrix rows across worker goroutines using `runtime.NumCPU()` when row count $M \ge 256$.
+  - Parallelize zero-copy kernels `MatVecMulQ8_0`, `MatVecMulQ4_K`, and `MatVecMulQ6_K`.
+  - Instrument with throughput latency metrics.
+
+---
+
+### 9. Vectorized FP32 Embedding Dot-Products and Fused Multiply-Add
+- **Impact Area:** Performance & SIMD Utilization
+- **Severity:** P0 Blocker (Unvectorized Attention Hotpaths)
+- **Location:** `internal/engine/cpu_weights.go`, `internal/simd/`
+- **Description:** `vecDot` and `vecFMA` in `cpu_weights.go` use basic scalar unrolled Go loops rather than utilizing AVX2 / AVX-512 vector extensions.
+- **Target Implementation:**
+  - Replace `vecDot` and `vecFMA` with vectorized routines `simd.VecDotF32` and `simd.VecFMAF32`.
+  - Provide 8-lane AVX2 and 16-lane AVX-512 implementations with auto-fallback to portable scalar implementations.
+
+---
+
+### 10. Complete CLI Sampling Parameter Ingestion & Flag Aliases
+- **Impact Area:** Usability, Accuracy, Coherence
+- **Severity:** P0 Blocker (Ignored User Flags)
+- **Location:** `cmd/simple/main.go`, `cmd/quarrel/main.go`
+- **Description:** `cmd/simple/main.go` declares `--temp` and `--topk` flags but hardcodes `Temperature: 0.8, TopK: 40` when instantiating `SamplerConfig`. In `cmd/quarrel/main.go`, `--gpu-layers` is assigned to a blank identifier `_`.
+- **Target Implementation:**
+  - Bind all CLI sampling flags (`--temp`, `--topk`, `--topp`, `--rep-penalty`, `--presence-penalty`, `--frequency-penalty`, `--minp`, `--seed`) into `SamplerConfig`.
+  - Properly handle `--gpu-layers` and `-ngl` aliases.
+  - Support streaming output token callbacks in `cmd/simple`.
+
+---
+
+## Completed in v0.2.0 (Archived Milestones)
+
+All 11 milestone tasks from Phase 9 and v0.2.0 have been implemented, validated with unit/fuzz tests, security-audited, and deployed:
+1. **Zero-Copy Quantized Inference (Fix CPU RAM Exhaustion / OOM)** (`internal/engine/cpu_weights.go`, `internal/gguf/dequant.go`)
+2. **Universal Multi-Engine Model Cache Resolver** (`internal/models/resolver.go`)
+3. **Multi-Architecture Dynamic Metadata Extraction** (`internal/engine/engine_utils.go`)
+4. **CUDA Double-Allocation Elimination** (`cmd/quarrel/main.go`, `internal/device/cuda.go`)
+5. **Automated CUDA Kernel Compilation in Makefile** (`Makefile`)
+6. **Qwen 3.5 Hybrid Linear/Full Attention Architecture Support** (`internal/engine/cpu_weights.go`)
+7. **Modernized Benchmarks & IDE Warning Cleanup** (`internal/engine/`, `internal/gguf/`)
+8. **Partial GPU Layer Offloading (Hybrid VRAM / RAM)** (`internal/engine/engine_cuda.go`, `internal/engine/cpu_weights.go`)
+9. **TurboQuant AVX-512 & AVX2 Kernels** (`internal/simd/turboquant_avx512.c`, `internal/simd/turboquant_avx2.c`)
+10. **NEON Kernels Unit Tests & Benchmarks** (`internal/simd/turboquant_neon.c`)
+11. **AVX-512 / SIMD GGUF Dequantization Kernels (Q4_K, Q6_K)** (`internal/gguf/dequant_simd.go`)
+
+---
+
+#### Last updated: September 2026 (v0.2.0+ P0 Performance, Accuracy & Coherence Plan)

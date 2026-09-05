@@ -35,14 +35,15 @@ func TestToArrowArray(t *testing.T) {
 		t.Errorf("expected length %d, got %d", rows, arr.Len())
 	}
 
-	// Verify zero-copy: pointer equivalence
-	// The Arrow Buffer mapping raw memory should point to the same address as the tensor
-	rawData := tensor.RawData()
-	arrowChild := arr.ListValues()
-	arrowRaw := arrowChild.Data().Buffers()[1].Bytes()
+	// Verify zero-copy: pointer equivalence on unified/host memory
+	if !tensor.IsDevice() {
+		rawData := tensor.RawData()
+		arrowChild := arr.ListValues()
+		arrowRaw := arrowChild.Data().Buffers()[1].Bytes()
 
-	if unsafe.Pointer(&rawData[0]) != unsafe.Pointer(&arrowRaw[0]) {
-		t.Errorf("True Zero-Copy FAILED: pointer mismatch")
+		if unsafe.Pointer(&rawData[0]) != unsafe.Pointer(&arrowRaw[0]) {
+			t.Errorf("True Zero-Copy FAILED: pointer mismatch")
+		}
 	}
 
 	// 2. Test F16 Zero-Copy (if supported by backend)
@@ -60,11 +61,13 @@ func TestToArrowArray(t *testing.T) {
 			t.Errorf("expected Float16 element type, got %v", arr16.DataType())
 		}
 		
-		// Verify zero-copy
-		rawData16 := tensorF16.RawData()
-		arrowRaw16 := arr16.ListValues().Data().Buffers()[1].Bytes()
-		if unsafe.Pointer(&rawData16[0]) != unsafe.Pointer(&arrowRaw16[0]) {
-			t.Errorf("True Zero-Copy F16 FAILED: pointer mismatch")
+		// Verify zero-copy on host/unified memory
+		if !tensorF16.IsDevice() {
+			rawData16 := tensorF16.RawData()
+			arrowRaw16 := arr16.ListValues().Data().Buffers()[1].Bytes()
+			if unsafe.Pointer(&rawData16[0]) != unsafe.Pointer(&arrowRaw16[0]) {
+				t.Errorf("True Zero-Copy F16 FAILED: pointer mismatch")
+			}
 		}
 	}
 }

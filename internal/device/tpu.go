@@ -157,6 +157,7 @@ func (t *Tensor) Free() {
 func (t *Tensor) Rows() int      { return t.rows }
 func (t *Tensor) Cols() int      { return t.cols }
 func (t *Tensor) DataType() int { return int(t.dataType) }
+func (t *Tensor) IsDevice() bool { return false }
 func (t *Tensor) SizeBytes() int { return t.sizeB }
 
 func (t *Tensor) LoadFrom(data interface{}) error {
@@ -175,6 +176,10 @@ func (t *Tensor) ToHostF32() ([]float32, error) {
 	result := make([]float32, size)
 	C.tpuMemcpyD2H(unsafe.Pointer(&result[0]), t.devPtr, C.size_t(size*t.cols*4))
 	return result, nil
+}
+
+func (t *Tensor) ToHostFP16() []uint16 {
+	return nil
 }
 
 func (t *Tensor) ReturnToPool() {

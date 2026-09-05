@@ -2,6 +2,7 @@ package tokenizer
 
 import (
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
@@ -50,30 +51,97 @@ func NewFromGGUF(f *gguf.GGUFFile) (*Tokenizer, error) {
 			for i, m := range mArr {
 				if ms, ok := m.(string); ok {
 					merges = append(merges, ms)
-					// Rank is explicit index or priority? GGUF stores them in order (low to high priority usually, or just index).
-					// Actually, lower index = higher priority (merge earlier)?
-					// In BPE, we merge the pairs that appear earliest in the merges list.
-					// So map pair -> index. Smallest index wins.
 					ranks[ms] = i
 				}
 			}
 		}
 	}
 
+	eosMap := make(map[int]bool)
+	// 1. Check tokenizer.ggml.eos_token_id in metadata
+	if eosVal, ok := f.KV["tokenizer.ggml.eos_token_id"]; ok {
+		switch v := eosVal.(type) {
+		case uint32:
+			eosMap[int(v)] = true
+		case int32:
+			eosMap[int(v)] = true
+		case uint64:
+			if v <= math.MaxInt {
+				eosMap[int(v)] = true // #nosec G115 -- safe: bounded by math.MaxInt
+			}
+		case int64:
+			if v >= 0 && v <= math.MaxInt {
+				eosMap[int(v)] = true // #nosec G115 -- safe: bounded by math.MaxInt
+			}
+		case float64:
+			if v >= 0 && v <= float64(math.MaxInt) {
+				eosMap[int(v)] = true // #nosec G115 -- safe: bounded by math.MaxInt
+			}
+		case int:
+			eosMap[v] = true
+		}
+	}
+
+	// 2. Add common known architecture EOS tokens if present in vocab
+	commonEOSTokens := []string{
+		"<|im_end|>",     // Qwen 2, 2.5, 3.5
+		"<|endoftext|>",  // Qwen, GPT
+		"<end_of_turn>",  // Gemma
+		"</s>",           // Llama 1/2, Mistral
+		"<|eot_id|>",     // Llama 3
+	}
+	for _, tokStr := range commonEOSTokens {
+		if id, exists := vocab[tokStr]; exists {
+			eosMap[id] = true
+		}
+	}
+
+	// 3. Fallback to 2 (Llama 2 default) if none found
+	if len(eosMap) == 0 {
+		eosMap[2] = true
+	}
+
 	return &Tokenizer{
-		Tokens: tokens,
-		Vocab:  vocab,
-		Merges: merges,
-		Ranks:  ranks,
+		Tokens:     tokens,
+		Vocab:      vocab,
+		Merges:     merges,
+		Ranks:      ranks,
+		EOSTokenIDs: eosMap,
 	}, nil
 }
 
 type Tokenizer struct {
-	Tokens []string
-	Vocab  map[string]int
-	Merges []string
-	Ranks  map[string]int // Pair "a b" -> Rank (Index)
-	Scores []float32      // optional
+	Tokens      []string
+	Vocab       map[string]int
+	Merges      []string
+	Ranks       map[string]int // Pair "a b" -> Rank (Index)
+	Scores      []float32      // optional
+	EOSTokenIDs map[int]bool
+}
+
+// IsEOS returns true if the tokenID is recognized as an end-of-sequence token.
+func (t *Tokenizer) IsEOS(tokenID int) bool {
+	if t.EOSTokenIDs == nil {
+		return tokenID == 2
+	}
+	return t.EOSTokenIDs[tokenID]
+}
+
+// GetEOSTokenIDs returns a slice of all recognized EOS token IDs.
+func (t *Tokenizer) GetEOSTokenIDs() []int {
+	ids := make([]int, 0, len(t.EOSTokenIDs))
+	for id := range t.EOSTokenIDs {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// AddEOSTokenID marks an additional token ID as an EOS token.
+func (t *Tokenizer) AddEOSTokenID(tokenID int) {
+	if t.EOSTokenIDs == nil {
+		t.EOSTokenIDs = make(map[int]bool)
+	}
+	t.EOSTokenIDs[tokenID] = true
 }
 
 func (t *Tokenizer) Encode(text string) []int {

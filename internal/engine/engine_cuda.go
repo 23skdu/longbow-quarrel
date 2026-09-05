@@ -49,6 +49,7 @@ type cudaEngine struct {
 	scratch      *CUDAScratch
 	tok          *tokenizer.Tokenizer
 	cache        *PagedKVCache
+	PromptCache  *PromptCache
 	BatchManager *ContinuousBatchManager
 	stopChan     chan struct{}
 	doneChan     chan struct{}
@@ -160,6 +161,7 @@ func NewcudaEngine(modelPath string, cfg config.Config) (Engine, error) {
 		},
 		tok:          tok,
 		cache:        cache,
+		PromptCache:  NewPromptCache(),
 		BatchManager: NewContinuousBatchManager(),
 		stopChan:     make(chan struct{}),
 		doneChan:     make(chan struct{}),
@@ -189,6 +191,16 @@ func (e *cudaEngine) Config() config.Config {
 }
 
 func (e *cudaEngine) Close() {
+	if e.stopChan != nil {
+		select {
+		case <-e.stopChan:
+		default:
+			close(e.stopChan)
+		}
+	}
+	if e.doneChan != nil {
+		<-e.doneChan
+	}
 	if e.scratch != nil {
 		e.scratch.Free()
 	}
@@ -293,7 +305,7 @@ func (e *cudaEngine) runBatchLoop() {
 		}
 
 		// 1. Pull active sequences
-		desc, _ := e.BatchManager.Step(16, e.cache, nil)
+		desc, _ := e.BatchManager.Step(16, e.cache, e.PromptCache)
 		if desc == nil || len(desc.Sequences) == 0 {
 			time.Sleep(10 * time.Millisecond)
 			continue
@@ -339,7 +351,8 @@ func (e *cudaEngine) runBatchLoop() {
 			}
 
 			// Termination
-			if token == 2 || len(seq.Tokens) >= seq.MaxTokens {
+			isEOS := (e.tok != nil && e.tok.IsEOS(token)) || token == e.config.EOSTokenID || token == 2
+			if isEOS || len(seq.Tokens) >= seq.MaxTokens {
 				select {
 				case seq.Result <- seq.Tokens:
 				default:

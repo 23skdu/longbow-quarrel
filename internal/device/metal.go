@@ -226,11 +226,23 @@ func (t *Tensor) SizeBytes() int {
 
 func (t *Tensor) DataType() DataType { return t.dataType }
 
+func (t *Tensor) IsDevice() bool { return false }
+
 func (t *Tensor) Rows() int { return t.rows }
 func (t *Tensor) Cols() int { return t.cols }
 
 func (t *Tensor) Data() []float32 {
 	return t.ToHostF32()
+}
+
+func (t *Tensor) ToHostFP16() []uint16 {
+	size := t.rows * t.cols
+	hostF16 := make([]uint16, size)
+	hostF32 := t.ToHostF32()
+	for i, v := range hostF32 {
+		hostF16[i] = Float32ToFloat16(v)
+	}
+	return hostF16
 }
 
 func (t *Tensor) RawData() []byte {
