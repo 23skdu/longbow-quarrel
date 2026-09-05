@@ -35,15 +35,23 @@ func SoftmaxF32(x []float32) {
 // MatMul computes A [rowsA x colsA] × B [colsA x colsB] → result [rowsA x colsB].
 // Uses parallel outer-row goroutines for matrices larger than 1024 output elements
 // and VecDotF32 for SIMD-accelerated inner dot products.
+// B is pre-transposed to column-major for cache-friendly column access.
 func MatMul(a, b []float32, rowsA, colsA, colsB int) []float32 {
 	result := make([]float32, rowsA*colsB)
 	if rowsA == 0 || colsA == 0 || colsB == 0 {
 		return result
 	}
 
-	// Precompute B columns for cache-friendly access
-	// B is row-major [colsA x colsB]; bCol[j] is B's j-th column
-	// Inline row-parallel computation using VecDotF32 per (row, col) pair.
+	// Transpose B to column-major: bT[j*colsA+k] = b[k*colsB+j]
+	// This makes each column contiguous for VecDotF32.
+	bT := make([]float32, colsA*colsB)
+	for k := 0; k < colsA; k++ {
+		rowOff := k * colsB
+		for j := 0; j < colsB; j++ {
+			bT[j*colsA+k] = b[rowOff+j]
+		}
+	}
+
 	workers := runtime.GOMAXPROCS(0)
 	if workers > rowsA {
 		workers = rowsA
@@ -52,11 +60,7 @@ func MatMul(a, b []float32, rowsA, colsA, colsB int) []float32 {
 		for i := 0; i < rowsA; i++ {
 			aRow := a[i*colsA : (i+1)*colsA]
 			for j := 0; j < colsB; j++ {
-				var sum float32
-				for k := 0; k < colsA; k++ {
-					sum += aRow[k] * b[k*colsB+j]
-				}
-				result[i*colsB+j] = sum
+				result[i*colsB+j] = VecDotF32(aRow, bT[j*colsA:(j+1)*colsA])
 			}
 		}
 		return result
@@ -79,11 +83,7 @@ func MatMul(a, b []float32, rowsA, colsA, colsB int) []float32 {
 			for i := rStart; i < rEnd; i++ {
 				aRow := a[i*colsA : (i+1)*colsA]
 				for j := 0; j < colsB; j++ {
-					var sum float32
-					for k := 0; k < colsA; k++ {
-						sum += aRow[k] * b[k*colsB+j]
-					}
-					result[i*colsB+j] = sum
+					result[i*colsB+j] = VecDotF32(aRow, bT[j*colsA:(j+1)*colsA])
 				}
 			}
 		}(start, end)
