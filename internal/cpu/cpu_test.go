@@ -2,6 +2,7 @@ package cpu
 
 import (
 	"math"
+	"runtime"
 	"testing"
 )
 
@@ -740,3 +741,130 @@ func TestEmbeddingSingleId(t *testing.T) {
 		t.Errorf("Embedding single id: oData[0] = %f, want %d", oData[0], 50*64)
 	}
 }
+
+func TestCPU_AllocatedBytesAndCapacityAndPool(t *testing.T) {
+	_ = AllocatedBytes()
+
+	ctx := NewContext()
+	// Test NewTensor with different elem sizes: 1, 2, 4, 8, 16 (default)
+	tByte := ctx.NewTensor([2]int{2, 4}, 1)
+	tF64 := ctx.NewTensor([2]int{2, 4}, 8)
+	tDefault := ctx.NewTensor([2]int{2, 4}, 16)
+	tOther := &Tensor{data: "string-data", shape: [2]int{1, 1}, elemSize: 4}
+
+	ctx.PutTensor(tByte)
+	ctx.PutTensor(tF64)
+	ctx.PutTensor(tDefault)
+	ctx.PutTensor(tOther)
+	ctx.PutTensor(nil)
+	ctx.PutTensor(&Tensor{data: nil})
+
+	// Free exercises capacity() on all types: byte, uint16, float32, float64, default
+	ctx.Free()
+}
+
+func TestCPU_EdgeCases(t *testing.T) {
+	ctx := NewContext()
+	defer ctx.Free()
+
+	// Softmax empty
+	Softmax([]float32{})
+
+	// SwiGLU mismatched lengths
+	gate := ctx.NewTensor([2]int{1, 4}, 4)
+	up := ctx.NewTensor([2]int{1, 8}, 4)
+	out := ctx.NewTensor([2]int{1, 4}, 4)
+	ctx.SwiGLU(gate, up, out)
+
+	// Fp16ToFp32Func mismatched lengths
+	Fp16ToFp32Func([]uint16{1, 2}, []float32{1})
+
+	// Fp16ToFp32Func special values: exp=31 (inf: mant=0, nan: mant!=0), normal values (default)
+	// uint16 layout: sign:1, exp:5, mant:10
+	// exp=31, mant=0 -> 0x7C00 (+inf), 0xFC00 (-inf)
+	// exp=31, mant=1 -> 0x7C01 (nan)
+	// normal: exp=15, mant=0 -> 0x3C00 (1.0)
+	src16 := []uint16{0x7C00, 0xFC00, 0x7C01, 0x3C00}
+	dst32 := make([]float32, 4)
+	Fp16ToFp32Func(src16, dst32)
+	if !math.IsInf(float64(dst32[0]), 1) {
+		t.Errorf("expected +inf, got %f", dst32[0])
+	}
+	if !math.IsInf(float64(dst32[1]), -1) {
+		t.Errorf("expected -inf, got %f", dst32[1])
+	}
+	if !math.IsNaN(float64(dst32[2])) {
+		t.Errorf("expected nan, got %f", dst32[2])
+	}
+	if dst32[3] != 1.0 {
+		t.Errorf("expected 1.0, got %f", dst32[3])
+	}
+
+	// Fp32ToFp16Func mismatched lengths
+	Fp32ToFp16Func([]float32{1, 2}, []uint16{1})
+
+	// Fp32ToFp16Func special cases:
+	// exp=255 (NaN or Inf), overflow to inf (newExp >= 31), subnormal (newExp <= 0), zero (exp=0)
+	srcF32 := []float32{
+		float32(math.Inf(1)),
+		float32(math.NaN()),
+		1e10,               // overflow to inf
+		float32(1e-8),      // subnormal in fp16 (exp around 100: newExp <= 0)
+		0.0,
+		2.0,
+	}
+	dstF16 := make([]uint16, len(srcF32))
+	Fp32ToFp16Func(srcF32, dstF16)
+	if dstF16[0] != 0x7C00 {
+		t.Errorf("expected +inf uint16 0x7C00, got 0x%X", dstF16[0])
+	}
+
+	// Concat axis 0
+	cA := ctx.NewTensor([2]int{2, 3}, 4)
+	cB := ctx.NewTensor([2]int{1, 3}, 4)
+	cOut := ctx.NewTensor([2]int{3, 3}, 4)
+	ctx.Concat(cA, cB, cOut, 0)
+
+	// GetTensorShape and GetTensorElemSize
+	sh := ctx.GetTensorShape(cA)
+	if sh[0] != 2 || sh[1] != 3 {
+		t.Errorf("unexpected shape: %v", sh)
+	}
+	es := ctx.GetTensorElemSize(cA)
+	if es != 4 {
+		t.Errorf("unexpected elemSize: %d", es)
+	}
+
+	// AttentionQKV (empty stub)
+	ctx.AttentionQKV(cA, cB, cOut, cOut, 0.5)
+
+	// MatMul with rows = NumCPU()+1 to trigger end > outRows
+	pRows := runtime.NumCPU() + 1
+	matA := ctx.NewTensor([2]int{pRows, 3}, 4)
+	matB := ctx.NewTensor([2]int{3, 2}, 4)
+	matOut := ctx.NewTensor([2]int{pRows, 2}, 4)
+	aData := matA.data.([]float32)
+	bData := matB.data.([]float32)
+	for i := range aData {
+		aData[i] = 1.0
+	}
+	for i := range bData {
+		bData[i] = 2.0
+	}
+	ctx.MatMul(matA, matB, matOut)
+	outData := matOut.data.([]float32)
+	for _, v := range outData {
+		if v != 6.0 {
+			t.Errorf("expected 6.0 in MatMul result, got %f", v)
+		}
+	}
+
+	// Test LinearF32 and RMSNorm with NumCPU()+1 rows to trigger end > outRows / end > numRows
+	oddRows := runtime.NumCPU() + 1
+	oddInput := ctx.NewTensor([2]int{oddRows, 4}, 4)
+	oddWeight := ctx.NewTensor([2]int{4, 4}, 4)
+	oddOutput := ctx.NewTensor([2]int{oddRows, 4}, 4)
+	ctx.LinearF32(oddWeight, oddInput, oddOutput)
+	ctx.RMSNorm(oddInput, oddWeight, oddOutput, 1e-5)
+}
+

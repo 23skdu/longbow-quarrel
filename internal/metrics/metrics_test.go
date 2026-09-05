@@ -181,3 +181,42 @@ func TestRecordGemma4Context(t *testing.T) {
 	RecordGemma4Context(32768)
 	RecordGemma4Context(131072)
 }
+
+func TestRecordAdditionalMetrics(t *testing.T) {
+	RecordBatchStats(4, 128, 64)
+	RecordModelHotSwap(2*time.Second, true)
+	RecordModelHotSwap(2*time.Second, false)
+	RecordKVCacheAudit(map[string]interface{}{"UniquePositions": 1024})
+	RecordBufferSizingAudit(map[string]interface{}{"GQARatio": 4})
+	RecordDequantizationAudit(map[string]interface{}{"MaxAbsError": 0.05, "MaxRelError": 0.01})
+	RecordWeightAlignmentAudit(map[string]interface{}{"PaddingBytes": 64})
+	RecordSoftmaxMaskingAudit(map[string]interface{}{"MaxMaskValue": 0.0})
+	RecordHeadDimensionAudit(map[string]interface{}{"ThreadgroupSize": 32})
+	RecordTokenizerEncode(100, 2)
+	RecordTokenizerDecode(100, 5*time.Millisecond)
+	RecordGemma4QNormApplied()
+	RecordGemma4KNormApplied()
+
+	RecordSIMDLevel(2)
+	RecordSIMDKernelDuration("test_kernel", 10*time.Millisecond, "medium")
+	RecordSIMDSoftmaxDuration(2 * time.Millisecond)
+	RecordSIMDRMSNormDuration(3 * time.Millisecond)
+	RecordSIMDMatmulDuration(15 * time.Millisecond)
+	RecordSIMDAttentionDuration(20 * time.Millisecond)
+	RecordSIMDFusedMLPDuration(25 * time.Millisecond)
+	RecordSIMDRoPEDuration(5 * time.Millisecond)
+	RecordSIMDSwiGLUDuration(8 * time.Millisecond)
+	RecordSIMDFallback("avx512", "avx2")
+	RecordSIMDNaN("gemm")
+	RecordSIMDInf("softmax")
+	RecordSIMDKernelError("rope", "overflow")
+
+	RecordLayerOffload("modelX", 16, 16)
+	RecordLayerOffloadTransfer("modelX", 5*time.Millisecond)
+	RecordLayerOffloadCPUDuration("modelX", 12*time.Millisecond)
+
+	RecordTurboQuantCompression("layer0", 0.25)
+	RecordTurboQuantLatency(0.015)
+}
+
+

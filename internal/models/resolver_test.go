@@ -53,3 +53,82 @@ func TestResolveModelPath_CacheResolution(t *testing.T) {
 		}
 	}
 }
+
+func TestResolveModelPath_TildeAndNotFound(t *testing.T) {
+	// Test tilde expansion for existing file in home
+	home, err := os.UserHomeDir()
+	if err == nil {
+		tmpInHome := filepath.Join(home, ".test_quarrel_tilde.gguf")
+		if err := os.WriteFile(tmpInHome, []byte("GGUF"), 0644); err == nil {
+			defer os.Remove(tmpInHome)
+			res, err := ResolveModelPath("~/.test_quarrel_tilde.gguf")
+			if err != nil || res != tmpInHome {
+				t.Errorf("Tilde resolution failed: %v, got %s", err, res)
+			}
+		}
+	}
+
+	// Test directory path (should not resolve since it is a dir, not a file)
+	tmpDir := t.TempDir()
+	if _, err := ResolveModelPath(tmpDir); err == nil {
+		t.Error("Expected error when resolving a directory path")
+	}
+
+	// Test non-existent model name
+	if _, err := ResolveModelPath("non_existent_model_xyz_12345"); err == nil {
+		t.Error("Expected error for non-existent model")
+	}
+
+	// Test tilde expansion for non-existent file
+	if _, err := ResolveModelPath("~/non_existent_model_xyz_12345.gguf"); err == nil {
+		t.Error("Expected error for non-existent tilde file")
+	}
+}
+
+func TestResolveModelPath_SearchDirsDirect(t *testing.T) {
+	dirs := SearchDirs()
+	if len(dirs) > 0 {
+		testDir := dirs[0]
+		_ = os.MkdirAll(testDir, 0755)
+		testFile := filepath.Join(testDir, "test_direct_match.gguf")
+		if err := os.WriteFile(testFile, []byte("GGUF"), 0644); err == nil {
+			defer os.Remove(testFile)
+
+			// With .gguf
+			res, err := ResolveModelPath("test_direct_match.gguf")
+			if err != nil || res != testFile {
+				t.Errorf("Direct match failed: %v, got %s", err, res)
+			}
+
+			// Without .gguf
+			resNoExt, err := ResolveModelPath("test_direct_match")
+			if err != nil || resNoExt != testFile {
+				t.Errorf("Direct match without ext failed: %v, got %s", err, resNoExt)
+			}
+		}
+	}
+}
+
+func TestResolveModelPath_OllamaFallback(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("OLLAMA_MODELS", tmpDir)
+
+	manifestDir := filepath.Join(tmpDir, "manifests", "registry.ollama.ai", "library", "testmodel")
+	_ = os.MkdirAll(manifestDir, 0755)
+	blobsDir := filepath.Join(tmpDir, "blobs")
+	_ = os.MkdirAll(blobsDir, 0755)
+
+	blobFile := filepath.Join(blobsDir, "sha256-abc12345")
+	_ = os.WriteFile(blobFile, []byte("GGUF"), 0644)
+
+	manifestContent := `{"schemaVersion":2,"layers":[{"mediaType":"application/vnd.ollama.image.model","digest":"sha256:abc12345","size":4}]}`
+	_ = os.WriteFile(filepath.Join(manifestDir, "latest"), []byte(manifestContent), 0644)
+
+	resolved, err := ResolveModelPath("testmodel")
+	if err != nil || resolved != blobFile {
+		t.Errorf("Ollama resolution failed: %v, got %s", err, resolved)
+	}
+}
+
+
+

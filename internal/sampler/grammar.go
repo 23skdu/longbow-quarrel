@@ -36,6 +36,7 @@ func NewJSONGrammar(vocab []string) *Grammar {
 
 	return &Grammar{
 		Active:    true,
+		JSONState: &JSONState{},
 		Vocab:     trie,
 		VocabSize: len(vocab),
 		Bitmask:   make([]byte, (len(vocab)+7)/8),
@@ -73,6 +74,9 @@ func (g *Grammar) Apply(logits []float32) error {
 
 
 func (g *Grammar) Update(token string) {
+	if g.JSONState == nil {
+		g.JSONState = &JSONState{}
+	}
 	for _, r := range token {
 		switch r {
 		case '{', '[':

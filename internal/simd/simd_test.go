@@ -696,3 +696,186 @@ func FuzzSoftmaxF32(f *testing.F) {
 		}
 	})
 }
+
+func TestDarwinSysctlParsing(t *testing.T) {
+	data := `
+hw.optional.avx2_0: 1
+hw.optional.avx512f: 1
+hw.optional.avx512bw: 1
+hw.optional.avx512dq: 1
+hw.optional.avx512vl: 1
+hw.optional.fma: 1
+hw.optional.neon: 1
+hw.optional.arm.feat_dotprod: 1
+hw.optional.vaes: 1
+hw.optional.vpclmulqdq: 1
+hw.optional.gfni: 1
+hw.optional.avxvnni: 1
+hw.optional.unknown: 1
+invalid_line_without_delim
+hw.optional.avx2_0: 0
+`
+	res := parseDarwinSysctl(data)
+	expectedFlags := []string{"avx2", "avx512f", "avx512bw", "avx512dq", "avx512vl", "fma", "neon", "asimddp", "vaes", "vpclmulqdq", "gfni", "avx_vnni"}
+	for _, f := range expectedFlags {
+		if !containsFlag(res, f) {
+			t.Errorf("expected flag %q in %q", f, res)
+		}
+	}
+}
+
+func TestContainsFlag_Extra(t *testing.T) {
+	if containsFlag("", "avx") {
+		t.Error("expected false for empty string")
+	}
+	flags := "fma avx2 neon"
+	if !containsFlag(flags, "fma") {
+		t.Error("expected true for flag at start")
+	}
+	if !containsFlag(flags, "avx2") {
+		t.Error("expected true for flag in middle")
+	}
+	if !containsFlag(flags, "neon") {
+		t.Error("expected true for flag at end")
+	}
+	if containsFlag(flags, "avx") {
+		t.Error("expected false for substring without word boundary")
+	}
+	if containsFlag(flags, "sse") {
+		t.Error("expected false for missing flag")
+	}
+}
+
+func TestGetCPULevelAndDetection(t *testing.T) {
+	level := GetCPULevel()
+	if level < 0 {
+		t.Errorf("unexpected CPU level: %d", level)
+	}
+}
+
+func TestScalarFPConversion_EdgeCases(t *testing.T) {
+	// Subnormal / denormal FP16
+	denormalFP16 := uint16(0x0001)
+	f32 := fp16ToFp32(denormalFP16)
+	if f32 <= 0 {
+		t.Errorf("expected positive float for denormal, got %f", f32)
+	}
+
+	// Infinity and NaN
+	infFP16 := uint16(0x7C00)
+	if !math.IsInf(float64(fp16ToFp32(infFP16)), 1) {
+		t.Errorf("expected +Inf, got %f", fp16ToFp32(infFP16))
+	}
+	nanFP16 := uint16(0x7C01)
+	if !math.IsNaN(float64(fp16ToFp32(nanFP16))) {
+		t.Errorf("expected NaN, got %f", fp16ToFp32(nanFP16))
+	}
+
+	// FP32 to FP16 special values
+	infFP32 := float32(math.Inf(1))
+	if fp32ToFp16(infFP32) != 0x7C00 {
+		t.Errorf("expected 0x7C00 for +Inf, got 0x%X", fp32ToFp16(infFP32))
+	}
+	nanFP32 := float32(math.NaN())
+	if (fp32ToFp16(nanFP32) & 0x7C00) != 0x7C00 {
+		t.Errorf("expected NaN FP16, got 0x%X", fp32ToFp16(nanFP32))
+	}
+	largeFP32 := float32(1e10)
+	if fp32ToFp16(largeFP32) != 0x7C00 {
+		t.Errorf("expected overflow to Inf 0x7C00, got 0x%X", fp32ToFp16(largeFP32))
+	}
+	tinyFP32 := float32(1e-6) // subnormal in FP16
+	if fp32ToFp16(tinyFP32) == 0 {
+		t.Errorf("expected non-zero for small number, got 0")
+	}
+}
+
+func TestAVX2Wrappers(t *testing.T) {
+	// Length < 16 (scalar path)
+	inSmall := []float32{1.0, 2.0, 3.0}
+	SoftmaxAVX2(inSmall)
+
+	gateSmall := []float32{1.0, 2.0}
+	upSmall := []float32{2.0, 3.0}
+	outSmall := make([]float32, 2)
+	SwiGLUAVX2(gateSmall, upSmall, outSmall)
+
+	srcSmall := []uint16{0x3C00, 0x4000}
+	dstSmall := make([]float32, 2)
+	Fp16ToFp32AVX2(srcSmall, dstSmall)
+
+	dst16Small := make([]uint16, 2)
+	Fp32ToFp16AVX2(dstSmall, dst16Small)
+
+	// Length >= 16 (AVX2 path)
+	inLarge := make([]float32, 32)
+	for i := range inLarge {
+		inLarge[i] = float32(i)
+	}
+	SoftmaxAVX2(inLarge)
+
+	gateLarge := make([]float32, 32)
+	upLarge := make([]float32, 32)
+	outLarge := make([]float32, 32)
+	SwiGLUAVX2(gateLarge, upLarge, outLarge)
+
+	srcLarge := make([]uint16, 32)
+	dstLarge := make([]float32, 32)
+	for i := range srcLarge {
+		srcLarge[i] = 0x3C00
+	}
+	Fp16ToFp32AVX2(srcLarge, dstLarge)
+
+	dst16Large := make([]uint16, 32)
+	Fp32ToFp16AVX2(dstLarge, dst16Large)
+
+	// Mismatched / empty lengths
+	SoftmaxAVX2(nil)
+	SwiGLUAVX2(nil, nil, nil)
+	Fp16ToFp32AVX2(nil, nil)
+	Fp32ToFp16AVX2(nil, nil)
+}
+
+
+func TestFusedMLP_EdgeCases(t *testing.T) {
+	// Empty inputs
+	out := make([]float32, 2)
+	FusedMLP(nil, nil, nil, nil, out, 0, 0, 0)
+
+	// Valid batch with gate clamping >10 and <-10
+	in := []float32{1.0, 2.0}
+	gateW := []float32{15.0, -15.0, 2.0, -2.0}
+	upW := []float32{1.0, 1.0, 1.0, 1.0}
+	downW := []float32{1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0}
+	out2 := make([]float32, 2)
+	FusedMLP(in, gateW, upW, downW, out2, 1, 2, 4)
+}
+
+func TestSwiGLU_Clamping(t *testing.T) {
+	gate := []float32{15.0, -15.0, 0.0}
+	up := []float32{1.0, 1.0, 1.0}
+	out := make([]float32, 3)
+	SwiGLU(gate, up, out)
+	swigluScalar(gate, up, out)
+}
+
+func TestFp32ToFp16_DefaultScalar(t *testing.T) {
+	src := []float32{
+		float32(math.Inf(1)),
+		float32(math.Inf(-1)),
+		float32(math.NaN()),
+		1e10,
+		-1e10,
+		1e-6,
+		-1e-6,
+		0.0,
+		-0.0,
+		1.0,
+		-1.0,
+	}
+	dst := make([]uint16, len(src))
+	Fp32ToFp16(src, dst)
+	fp32ToFp16Scalar(src, dst)
+}
+
+

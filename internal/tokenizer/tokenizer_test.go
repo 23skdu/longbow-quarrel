@@ -70,4 +70,92 @@ func TestTokenizerDecode(t *testing.T) {
 	if text != expected {
 		t.Errorf("Expected '%s', got '%s'", expected, text)
 	}
+
+	// Test GetVocab
+	v := tk.GetVocab()
+	if len(v) != len(vocab) {
+		t.Errorf("Expected %d vocab items, got %d", len(vocab), len(v))
+	}
 }
+
+func TestTokenizerDecodeSpecialTokens(t *testing.T) {
+	vocab := []string{
+		"<unk>",
+		"<|endoftext|>",
+		"ĠHello",
+		"Ċ",
+		"\u2581World",
+		"ĉ",
+	}
+	tmpFile := "test_vocab_special.gguf"
+	if err := generateVocabGGUF(tmpFile, vocab); err != nil {
+		t.Fatalf("Failed to generate vocab: %v", err)
+	}
+	defer func() { _ = os.Remove(tmpFile) }()
+
+	tk, err := New(tmpFile)
+	if err != nil {
+		t.Fatalf("Failed to create tokenizer: %v", err)
+	}
+
+	// Token 1 is special <|endoftext|> (should be skipped)
+	// Token 2 has Ġ -> space
+	// Token 3 has Ċ -> newline
+	// Token 4 has   -> space
+	// Token 5 has ĉ -> tab
+	// Token -1 and 999 are out of bounds (should be skipped)
+	decoded := tk.Decode([]int{-1, 1, 2, 3, 4, 5, 999})
+	expected := " Hello\n World\t"
+	if decoded != expected {
+		t.Errorf("Expected %q, got %q", expected, decoded)
+	}
+}
+
+func TestTokenizerSplitWords(t *testing.T) {
+	if res := splitWords(""); res != nil {
+		t.Errorf("Expected nil for empty string, got %v", res)
+	}
+
+	words := splitWords("Hello World  from Quarrel")
+	if len(words) < 3 {
+		t.Errorf("Unexpected splitWords result: %v", words)
+	}
+}
+
+func TestTokenizerNewFromGGUF_Errors(t *testing.T) {
+	// Missing tokens key
+	fEmpty := &gguf.GGUFFile{KV: map[string]interface{}{}}
+	if _, err := NewFromGGUF(fEmpty); err == nil {
+		t.Error("Expected error for missing tokens")
+	}
+
+	// Invalid tokens type
+	fInvalid := &gguf.GGUFFile{KV: map[string]interface{}{
+		"tokenizer.ggml.tokens": 12345,
+	}}
+	if _, err := NewFromGGUF(fInvalid); err == nil {
+		t.Error("Expected error for non-slice tokens")
+	}
+
+	// Non-string token element
+	fNonString := &gguf.GGUFFile{KV: map[string]interface{}{
+		"tokenizer.ggml.tokens": []interface{}{"valid", 123},
+	}}
+	if _, err := NewFromGGUF(fNonString); err == nil {
+		t.Error("Expected error for non-string token element")
+	}
+
+	// Merges parsing
+	fWithMerges := &gguf.GGUFFile{KV: map[string]interface{}{
+		"tokenizer.ggml.tokens": []interface{}{"<unk>", "H", "e", "He"},
+		"tokenizer.ggml.merges": []interface{}{"H e"},
+	}}
+	tk, err := NewFromGGUF(fWithMerges)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if len(tk.Merges) != 1 || tk.Ranks["H e"] != 0 {
+		t.Errorf("Merges not loaded properly: %v, %v", tk.Merges, tk.Ranks)
+	}
+}
+
