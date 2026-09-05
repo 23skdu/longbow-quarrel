@@ -81,40 +81,48 @@ void polar_quant_avx512(const float* input, const float* rotation_matrix, int8_t
     }
 
     // 3. Inverse Rotation: finalRes = R^T * resRotated
-    for (int i = 0; i < n; i++) {
-        float sum = 0.0f;
-        for (int j = 0; j < n; j++) {
-            sum += rotation_matrix[j * n + i] * res_rotated[j];
+    memset(residual, 0, n * sizeof(float));
+    for (int j = 0; j < n; j++) {
+        __m512 v_res_j = _mm512_set1_ps(res_rotated[j]);
+        int jn = j * n;
+        int i = 0;
+        for (; i <= n - 16; i += 16) {
+            __m512 v_r = _mm512_loadu_ps(&rotation_matrix[jn + i]);
+            __m512 v_res = _mm512_loadu_ps(&residual[i]);
+            v_res = _mm512_fmadd_ps(v_res_j, v_r, v_res);
+            _mm512_storeu_ps(&residual[i], v_res);
         }
-        residual[i] = sum;
+        for (; i < n; i++) {
+            residual[i] += res_rotated[j] * rotation_matrix[jn + i];
+        }
     }
 }
 
 void qjl_transform_avx512(const float* residual, const float* sign_matrix, int8_t* quantized, float* scale_out, int rows, int cols) {
     if (rows <= 0 || cols <= 0) return;
 
-    __m512 v_norm_sq = _mm512_setzero_ps();
+    float norm_sq = 0.0f;
     float* projected = (float*)__builtin_alloca(rows * sizeof(float));
 
     for (int i = 0; i < rows; i++) {
         __m512 v_sum = _mm512_setzero_ps();
         int j = 0;
+        int icols = i * cols;
         for (; j <= cols - 16; j += 16) {
-            __m512 v_s = _mm512_loadu_ps(&sign_matrix[i * cols + j]);
+            __m512 v_s = _mm512_loadu_ps(&sign_matrix[icols + j]);
             __m512 v_r = _mm512_loadu_ps(&residual[j]);
             v_sum = _mm512_fmadd_ps(v_s, v_r, v_sum);
         }
         
         float sum = _mm512_reduce_add_ps(v_sum);
         for (; j < cols; j++) {
-            sum += sign_matrix[i * cols + j] * residual[j];
+            sum += sign_matrix[icols + j] * residual[j];
         }
         
         projected[i] = sum;
-        v_norm_sq = _mm512_add_ps(v_norm_sq, _mm512_set1_ps(sum * sum));
+        norm_sq += sum * sum;
     }
 
-    float norm_sq = _mm512_reduce_add_ps(v_norm_sq);
     *scale_out = sqrtf(norm_sq / (float)rows);
 
     for (int i = 0; i < rows; i++) {

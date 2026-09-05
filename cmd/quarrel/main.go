@@ -39,6 +39,8 @@ var (
 	repPenalty   = flag.Float64("rep-penalty", 1.1, "Repetition penalty")
 	streamOutput = flag.Bool("stream", false, "Stream tokens as they are generated")
 	flightAddr   = flag.String("flight", ":50051", "Address to serve Arrow Flight inference")
+	numGPULayers = flag.Int("ngl", -1, "Number of layers to offload to GPU (-1 for all)")
+	_            = flag.Int("gpu-layers", -1, "Alias for -ngl")
 )
 
 func main() {
@@ -76,16 +78,26 @@ func main() {
 		engineConfig.KVCacheSize = *kvCacheSize
 		engineConfig.SeqLen = *kvCacheSize
 	}
+	if *numGPULayers >= 0 {
+		engineConfig.NumGPULayers = *numGPULayers
+	}
 
-	fmt.Printf("Layers: %d\n", engineConfig.Layers)
+	fmt.Printf("Layers: %d (GPU: %d)\n", engineConfig.Layers, engineConfig.NumGPULayers)
 	fmt.Printf("Vocab: %d\n", engineConfig.VocabSize)
 	fmt.Printf("Dim: %d, Heads: %d, KV Heads: %d\n", engineConfig.Dim, engineConfig.Heads, engineConfig.KVHeads)
 
 	fmt.Printf("\n=== Initializing CUDA Backend ===\n")
 
 	go func() {
-		http.Handle("/metrics", promhttp.Handler())
-		if err := http.ListenAndServe(*metricsAddr, nil); err != nil {
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", promhttp.Handler())
+		srv := &http.Server{
+			Addr:              *metricsAddr,
+			Handler:           mux,
+			ReadHeaderTimeout: 5 * time.Second,
+		}
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Log.Warn("Metrics server exited", "error", err)
 		}
 	}()
 

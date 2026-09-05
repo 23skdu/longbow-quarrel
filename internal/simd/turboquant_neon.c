@@ -86,22 +86,20 @@ void polar_quant_neon(const float* input, const float* rotation_matrix, int8_t* 
     }
 
     // 3. Inverse Rotation: finalRes = R^T * resRotated
-    for (int i = 0; i < n; i++) {
-        float32x4_t v_sum = vdupq_n_f32(0.0f);
-        int j = 0;
-        for (; j <= n - 4; j += 4) {
-            // Since we need R^T, we take rotation_matrix[j][i], [j+1][i], etc.
-            // This is not contiguous in memory! So we must load or pre-transpose.
-            // For now, use scalar fallback for R^T or implement a better layout.
-            // Actually, in Transformer models, we rotation_matrix is constant.
-            // But if we can't change layout, we'll just do it simply.
+    memset(residual, 0, n * sizeof(float));
+    for (int j = 0; j < n; j++) {
+        float32x4_t v_res_j = vdupq_n_f32(res_rotated[j]);
+        int jn = j * n;
+        int i = 0;
+        for (; i <= n - 4; i += 4) {
+            float32x4_t v_r = vld1q_f32(&rotation_matrix[jn + i]);
+            float32x4_t v_res = vld1q_f32(&residual[i]);
+            v_res = vfmaq_f32(v_res, v_res_j, v_r);
+            vst1q_f32(&residual[i], v_res);
         }
-        
-        float sum = 0.0f;
-        for (int j = 0; j < n; j++) {
-            sum += rotation_matrix[j * n + i] * res_rotated[j];
+        for (; i < n; i++) {
+            residual[i] += res_rotated[j] * rotation_matrix[jn + i];
         }
-        residual[i] = sum;
     }
 }
 

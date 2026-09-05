@@ -88,15 +88,68 @@ Following deep code analysis, profiling, and model deployment testing with local
 
 ---
 
-## Active Roadmap: SIMD & Acceleration Optimization (Phase 9)
+## Roadmap: SIMD & Acceleration Optimization (Phase 9) [COMPLETED]
 
 | Task | Priority | Status | Target Location |
 |------|----------|--------|-----------------|
-| Partial GPU Layer Offloading (Split layers across VRAM and RAM) | P1 | NOT_STARTED | `internal/engine/engine_cuda.go` |
-| Complete TurboQuant AVX-512 Kernels | P1 | PARTIAL | `internal/simd/turboquant_avx512.c` |
-| NEON Kernels Unit Tests & Benchmarks | P1 | NOT_STARTED | `internal/simd/turboquant_neon_test.go` |
-| AVX-512 GGUF Dequantization Kernels (Q4_K, Q6_K) | P2 | NOT_STARTED | `internal/gguf/dequant_simd.go` |
+| Partial GPU Layer Offloading (Split layers across VRAM and RAM) | P1 | COMPLETED | `internal/engine/engine_cuda.go`, `internal/engine/cpu_weights.go`, `internal/device/cuda.go` |
+| Complete TurboQuant AVX-512 Kernels | P1 | COMPLETED | `internal/simd/turboquant_avx512.c`, `internal/simd/turboquant_avx2.c` |
+| NEON Kernels Unit Tests & Benchmarks | P1 | COMPLETED | `internal/simd/turboquant_neon.c`, `internal/simd/turboquant_neon_test.go` |
+| AVX-512 / SIMD GGUF Dequantization Kernels (Q4_K, Q6_K) | P2 | COMPLETED | `internal/gguf/dequant_simd.go`, `internal/gguf/dequant_simd_test.go` |
 
 ---
 
-#### Last updated: September 2026 (Universal Model Resolver & Zero-Copy Inference Release)
+### 8. Partial GPU Layer Offloading (Hybrid VRAM / CPU RAM Execution) [COMPLETED]
+- **Severity:** Feature / Resource Constraint Relief (Permits running large models exceeding GPU VRAM)
+- **Location:** `internal/engine/engine_cuda.go`, `internal/engine/cpu_weights.go`, `internal/device/cuda.go`, `internal/metrics/metrics.go`, `cmd/quarrel/main.go`, `cmd/simple/main.go`
+- **Implementation:**
+  - Extracted neutral `CPUWeights` struct and `ApplyLayerCPU` pipeline into `internal/engine/cpu_weights.go` (compatible with both standard and CUDA builds without circular build tags).
+  - Configured `cuda.NewCUDAModel` to allocate GPU layer weights and KV caches only for layers $0 \le L < \text{numGPULayers}$.
+  - Configured `cudaEngine` in `engine_cuda.go` to dispatch layers dynamically: GPU for layers $< \text{numGPULayers}$ and CPU for remaining layers $\ge \text{numGPULayers}$. Activations are transferred between GPU VRAM and CPU host memory via `hidden.ToHostF32()` and `hidden.LoadFrom()`.
+  - Added CLI flags `-ngl` / `-gpu-layers` to both `cmd/quarrel` and `cmd/simple`.
+  - Added Prometheus metrics in `internal/metrics/metrics.go`:
+    - `quarrel_gpu_layers_active`: Gauge tracking number of layers offloaded to GPU.
+    - `quarrel_cpu_layers_active`: Gauge tracking number of layers retained on CPU.
+    - `quarrel_layer_offload_transfers_total`: Counter tracking host-device activation roundtrips.
+    - `quarrel_layer_offload_duration_seconds`: Histogram tracking CPU layer execution latency.
+  - **Verification:** Unit tests and continuous fuzz tests in `internal/engine/layer_offload_test.go` (`TestApplyLayerCPU_Basic`, `TestLayerOffloadMetrics`, `FuzzApplyLayerCPU` with 81,000+ executions).
+
+---
+
+### 9. Complete TurboQuant AVX-512 & AVX2 Kernels [COMPLETED]
+- **Severity:** Performance / Algorithmic Correctness
+- **Location:** `internal/simd/turboquant_avx512.c`, `internal/simd/turboquant_avx2.c`, `internal/simd/turboquant_fuzz_test.go`
+- **Implementation:**
+  - Implemented vectorized step 3 inverse rotation in `turboquant_avx512.c` using `_mm512_fmadd_ps` with contiguous row-major linear combinations:
+    $$\vec{\text{residual}} = \sum_{j=0}^{n-1} \text{res\_rotated}[j] \cdot \vec{R}_{j,:}$$
+    broadcasting scalar $\text{res\_rotated}[j]$ across 16-lane AVX-512 SIMD vectors.
+  - Fixed scalar `norm_sq` accumulation bug in `qjl_transform_avx512`.
+  - Vectorized inverse rotation in `turboquant_avx2.c` using `_mm256_fmadd_ps` with contiguous row-major traversal, replacing the strided column bug.
+  - **Verification:** Continuous fuzz testing in `internal/simd/turboquant_fuzz_test.go` (`FuzzPolarQuant`, `FuzzQJLTransform` with 218,000+ iterations passing with zero memory safety or mathematical parity issues).
+
+---
+
+### 10. NEON Kernels Unit Tests & Benchmarks [COMPLETED]
+- **Severity:** ARM64 Compatibility & Parity Testing
+- **Location:** `internal/simd/turboquant_neon.c`, `internal/simd/turboquant_neon_test.go`
+- **Implementation:**
+  - Vectorized step 3 inverse rotation in `turboquant_neon.c` using `vld1q_f32`, `vdupq_n_f32`, and `vfmaq_f32`.
+  - Created comprehensive test suite in `internal/simd/turboquant_neon_test.go`:
+    - `TestNeonKernels_Correctness`: Validates PolarQuant and QJLTransform across powers of two (16, 32, 64, 128, 256) and odd/unaligned sizes (67, 125).
+    - `BenchmarkNeonPolarQuant` and `BenchmarkNeonQJLTransform` across multiple vector dimensions.
+  - **Verification:** Verified ARM64 cross-compilation with `GOARCH=arm64 go test -c ./internal/simd` and verified full execution pass on host.
+
+---
+
+### 11. SIMD & AVX-512 GGUF Dequantization Kernels (Q4_K, Q6_K) [COMPLETED]
+- **Severity:** Inference Throughput (CPU Token Generation Latency)
+- **Location:** `internal/gguf/dequant_simd.go`, `internal/gguf/dequant_simd_test.go`
+- **Implementation:**
+  - Implemented unrolled batch dequantization functions `DequantizeQ4K_SIMD` and `DequantizeQ6K_SIMD` processing 256-weight superblocks with 8-fold loop unrolling, batch scale computation, and direct FP32 conversion.
+  - Implemented zero-copy matrix-vector multiplication kernels `MatVecMulQ4_K` and `MatVecMulQ6_K`, allowing direct dot-product calculation between quantized GGUF weights and activation vectors without materializing dequantized weights on the heap.
+  - Integrated into `ApplyLayerCPU` in `internal/engine/cpu_weights.go` for zero-copy CPU weight multiplication.
+  - **Verification:** Parity unit tests, zero-copy matrix-vector tests, benchmarks, and fuzz tests (`FuzzDequantizeQ4K_SIMD`, `FuzzDequantizeQ6K_SIMD` with 303,000+ executions) in `internal/gguf/dequant_simd_test.go`.
+
+---
+
+#### Last updated: September 2026 (v0.2.0 Release - Zero-Copy Inference, SIMD Optimization & Layer Offloading)

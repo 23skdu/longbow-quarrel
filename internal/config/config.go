@@ -28,6 +28,7 @@ type Config struct {
 	Dim          int
 	HiddenDim    int
 	Layers       int
+	NumGPULayers int // Number of layers offloaded to GPU (-1 or >= Layers for full GPU offload, >0 for partial)
 	Heads        int
 	KVHeads      int
 	HeadDim      int

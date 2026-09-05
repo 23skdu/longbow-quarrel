@@ -12,6 +12,7 @@ import (
 	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/device"
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
+	"github.com/23skdu/longbow-quarrel/internal/metrics"
 	"github.com/23skdu/longbow-quarrel/internal/tokenizer"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -104,6 +105,8 @@ type cudaEngine struct {
 	model        *gguf.GGUFFile
 	ctx          *device.Context
 	cuda         *CUDAStorage
+	cpuWeights   *CPUWeights
+	numGPULayers int
 	config       config.Config
 	scratch      *CUDAScratch
 	tok          *tokenizer.Tokenizer
@@ -131,23 +134,45 @@ func NewcudaEngine(modelPath string, cfg config.Config) (Engine, error) {
 		modelCfg.KVCacheSize = cfg.KVCacheSize
 		modelCfg.SeqLen = cfg.KVCacheSize
 	}
+	if cfg.NumGPULayers != 0 {
+		modelCfg.NumGPULayers = cfg.NumGPULayers
+	}
 	cfg = modelCfg
 
 	ctx := device.NewContext()
 
-	cudaModel, err := ctx.NewCUDAModel(f, true, cfg.KVCacheSize)
+	numGPULayers := cfg.Layers
+	if cfg.NumGPULayers >= 0 && cfg.NumGPULayers < cfg.Layers {
+		numGPULayers = cfg.NumGPULayers
+	}
+
+	cudaModel, err := ctx.NewCUDAModel(f, true, cfg.KVCacheSize, numGPULayers)
 	if err != nil {
 		ctx.Free()
-		f.Close()
+		_ = f.Close()
 		cudaEngineFailed.WithLabelValues(arch, "model_load_failed").Inc()
 		return nil, fmt.Errorf("failed to load model to GPU: %w", err)
 	}
+
+	var cpuW *CPUWeights
+	if numGPULayers < cfg.Layers {
+		var err error
+		cpuW, err = loadCPUWeights(f, cfg)
+		if err != nil {
+			ctx.Free()
+			cudaModel.Free()
+			_ = f.Close()
+			return nil, fmt.Errorf("failed to load CPU weights for layer offloading: %w", err)
+		}
+	}
+
+	metrics.RecordLayerOffload(arch, numGPULayers, cfg.Layers-numGPULayers)
 
 	cache := &PagedKVCache{}
 	if err := cache.Init(ctx, cfg); err != nil {
 		ctx.Free()
 		cudaModel.Free()
-		f.Close()
+		_ = f.Close()
 		cudaEngineFailed.WithLabelValues(arch, "cache_init_failed").Inc()
 		return nil, fmt.Errorf("failed to initialize paged cache: %w", err)
 	}
@@ -173,14 +198,17 @@ func NewcudaEngine(modelPath string, cfg config.Config) (Engine, error) {
 
 	isGemma4 := arch == "gemma4"
 	e := &cudaEngine{
-		model: f,
-		ctx:   ctx,
-		cuda:  cudaModel,
+		model:        f,
+		ctx:          ctx,
+		cuda:         cudaModel,
+		cpuWeights:   cpuW,
+		numGPULayers: numGPULayers,
 		config: config.Config{
 			Architecture:  arch,
 			Dim:           dim,
 			HiddenDim:     hiddenDim,
 			Layers:        layers,
+			NumGPULayers:  numGPULayers,
 			Heads:         heads,
 			KVHeads:       kvHeads,
 			HeadDim:       headDim,
@@ -232,11 +260,14 @@ func (e *cudaEngine) Close() {
 	if e.cuda != nil {
 		e.cuda.Free()
 	}
+	if e.cpuWeights != nil {
+		e.cpuWeights.Free()
+	}
 	if e.ctx != nil {
 		e.ctx.Free()
 	}
 	if e.model != nil {
-		e.model.Close()
+		_ = e.model.Close()
 	}
 }
 
@@ -474,7 +505,8 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 		}
 	}
 
-	for layer := 0; layer < e.config.Layers; layer++ {
+	gpuLayers := e.numGPULayers
+	for layer := 0; layer < gpuLayers; layer++ {
 		// Batched RMSNorm
 		attnNormW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_norm.weight", layer))
 		normed := ctx.NewTensorFP32(numTokens, dim)
@@ -540,6 +572,25 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 
 		// Feed Forward (Batched)
 		// Simplified for brevity, same pattern as single-seq
+	}
+
+	if gpuLayers < e.config.Layers && e.cpuWeights != nil {
+		startTransfer := time.Now()
+		hiddenHost := hidden.ToHostF32()
+		metrics.RecordLayerOffloadTransfer(e.config.Architecture, time.Since(startTransfer))
+
+		startCPU := time.Now()
+		for layer := gpuLayers; layer < e.config.Layers; layer++ {
+			for t := 0; t < numTokens; t++ {
+				tokOffset := t * dim
+				tokenHidden := hiddenHost[tokOffset : tokOffset+dim]
+				newHidden := ApplyLayerCPU(e.cpuWeights, tokenHidden, layer, e.config)
+				copy(hiddenHost[tokOffset:tokOffset+dim], newHidden)
+			}
+		}
+		metrics.RecordLayerOffloadCPUDuration(e.config.Architecture, time.Since(startCPU))
+
+		_ = hidden.LoadFrom(hiddenHost)
 	}
 
 	// 4. Extract Last Logits
@@ -644,7 +695,8 @@ func (e *cudaEngine) forward(token int, pos int, allTokens []int) ([]float32, er
 	defer hidden.ReturnToPool()
 
 	// 2. Transformer Layer Loop
-	for layer := 0; layer < e.config.Layers; layer++ {
+	gpuLayers := e.numGPULayers
+	for layer := 0; layer < gpuLayers; layer++ {
 		// --- Attention Sublayer ---
 		// RMSNorm
 		attnNormW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_norm.weight", layer))
@@ -705,6 +757,20 @@ func (e *cudaEngine) forward(token int, pos int, allTokens []int) ([]float32, er
 
 		// Residual Add
 		ctx.Add(hidden, mlpOut, hidden, dim)
+	}
+
+	if gpuLayers < e.config.Layers && e.cpuWeights != nil {
+		startTransfer := time.Now()
+		hiddenHost := hidden.ToHostF32()
+		metrics.RecordLayerOffloadTransfer(e.config.Architecture, time.Since(startTransfer))
+
+		startCPU := time.Now()
+		for layer := gpuLayers; layer < e.config.Layers; layer++ {
+			hiddenHost = ApplyLayerCPU(e.cpuWeights, hiddenHost, layer, e.config)
+		}
+		metrics.RecordLayerOffloadCPUDuration(e.config.Architecture, time.Since(startCPU))
+
+		_ = hidden.LoadFrom(hiddenHost)
 	}
 
 	// 3. Final Output Layer

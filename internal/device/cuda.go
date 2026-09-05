@@ -61,6 +61,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"strconv"
+	"strings"
 	"sync"
 	"unsafe"
 
@@ -259,10 +261,13 @@ func (t *Tensor) LoadFrom(data interface{}) error {
 
 	switch d := data.(type) {
 	case []float32:
-		src = unsafe.Pointer(&d[0])
-		bytes = len(d) * 4
 		if t.dataType == DataTypeF16 {
-			return fmt.Errorf("direct load of []float32 to F16 tensor not supported")
+			hostF16 := Float32SliceToFloat16(d)
+			src = unsafe.Pointer(&hostF16[0])
+			bytes = len(d) * 2
+		} else {
+			src = unsafe.Pointer(&d[0])
+			bytes = len(d) * 4
 		}
 	case []int32:
 		src = unsafe.Pointer(&d[0])
@@ -416,14 +421,30 @@ type CUDAModel struct {
 	mu      sync.RWMutex
 }
 
-func (ctx *Context) NewCUDAModel(f *gguf.GGUFFile, preDequantize bool, kvCacheSize int) (*CUDAModel, error) {
+func (ctx *Context) NewCUDAModel(f *gguf.GGUFFile, preDequantize bool, kvCacheSize int, numGPULayers ...int) (*CUDAModel, error) {
 	m := &CUDAModel{
 		Ctx:     ctx,
 		Weights: make(map[string]*weight),
 	}
 
+	gpuLayers := -1
+	if len(numGPULayers) > 0 {
+		gpuLayers = numGPULayers[0]
+	}
+
 	for _, tensor := range f.Tensors {
 		name := tensor.Name
+
+		// If partial GPU layer offloading is active, skip blk.<L>.* where L >= gpuLayers
+		if gpuLayers >= 0 && strings.HasPrefix(name, "blk.") {
+			rem := name[4:]
+			if dot := strings.IndexByte(rem, '.'); dot > 0 {
+				if lIdx, err := strconv.Atoi(rem[:dot]); err == nil && lIdx >= gpuLayers {
+					continue
+				}
+			}
+		}
+
 		rows := int(tensor.Dimensions[0])
 		cols := 1
 		if len(tensor.Dimensions) > 1 {
@@ -447,10 +468,10 @@ func (ctx *Context) NewCUDAModel(f *gguf.GGUFFile, preDequantize bool, kvCacheSi
 			f32Data := gguf.DequantizeQ8_0(tensor.Data, numElements)
 			hostFP16 = Float32SliceToFloat16(f32Data)
 		case gguf.GGMLTypeQ4_K:
-			f32Data := gguf.DequantizeQ4K(tensor.Data, numElements)
+			f32Data := gguf.DequantizeQ4K_SIMD(tensor.Data, numElements)
 			hostFP16 = Float32SliceToFloat16(f32Data)
 		case gguf.GGMLTypeQ6_K:
-			f32Data := gguf.DequantizeQ6K(tensor.Data, numElements)
+			f32Data := gguf.DequantizeQ6K_SIMD(tensor.Data, numElements)
 			hostFP16 = Float32SliceToFloat16(f32Data)
 		default:
 			C.cudaFree(dPtr)
@@ -481,9 +502,14 @@ func (ctx *Context) NewCUDAModel(f *gguf.GGUFFile, preDequantize bool, kvCacheSi
 	}
 	headDim := dim / heads
 
-	m.KCache = make([]*Tensor, layers)
-	m.VCache = make([]*Tensor, layers)
-	for i := 0; i < layers; i++ {
+	cacheLayers := layers
+	if gpuLayers >= 0 && gpuLayers < layers {
+		cacheLayers = gpuLayers
+	}
+
+	m.KCache = make([]*Tensor, cacheLayers)
+	m.VCache = make([]*Tensor, cacheLayers)
+	for i := 0; i < cacheLayers; i++ {
 		m.KCache[i], _ = ctx.NewTensor(kvCacheSize*heads, headDim, DataTypeF16)
 		m.VCache[i], _ = ctx.NewTensor(kvCacheSize*heads, headDim, DataTypeF16)
 	}

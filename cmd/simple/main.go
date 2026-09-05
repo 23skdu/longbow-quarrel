@@ -21,6 +21,7 @@ func main() {
 	temp := flag.Float64("temp", 0.7, "Temperature for sampling")
 	topK := flag.Int("topk", 40, "Top-K sampling")
 	maxMemMB := flag.Int64("max-memory", 0, "Max memory in MB (0 = no limit)")
+	numGPULayers := flag.Int("ngl", -1, "Number of GPU layers to offload (-1 for all)")
 	flag.Parse()
 
 	if *modelPath == "" {
@@ -81,6 +82,7 @@ func main() {
 
 	cfg := config.Default()
 	cfg.MaxMemoryMB = *maxMemMB
+	cfg.NumGPULayers = *numGPULayers
 	if cfg.MaxMemoryMB > 0 {
 		fmt.Printf("Memory limit: %d MB\n", cfg.MaxMemoryMB)
 	}

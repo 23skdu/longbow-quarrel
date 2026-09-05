@@ -93,21 +93,20 @@ void polar_quant_avx2(const float* input, const float* rotation_matrix, int8_t* 
         res_rotated[i] = rotated[i] - qf * scale;
     }
 
-    for (int i = 0; i < n; i++) {
-        __m256 v_sum = _mm256_setzero_ps();
-        int j = 0;
-        for (; j <= n - 8; j += 8) {
-            __m256 v_r = _mm256_loadu_ps(&rotation_matrix[j * n + i]);
-            __m256 v_rr = _mm256_loadu_ps(&res_rotated[j]);
-            v_sum = _mm256_fmadd_ps(v_r, v_rr, v_sum);
+    memset(residual, 0, n * sizeof(float));
+    for (int j = 0; j < n; j++) {
+        __m256 v_res_j = _mm256_set1_ps(res_rotated[j]);
+        int jn = j * n;
+        int i = 0;
+        for (; i <= n - 8; i += 8) {
+            __m256 v_r = _mm256_loadu_ps(&rotation_matrix[jn + i]);
+            __m256 v_res = _mm256_loadu_ps(&residual[i]);
+            v_res = _mm256_fmadd_ps(v_res_j, v_r, v_res);
+            _mm256_storeu_ps(&residual[i], v_res);
         }
-        
-        float sum = horizontal_sum_avx2(v_sum);
-        for (; j < n; j++) {
-            sum += rotation_matrix[j * n + i] * res_rotated[j];
+        for (; i < n; i++) {
+            residual[i] += res_rotated[j] * rotation_matrix[jn + i];
         }
-        
-        residual[i] = sum;
     }
     free(rotated);
     free(res_rotated);
