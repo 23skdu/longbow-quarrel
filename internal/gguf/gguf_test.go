@@ -110,7 +110,7 @@ func TestTensorInfoSizeBytes(t *testing.T) {
 		{"IQ3_S 1D", []uint64{256}, GGMLTypeIQ3_S, 110},
 		{"IQ4_XS 1D", []uint64{256}, GGMLTypeIQ4_XS, 138},
 		{"IQ4_NL 1D", []uint64{256}, GGMLTypeIQ4_NL, 144},
-		{"IQ4_NL_2 1D", []uint64{256}, GGMLTypeIQ4_NL_2, 144},
+		{"BF16 1D", []uint64{256}, GGMLTypeBF16, 512},
 	}
 
 	for _, tt := range tests {
@@ -127,15 +127,14 @@ func TestTensorInfoSizeBytes(t *testing.T) {
 	}
 }
 
-func TestTensorInfoSizeBytesIQTypes(t *testing.T) {
-	// Test IQ4_NL with alternate type constant
+func TestTensorInfoSizeBytesBF16(t *testing.T) {
 	info := &TensorInfo{
 		Name:       "test",
 		Dimensions: []uint64{256},
-		Type:       GGMLTypeIQ4_NL_2,
+		Type:       GGMLTypeBF16,
 	}
-	if got := info.SizeBytes(); got != 144 {
-		t.Errorf("IQ4_NL_2 SizeBytes() = %d, want 144", got)
+	if got := info.SizeBytes(); got != 512 {
+		t.Errorf("BF16 SizeBytes() = %d, want 512", got)
 	}
 }
 

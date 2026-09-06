@@ -39,10 +39,23 @@ func RegisterEngine(name string, creator EngineCreator) {
 // NewRegisteredEngine creates the best available engine implementation
 func NewRegisteredEngine(modelPath string, cfg config.Config) (Engine, error) {
 	// Priority order
-	for _, name := range []string{"metal", "cuda", "cpu", "mock"} {
+	order := []string{"metal", "cuda", "cpu", "mock"}
+	if cfg.NumGPULayers == 0 {
+		order = []string{"cpu", "metal", "cuda", "mock"}
+	}
+
+	var lastErr error
+	for _, name := range order {
 		if creator, ok := engineCreators[name]; ok {
-			return creator(modelPath, cfg)
+			e, err := creator(modelPath, cfg)
+			if err == nil {
+				return e, nil
+			}
+			lastErr = err
 		}
+	}
+	if lastErr != nil {
+		return nil, fmt.Errorf("failed to create engine: %w", lastErr)
 	}
 	return nil, fmt.Errorf("no registered engine found")
 }

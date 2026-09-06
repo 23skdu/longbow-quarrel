@@ -630,7 +630,6 @@ func (t *Tensor) NumElements() int {
 }
 
 var cpuAllocatedBytes int64
-var maxMemoryMB int64
 
 func CPUAllocatedBytes() int64 {
 	return atomic.LoadInt64(&cpuAllocatedBytes)
@@ -640,9 +639,6 @@ func RecordMemory(n int64) {
 	atomic.AddInt64(&cpuAllocatedBytes, n)
 }
 
-func SetMaxMemoryMB(mb int64) {
-	atomic.StoreInt64(&maxMemoryMB, mb)
-}
 
 func (c *Context) SetNumThreads(n int) {
 	c.numThreads = n

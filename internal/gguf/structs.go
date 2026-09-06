@@ -32,7 +32,6 @@ const (
 	GGMLTypeIQ2_S    GGMLType = 22
 	GGMLTypeIQ4_XS   GGMLType = 23
 	GGMLTypeIQ1_M    GGMLType = 24
-	GGMLTypeIQ4_NL_2 GGMLType = 30 // Sometimes used for IQ4_NL in newer formats
 	GGMLTypeMXFP4    GGMLType = 39 // MXFP4 for Nemotron-3-Nano
 	GGMLTypeTQ1_0    GGMLType = 40 // TurboQuant 4-bit + 1-bit residual
 	GGMLTypeTQ2_0    GGMLType = 41 // TurboQuant 8-bit + 1-bit residual
@@ -74,7 +73,7 @@ func (t *TensorInfo) SizeBytes() uint64 {
 	switch t.Type {
 	case GGMLTypeF32:
 		return numElements * 4
-	case GGMLTypeF16:
+	case GGMLTypeF16, GGMLTypeBF16:
 		return numElements * 2
 	case GGMLTypeQ4_0:
 		return (numElements / 32) * 18
@@ -106,7 +105,7 @@ func (t *TensorInfo) SizeBytes() uint64 {
 		return (numElements / 256) * 110
 	case GGMLTypeIQ4_XS:
 		return (numElements / 256) * 138
-	case GGMLTypeIQ4_NL, GGMLTypeIQ4_NL_2:
+	case GGMLTypeIQ4_NL:
 		return (numElements / 32) * 18
 	case GGMLTypeMXFP4:
 		return (numElements / 32) * 18 // Estimate for MXFP4
@@ -166,6 +165,8 @@ func (t GGMLType) String() string {
 		return "Q8_0"
 	case GGMLTypeQ2_K:
 		return "Q2_K"
+	case GGMLTypeBF16:
+		return "BF16"
 	case GGMLTypeQ3_K:
 		return "Q3_K"
 	case GGMLTypeQ4_K:
@@ -194,8 +195,6 @@ func (t GGMLType) String() string {
 		return "IQ4_XS"
 	case GGMLTypeIQ1_M:
 		return "IQ1_M"
-	case GGMLTypeIQ4_NL_2:
-		return "IQ4_NL (30)"
 	case GGMLTypeMXFP4:
 		return "MXFP4"
 	case GGMLTypeTQ1_0:

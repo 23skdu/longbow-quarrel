@@ -80,14 +80,19 @@ func (c *PagedKVCache) Init(ctx *device.Context, config config.Config) error {
 	}
 
 	// Total capacity
-	// If WindowSize is set, we allocate enough for WindowSize.
-	// If not, we allocate for SeqLen.
-	capacity := config.WindowSize
+	capacity := config.KVCacheSize
+	if capacity == 0 {
+		capacity = config.WindowSize
+	}
 	if capacity == 0 {
 		capacity = config.SeqLen
 	}
-	if capacity == 0 {
-		capacity = 4096 // Default
+	if capacity == 0 || capacity > 4096 {
+		if config.KVCacheSize > 0 {
+			capacity = config.KVCacheSize
+		} else {
+			capacity = 4096
+		}
 	}
 
 	// Calculate number of blocks
@@ -124,7 +129,12 @@ func (c *PagedKVCache) Init(ctx *device.Context, config config.Config) error {
 		kvDim = tqBlockSize * c.kvHeads
 	}
 
-	for i := 0; i < c.layers; i++ {
+	allocLayers := c.layers
+	if config.NumGPULayers >= 0 && config.NumGPULayers < c.layers {
+		allocLayers = config.NumGPULayers
+	}
+
+	for i := 0; i < allocLayers; i++ {
 		var k, v *device.Tensor
 		if c.Precision == device.DataTypeTQ1_0 || c.Precision == device.DataTypeTQ2_0 {
 			k = ctx.NewTensorWithType(capacity, kvDim, device.DataTypeINT8)

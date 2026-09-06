@@ -727,12 +727,43 @@ func DequantizeBlock(data []byte, dst []float32, dataType GGMLType) {
 	case GGMLTypeIQ4_XS:
 		res := DequantizeIQ4XS(data, len(dst))
 		copy(dst, res)
+	case GGMLTypeIQ4_NL:
+		res := DequantizeIQ4NL(data, len(dst))
+		copy(dst, res)
 	default:
 		// Fallback: zero-fill to avoid panicking on unknown types
 		for i := range dst {
 			dst[i] = 0
 		}
 	}
+}
+
+var kvaluesIQ4NL = [16]float32{
+	-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113,
+}
+
+func DequantizeIQ4NL(data []byte, numElements int) []float32 {
+	const blockSize = 32
+	const blockSizeBytes = 18
+	if numElements%blockSize != 0 {
+		return make([]float32, numElements)
+	}
+	numBlocks := numElements / blockSize
+	out := make([]float32, numElements)
+	for i := 0; i < numBlocks; i++ {
+		off := i * blockSizeBytes
+		if off+blockSizeBytes > len(data) {
+			break
+		}
+		d := Float16ToFloat32(binary.LittleEndian.Uint16(data[off : off+2]))
+		qs := data[off+2 : off+18]
+		base := i * blockSize
+		for j := 0; j < 16; j++ {
+			out[base+j] = d * kvaluesIQ4NL[qs[j]&0x0F]
+			out[base+j+16] = d * kvaluesIQ4NL[qs[j]>>4]
+		}
+	}
+	return out
 }
 
 func DequantizeQ80(data []byte, numElements int) []float32 {

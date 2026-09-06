@@ -396,6 +396,19 @@ func MatVecMulQ4_0(data []byte, vector []float32, rows, cols int) []float32 {
 	})
 }
 
+// MatVecMulIQ4_NL performs parallel zero-copy MatVec on IQ4_NL data.
+// Block layout: 18 bytes = 2 (f16 scale) + 16 (32 * 4-bit non-linear quants).
+func MatVecMulIQ4_NL(data []byte, vector []float32, rows, cols int) []float32 {
+	return matVecMulGeneric(data, vector, rows, cols, 32, 18, func(block []byte, dst []float32) {
+		d := Float16ToFloat32(binary.LittleEndian.Uint16(block[0:2]))
+		qs := block[2:18]
+		for j := 0; j < 16; j++ {
+			dst[j] = d * kvaluesIQ4NL[qs[j]&0x0F]
+			dst[j+16] = d * kvaluesIQ4NL[qs[j]>>4]
+		}
+	})
+}
+
 // MatVecMulQ5_0 performs parallel zero-copy MatVec on Q5_0 data.
 // Block layout: 22 bytes = 2 (f16) + 4 (uint32 high bits) + 16 (4-bit quants).
 func MatVecMulQ5_0(data []byte, vector []float32, rows, cols int) []float32 {

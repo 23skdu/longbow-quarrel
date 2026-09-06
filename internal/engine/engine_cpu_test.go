@@ -317,7 +317,7 @@ func TestDecodeTensorDataF16(t *testing.T) {
 func TestDecodeTensorDataUnsupported(t *testing.T) {
 	tensor := &gguf.TensorInfo{
 		Name:       "test",
-		Type:       gguf.GGMLTypeQ4_0,
+		Type:       gguf.GGMLType(9999),
 		Dimensions: []uint64{4},
 		Data:       make([]byte, 4),
 	}

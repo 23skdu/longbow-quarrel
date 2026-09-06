@@ -186,13 +186,14 @@ func TestDequantizeBlock_AllTypes(t *testing.T) {
 		DequantizeBlock(data, dst, dt)
 	}
 
-	// Test panic on unsupported type
-	defer func() {
-		if r := recover(); r == nil {
-			t.Errorf("expected panic on unsupported type")
-		}
-	}()
+	// Test fallback zero-fill on unsupported type
 	DequantizeBlock(data, dst, GGMLType(9999))
+	for _, v := range dst {
+		if v != 0 {
+			t.Errorf("expected zero-fill on unsupported type, got %v", v)
+			break
+		}
+	}
 }
 
 func TestFP8_TensorHelpers(t *testing.T) {
@@ -247,6 +248,29 @@ func TestGGUF_GetGapTensors(t *testing.T) {
 	}
 	if gaps[0].Offset != f.Tensors[0].Offset+f.Tensors[0].SizeBytes() {
 		t.Errorf("unexpected gap offset: %d", gaps[0].Offset)
+	}
+}
+
+func TestDequantizeIQ4_NL(t *testing.T) {
+	// Block size: 18 bytes for 32 elements.
+	// scale = 1.0 (float16 0x3c00)
+	input := make([]byte, 18)
+	input[0] = 0x00
+	input[1] = 0x3c // Float16 for 1.0
+
+	// low nibble = 8 -> kvaluesIQ4NL[8] = 1
+	// high nibble = 9 -> kvaluesIQ4NL[9] = 13
+	input[2] = 0x98
+
+	out := DequantizeIQ4NL(input, 32)
+	if len(out) != 32 {
+		t.Fatalf("expected 32 elements, got %d", len(out))
+	}
+	if out[0] != 1.0 {
+		t.Errorf("expected out[0] == 1.0, got %f", out[0])
+	}
+	if out[16] != 13.0 {
+		t.Errorf("expected out[16] == 13.0, got %f", out[16])
 	}
 }
 

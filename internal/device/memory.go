@@ -28,3 +28,14 @@ func GetMemoryConfig() *MemoryConfig {
 func SetMaxMemory(maxMemory int64) {
 	atomic.StoreInt64(&defaultMemoryConfig.MaxMemory, maxMemory)
 }
+
+var maxMemoryMB int64
+
+func SetMaxMemoryMB(mb int64) {
+	atomic.StoreInt64(&maxMemoryMB, mb)
+	SetMaxMemory(mb * 1024 * 1024)
+}
+
+func GetMaxMemoryMB() int64 {
+	return atomic.LoadInt64(&maxMemoryMB)
+}

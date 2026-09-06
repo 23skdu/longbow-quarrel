@@ -61,6 +61,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -448,8 +450,16 @@ func (ctx *Context) NewCUDAModel(f *gguf.GGUFFile, preDequantize bool, kvCacheSi
 		gpuLayers = numGPULayers[0]
 	}
 
+	var f32Scratch []float32
+	var hostFP16 []uint16
+
 	for _, tensor := range f.Tensors {
 		name := tensor.Name
+
+		// Skip output / lm_head on GPU - computed on CPU via raw quantized weights and SIMD
+		if name == "output.weight" || name == "lm_head.weight" {
+			continue
+		}
 
 		// If partial GPU layer offloading is active, skip blk.<L>.* where L >= gpuLayers
 		if gpuLayers >= 0 && strings.HasPrefix(name, "blk.") {
@@ -464,36 +474,96 @@ func (ctx *Context) NewCUDAModel(f *gguf.GGUFFile, preDequantize bool, kvCacheSi
 		rows := int(tensor.Dimensions[0])
 		cols := 1
 		if len(tensor.Dimensions) > 1 {
-			cols = int(tensor.Dimensions[1])
+			cols = int(tensor.Dimensions[0])
+			rows = int(tensor.Dimensions[1])
 		}
 		numElements := rows * cols
+
+		if len(tensor.Dimensions) <= 1 {
+			// 1D vectors (RMSNorm weights, biases): allocate as float32 to match CUDA RMSNorm
+			var dPtr unsafe.Pointer
+			if errCode := C.cudaMalloc(&dPtr, C.size_t(numElements*4)); errCode != 0 {
+				m.Free()
+				return nil, fmt.Errorf("cudaMalloc failed for 1D tensor %s (%d elements): cuda error %d", name, numElements, errCode)
+			}
+			if cap(f32Scratch) < numElements {
+				f32Scratch = make([]float32, numElements)
+			} else {
+				f32Scratch = f32Scratch[:numElements]
+			}
+			switch tensor.Type {
+			case gguf.GGMLTypeF32:
+				for i := 0; i < numElements; i++ {
+					f32Scratch[i] = math.Float32frombits(binary.LittleEndian.Uint32(tensor.Data[i*4:]))
+				}
+			default:
+				gguf.DequantizeBlock(tensor.Data, f32Scratch, tensor.Type)
+			}
+			C.cudaMemcpy(dPtr, unsafe.Pointer(&f32Scratch[0]), C.size_t(numElements*4), C.cudaMemcpyHostToDevice)
+			m.Weights[name] = &weight{
+				devPtr:   dPtr,
+				rows:     rows,
+				cols:     cols,
+				dataType: DataTypeF32,
+				ctx:      ctx,
+			}
+			continue
+		}
+
 		var dPtr unsafe.Pointer
 		if errCode := C.cudaMalloc(&dPtr, C.size_t(numElements*2)); errCode != 0 {
 			m.Free()
 			return nil, fmt.Errorf("cudaMalloc failed for tensor %s (%d elements, %d bytes): cuda error %d", name, numElements, numElements*2, errCode)
 		}
-		var hostFP16 []uint16
+
+		if cap(f32Scratch) < numElements {
+			f32Scratch = make([]float32, numElements)
+		} else {
+			f32Scratch = f32Scratch[:numElements]
+		}
+		if cap(hostFP16) < numElements {
+			hostFP16 = make([]uint16, numElements)
+		} else {
+			hostFP16 = hostFP16[:numElements]
+		}
+
 		switch tensor.Type {
 		case gguf.GGMLTypeF32:
-			f32Data := make([]float32, numElements)
 			for i := 0; i < numElements; i++ {
-				f32Data[i] = math.Float32frombits(binary.LittleEndian.Uint32(tensor.Data[i*4:]))
+				f32Scratch[i] = math.Float32frombits(binary.LittleEndian.Uint32(tensor.Data[i*4:]))
 			}
-			hostFP16 = Float32SliceToFloat16(f32Data)
+		case gguf.GGMLTypeF16:
+			f32Scratch = gguf.DequantizeF16(tensor.Data, numElements)
+		case gguf.GGMLTypeBF16:
+			f32Scratch = gguf.DequantizeBF16(tensor.Data, numElements)
 		case gguf.GGMLTypeQ8_0:
-			f32Data := gguf.DequantizeQ8_0(tensor.Data, numElements)
-			hostFP16 = Float32SliceToFloat16(f32Data)
+			f32Scratch = gguf.DequantizeQ8_0(tensor.Data, numElements)
 		case gguf.GGMLTypeQ4_K:
-			f32Data := gguf.DequantizeQ4K_SIMD(tensor.Data, numElements)
-			hostFP16 = Float32SliceToFloat16(f32Data)
+			f32Scratch = gguf.DequantizeQ4K_SIMD(tensor.Data, numElements)
+		case gguf.GGMLTypeQ5_K:
+			f32Scratch = gguf.DequantizeQ5K(tensor.Data, numElements)
 		case gguf.GGMLTypeQ6_K:
-			f32Data := gguf.DequantizeQ6K_SIMD(tensor.Data, numElements)
-			hostFP16 = Float32SliceToFloat16(f32Data)
+			f32Scratch = gguf.DequantizeQ6K_SIMD(tensor.Data, numElements)
+		case gguf.GGMLTypeQ2_K:
+			f32Scratch = gguf.DequantizeQ2K(tensor.Data, numElements)
+		case gguf.GGMLTypeQ3_K:
+			f32Scratch = gguf.DequantizeQ3K(tensor.Data, numElements)
+		case gguf.GGMLTypeQ4_0:
+			f32Scratch = gguf.DequantizeQ4_0(tensor.Data, numElements)
+		case gguf.GGMLTypeQ5_0:
+			f32Scratch = gguf.DequantizeQ5_0(tensor.Data, numElements)
+		case gguf.GGMLTypeIQ4_NL:
+			f32Scratch = gguf.DequantizeIQ4NL(tensor.Data, numElements)
 		default:
-			C.cudaFree(dPtr)
-			return nil, fmt.Errorf("unsupported quantization: %v", tensor.Type)
+			gguf.DequantizeBlock(tensor.Data, f32Scratch, tensor.Type)
 		}
-		C.cudaMemcpy(dPtr, unsafe.Pointer(&hostFP16[0]), C.size_t(numElements*2), C.cudaMemcpyHostToDevice)
+		for i, v := range f32Scratch {
+			hostFP16[i] = Float32ToFloat16(v)
+		}
+
+		if len(hostFP16) > 0 {
+			C.cudaMemcpy(dPtr, unsafe.Pointer(&hostFP16[0]), C.size_t(numElements*2), C.cudaMemcpyHostToDevice)
+		}
 		m.Weights[name] = &weight{
 			devPtr:   dPtr,
 			rows:     rows,
@@ -502,6 +572,10 @@ func (ctx *Context) NewCUDAModel(f *gguf.GGUFFile, preDequantize bool, kvCacheSi
 			ctx:      ctx,
 		}
 	}
+	f32Scratch = nil
+	hostFP16 = nil
+	runtime.GC()
+	debug.FreeOSMemory()
 
 	arch := "llama"
 	if v, ok := f.KV["general.architecture"].(string); ok {
@@ -610,7 +684,10 @@ func (m *CUDAModel) GetBatchEmbedding(tokens []int, vocabSize int) (*Tensor, err
 	if !ok {
 		return nil, fmt.Errorf("embedding weight not found")
 	}
-	dim := embWeight.rows
+	dim := embWeight.cols
+	if dim == 0 {
+		dim = embWeight.rows
+	}
 	numTokens := len(tokens)
 	out := m.Ctx.NewTensorPooled(numTokens, dim)
 	for i, tok := range tokens {

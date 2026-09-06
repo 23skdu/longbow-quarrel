@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"runtime"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -13,6 +15,7 @@ import (
 	"github.com/23skdu/longbow-quarrel/internal/device"
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
 	"github.com/23skdu/longbow-quarrel/internal/metrics"
+	"github.com/23skdu/longbow-quarrel/internal/simd"
 	"github.com/23skdu/longbow-quarrel/internal/tokenizer"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -50,6 +53,8 @@ type cudaEngine struct {
 	tok          *tokenizer.Tokenizer
 	cache        *PagedKVCache
 	PromptCache  *PromptCache
+	seqKVCaches  map[string]*CPUKVCache
+	kvMu         sync.Mutex
 	BatchManager *ContinuousBatchManager
 	stopChan     chan struct{}
 	doneChan     chan struct{}
@@ -93,17 +98,9 @@ func NewcudaEngine(modelPath string, cfg config.Config) (Engine, error) {
 		return nil, fmt.Errorf("failed to load model to GPU: %w", err)
 	}
 
+	// Always load CPU weights for hybrid offloading, recurrent SSM layers, or PLE fallback
 	var cpuW *CPUWeights
-	if numGPULayers < cfg.Layers {
-		var err error
-		cpuW, err = loadCPUWeights(f, cfg)
-		if err != nil {
-			ctx.Free()
-			cudaModel.Free()
-			_ = f.Close()
-			return nil, fmt.Errorf("failed to load CPU weights for layer offloading: %w", err)
-		}
-	}
+	cpuW, _ = loadCPUWeights(f, cfg)
 
 	metrics.RecordLayerOffload(arch, numGPULayers, cfg.Layers-numGPULayers)
 
@@ -119,9 +116,15 @@ func NewcudaEngine(modelPath string, cfg config.Config) (Engine, error) {
 	cudaEngineInitialized.WithLabelValues(arch, arch).Inc()
 	cudaMemoryUsage.WithLabelValues(arch).Set(float64(device.CUDAAllocatedBytes()))
 
-	tok, err := tokenizer.New(modelPath)
+	runtime.GC()
+	debug.FreeOSMemory()
+
+	tok, err := tokenizer.NewFromGGUF(f)
 	if err != nil {
-		log.Printf("Warning: failed to load tokenizer: %v", err)
+		tok, err = tokenizer.New(modelPath)
+		if err != nil {
+			log.Printf("Warning: failed to load tokenizer: %v", err)
+		}
 	}
 
 	layers := cfg.Layers
@@ -143,25 +146,27 @@ func NewcudaEngine(modelPath string, cfg config.Config) (Engine, error) {
 		cpuWeights:   cpuW,
 		numGPULayers: numGPULayers,
 		config: config.Config{
-			Architecture:  arch,
-			Dim:           dim,
-			HiddenDim:     hiddenDim,
-			Layers:        layers,
-			NumGPULayers:  numGPULayers,
-			Heads:         heads,
-			KVHeads:       kvHeads,
-			HeadDim:       headDim,
-			VocabSize:     vocabSize,
-			SeqLen:        seqLen,
-			Eps:           eps,
-			RopeTheta:     float32(ropeTheta),
-			PrecisionMode: config.PrecisionAuto,
-			KVCacheSize:   cfg.KVCacheSize,
-			IsGemma4:      isGemma4,
+			Architecture:          arch,
+			Dim:                   dim,
+			HiddenDim:             hiddenDim,
+			Layers:                layers,
+			NumGPULayers:          numGPULayers,
+			Heads:                 heads,
+			KVHeads:               kvHeads,
+			HeadDim:               headDim,
+			VocabSize:             vocabSize,
+			SeqLen:                seqLen,
+			Eps:                   eps,
+			RopeTheta:             float32(ropeTheta),
+			PrecisionMode:         config.PrecisionAuto,
+			KVCacheSize:           cfg.KVCacheSize,
+			IsGemma4:              isGemma4,
+			FinalLogitSoftcapping: modelCfg.FinalLogitSoftcapping,
 		},
 		tok:          tok,
 		cache:        cache,
 		PromptCache:  NewPromptCache(),
+		seqKVCaches:  make(map[string]*CPUKVCache),
 		BatchManager: NewContinuousBatchManager(),
 		stopChan:     make(chan struct{}),
 		doneChan:     make(chan struct{}),
@@ -328,6 +333,13 @@ func (e *cudaEngine) runBatchLoop() {
 			logits := results[i].ToHostF32()
 			results[i].Free()
 
+			if e.config.FinalLogitSoftcapping > 0 {
+				capVal := e.config.FinalLogitSoftcapping
+				for j := range logits {
+					logits[j] = capVal * float32(math.Tanh(float64(logits[j]/capVal)))
+				}
+			}
+
 			if seq.LogitsCallback != nil {
 				seq.LogitsCallback(logits)
 			}
@@ -368,6 +380,9 @@ func (e *cudaEngine) runBatchLoop() {
 					}
 				}
 				e.BatchManager.CompleteSequence(seq.ID, e.cache)
+				e.kvMu.Lock()
+				delete(e.seqKVCaches, fmt.Sprintf("seq-%d", seq.ID))
+				e.kvMu.Unlock()
 			}
 
 		}
@@ -440,17 +455,25 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 	}
 	defer blockTableTensor.ReturnToPool()
 
+	dim := e.config.Dim
+	eps := e.config.Eps
+
 	// 2. Initial Embedding
 	// [numTokens, dim]
 	hidden, err := e.cuda.GetBatchEmbedding(desc.Tokens, e.config.VocabSize)
 	if err != nil {
 		return nil, err
 	}
-	defer hidden.ReturnToPool()
+	if e.config.IsGemma4 {
+		hiddenHost := hidden.ToHostF32()
+		scaleEmb := float32(math.Sqrt(float64(dim)))
+		for j := range hiddenHost {
+			hiddenHost[j] *= scaleEmb
+		}
+		_ = hidden.LoadFrom(hiddenHost)
+	}
 
 	// 3. Layer Loop
-	eps := e.config.Eps
-	dim := e.config.Dim
 	heads := e.config.Heads
 	kvHeads := e.config.KVHeads
 	headDim := e.config.HeadDim
@@ -468,17 +491,93 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 	}
 
 	gpuLayers := e.numGPULayers
-	for layer := 0; layer < gpuLayers; layer++ {
+	for layer := 0; layer < e.config.Layers; layer++ {
+		qW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_q.weight", layer))
+		needsCPU := (layer >= gpuLayers) || (e.cpuWeights != nil && (
+			e.config.IsGemma4 ||
+			qW == nil ||
+			(layer < len(e.cpuWeights.AttnQNorm) && len(e.cpuWeights.AttnQNorm[layer]) > 0) ||
+			(layer < len(e.cpuWeights.SSMA) && len(e.cpuWeights.SSMA[layer]) > 0) ||
+			headDim > 128))
+
+		if needsCPU && e.cpuWeights != nil {
+			// Find contiguous run of CPU layers to avoid ping-pong GPU transfers
+			endLayer := layer + 1
+			for endLayer < e.config.Layers {
+				eqW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_q.weight", endLayer))
+				eNeedsCPU := (endLayer >= gpuLayers) || (
+					e.config.IsGemma4 ||
+					eqW == nil ||
+					(endLayer < len(e.cpuWeights.AttnQNorm) && len(e.cpuWeights.AttnQNorm[endLayer]) > 0) ||
+					(endLayer < len(e.cpuWeights.SSMA) && len(e.cpuWeights.SSMA[endLayer]) > 0) ||
+					headDim > 128)
+				if !eNeedsCPU {
+					break
+				}
+				endLayer++
+			}
+
+			startCPU := time.Now()
+			hiddenHost := hidden.ToHostF32()
+			for sIdx, seq := range desc.Sequences {
+				seqIDStr := fmt.Sprintf("seq-%d", seq.ID)
+				e.kvMu.Lock()
+				if e.seqKVCaches == nil {
+					e.seqKVCaches = make(map[string]*CPUKVCache)
+				}
+				kvCache, ok := e.seqKVCaches[seqIDStr]
+				if !ok {
+					if e.config.WindowSize > 0 {
+						kvCache = NewCPUKVCacheWithWindow(e.config.Layers, e.config.WindowSize)
+					} else {
+						kvCache = NewCPUKVCache(e.config.Layers)
+					}
+					e.seqKVCaches[seqIDStr] = kvCache
+				}
+				e.kvMu.Unlock()
+
+				start := desc.Offsets[sIdx]
+				end := numTokens
+				if sIdx < batchSize-1 {
+					end = desc.Offsets[sIdx+1]
+				}
+				basePos := desc.ContextLens[sIdx]
+				for t := 0; t < end-start; t++ {
+					tokIdx := start + t
+					tokOffset := tokIdx * dim
+					tokenHidden := hiddenHost[tokOffset : tokOffset+dim]
+					pos := basePos + t
+
+					if e.config.IsGemma4 {
+						tok := desc.Tokens[tokIdx]
+						ple := e.cpuWeights.ComputeGemma4PLE(tok, tokenHidden, e.config.Layers)
+						for l := layer; l < endLayer; l++ {
+							tokenHidden = ApplyGemma4LayerCPU(e.cpuWeights, tokenHidden, l, pos, kvCache, ple[l], e.config)
+						}
+					} else {
+						for l := layer; l < endLayer; l++ {
+							tokenHidden = ApplyLayerCPUKV(e.cpuWeights, tokenHidden, l, pos, kvCache, e.config)
+						}
+					}
+					copy(hiddenHost[tokOffset:tokOffset+dim], tokenHidden)
+				}
+			}
+			_ = hidden.LoadFrom(hiddenHost)
+			metrics.RecordLayerOffloadCPUDuration(e.config.Architecture, time.Since(startCPU))
+			layer = endLayer - 1
+			continue
+		}
+
+		// Standard Attention and MLP on GPU
 		// Batched RMSNorm
 		attnNormW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_norm.weight", layer))
 		normed := ctx.NewTensorFP32(numTokens, dim)
 		ctx.RMSNorm(hidden, attnNormW, normed, numTokens, dim, eps)
-		
+
 		// Batched Projections
-		qW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_q.weight", layer))
 		kW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_k.weight", layer))
 		vW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_v.weight", layer))
-		
+
 		q, _ := ctx.MatmulF16(normed, qW)
 		k, _ := ctx.MatmulF16(normed, kW)
 		v, _ := ctx.MatmulF16(normed, vW)
@@ -491,9 +590,9 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 		// Paged Attention (BATCHED)
 		kCache := e.cache.kPools[layer]
 		vCache := e.cache.vPools[layer]
-		
+
 		attnOut := ctx.NewTensorFP32(numTokens, dim)
-		
+
 		// Update Cache (StoreKV)
 		// We'll calculate physical positions for new tokens
 		physPosData := make([]int32, numTokens)
@@ -512,7 +611,7 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 		if err := physPosTensor.LoadFrom(physPosData); err != nil {
 			return nil, err
 		}
-		
+
 		ctx.StoreKVPagedBatch(k, v, kCache, vCache, physPosTensor, kvHeads*headDim, batchSize)
 		physPosTensor.ReturnToPool()
 
@@ -533,80 +632,66 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 		attnProj.ReturnToPool()
 
 		// Feed Forward (Batched)
-		// Simplified for brevity, same pattern as single-seq
-	}
+		ffnNormW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.ffn_norm.weight", layer))
+		if ffnNormW != nil {
+			normedFFN := ctx.NewTensorFP32(numTokens, dim)
+			ctx.RMSNorm(hidden, ffnNormW, normedFFN, numTokens, dim, eps)
 
-	if gpuLayers < e.config.Layers && e.cpuWeights != nil {
-		startTransfer := time.Now()
-		hiddenHost := hidden.ToHostF32()
-		metrics.RecordLayerOffloadTransfer(e.config.Architecture, time.Since(startTransfer))
+			ffnGateW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.ffn_gate.weight", layer))
+			ffnUpW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.ffn_up.weight", layer))
+			ffnDownW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.ffn_down.weight", layer))
 
-		startCPU := time.Now()
-		for layer := gpuLayers; layer < e.config.Layers; layer++ {
-			for t := 0; t < numTokens; t++ {
-				tokOffset := t * dim
-				tokenHidden := hiddenHost[tokOffset : tokOffset+dim]
-				newHidden := ApplyLayerCPU(e.cpuWeights, tokenHidden, layer, e.config)
-				copy(hiddenHost[tokOffset:tokOffset+dim], newHidden)
+			if ffnGateW != nil && ffnUpW != nil && ffnDownW != nil {
+				gate, _ := ctx.MatmulF16(normedFFN, ffnGateW)
+				up, _ := ctx.MatmulF16(normedFFN, ffnUpW)
+				normedFFN.ReturnToPool()
+
+				ctx.FusedSwiGLU(gate, up, gate, numTokens, e.config.HiddenDim)
+				up.ReturnToPool()
+
+				down, _ := ctx.MatmulF16(gate, ffnDownW)
+				gate.ReturnToPool()
+
+				ctx.Add(hidden, down, hidden, numTokens*dim)
+				down.ReturnToPool()
+			} else {
+				normedFFN.ReturnToPool()
 			}
 		}
-		metrics.RecordLayerOffloadCPUDuration(e.config.Architecture, time.Since(startCPU))
-
-		_ = hidden.LoadFrom(hiddenHost)
 	}
 
 	// 4. Extract Last Logits
-	// We need the hidden states of the last token for each sequence in the batch
-	lastHiddenIndices := make([]int32, batchSize)
-	for i := 0; i < batchSize; i++ {
-		idx := numTokens - 1
-		if i < batchSize-1 {
-			idx = desc.Offsets[i+1] - 1
-		}
-		lastHiddenIndices[i] = int32(idx)
-	}
-	lastHiddenIndicesTensor := ctx.NewTensorI32(1, batchSize)
-	if err := lastHiddenIndicesTensor.LoadFrom(lastHiddenIndices); err != nil {
-		return nil, err
-	}
-	defer lastHiddenIndicesTensor.ReturnToPool()
-
-	// Gather last hidden states: [batchSize, dim]
-	lastHidden := ctx.NewTensorFP32(batchSize, dim)
-	ctx.Gather(hidden, lastHiddenIndicesTensor, lastHidden, numTokens, batchSize, dim)
-
-	// Final Output Norm
-	outputNormW, _ := e.cuda.GetWeightTensor("output_norm.weight")
-	if outputNormW == nil {
-		outputNormW, _ = e.cuda.GetWeightTensor("norm.weight")
-	}
-	if outputNormW == nil {
-		outputNormW, _ = e.cuda.GetWeightTensor("model.norm.weight")
-	}
-	normedFinal := ctx.NewTensorFP32(batchSize, dim)
-	if normedFinal == nil {
-		return nil, fmt.Errorf("failed to allocate normedFinal tensor")
-	}
-	ctx.RMSNorm(lastHidden, outputNormW, normedFinal, batchSize, dim, eps)
-	lastHidden.ReturnToPool()
-
-	// Final Projections (Logits)
-	outputW, _ := e.cuda.GetWeightTensor("output.weight")
-	if outputW == nil {
-		outputW, _ = e.cuda.GetWeightTensor("token_embd.weight")
-	}
-
-	logitsTensor, _ := ctx.MatmulF16(normedFinal, outputW)
-	normedFinal.ReturnToPool()
-
-	// Split Logits into []*device.Tensor
 	results := make([]*device.Tensor, batchSize)
+	hiddenHost := hidden.ToHostF32()
 	for i := 0; i < batchSize; i++ {
+		lastTokIdx := numTokens - 1
+		if i < batchSize-1 {
+			lastTokIdx = desc.Offsets[i+1] - 1
+		}
+		tokOffset := lastTokIdx * dim
+		lastTokenHidden := make([]float32, dim)
+		copy(lastTokenHidden, hiddenHost[tokOffset:tokOffset+dim])
+
+		var finalLogits []float32
+		if e.cpuWeights != nil {
+			if e.cpuWeights.OutputNorm != nil {
+				normed := make([]float32, dim)
+				simd.RMSNorm(lastTokenHidden, e.cpuWeights.OutputNorm, normed, 1, dim, eps)
+				lastTokenHidden = normed
+			}
+			if len(e.cpuWeights.Output) > 0 || e.cpuWeights.RawOutput != nil {
+				finalLogits = e.cpuWeights.MatVec(e.cpuWeights.Output, e.cpuWeights.RawOutput, lastTokenHidden)
+			} else {
+				finalLogits = lastTokenHidden
+			}
+		}
+
 		res := ctx.NewTensorFP32(1, e.config.VocabSize)
-		ctx.Slice(logitsTensor, res, i, e.config.VocabSize)
+		if err := res.LoadFrom(finalLogits); err != nil {
+			return nil, err
+		}
 		results[i] = res
 	}
-	logitsTensor.ReturnToPool()
 
 	return results, nil
 }

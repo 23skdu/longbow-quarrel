@@ -66,6 +66,7 @@ type Config struct {
 	Gemma4PartialRoPEFactor float32 // Default 0.25 for full attention layers
 	Gemma4SlidingHeadDim    int     // Default 256 for sliding window layers
 	Gemma4FullHeadDim       int     // Default 512 for full attention layers
+	FinalLogitSoftcapping   float32 // e.g. 30.0 for Gemma4
 
 	DebugDequant     bool
 	DebugActivations bool
@@ -117,7 +118,7 @@ func (c *Config) Validate() error {
 	if c.HeadDim <= 0 {
 		return fmt.Errorf("invalid head_dim: %d (must be positive)", c.HeadDim)
 	}
-	if c.Dim != c.Heads*c.HeadDim {
+	if !c.IsGemma4 && c.Dim != c.Heads*c.HeadDim {
 		return fmt.Errorf("dim mismatch: %d != heads(%d) * head_dim(%d)", c.Dim, c.Heads, c.HeadDim)
 	}
 	if c.VocabSize <= 0 {

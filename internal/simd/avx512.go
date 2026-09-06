@@ -468,7 +468,7 @@ func rmsnormScalar(input, weight, output []float32, rows, cols int, eps float32)
 			v := input[offset+c]
 			sum += v * v
 		}
-		sum = float32(1.0) / (float32(math.Sqrt(float64(sum)/float64(cols)) + float64(eps)))
+		sum = float32(1.0 / math.Sqrt(float64(sum)/float64(cols) + float64(eps)))
 
 		// Normalize and scale
 		for c := 0; c < cols; c++ {

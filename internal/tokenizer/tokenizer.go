@@ -101,14 +101,100 @@ func NewFromGGUF(f *gguf.GGUFFile) (*Tokenizer, error) {
 		eosMap[2] = true
 	}
 
+	var bosTokenID int = -1
+	if bosVal, ok := f.KV["tokenizer.ggml.bos_token_id"]; ok {
+		switch v := bosVal.(type) {
+		case uint32:
+			bosTokenID = int(v)
+		case int32:
+			bosTokenID = int(v)
+		case uint64:
+			if v <= math.MaxInt {
+				bosTokenID = int(v) // #nosec G115
+			}
+		case int64:
+			if v >= 0 && v <= math.MaxInt {
+				bosTokenID = int(v) // #nosec G115
+			}
+		case int:
+			bosTokenID = v
+		}
+	}
+
+	addBOSToken := false
+	if addBOS, ok := f.KV["tokenizer.ggml.add_bos_token"].(bool); ok {
+		addBOSToken = addBOS
+	}
+
+	// Detect if vocab uses GPT-2 / byte-level BPE with 'Ġ' (U+0120)
+	// Models using SentencePiece BPE (Gemma, LLaMA) with U+2581 (lower one eighth block)
+	// should not use byte-level BPE even if the vocab contains a standalone 'Ġ' token.
+	useByteBPE := false
+	modelType, _ := f.KV["tokenizer.ggml.model"].(string)
+	if modelType == "gemma4" || modelType == "llama" {
+		useByteBPE = false
+	} else if _, ok := vocab["Ġ"]; ok {
+		useByteBPE = true
+	} else {
+		for i := 0; i < len(tokens) && i < 1000; i++ {
+			if strings.Contains(tokens[i], "Ġ") {
+				useByteBPE = true
+				break
+			}
+		}
+	}
+
 	return &Tokenizer{
-		Tokens:     tokens,
-		Vocab:      vocab,
-		Merges:     merges,
-		Ranks:      ranks,
+		Tokens:      tokens,
+		Vocab:       vocab,
+		Merges:      merges,
+		Ranks:       ranks,
 		EOSTokenIDs: eosMap,
+		UseByteBPE:  useByteBPE,
+		BOSTokenID:  bosTokenID,
+		AddBOSToken: addBOSToken,
 	}, nil
 }
+
+var byteToUnicodeMap = func() [256]rune {
+	var m [256]rune
+	bs := make([]int, 0, 256)
+	for b := int('!'); b <= int('~'); b++ {
+		bs = append(bs, b)
+	}
+	for b := 161; b <= 172; b++ {
+		bs = append(bs, b)
+	}
+	for b := 174; b <= 255; b++ {
+		bs = append(bs, b)
+	}
+	cs := make([]int, len(bs))
+	copy(cs, bs)
+	n := 0
+	inBs := make(map[int]bool)
+	for _, b := range bs {
+		inBs[b] = true
+	}
+	for b := 0; b < 256; b++ {
+		if !inBs[b] {
+			bs = append(bs, b)
+			cs = append(cs, 256+n)
+			n++
+		}
+	}
+	for i, b := range bs {
+		m[b] = rune(cs[i])
+	}
+	return m
+}()
+
+var unicodeToByteMap = func() map[rune]byte {
+	m := make(map[rune]byte, 256)
+	for b, r := range byteToUnicodeMap {
+		m[r] = byte(b)
+	}
+	return m
+}()
 
 type Tokenizer struct {
 	Tokens      []string
@@ -117,6 +203,9 @@ type Tokenizer struct {
 	Ranks       map[string]int // Pair "a b" -> Rank (Index)
 	Scores      []float32      // optional
 	EOSTokenIDs map[int]bool
+	UseByteBPE  bool
+	BOSTokenID  int
+	AddBOSToken bool
 }
 
 // IsEOS returns true if the tokenID is recognized as an end-of-sequence token.
@@ -149,18 +238,29 @@ func (t *Tokenizer) Encode(text string) []int {
 		return nil
 	}
 
+	var allIDs []int
+	if t.AddBOSToken && t.BOSTokenID >= 0 {
+		allIDs = append(allIDs, t.BOSTokenID)
+	}
+
 	// 1. Basic pre-tokenization
 	words := splitWords(text)
-
-	var allIDs []int
 
 	// Fallback to Greedy Max Match if no merges available (e.g. Unigram)
 	useMaxMatch := len(t.Ranks) == 0
 
 	for _, w := range words {
-		// Convert to BPE-clean format (replace space with U+2581 for Llama/Mistral)
-		// Note: GPT-2 uses Ġ, Llama uses  (U+2581)
-		cleanW := strings.ReplaceAll(w, " ", "\u2581")
+		var cleanW string
+		if t.UseByteBPE {
+			var sb strings.Builder
+			for _, b := range []byte(w) {
+				sb.WriteRune(byteToUnicodeMap[b])
+			}
+			cleanW = sb.String()
+		} else {
+			// Convert to BPE-clean format (replace space with U+2581 for Llama/Mistral)
+			cleanW = strings.ReplaceAll(w, " ", "\u2581")
+		}
 
 		if useMaxMatch {
 			// Greedy Max Match
@@ -255,7 +355,7 @@ func splitWords(text string) []string {
 	start := 0
 	for i := 1; i < len(text); i++ {
 		// New word boundary heuristic
-		if text[i] == ' ' && text[i-1] != ' ' {
+		if (text[i] == ' ' && text[i-1] != ' ') || text[i] == '\n' || text[i-1] == '\n' {
 			res = append(res, text[start:i])
 			start = i
 		}
@@ -265,6 +365,33 @@ func splitWords(text string) []string {
 }
 
 func (t *Tokenizer) Decode(ids []int) string {
+	if t.UseByteBPE {
+		var byteBuf []byte
+		for _, id := range ids {
+			if id < 0 || id >= len(t.Tokens) {
+				continue // Skip invalid token IDs
+			}
+
+			token := t.Tokens[id]
+
+			// Skip special tokens
+			if strings.HasPrefix(token, "<|") && strings.HasSuffix(token, "|>") {
+				continue
+			}
+
+			for _, r := range token {
+				if b, ok := unicodeToByteMap[r]; ok {
+					byteBuf = append(byteBuf, b)
+				} else if r == '\u2581' {
+					byteBuf = append(byteBuf, ' ')
+				} else {
+					byteBuf = append(byteBuf, []byte(string(r))...)
+				}
+			}
+		}
+		return string(byteBuf)
+	}
+
 	var sb strings.Builder
 	for _, id := range ids {
 		if id < 0 || id >= len(t.Tokens) {

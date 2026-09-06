@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"strings"
 	"sync"
 
 	"github.com/23skdu/longbow-quarrel/internal/config"
@@ -41,6 +42,20 @@ type CPUWeights struct {
 	SSMDtBias     [][]float32
 	SSMNorm       [][]float32
 	SSMOut        [][]float32
+
+	// Gemma4 support
+	PostAttentionNorm [][]float32
+	PostFfnNorm       [][]float32
+	InpGate           [][]float32
+	Proj              [][]float32
+	PostNorm          [][]float32
+	LayerOutputScale  [][]float32
+
+	PerLayerModelProj *gguf.TensorInfo
+	PerLayerProjNorm  []float32
+	PerLayerTokenEmbd *gguf.TensorInfo
+	RawInpGate        []*gguf.TensorInfo
+	RawProj           []*gguf.TensorInfo
 
 	// Memory-efficient raw tensor handles (e.g. Q8_0 directly from mmap)
 	RawTokenEmb *gguf.TensorInfo
@@ -104,6 +119,15 @@ func loadCPUWeights(f *gguf.GGUFFile, cfg config.Config) (*CPUWeights, error) {
 	w.RawAttnGate = make([]*gguf.TensorInfo, numLayers)
 	w.RawSSMOut = make([]*gguf.TensorInfo, numLayers)
 
+	w.PostAttentionNorm = make([][]float32, numLayers)
+	w.PostFfnNorm = make([][]float32, numLayers)
+	w.InpGate = make([][]float32, numLayers)
+	w.Proj = make([][]float32, numLayers)
+	w.PostNorm = make([][]float32, numLayers)
+	w.LayerOutputScale = make([][]float32, numLayers)
+	w.RawInpGate = make([]*gguf.TensorInfo, numLayers)
+	w.RawProj = make([]*gguf.TensorInfo, numLayers)
+
 	for _, t := range f.Tensors {
 		isQ8Matrix := t.Type == gguf.GGMLTypeQ8_0 && len(t.Dimensions) >= 2
 
@@ -135,6 +159,14 @@ func loadCPUWeights(f *gguf.GGUFFile, cfg config.Config) (*CPUWeights, error) {
 			if err == nil {
 				w.OutputNorm = data
 			}
+		case "per_layer_model_proj.weight":
+			w.PerLayerModelProj = t
+		case "per_layer_proj_norm.weight":
+			if data, err := decodeTensorData(t); err == nil {
+				w.PerLayerProjNorm = data
+			}
+		case "per_layer_token_embd.weight":
+			w.PerLayerTokenEmbd = t
 		default:
 			var layer int
 			var _, _ = fmt.Sscanf(t.Name, "blk.%d.", &layer)
@@ -152,9 +184,42 @@ func loadCPUWeights(f *gguf.GGUFFile, cfg config.Config) (*CPUWeights, error) {
 					if data, err := decodeTensorData(t); err == nil {
 						w.AttnNorm[layer] = data
 					}
-				case containsStr(t.Name, "ffn_norm.weight"), containsStr(t.Name, "post_attention_norm.weight"):
+				case strings.HasSuffix(t.Name, ".post_attention_norm.weight"):
+					if data, err := decodeTensorData(t); err == nil {
+						w.PostAttentionNorm[layer] = data
+					}
+					if len(w.FfnNorm[layer]) == 0 {
+						w.FfnNorm[layer] = w.PostAttentionNorm[layer]
+					}
+				case containsStr(t.Name, "ffn_norm.weight"):
 					if data, err := decodeTensorData(t); err == nil {
 						w.FfnNorm[layer] = data
+					}
+				case strings.HasSuffix(t.Name, ".post_ffw_norm.weight"), strings.HasSuffix(t.Name, ".post_ffn_norm.weight"):
+					if data, err := decodeTensorData(t); err == nil {
+						w.PostFfnNorm[layer] = data
+					}
+				case strings.HasSuffix(t.Name, ".post_norm.weight"):
+					if data, err := decodeTensorData(t); err == nil {
+						w.PostNorm[layer] = data
+					}
+				case strings.HasSuffix(t.Name, ".inp_gate.weight"):
+					w.RawInpGate[layer] = t
+					if !isQ8Matrix {
+						if data, err := decodeTensorData(t); err == nil {
+							w.InpGate[layer] = data
+						}
+					}
+				case strings.HasSuffix(t.Name, ".proj.weight"):
+					w.RawProj[layer] = t
+					if !isQ8Matrix {
+						if data, err := decodeTensorData(t); err == nil {
+							w.Proj[layer] = data
+						}
+					}
+				case strings.HasSuffix(t.Name, ".layer_output_scale.weight"):
+					if data, err := decodeTensorData(t); err == nil {
+						w.LayerOutputScale[layer] = data
 					}
 				case containsStr(t.Name, "ssm_conv1d.weight"):
 					if data, err := decodeTensorData(t); err == nil {
@@ -267,6 +332,15 @@ func loadCPUWeights(f *gguf.GGUFFile, cfg config.Config) (*CPUWeights, error) {
 		}
 	}
 
+	if len(w.Output) == 0 && w.RawOutput == nil {
+		if len(w.TokenEmb) > 0 {
+			w.Output = w.TokenEmb[0]
+		}
+		if w.RawTokenEmb != nil {
+			w.RawOutput = w.RawTokenEmb
+		}
+	}
+
 	return w, nil
 }
 
@@ -311,6 +385,8 @@ func decodeTensorData(t *gguf.TensorInfo) ([]float32, error) {
 		return data, nil
 	case gguf.GGMLTypeBF16:
 		return gguf.DequantizeBF16(t.Data, int(numElements)), nil
+	case gguf.GGMLTypeIQ4_NL:
+		return gguf.DequantizeIQ4NL(t.Data, int(numElements)), nil
 	default:
 		return make([]float32, numElements), nil
 	}
@@ -435,16 +511,30 @@ func ApplyLayerCPUKV(w *CPUWeights, input []float32, layerIdx int, pos int, kv *
 			}
 		}
 		attnHeads := cfg.Heads
-		if attnHeadDim > 0 {
-			attnHeads = len(qFull) / (2 * attnHeadDim) // Q output = 2 * heads * head_dim (query + gate)
-		}
-		querySize := attnHeads * attnHeadDim
-
-		// Split Q output: first half = query, second half = gate (Qwen 3.5 query-gate)
-		query := qFull[:querySize]
-		gate := qFull[querySize:]
-		if len(gate) > querySize {
-			gate = gate[:querySize]
+		var query, gate []float32
+		if attnHeadDim > 0 && len(qFull) == 2*attnHeads*attnHeadDim {
+			// Qwen 3.5 query-gate: interleaved [query_h, gate_h] for each head
+			query = make([]float32, attnHeads*attnHeadDim)
+			gate = make([]float32, attnHeads*attnHeadDim)
+			for h := 0; h < attnHeads; h++ {
+				srcQ := h * 2 * attnHeadDim
+				srcGate := srcQ + attnHeadDim
+				copy(query[h*attnHeadDim:(h+1)*attnHeadDim], qFull[srcQ:srcQ+attnHeadDim])
+				copy(gate[h*attnHeadDim:(h+1)*attnHeadDim], qFull[srcGate:srcGate+attnHeadDim])
+			}
+		} else if attnHeadDim > 0 && len(qFull) > attnHeads*attnHeadDim && len(qFull)%(2*attnHeadDim) == 0 {
+			attnHeads = len(qFull) / (2 * attnHeadDim)
+			query = make([]float32, attnHeads*attnHeadDim)
+			gate = make([]float32, attnHeads*attnHeadDim)
+			for h := 0; h < attnHeads; h++ {
+				srcQ := h * 2 * attnHeadDim
+				srcGate := srcQ + attnHeadDim
+				copy(query[h*attnHeadDim:(h+1)*attnHeadDim], qFull[srcQ:srcQ+attnHeadDim])
+				copy(gate[h*attnHeadDim:(h+1)*attnHeadDim], qFull[srcGate:srcGate+attnHeadDim])
+			}
+		} else {
+			query = qFull
+			gate = nil
 		}
 
 		// Per-head QK-norm (norm weight [head_dim] broadcast to all heads)
@@ -480,7 +570,10 @@ func ApplyLayerCPUKV(w *CPUWeights, input []float32, layerIdx int, pos int, kv *
 		if ropeTheta <= 0 {
 			ropeTheta = 10000.0
 		}
-		rotaryDim := attnHeadDim / 4 // partial_rotary_factor=0.25
+		rotaryDim := attnHeadDim
+		if cfg.Architecture == "qwen35" || (attnHeadDim > 64 && attnHeadDim == 256) {
+			rotaryDim = 64
+		}
 		if rotaryDim > 0 && attnHeads > 0 && len(query) >= attnHeads*attnHeadDim {
 			partialRoPECPU(query, []int{pos}, attnHeads, attnHeadDim, rotaryDim, ropeTheta)
 		}
@@ -499,7 +592,7 @@ func ApplyLayerCPUKV(w *CPUWeights, input []float32, layerIdx int, pos int, kv *
 			attn = attentionCPU(query, k, v, attnHeads, kvHeads, attnHeadDim)
 		}
 		// Apply output gate: attn_out * sigmoid(gate)
-		if len(attn) == len(gate) {
+		if len(gate) > 0 && len(attn) == len(gate) {
 			for i := range attn {
 				attn[i] *= sigmoidCPU(gate[i])
 			}
@@ -561,16 +654,14 @@ func ApplyLayerCPUKV(w *CPUWeights, input []float32, layerIdx int, pos int, kv *
 		gate := w.MatVec(gateWeight, rawGate, normedFFN)
 		up := w.MatVec(upWeight, rawUp, normedFFN)
 
-		swiGLU := make([]float32, len(gate))
-		simd.SwiGLU(gate, up, swiGLU)
-
-		down := w.MatVec(downWeight, rawDown, swiGLU)
-
-		result := make([]float32, len(residual))
-		for i := range result {
-			result[i] = residual[i] + down[i]
+		for i := range gate {
+			gate[i] = siluCPU(gate[i]) * up[i]
 		}
-		return result
+		down := w.MatVec(downWeight, rawDown, gate)
+
+		for i := range residual {
+			residual[i] += down[i]
+		}
 	}
 
 	return residual
@@ -585,6 +676,7 @@ func vecFMA(dst, src []float32, weight float32) {
 }
 
 func attentionCPUKV(q, k, v []float32, layerIdx, pos int, kv *CPUKVCache, numHeads, kvHeads, headDim int) []float32 {
+	_ = pos
 	if numHeads <= 0 || headDim <= 0 || len(q) == 0 {
 		return make([]float32, len(q))
 	}
@@ -832,6 +924,8 @@ func (w *CPUWeights) MatVec(f32Weight []float32, raw *gguf.TensorInfo, x []float
 			return gguf.MatVecMulQ6_K(raw.Data, x, rows, cols)
 		case gguf.GGMLTypeBF16:
 			return gguf.MatVecMulBF16(raw.Data, x, rows, cols)
+		case gguf.GGMLTypeIQ4_NL:
+			return gguf.MatVecMulIQ4_NL(raw.Data, x, rows, cols)
 		case gguf.GGMLTypeQ4_0:
 			return gguf.MatVecMulQ4_0(raw.Data, x, rows, cols)
 		case gguf.GGMLTypeQ5_0:
@@ -854,6 +948,82 @@ func (w *CPUWeights) MatVec(f32Weight []float32, raw *gguf.TensorInfo, x []float
 	return nil
 }
 
+func dequantizeRow(t *gguf.TensorInfo, rowIdx int, rowElements int) []float32 {
+	if t == nil || rowElements <= 0 {
+		return make([]float32, rowElements)
+	}
+	var rowBytes int
+	switch t.Type {
+	case gguf.GGMLTypeF32:
+		rowBytes = rowElements * 4
+	case gguf.GGMLTypeF16, gguf.GGMLTypeBF16:
+		rowBytes = rowElements * 2
+	case gguf.GGMLTypeQ4_0, gguf.GGMLTypeIQ4_NL:
+		rowBytes = (rowElements / 32) * 18
+	case gguf.GGMLTypeQ5_0:
+		rowBytes = (rowElements / 32) * 22
+	case gguf.GGMLTypeQ8_0:
+		rowBytes = (rowElements / 32) * 34
+	case gguf.GGMLTypeQ4_K:
+		rowBytes = (rowElements / 256) * 144
+	case gguf.GGMLTypeQ5_K:
+		rowBytes = (rowElements / 256) * 176
+	case gguf.GGMLTypeQ6_K:
+		rowBytes = (rowElements / 256) * 210
+	case gguf.GGMLTypeQ3_K:
+		rowBytes = (rowElements / 256) * 110
+	case gguf.GGMLTypeQ2_K:
+		rowBytes = (rowElements / 256) * 84
+	default:
+		return make([]float32, rowElements)
+	}
+
+	offset := rowIdx * rowBytes
+	if offset < 0 || offset+rowBytes > len(t.Data) {
+		return make([]float32, rowElements)
+	}
+	slice := t.Data[offset : offset+rowBytes]
+
+	switch t.Type {
+	case gguf.GGMLTypeQ4_K:
+		return gguf.DequantizeQ4K_SIMD(slice, rowElements)
+	case gguf.GGMLTypeQ6_K:
+		return gguf.DequantizeQ6K_SIMD(slice, rowElements)
+	case gguf.GGMLTypeQ5_0:
+		return gguf.DequantizeQ5_0(slice, rowElements)
+	case gguf.GGMLTypeQ8_0:
+		return gguf.DequantizeQ8_0(slice, rowElements)
+	case gguf.GGMLTypeQ2_K:
+		return gguf.DequantizeQ2K(slice, rowElements)
+	case gguf.GGMLTypeQ3_K:
+		return gguf.DequantizeQ3K(slice, rowElements)
+	case gguf.GGMLTypeQ5_K:
+		return gguf.DequantizeQ5K(slice, rowElements)
+	case gguf.GGMLTypeQ4_0:
+		return gguf.DequantizeQ4_0(slice, rowElements)
+	case gguf.GGMLTypeF32:
+		out := make([]float32, rowElements)
+		for i := 0; i < rowElements; i++ {
+			bits := binary.LittleEndian.Uint32(slice[i*4:])
+			out[i] = math.Float32frombits(bits)
+		}
+		return out
+	case gguf.GGMLTypeF16:
+		out := make([]float32, rowElements)
+		for i := 0; i < rowElements; i++ {
+			bits := binary.LittleEndian.Uint16(slice[i*2:])
+			out[i] = gguf.Float16ToFloat32(bits)
+		}
+		return out
+	case gguf.GGMLTypeBF16:
+		return gguf.DequantizeBF16(slice, rowElements)
+	case gguf.GGMLTypeIQ4_NL:
+		return gguf.DequantizeIQ4NL(slice, rowElements)
+	default:
+		return make([]float32, rowElements)
+	}
+}
+
 func (w *CPUWeights) GetTokenEmbedding(tokenId int, hiddenSize int) []float32 {
 	if len(w.TokenEmb) > 0 && len(w.TokenEmb[0]) > 0 {
 		vocabSize := len(w.TokenEmb[0]) / hiddenSize
@@ -868,25 +1038,7 @@ func (w *CPUWeights) GetTokenEmbedding(tokenId int, hiddenSize int) []float32 {
 		}
 	}
 	if w.RawTokenEmb != nil {
-		out := make([]float32, hiddenSize)
-		switch w.RawTokenEmb.Type {
-		case gguf.GGMLTypeQ8_0:
-			const blockSize = 32
-			const blockSizeBytes = 34
-			blocksPerRow := hiddenSize / blockSize
-			rowBytes := blocksPerRow * blockSizeBytes
-			offset := tokenId * rowBytes
-			if offset+rowBytes <= len(w.RawTokenEmb.Data) {
-				return gguf.DequantizeQ8_0(w.RawTokenEmb.Data[offset:offset+rowBytes], hiddenSize)
-			}
-		case gguf.GGMLTypeF32:
-			offset := tokenId * hiddenSize * 4
-			for i := 0; i < hiddenSize && offset+(i+1)*4 <= len(w.RawTokenEmb.Data); i++ {
-				bits := binary.LittleEndian.Uint32(w.RawTokenEmb.Data[offset+i*4:])
-				out[i] = math.Float32frombits(bits)
-			}
-			return out
-		}
+		return dequantizeRow(w.RawTokenEmb, tokenId, hiddenSize)
 	}
 	return make([]float32, hiddenSize)
 }
@@ -934,6 +1086,7 @@ func (w *CPUWeights) mambaForward(qkv []float32, normed []float32, layerIdx int,
 
 // mamba2Forward executes a standard Mamba-2 SSM layer.
 func (w *CPUWeights) mamba2Forward(qkv []float32, layerIdx int, kv *CPUKVCache, cfg config.Config) []float32 {
+	_ = cfg
 	dInner := 0
 	if layerIdx < len(w.SSMA) {
 		dInner = len(w.SSMA[layerIdx])
@@ -1123,46 +1276,43 @@ func (w *CPUWeights) mamba2Forward(qkv []float32, layerIdx int, kv *CPUKVCache, 
 //   - Delta rule scan: S = g*S + beta*(v - S@k)⊗k^T; y = S@q
 //   - Output: RMSNorm(y) * SiLU(z) → ssm_out
 func (w *CPUWeights) gatedDeltaNetForward(qkv []float32, normed []float32, layerIdx int, kv *CPUKVCache, cfg config.Config) []float32 {
+	_ = cfg
 	totalProj := len(qkv)
 	if totalProj == 0 {
 		return qkv
 	}
 
-	// Infer dimensions from tensor shapes
-	dInner := totalProj / 2
-	if dInner == 0 {
-		dInner = 4096
+	// In GatedDeltaNet (e.g. Qwen 3.5):
+	// headDim is determined by SSMNorm weight size (128).
+	headDim := 128
+	if layerIdx < len(w.SSMNorm) && len(w.SSMNorm[layerIdx]) > 0 {
+		headDim = len(w.SSMNorm[layerIdx])
 	}
-
 	numVHeads := 0
 	if layerIdx < len(w.SSMA) {
 		numVHeads = len(w.SSMA[layerIdx])
 	}
 	if numVHeads == 0 {
-		numVHeads = 32
+		numVHeads = 16
 	}
-	headDim := dInner / numVHeads
-	if headDim == 0 {
-		headDim = 128
-	}
+	vSize := numVHeads * headDim
+	dInner := vSize
 
-	// numKHeads: Q and K are interleaved from numKHeads to numVHeads.
-	// The qk portion of conv output is 2 * numKHeads * headKDim.
-	// headKDim = headDim for this model (both 128).
-	// qkSize = 2 * numKHeads * headDim, vSize = numVHeads * headDim
-	// totalProj = qkSize + vSize = 2 * numKHeads * headDim + numVHeads * headDim
-	numKHeads := (totalProj - dInner) / (2 * headDim)
-	if numKHeads <= 0 {
-		numKHeads = numVHeads / 2
-		if numKHeads == 0 {
-			numKHeads = 16
-		}
-	}
+	// totalProj = qSize + kSize + vSize
+	// qkSize = totalProj - vSize = 2 * numKHeads * headKDim
+	// headKDim == headDim (128)
 	headKDim := headDim
+	qkSize := totalProj - vSize
+	if qkSize < 0 {
+		qkSize = 0
+	}
+	numKHeads := qkSize / (2 * headKDim)
+	if numKHeads <= 0 {
+		numKHeads = 16
+	}
 	qSize := numKHeads * headKDim
 	kSize := numKHeads * headKDim
-	vSize := numVHeads * headDim
-	convDim := qSize + kSize + vSize
+	convDim := totalProj
 
 	dConv := 4
 	if layerIdx < len(w.SSMConv1d) && len(w.SSMConv1d[layerIdx]) > 0 {
@@ -1192,19 +1342,17 @@ func (w *CPUWeights) gatedDeltaNetForward(qkv []float32, normed []float32, layer
 		kv.mu.Unlock()
 	}
 
-	// 1. Causal conv1d on qkv (Metal convention: state[0] = newest)
+	// 1. Causal conv1d on qkv
 	convOut := make([]float32, convDim)
 	if kv != nil {
 		convState := kv.ConvState[layerIdx]
 
-		// Shift state right: state[k] ← state[k-1] for k=dConv-1..1 (matching Metal kernel)
+		// Shift state left: state[0..dConv-2] ← state[1..dConv-1]
 		if dConv > 1 {
-			for k := dConv - 1; k > 0; k-- {
-				copy(convState[k*convDim:(k+1)*convDim], convState[(k-1)*convDim:k*convDim])
-			}
+			copy(convState[0:], convState[convDim:])
 		}
-		// Insert newest input at position 0
-		copy(convState[:convDim], qkv)
+		// Insert newest input at the last slot
+		copy(convState[(dConv-1)*convDim:], qkv)
 
 		if layerIdx < len(w.SSMConv1d) {
 			convWeight := w.SSMConv1d[layerIdx]
@@ -1239,9 +1387,36 @@ func (w *CPUWeights) gatedDeltaNetForward(qkv []float32, normed []float32, layer
 	}
 
 	// 3. Split into Q, K, V
-	qRaw := convOut[:qSize]
-	kRaw := convOut[qSize : qSize+kSize]
+	qRaw := make([]float32, qSize)
+	copy(qRaw, convOut[:qSize])
+	kRaw := make([]float32, kSize)
+	copy(kRaw, convOut[qSize:qSize+kSize])
 	vRaw := convOut[qSize+kSize:]
+
+	// L2-normalize Q and K per-head (matching llama.cpp ggml_l2_norm)
+	for h := 0; h < numKHeads; h++ {
+		qOff := h * headKDim
+		var sumQ float32
+		for d := 0; d < headKDim; d++ {
+			sumQ += qRaw[qOff+d] * qRaw[qOff+d]
+		}
+		normQ := float32(math.Sqrt(float64(sumQ)))
+		scaleQ := float32(1.0) / float32(math.Max(1e-6, float64(normQ)))
+		for d := 0; d < headKDim; d++ {
+			qRaw[qOff+d] *= scaleQ
+		}
+
+		kOff := h * headKDim
+		var sumK float32
+		for d := 0; d < headKDim; d++ {
+			sumK += kRaw[kOff+d] * kRaw[kOff+d]
+		}
+		normK := float32(math.Sqrt(float64(sumK)))
+		scaleK := float32(1.0) / float32(math.Max(1e-6, float64(normK)))
+		for d := 0; d < headKDim; d++ {
+			kRaw[kOff+d] *= scaleK
+		}
+	}
 
 	// 4. Compute alpha (decay) and beta (write strength)
 	alphaRaw := make([]float32, numVHeads)
@@ -1274,19 +1449,16 @@ func (w *CPUWeights) gatedDeltaNetForward(qkv []float32, normed []float32, layer
 		if h < len(A) {
 			aLog = A[h]
 		}
-		gates[h] = -float32(math.Exp(float64(aLog))) * softplusCPU(alphaRaw[h]+dtBias[h])
+		decayGate := aLog * softplusCPU(alphaRaw[h]+dtBias[h])
+		gates[h] = float32(math.Exp(float64(decayGate)))
 		betas[h] = sigmoidCPU(betaRaw[h])
 	}
 
-	// 5. Repeat-interleave Q, K from numKHeads to numVHeads
-	repeatFactor := numVHeads / numKHeads
-	if repeatFactor < 1 {
-		repeatFactor = 1
-	}
+	// 5. Repeat Q, K from numKHeads to numVHeads (matching ggml_repeat: tile modulo)
 	q := make([]float32, dInner)
 	k := make([]float32, dInner)
 	for h := 0; h < numVHeads; h++ {
-		srcHead := h / repeatFactor
+		srcHead := h % numKHeads
 		srcOff := srcHead * headKDim
 		dstOff := h * headDim
 		for d := 0; d < headDim && d < headKDim; d++ {
@@ -1299,24 +1471,7 @@ func (w *CPUWeights) gatedDeltaNetForward(qkv []float32, normed []float32, layer
 		}
 	}
 
-	// 6. L2-normalize Q and K per head
-	for h := 0; h < numVHeads; h++ {
-		off := h * headDim
-		qNorm := float32(0)
-		kNorm := float32(0)
-		for d := 0; d < headDim; d++ {
-			qNorm += q[off+d] * q[off+d]
-			kNorm += k[off+d] * k[off+d]
-		}
-		qNorm = float32(math.Sqrt(float64(qNorm) + 1e-6))
-		kNorm = float32(math.Sqrt(float64(kNorm) + 1e-6))
-		for d := 0; d < headDim; d++ {
-			q[off+d] /= qNorm
-			k[off+d] /= kNorm
-		}
-	}
-
-	// 7. Lazy-init SSM state: [numVHeads * headDim * headKDim]
+	// 6. Lazy-init SSM state: [numVHeads * headDim * headKDim]
 	stateSize := numVHeads * headDim * headKDim
 	if kv != nil {
 		kv.mu.Lock()
@@ -1334,13 +1489,17 @@ func (w *CPUWeights) gatedDeltaNetForward(qkv []float32, normed []float32, layer
 		kv.mu.Unlock()
 	}
 
-	// 8. Gated delta rule scan (single-step inference)
-	// State layout: [numVHeads, headDim, headKDim] — S[i,j] for i in [headDim), j in [headKDim)
-	// Update: S = g*S + beta*(v - S@k)⊗k^T
-	// Readout: y = S @ q
+	// 7. Gated delta rule scan (single-step inference)
+	// Matching ggml_compute_forward_gated_delta_net:
+	// 1. S_h = g * S_h (decay prior state)
+	// 2. sk = S_h @ k_h (retrieval)
+	// 3. err = beta * (v_h - sk) (prediction error)
+	// 4. S_h = S_h + err ⊗ k_h^T (associative write)
+	// 5. y_h = (1 / sqrt(headKDim)) * (S_h @ q_h) (scaled readout)
 	y := make([]float32, dInner)
 	if kv != nil {
 		ssmState := kv.SSMState[layerIdx]
+		scale := float32(1.0 / math.Sqrt(float64(headKDim)))
 		for h := 0; h < numVHeads; h++ {
 			g := gates[h]
 			beta := betas[h]
@@ -1349,7 +1508,15 @@ func (w *CPUWeights) gatedDeltaNetForward(qkv []float32, normed []float32, layer
 			vOff := h * headDim
 			stateOff := h * headDim * headKDim
 
-			// S_h @ k_h: [headDim, headKDim] @ [headKDim] = [headDim]
+			// 1. Decay state S = g * S
+			for i := 0; i < headDim; i++ {
+				for j := 0; j < headKDim; j++ {
+					stateIdx := stateOff + i*headKDim + j
+					ssmState[stateIdx] *= g
+				}
+			}
+
+			// 2. sk = S @ k
 			sk := make([]float32, headDim)
 			for i := 0; i < headDim; i++ {
 				var sum float32
@@ -1359,31 +1526,31 @@ func (w *CPUWeights) gatedDeltaNetForward(qkv []float32, normed []float32, layer
 				sk[i] = sum
 			}
 
-			// err = v_h - S_h @ k_h
+			// 3. err = beta * (v - sk)
 			err := make([]float32, headDim)
 			for i := 0; i < headDim; i++ {
 				vi := float32(0)
 				if vOff+i < len(vRaw) {
 					vi = vRaw[vOff+i]
 				}
-				err[i] = vi - sk[i]
+				err[i] = beta * (vi - sk[i])
 			}
 
-			// State update: S = g*S + beta * err ⊗ k^T
+			// 4. Update: S = S + err ⊗ k^T
 			for i := 0; i < headDim; i++ {
 				for j := 0; j < headKDim; j++ {
 					stateIdx := stateOff + i*headKDim + j
-					ssmState[stateIdx] = g*ssmState[stateIdx] + beta*err[i]*k[kOff+j]
+					ssmState[stateIdx] += err[i] * k[kOff+j]
 				}
 			}
 
-			// Readout: y_h = S_h @ q_h
+			// 5. Readout: y_h = scale * (S_h @ q_h)
 			for i := 0; i < headDim; i++ {
 				var sum float32
 				for j := 0; j < headKDim; j++ {
 					sum += ssmState[stateOff+i*headKDim+j] * q[qOff+j]
 				}
-				y[qOff+i] = sum
+				y[qOff+i] = sum * scale
 			}
 		}
 	} else {
@@ -1506,7 +1673,7 @@ func partialRoPECPU(tensor []float32, positions []int, heads, headDim, rotaryDim
 		}
 		for d := 0; d < half; d++ {
 			offset := h*headDim + d
-			freq := float32(pos) / float32(math.Pow(float64(theta), float64(2*d)/float64(headDim)))
+			freq := float32(pos) / float32(math.Pow(float64(theta), float64(2*d)/float64(rotaryDim)))
 			cos := float32(math.Cos(float64(freq)))
 			sin := float32(math.Sin(float64(freq)))
 			ei := offset
@@ -1517,4 +1684,372 @@ func partialRoPECPU(tensor []float32, positions []int, heads, headDim, rotaryDim
 			tensor[oi] = ev*sin + od*cos
 		}
 	}
+}
+
+func geluCPU(x float32) float32 {
+	const sqrt2OverPi = float32(0.7978845608)
+	const coeff = float32(0.044715)
+	return 0.5 * x * (1.0 + float32(math.Tanh(float64(sqrt2OverPi*(x+coeff*x*x*x)))))
+}
+
+// ComputeGemma4PLE computes the per-layer embedding slices for each layer of Gemma 4.
+// It combines per_layer_token_embd and per_layer_model_proj.
+func (w *CPUWeights) ComputeGemma4PLE(tok int, hidden []float32, numLayers int) [][]float32 {
+	const pleDim = 256
+	ple := make([][]float32, numLayers)
+	for i := 0; i < numLayers; i++ {
+		ple[i] = make([]float32, pleDim)
+	}
+
+	totalPLEElements := numLayers * pleDim // 35 * 256 = 8960
+
+	// 1. Token PLE lookup from w.PerLayerTokenEmbd
+	var tokenPLE []float32
+	if w.PerLayerTokenEmbd != nil {
+		tokenPLE = dequantizeRow(w.PerLayerTokenEmbd, tok, totalPLEElements)
+	}
+	if len(tokenPLE) < totalPLEElements {
+		tokenPLE = make([]float32, totalPLEElements)
+	}
+	const scaleToken = 16.0
+	for j := range tokenPLE {
+		tokenPLE[j] *= scaleToken
+	}
+
+	// 2. Model projection of hidden state through per_layer_model_proj
+	var projPLE []float32
+	if w.PerLayerModelProj != nil {
+		projPLE = w.MatVec(nil, w.PerLayerModelProj, hidden)
+	}
+	if len(projPLE) < totalPLEElements {
+		projPLE = make([]float32, totalPLEElements)
+	}
+	scaleProj := float32(1.0 / math.Sqrt(float64(len(hidden))))
+	for j := range projPLE {
+		projPLE[j] *= scaleProj
+	}
+
+	// 3. For each layer i: combine normalized projSlice and tokenSlice, then scale by 1/sqrt(2)
+	invSqrt2 := float32(1.0 / math.Sqrt(2.0))
+	for i := 0; i < numLayers; i++ {
+		sliceStart := i * pleDim
+		sliceEnd := sliceStart + pleDim
+		projSlice := projPLE[sliceStart:sliceEnd]
+		tokenSlice := tokenPLE[sliceStart:sliceEnd]
+
+		normedProj := make([]float32, pleDim)
+		if len(w.PerLayerProjNorm) == pleDim {
+			simd.RMSNorm(projSlice, w.PerLayerProjNorm, normedProj, 1, pleDim, 1e-6)
+		} else {
+			copy(normedProj, projSlice)
+		}
+
+		for k := 0; k < pleDim; k++ {
+			ple[i][k] = (normedProj[k] + tokenSlice[k]) * invSqrt2
+		}
+	}
+
+	return ple
+}
+
+// ApplyGemma4LayerCPU executes a single transformer layer of Gemma 4 on CPU.
+func ApplyGemma4LayerCPU(
+	w *CPUWeights,
+	x []float32,
+	layerIdx int,
+	pos int,
+	kv *CPUKVCache,
+	pleSlice []float32,
+	cfg config.Config,
+) []float32 {
+	if layerIdx < 0 || w == nil || len(x) == 0 {
+		return x
+	}
+
+	// 1. Pre-attention RMSNorm
+	normedAttn := make([]float32, len(x))
+	if layerIdx < len(w.AttnNorm) && len(w.AttnNorm[layerIdx]) > 0 {
+		simd.RMSNorm(x, w.AttnNorm[layerIdx], normedAttn, 1, len(x), 1e-6)
+	} else {
+		copy(normedAttn, x)
+	}
+
+	// Layer characteristics
+	isFull := (layerIdx % 5) == 4
+	headDim := 256
+	heads := 8
+	kvHeads := 1
+	ropeTheta := float32(10000.0)
+	if isFull {
+		headDim = 512
+		ropeTheta = float32(1000000.0)
+	}
+
+	// 2. K and V: compute for layer < 15, reuse for layer >= 15
+	kvLayerIdx := layerIdx
+	if layerIdx >= 15 {
+		if isFull {
+			kvLayerIdx = 14
+		} else {
+			kvLayerIdx = 13
+		}
+	} else {
+		var kWeight, vWeight []float32
+		var rawK, rawV *gguf.TensorInfo
+		if layerIdx < len(w.AttnK) {
+			kWeight = w.AttnK[layerIdx]
+		}
+		if layerIdx < len(w.RawAttnK) {
+			rawK = w.RawAttnK[layerIdx]
+		}
+		if layerIdx < len(w.AttnV) {
+			vWeight = w.AttnV[layerIdx]
+		}
+		if layerIdx < len(w.RawAttnV) {
+			rawV = w.RawAttnV[layerIdx]
+		}
+
+		k := w.MatVec(kWeight, rawK, normedAttn) // shape [headDim]
+		v := w.MatVec(vWeight, rawV, normedAttn) // shape [headDim]
+
+		// K-Norm
+		if layerIdx < len(w.AttnKNorm) && len(w.AttnKNorm[layerIdx]) == headDim {
+			kNormed := make([]float32, headDim)
+			simd.RMSNorm(k, w.AttnKNorm[layerIdx], kNormed, 1, headDim, 1e-6)
+			k = kNormed
+		}
+
+		// K RoPE
+		partialRoPECPU(k, []int{pos}, kvHeads, headDim, headDim, ropeTheta)
+
+		// V Unit RMSNorm (weight=1.0, eps=1e-6)
+		vNormed := make([]float32, headDim)
+		var sumSq float32
+		for _, val := range v {
+			sumSq += val * val
+		}
+		rms := float32(math.Sqrt(float64(sumSq/float32(headDim) + 1e-6)))
+		for d := 0; d < headDim; d++ {
+			vNormed[d] = v[d] / rms
+		}
+		v = vNormed
+
+		// Store in KV cache
+		if kv != nil {
+			kv.mu.Lock()
+			if layerIdx >= len(kv.Keys) {
+				newKeys := make([][]float32, layerIdx+1)
+				newVals := make([][]float32, layerIdx+1)
+				copy(newKeys, kv.Keys)
+				copy(newVals, kv.Values)
+				kv.Keys = newKeys
+				kv.Values = newVals
+			}
+			kv.Keys[layerIdx] = append(kv.Keys[layerIdx], k...)
+			kv.Values[layerIdx] = append(kv.Values[layerIdx], v...)
+			kv.mu.Unlock()
+		}
+	}
+
+	// 3. Query projection
+	var qWeight []float32
+	var rawQ *gguf.TensorInfo
+	if layerIdx < len(w.AttnQ) {
+		qWeight = w.AttnQ[layerIdx]
+	}
+	if layerIdx < len(w.RawAttnQ) {
+		rawQ = w.RawAttnQ[layerIdx]
+	}
+	q := w.MatVec(qWeight, rawQ, normedAttn) // shape [heads * headDim]
+
+	// Q-Norm (per-head with AttnQNorm)
+	if layerIdx < len(w.AttnQNorm) && len(w.AttnQNorm[layerIdx]) == headDim {
+		qNormed := make([]float32, len(q))
+		for h := 0; h < heads; h++ {
+			off := h * headDim
+			simd.RMSNorm(q[off:off+headDim], w.AttnQNorm[layerIdx], qNormed[off:off+headDim], 1, headDim, 1e-6)
+		}
+		q = qNormed
+	}
+
+	// Q RoPE
+	partialRoPECPU(q, []int{pos}, heads, headDim, headDim, ropeTheta)
+
+	// 4. Multi-head Attention
+	attnOut := make([]float32, heads*headDim)
+	if kv != nil && kvLayerIdx < len(kv.Keys) {
+		kv.mu.Lock()
+		cachedK := kv.Keys[kvLayerIdx]
+		cachedV := kv.Values[kvLayerIdx]
+		kv.mu.Unlock()
+
+		numCachedTokens := len(cachedK) / headDim
+		if numCachedTokens > 0 {
+			// In Gemma 4, Q and K are normalized, and attention scale is 1.0
+			scale := float32(1.0)
+
+			windowStart := 0
+			if !isFull && pos >= 512 {
+				windowStart = pos - 512 + 1
+			}
+			if windowStart > numCachedTokens {
+				windowStart = numCachedTokens
+			}
+
+			scores := make([]float32, numCachedTokens)
+			for h := 0; h < heads; h++ {
+				qHead := q[h*headDim : (h+1)*headDim]
+
+				var maxScore float32 = -math.MaxFloat32
+				for p := windowStart; p < numCachedTokens; p++ {
+					kOffset := p * headDim
+					kVec := cachedK[kOffset : kOffset+headDim]
+					s := simd.VecDotF32(qHead, kVec) * scale
+					scores[p] = s
+					if s > maxScore {
+						maxScore = s
+					}
+				}
+
+				var sumExp float32
+				for p := windowStart; p < numCachedTokens; p++ {
+					exp := float32(math.Exp(float64(scores[p] - maxScore)))
+					scores[p] = exp
+					sumExp += exp
+				}
+
+				invSumExp := float32(0.0)
+				if sumExp > 0 {
+					invSumExp = 1.0 / sumExp
+				}
+
+				outHead := attnOut[h*headDim : (h+1)*headDim]
+				for p := windowStart; p < numCachedTokens; p++ {
+					weight := scores[p] * invSumExp
+					vOffset := p * headDim
+					vVec := cachedV[vOffset : vOffset+headDim]
+					simd.VecFMAF32(outHead, vVec, weight)
+				}
+			}
+		}
+	}
+
+	// 5. Attention output projection & post-attention norm
+	var oWeight []float32
+	var rawO *gguf.TensorInfo
+	if layerIdx < len(w.AttnO) {
+		oWeight = w.AttnO[layerIdx]
+	}
+	if layerIdx < len(w.RawAttnO) {
+		rawO = w.RawAttnO[layerIdx]
+	}
+	attnProj := w.MatVec(oWeight, rawO, attnOut)
+	if len(attnProj) == len(x) {
+		normedAttnProj := make([]float32, len(attnProj))
+		if layerIdx < len(w.PostAttentionNorm) && len(w.PostAttentionNorm[layerIdx]) > 0 {
+			simd.RMSNorm(attnProj, w.PostAttentionNorm[layerIdx], normedAttnProj, 1, len(attnProj), 1e-6)
+		} else {
+			copy(normedAttnProj, attnProj)
+		}
+		for j := range x {
+			x[j] += normedAttnProj[j]
+		}
+	}
+
+	// 6. FFN branch
+	normedFFN := make([]float32, len(x))
+	if layerIdx < len(w.FfnNorm) && len(w.FfnNorm[layerIdx]) > 0 {
+		simd.RMSNorm(x, w.FfnNorm[layerIdx], normedFFN, 1, len(x), 1e-6)
+	} else {
+		copy(normedFFN, x)
+	}
+
+	var gateWeight, upWeight, downWeight []float32
+	var rawGate, rawUp, rawDown *gguf.TensorInfo
+	if layerIdx < len(w.FfnGate) {
+		gateWeight = w.FfnGate[layerIdx]
+	}
+	if layerIdx < len(w.RawFfnGate) {
+		rawGate = w.RawFfnGate[layerIdx]
+	}
+	if layerIdx < len(w.FfnUp) {
+		upWeight = w.FfnUp[layerIdx]
+	}
+	if layerIdx < len(w.RawFfnUp) {
+		rawUp = w.RawFfnUp[layerIdx]
+	}
+	if layerIdx < len(w.FfnDown) {
+		downWeight = w.FfnDown[layerIdx]
+	}
+	if layerIdx < len(w.RawFfnDown) {
+		rawDown = w.RawFfnDown[layerIdx]
+	}
+
+	gate := w.MatVec(gateWeight, rawGate, normedFFN)
+	up := w.MatVec(upWeight, rawUp, normedFFN)
+	act := make([]float32, len(gate))
+	for j := range act {
+		act[j] = geluCPU(gate[j]) * up[j]
+	}
+	down := w.MatVec(downWeight, rawDown, act)
+
+	if len(down) == len(x) {
+		normedDown := make([]float32, len(down))
+		if layerIdx < len(w.PostFfnNorm) && len(w.PostFfnNorm[layerIdx]) > 0 {
+			simd.RMSNorm(down, w.PostFfnNorm[layerIdx], normedDown, 1, len(down), 1e-6)
+		} else {
+			copy(normedDown, down)
+		}
+		for j := range x {
+			x[j] += normedDown[j]
+		}
+	}
+
+	// 7. PLE residual branch
+	if len(pleSlice) == 256 {
+		var inpGateWeight, projWeight []float32
+		var rawInpGate, rawProj *gguf.TensorInfo
+		if layerIdx < len(w.InpGate) {
+			inpGateWeight = w.InpGate[layerIdx]
+		}
+		if layerIdx < len(w.RawInpGate) {
+			rawInpGate = w.RawInpGate[layerIdx]
+		}
+		if layerIdx < len(w.Proj) {
+			projWeight = w.Proj[layerIdx]
+		}
+		if layerIdx < len(w.RawProj) {
+			rawProj = w.RawProj[layerIdx]
+		}
+
+		inpGate := w.MatVec(inpGateWeight, rawInpGate, x)
+		if len(inpGate) == 256 {
+			gated := make([]float32, 256)
+			for j := 0; j < 256; j++ {
+				gated[j] = geluCPU(inpGate[j]) * pleSlice[j]
+			}
+			proj := w.MatVec(projWeight, rawProj, gated)
+			if len(proj) == len(x) {
+				normedProj := make([]float32, len(proj))
+				if layerIdx < len(w.PostNorm) && len(w.PostNorm[layerIdx]) > 0 {
+					simd.RMSNorm(proj, w.PostNorm[layerIdx], normedProj, 1, len(proj), 1e-6)
+				} else {
+					copy(normedProj, proj)
+				}
+				for j := range x {
+					x[j] += normedProj[j]
+				}
+			}
+		}
+	}
+
+	// 8. Layer output scale
+	if layerIdx < len(w.LayerOutputScale) && len(w.LayerOutputScale[layerIdx]) > 0 {
+		scale := w.LayerOutputScale[layerIdx][0]
+		for j := range x {
+			x[j] *= scale
+		}
+	}
+
+	return x
 }

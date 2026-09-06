@@ -310,6 +310,8 @@ func (e *metalEngine) loadModel(path string) error {
 			e.config.Gemma4PartialRoPEFactor = 0.25
 			e.config.Gemma4SlidingHeadDim = 256
 			e.config.Gemma4FullHeadDim = 512
+			e.config.FinalLogitSoftcapping = 30.0
+			e.config.Eps = 1e-6
 			logger.Log.Info("Gemma4 architecture detected", "arch", arch)
 		}
 		logger.Log.Info("Model architecture confirmed", "arch", arch)

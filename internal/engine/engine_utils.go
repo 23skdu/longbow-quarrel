@@ -158,6 +158,18 @@ func ExtractModelConfig(f *gguf.GGUFFile) config.Config {
 		cfg.EOSTokenID = 2
 	}
 
+	if arch == "gemma4" {
+		cfg.IsGemma4 = true
+		cfg.Gemma4SlidingWindowSize = 512
+		cfg.Gemma4SlidingRoPETheta = 10000.0
+		cfg.Gemma4FullRoPETheta = 1000000.0
+		cfg.Gemma4PartialRoPEFactor = 0.25
+		cfg.Gemma4SlidingHeadDim = 256
+		cfg.Gemma4FullHeadDim = 512
+		cfg.FinalLogitSoftcapping = 30.0
+		cfg.Eps = 1e-6
+	}
+
 	return cfg
 }
 

@@ -1,5 +1,3 @@
-//go:build !cuda && !tpu && !metal
-
 package engine
 
 import (
@@ -67,7 +65,9 @@ func NewCPUEngine(modelPath string, cfg config.Config) (Engine, error) {
 	if cfg.KVHeads <= 0 {
 		cfg.KVHeads = modelCfg.KVHeads
 	}
-	if cfg.HeadDim <= 0 {
+	if modelCfg.HeadDim > 0 {
+		cfg.HeadDim = modelCfg.HeadDim
+	} else if cfg.HeadDim <= 0 {
 		cfg.HeadDim = modelCfg.HeadDim
 	}
 	if cfg.HiddenDim <= 0 {
@@ -79,14 +79,29 @@ func NewCPUEngine(modelPath string, cfg config.Config) (Engine, error) {
 	if cfg.SeqLen <= 0 {
 		cfg.SeqLen = modelCfg.SeqLen
 	}
-	if cfg.Eps <= 0 {
+	if modelCfg.Eps > 0 {
+		cfg.Eps = modelCfg.Eps
+	} else if cfg.Eps <= 0 {
 		cfg.Eps = modelCfg.Eps
 	}
-	if cfg.RopeTheta <= 0 {
+	if modelCfg.RopeTheta > 0 {
+		cfg.RopeTheta = modelCfg.RopeTheta
+	} else if cfg.RopeTheta <= 0 {
 		cfg.RopeTheta = modelCfg.RopeTheta
 	}
 	if cfg.Architecture == "" {
 		cfg.Architecture = modelCfg.Architecture
+	}
+	if modelCfg.IsGemma4 {
+		cfg.IsGemma4 = true
+		cfg.Gemma4SlidingWindowSize = modelCfg.Gemma4SlidingWindowSize
+		cfg.Gemma4SlidingRoPETheta = modelCfg.Gemma4SlidingRoPETheta
+		cfg.Gemma4FullRoPETheta = modelCfg.Gemma4FullRoPETheta
+		cfg.Gemma4PartialRoPEFactor = modelCfg.Gemma4PartialRoPEFactor
+		cfg.Gemma4SlidingHeadDim = modelCfg.Gemma4SlidingHeadDim
+		cfg.Gemma4FullHeadDim = modelCfg.Gemma4FullHeadDim
+		cfg.FinalLogitSoftcapping = modelCfg.FinalLogitSoftcapping
+		cfg.Eps = modelCfg.Eps
 	}
 
 	// Cap KV cache based on memory budget
@@ -318,8 +333,19 @@ func (e *CPUEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, error
 				pos := basePos + t
 				hidden := e.weights.GetTokenEmbedding(tok, hiddenSize)
 
-				for layerIdx := 0; layerIdx < e.config.Layers; layerIdx++ {
-					hidden = ApplyLayerCPUKV(e.weights, hidden, layerIdx, pos, kvCache, e.config)
+				if e.config.IsGemma4 {
+					scaleEmb := float32(math.Sqrt(float64(hiddenSize)))
+					for j := range hidden {
+						hidden[j] *= scaleEmb
+					}
+					ple := e.weights.ComputeGemma4PLE(tok, hidden, e.config.Layers)
+					for layerIdx := 0; layerIdx < e.config.Layers; layerIdx++ {
+						hidden = ApplyGemma4LayerCPU(e.weights, hidden, layerIdx, pos, kvCache, ple[layerIdx], e.config)
+					}
+				} else {
+					for layerIdx := 0; layerIdx < e.config.Layers; layerIdx++ {
+						hidden = ApplyLayerCPUKV(e.weights, hidden, layerIdx, pos, kvCache, e.config)
+					}
 				}
 
 				// Only compute output norm and logits for the last token in chunk
@@ -334,6 +360,13 @@ func (e *CPUEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, error
 						logits = e.weights.MatVec(e.weights.Output, e.weights.RawOutput, hidden)
 					} else {
 						logits = hidden
+					}
+
+					if e.config.FinalLogitSoftcapping > 0 {
+						capVal := e.config.FinalLogitSoftcapping
+						for j := range logits {
+							logits[j] = capVal * float32(math.Tanh(float64(logits[j]/capVal)))
+						}
 					}
 				}
 			}
@@ -414,8 +447,19 @@ func (e *CPUEngine) forward(tokens []int) []float32 {
 
 	for pos, tok := range tokens {
 		hidden = e.weights.GetTokenEmbedding(tok, hiddenSize)
-		for layerIdx := 0; layerIdx < e.config.Layers; layerIdx++ {
-			hidden = ApplyLayerCPUKV(e.weights, hidden, layerIdx, pos, kvCache, e.config)
+		if e.config.IsGemma4 {
+			scaleEmb := float32(math.Sqrt(float64(hiddenSize)))
+			for j := range hidden {
+				hidden[j] *= scaleEmb
+			}
+			ple := e.weights.ComputeGemma4PLE(tok, hidden, e.config.Layers)
+			for layerIdx := 0; layerIdx < e.config.Layers; layerIdx++ {
+				hidden = ApplyGemma4LayerCPU(e.weights, hidden, layerIdx, pos, kvCache, ple[layerIdx], e.config)
+			}
+		} else {
+			for layerIdx := 0; layerIdx < e.config.Layers; layerIdx++ {
+				hidden = ApplyLayerCPUKV(e.weights, hidden, layerIdx, pos, kvCache, e.config)
+			}
 		}
 	}
 
@@ -425,12 +469,21 @@ func (e *CPUEngine) forward(tokens []int) []float32 {
 		hidden = normed
 	}
 
+	var logits []float32
 	if len(e.weights.Output) > 0 || e.weights.RawOutput != nil {
-		logits := e.weights.MatVec(e.weights.Output, e.weights.RawOutput, hidden)
-		return logits
+		logits = e.weights.MatVec(e.weights.Output, e.weights.RawOutput, hidden)
+	} else {
+		logits = hidden
 	}
 
-	return hidden
+	if e.config.FinalLogitSoftcapping > 0 {
+		capVal := e.config.FinalLogitSoftcapping
+		for j := range logits {
+			logits[j] = capVal * float32(math.Tanh(float64(logits[j]/capVal)))
+		}
+	}
+
+	return logits
 }
 
 func (e *CPUEngine) applyLayerCPU(input []float32, layerIdx int) []float32 {

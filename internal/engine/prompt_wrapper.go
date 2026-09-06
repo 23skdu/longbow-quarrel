@@ -61,13 +61,16 @@ func (p *PromptWrapper) Wrap(messages []Message) (string, error) {
 		return p.simpleWrap(messages), nil
 	}
 
-	// Detect Jinja2 template
-	if strings.Contains(p.ChatTemplate, "{%") || strings.Contains(p.ChatTemplate, "{{") {
-		result, err := renderJinja2Subset(p.ChatTemplate, messages, p.SystemPrompt)
-		if err == nil {
-			return result, nil
+	// If template contains Go template variables ({{ .Field }} or {{.Field}}), use legacy substitution.
+	// Otherwise, detect Jinja2 template ({% or {{).
+	if !strings.Contains(p.ChatTemplate, "{{ .") && !strings.Contains(p.ChatTemplate, "{{.") {
+		if strings.Contains(p.ChatTemplate, "{%") || strings.Contains(p.ChatTemplate, "{{") {
+			result, err := renderJinja2Subset(p.ChatTemplate, messages, p.SystemPrompt)
+			if err == nil {
+				return result, nil
+			}
+			// Fall through to legacy rendering on error
 		}
-		// Fall through to legacy rendering on error
 	}
 
 	// Legacy Go-template substitution
@@ -268,6 +271,7 @@ func splitBlock(s, endTag string) (string, string) {
 
 // evalVarExpr evaluates a Jinja2 variable expression like "msg.role", "bos_token", etc.
 func evalVarExpr(expr string, vars map[string]string, messages []Message) string {
+	_ = messages
 	// Strip filters (e.g., "messages | selectattr(...)")
 	if idx := strings.Index(expr, "|"); idx >= 0 {
 		expr = strings.TrimSpace(expr[:idx])
