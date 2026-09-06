@@ -262,6 +262,7 @@ func (e *RemoteWorkerEngine) ForwardBatch(batch *BatchDescriptor) ([]*device.Ten
 		}
 
 		// Forward each sequence through the remote worker via DoPutTensor
+		// #nosec G115 -- safe: sequence token count is bounded and fits in int32
 		resultData, err := e.client.DoPutTensor(ctx, tokenData, []int32{int32(len(seqTokens))}, meta)
 		if err != nil {
 			for j := 0; j < idx; j++ {

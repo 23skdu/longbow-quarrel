@@ -257,7 +257,7 @@ func (e *cudaEngine) SwapModel(newModelPath string, newConfig config.Config) err
 	}
 
 	if e.model != nil {
-		e.model.Close()
+		_ = e.model.Close()
 		e.model = nil
 	}
 
