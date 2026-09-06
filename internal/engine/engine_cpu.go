@@ -486,10 +486,6 @@ func (e *CPUEngine) forward(tokens []int) []float32 {
 	return logits
 }
 
-func (e *CPUEngine) applyLayerCPU(input []float32, layerIdx int) []float32 {
-	return ApplyLayerCPU(e.weights, input, layerIdx, e.config)
-}
-
 func rmsNormCPU(input, weight []float32, eps float32) []float32 {
 	result := make([]float32, len(input))
 	simd.RMSNorm(input, weight, result, 1, len(input), eps)
