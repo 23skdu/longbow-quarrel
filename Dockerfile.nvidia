@@ -49,6 +49,12 @@ RUN go mod download
 # Copy source code
 COPY . .
 
+# Compile CUDA kernels to static lib (matches Makefile target
+# internal/device/libcuda_kernels.a; required by #cgo -lcuda_kernels)
+RUN nvcc -c -O3 -Xcompiler -fPIC internal/device/cuda_kernels.cu -o internal/device/cuda_kernels.o && \
+    ar rcs internal/device/libcuda_kernels.a internal/device/cuda_kernels.o && \
+    rm -f internal/device/cuda_kernels.o
+
 # Build with CUDA + NCCL support
 RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -tags "cuda,nccl" \
     -o quarrel-nvidia ./cmd/quarrel
@@ -66,16 +72,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Copy CUDA library stubs for runtime linking
+# Copy CUDA runtime libs for linking
 COPY --from=cuda-builder /usr/local/cuda/lib64/libcudart.so* /usr/local/cuda/lib64/
-COPY --from=cuda-builder /usr/local/cuda/lib64/libcuda.so* /usr/lib/x86_64-linux-gnu/
 
 # Copy NCCL library
 COPY --from=cuda-builder /usr/lib/x86_64-linux-gnu/libnccl.so* /usr/lib/x86_64-linux-gnu/
 
-# Copy the binary and kernels
+# Copy the binary and statically-linked kernel archive (for reference/debugging)
 COPY --from=cuda-builder /app/quarrel-nvidia ./quarrel
-COPY --from=cuda-builder /app/internal/device/libcuda_kernels.so /usr/local/lib/libcuda_kernels.so
+COPY --from=cuda-builder /app/internal/device/libcuda_kernels.a /usr/local/lib/libcuda_kernels.a
 
 # Set library path
 ENV LD_LIBRARY_PATH=/usr/local/lib:/usr/local/cuda/lib64:/usr/lib/x86_64-linux-gnu

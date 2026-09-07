@@ -14,23 +14,31 @@ WORKDIR /src
 RUN apk add --no-cache ca-certificates git build-base
 
 # Copy go.mod and go.sum first for better caching
+# NOTE: cmd/webui is a separate Go module (cmd/webui/go.mod) with
+# `replace github.com/23skdu/longbow-quarrel => ../..`, so both the
+# root module and the webui module must be copied before building.
 COPY go.mod go.sum* ./
+COPY cmd/webui/go.mod cmd/webui/go.sum* ./cmd/webui/
 
 RUN go mod download
 
 # Copy the rest of the source code
 COPY . .
 
-# Build the webui binary with CUDA support
-RUN CGO_ENABLED=1 GOOS=$TARGETOS GOARCH=$TARGETARCH \
-    go build -tags "webui,cuda" \
-    -ldflags="-s -w -linkmode=external -extldflags=-static" \
-    -o /out/webui ./cmd/webui
+# Build the webui binary from its own module.
+# NOTE: the CUDA-tagged binary requires the CUDA toolkit; the default
+# alpine builder below produces the CPU-only binary used by `runtime-cpu`.
+# For a CUDA-enabled webui, build with -tags "webui,cuda" in a
+# nvidia/cuda:12.4.0-devel-ubuntu22.04 builder (see Dockerfile.nvidia).
+RUN cd cmd/webui && CGO_ENABLED=1 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+    go build -tags "webui" \
+    -ldflags="-s -w" \
+    -o /out/webui .
 
 # =============================================================================
-# Stage 2: Runtime
+# Stage 2: Runtime (CUDA)
 # =============================================================================
-FROM --platform=$TARGETPLATFORM nvidia/cuda:12.2-runtime-ubuntu22.04 AS runtime
+FROM --platform=$TARGETPLATFORM nvidia/cuda:12.4.0-runtime-ubuntu22.04 AS runtime
 
 ARG WEBUI_VERSION=dev
 
@@ -38,10 +46,11 @@ LABEL maintainer="Longbow-Quarrel <dev@longbow.example.com>"
 LABEL description="Longbow-Quarrel WebUI - LLM Inference Engine Web Interface"
 LABEL version="${WEBUI_VERSION}"
 
-# Install runtime dependencies
+# Install runtime dependencies (align with Dockerfile.nvidia: CUDA 12.4 + cuDNN 9)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
-    libcudnn8 \
+    curl \
+    libcudnn9-cuda-12 \
     libnccl2 \
     && rm -rf /var/lib/apt/lists/*
 
@@ -78,13 +87,15 @@ USER quarrel
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:${WEBUI_PORT}/healthz || exit 1
+    CMD curl -f http://localhost:8080/healthz || exit 1
 
 # Entrypoint
 ENTRYPOINT ["webui"]
 
 # Default command
-CMD ["--port", "${WEBUI_PORT}", "--metrics-port", "${WEBUI_METRICS_PORT}", "--host", "${WEBUI_HOST}"]
+# NOTE: exec-form CMD does not expand ${VAR}; use fixed defaults here.
+# Override at runtime: docker run ... webui --port 8080 --metrics-port 9090 --host 0.0.0.0
+CMD ["--port", "8080", "--metrics-port", "9090", "--host", "0.0.0.0"]
 
 # =============================================================================
 # Stage 3: CPU-only Runtime (alternative)
@@ -132,10 +143,10 @@ USER quarrel
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:${WEBUI_PORT}/healthz || exit 1
+    CMD curl -f http://localhost:8080/healthz || exit 1
 
 # Entrypoint
 ENTRYPOINT ["webui"]
 
-# Default command
-CMD ["--port", "${WEBUI_PORT}", "--metrics-port", "${WEBUI_METRICS_PORT}", "--host", "${WEBUI_HOST}"]
+# Default command (see note above: fixed defaults, override at runtime)
+CMD ["--port", "8080", "--metrics-port", "9090", "--host", "0.0.0.0"]

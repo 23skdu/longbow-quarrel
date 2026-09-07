@@ -1,10 +1,9 @@
-version: "3.8"
-
+# NOTE: requires Dockerfile.nvidia (CUDA 12.4.0). See Makefile `docker-nvidia` target.
 services:
   quarrel-cuda:
     build:
       context: .
-      dockerfile: Dockerfile.cuda
+      dockerfile: Dockerfile.nvidia
     image: longbow-quarrel:cuda
     container_name: quarrel-cuda
     runtime: nvidia
@@ -31,7 +30,7 @@ services:
   quarrel-cuda-interactive:
     build:
       context: .
-      dockerfile: Dockerfile.cuda
+      dockerfile: Dockerfile.nvidia
     image: longbow-quarrel:cuda
     container_name: quarrel-interactive
     runtime: nvidia

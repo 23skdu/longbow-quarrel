@@ -33,9 +33,12 @@ RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build \
 # -----------------------------------------------------------------------------
 # Runtime Stage: Minimal CPU Runtime
 # -----------------------------------------------------------------------------
-FROM alpine:latest
+FROM alpine:3.19
 
 WORKDIR /app
+
+# Runtime deps for CGO binary
+RUN apk add --no-cache ca-certificates libstdc++
 
 # Copy binary
 COPY --from=cpu-builder /app/quarrel-cpu ./quarrel

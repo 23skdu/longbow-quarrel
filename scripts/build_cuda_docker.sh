@@ -20,12 +20,12 @@ fi
 # Build the image
 echo ""
 echo "[1/3] Building CUDA image..."
-docker build -f Dockerfile.cuda -t "$IMAGE_NAME" .
+docker build -f Dockerfile.nvidia -t "$IMAGE_NAME" .
 
 # Verify nvidia runtime
 echo ""
 echo "[2/3] Testing NVIDIA runtime..."
-docker run --rm --gpus all nvidia/cuda:12.4-runtime-ubuntu22.04 nvidia-smi
+docker run --rm --gpus all nvidia/cuda:12.4.0-runtime-ubuntu22.04 nvidia-smi
 
 # Create model directory if needed
 mkdir -p "$MODEL_PATH"

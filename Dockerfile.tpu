@@ -15,12 +15,13 @@ FROM ubuntu:22.04 AS tpu-builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    golang-go \
     git \
     build-essential \
     pkg-config \
     wget \
     curl \
+    python3 \
+    python3-pip \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Go 1.27 for XLA compatibility
@@ -34,7 +35,9 @@ ENV PATH=/usr/local/go/bin:$PATH \
 
 # Install JAX with TPU support (includes libtpu)
 # JAX provides the TPU XLA backend
-RUN pip install --no-cache-dir jax[tpu]>=0.4.20 -f https://storage.googleapis.com/jax-releases/jax_lib.html
+# NOTE: libtpu0 is not in vanilla ubuntu:22.04 repos; install from
+# Google Cloud TPU repo or rely on the pip jax[tpu] wheel's bundled libtpu.
+RUN pip3 install --no-cache-dir "jax[tpu]==0.4.26" -f https://storage.googleapis.com/jax-releases/jax_lib.html
 
 # XLA/TPU environment setup
 ENV LIBTPU_INIT_ARGS="force_authoritative=true" \
@@ -60,14 +63,16 @@ RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -tags tpu \
 FROM ubuntu:22.04
 
 # Install TPU runtime dependencies
+# NOTE: libtpu0 requires Google's TPU apt repo; see
+# https://cloud.google.com/tpu/docs/setup. The pip jax[tpu] wheel
+# already bundles libtpu, so the apt package is optional.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.10 \
     python3-pip \
-    libtpu0 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install JAX runtime (libtpu)
-RUN pip3 install --no-cache-dir jax[tpu]>=0.4.20 -f https://storage.googleapis.com/jax-releases/jax_lib.html
+RUN pip3 install --no-cache-dir "jax[tpu]==0.4.26" -f https://storage.googleapis.com/jax-releases/jax_lib.html
 
 # XLA/TPU environment setup
 ENV LIBTPU_INIT_ARGS="force_authoritative=true" \

@@ -5,7 +5,15 @@
 # Uses Apple Metal for GPU acceleration on Apple Silicon.
 #
 # Note: This build is designed to run on macOS (darwin/arm64).
-# Build on Linux with cross-compiler or on macOS directly.
+# Linux containers CANNOT execute darwin binaries. This Dockerfile
+# cross-compiles the binary; the runtime stage below is only a
+# carrier for artifact extraction (use `docker build --output` or
+# `docker cp`). For production use, build natively on macOS:
+#   CGO_ENABLED=1 go build -o quarrel-metal ./cmd/quarrel
+#
+# Cross-compiling from Linux additionally requires osxcross
+# (o64-clang) + cctools (lipo) + macOS SDK, which are NOT installed
+# by default. Install them in your own builder image, or build on Mac.
 #
 # Build:    docker build -f Dockerfile.metal -t longbow-quarrel:metal .
 # Run:      docker run --device metal -v $(pwd)/models:/data longbow-quarrel:metal --model /data/model.gguf
@@ -13,14 +21,18 @@
 
 # -----------------------------------------------------------------------------
 # Build Stage: Metal Compilation (cross-compile from Linux amd64 to darwin arm64)
+# Requires osxcross (o64-clang) + macOS SDK - see note above.
 # -----------------------------------------------------------------------------
 FROM --platform=linux/amd64 golang:1.27.0-alpine AS metal-builder
 
 # Install build dependencies for cross-compilation
+# NOTE: o64-clang/lipo come from osxcross/cctools, not stock alpine.
+# Uncomment and point at your internal osxcross image to enable:
+#   COPY --from=osxcross-image /osxcross /osxcross
+#   ENV PATH=/osxcross/bin:$PATH
 RUN apk add --no-cache build-base git clang llvm
+RUN echo "WARNING: o64-clang (osxcross) + macOS SDK required for darwin cross-compile - see Dockerfile header" >&2
 
-# Cross-compile to Darwin arm64 with Metal support
-# Note: Requires proper Darwin SDK and Metal headers for production builds
 WORKDIR /app
 
 # Copy go mod files
@@ -31,31 +43,15 @@ RUN go mod download
 COPY . .
 
 # Build with CGO for Metal (darwin/arm64)
-RUN CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 CC=o64-clang go build -o quarrel-metal ./cmd/quarrel
+# Requires CC=o64-clang from osxcross; plain clang cannot target darwin.
+RUN if ! command -v o64-clang >/dev/null 2>&1; then echo "ERROR: o64-clang not found. Install osxcross or build natively on macOS (see header)." >&2; exit 1; fi && \
+    CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 CC=o64-clang go build -o quarrel-metal ./cmd/quarrel
 
 # -----------------------------------------------------------------------------
-# Build Stage: macOS Universal Binary (arm64 + x86_64)
+# Runtime Stage: Artifact carrier (darwin binary cannot execute on Linux)
+# Extract with: docker create --name m longbow-quarrel:metal && docker cp m:/app/quarrel ./quarrel-metal
 # -----------------------------------------------------------------------------
-FROM --platform=linux/amd64 golang:1.27.0-alpine AS universal-builder
-
-RUN apk add --no-cache build-base git
-
-WORKDIR /app
-
-COPY go.mod go.sum ./
-RUN go mod download
-
-COPY . .
-
-# Build for both arm64 and x86_64, then combine into universal binary
-RUN CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 CC=o64-clang go build -o quarrel-metal-arm64 ./cmd/quarrel && \
-    CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 CC=o64-clang go build -o quarrel-metal-amd64 ./cmd/quarrel && \
-    lipo -create -arch arm64 quarrel-metal-arm64 -arch x86_64 quarrel-metal-amd64 -output quarrel-metal
-
-# -----------------------------------------------------------------------------
-# Runtime Stage: Minimal Runtime
-# -----------------------------------------------------------------------------
-FROM alpine:latest
+FROM alpine:3.19
 
 WORKDIR /app
 
