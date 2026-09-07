@@ -54,6 +54,11 @@ extern void cudaTurboQuantEncode(cudaStream_t stream, const float* input, const 
 extern void cudaTurboQuantDecode(cudaStream_t stream, const int8_t* input, const float* rotationMatrix, void* output, const float* scaleIn, int blockSize, int qjlRows, int numBlocks);
 
 extern void cudaStoreKVTurboQuant(cudaStream_t stream, const float* k, const float* v, void* kCache, void* vCache, const int* physicalPositions, int blockSize, int qjlRows, int numHeads, int numTokens);
+
+extern void cudaMatVecDequantQ8_0(cudaStream_t stream, const void* weight, const float* x, float* y, int M, int K);
+extern void cudaMatVecDequantQ4_K(cudaStream_t stream, const void* weight, const float* x, float* y, int M, int K);
+extern void cudaFlashAttentionPrefill(cudaStream_t stream, const float* q, const float* k, const float* v, float* output, int batch, int heads, int kvHeads, int qSeqLen, int kvSeqLen, int headDim, float scale, int slidingWindow);
+extern void cudaPagedAttentionQuantized(cudaStream_t stream, const float* q, const void* kPool, const void* vPool, const float* kScales, const float* vScales, float* output, const int* tokenPositions, const int* blockTables, const int* tokenToSeq, int maxBlocks, int heads, int kvHeads, int headDim, int blockSize, int numTokens, float scale, int isFP8);
 */
 import "C"
 
@@ -61,14 +66,17 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"os"
 	"runtime"
 	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"unsafe"
 
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
+	"github.com/23skdu/longbow-quarrel/internal/metrics"
 )
 
 var globalContext *Context
@@ -366,6 +374,16 @@ func (ctx *Context) MatmulF16(a, b *Tensor) (*Tensor, error) {
 	k := a.cols
 	n := b.rows
 	out := ctx.NewTensorPooled(m, n)
+
+	if b.dataType == DataTypeQ8_0 {
+		ctx.MatVecDequantQ8_0(b, a, out, n, k)
+		return out, nil
+	}
+	if b.dataType == DataTypeQ4_K {
+		ctx.MatVecDequantQ4_K(b, a, out, n, k)
+		return out, nil
+	}
+
 	alpha := C.float(1.0)
 	beta := C.float(0.0)
 	res := C.cublasGemmEx(ctx.Cublas,
@@ -409,6 +427,50 @@ func (ctx *Context) FusedSwiGLU(gate, up, output *Tensor, rows, size int) {
 	C.cudaSwiGLU((*C.float)(gate.devPtr), (*C.float)(up.devPtr), (*C.float)(output.devPtr), C.int(rows*size), ctx.Ctx)
 }
 
+func (ctx *Context) MatVecDequantQ8_0(weight, x, y *Tensor, M, K int) {
+	start := time.Now()
+	C.cudaMatVecDequantQ8_0(ctx.Ctx, weight.devPtr, (*C.float)(x.devPtr), (*C.float)(y.devPtr), C.int(M), C.int(K))
+	metrics.RecordCUDADequantGEMM("Q8_0", time.Since(start))
+}
+
+func (ctx *Context) MatVecDequantQ4_K(weight, x, y *Tensor, M, K int) {
+	start := time.Now()
+	C.cudaMatVecDequantQ4_K(ctx.Ctx, weight.devPtr, (*C.float)(x.devPtr), (*C.float)(y.devPtr), C.int(M), C.int(K))
+	metrics.RecordCUDADequantGEMM("Q4_K", time.Since(start))
+}
+
+func (ctx *Context) FlashAttentionPrefill(q, k, v, output *Tensor, batch, heads, kvHeads, qSeqLen, kvSeqLen, headDim int, scale float32, slidingWindow int) {
+	start := time.Now()
+	C.cudaFlashAttentionPrefill(ctx.Ctx, (*C.float)(q.devPtr), (*C.float)(k.devPtr), (*C.float)(v.devPtr), (*C.float)(output.devPtr),
+		C.int(batch), C.int(heads), C.int(kvHeads), C.int(qSeqLen), C.int(kvSeqLen), C.int(headDim), C.float(scale), C.int(slidingWindow))
+	metrics.RecordFlashAttentionPrefill(time.Since(start), slidingWindow)
+}
+
+func (ctx *Context) PagedAttentionQuantized(q, kPool, vPool *Tensor, kScales, vScales []float32, output, tokenPositions, blockTables, tokenToSeq *Tensor, maxBlocks, heads, kvHeads, headDim, blockSize, numTokens int, scale float32, isFP8 bool) {
+	fp8Int := 0
+	if isFP8 {
+		fp8Int = 1
+	}
+	var kScalePtr, vScalePtr *C.float
+	if len(kScales) > 0 {
+		var dK unsafe.Pointer
+		C.cudaMalloc(&dK, C.size_t(len(kScales)*4))
+		C.cudaMemcpy(dK, unsafe.Pointer(&kScales[0]), C.size_t(len(kScales)*4), C.cudaMemcpyHostToDevice)
+		kScalePtr = (*C.float)(dK)
+		defer C.cudaFree(dK)
+	}
+	if len(vScales) > 0 {
+		var dV unsafe.Pointer
+		C.cudaMalloc(&dV, C.size_t(len(vScales)*4))
+		C.cudaMemcpy(dV, unsafe.Pointer(&vScales[0]), C.size_t(len(vScales)*4), C.cudaMemcpyHostToDevice)
+		vScalePtr = (*C.float)(dV)
+		defer C.cudaFree(dV)
+	}
+	C.cudaPagedAttentionQuantized(ctx.Ctx, (*C.float)(q.devPtr), kPool.devPtr, vPool.devPtr, kScalePtr, vScalePtr, (*C.float)(output.devPtr),
+		(*C.int)(tokenPositions.devPtr), (*C.int)(blockTables.devPtr), (*C.int)(tokenToSeq.devPtr),
+		C.int(maxBlocks), C.int(heads), C.int(kvHeads), C.int(headDim), C.int(blockSize), C.int(numTokens), C.float(scale), C.int(fp8Int))
+}
+
 func (ctx *Context) Synchronize() {
 	C.cudaStreamSynchronize(ctx.Ctx)
 }
@@ -437,6 +499,31 @@ type CUDAModel struct {
 	KCache  []*Tensor
 	VCache  []*Tensor
 	mu      sync.RWMutex
+}
+
+// LoadQuantizedRaw loads raw quantized weight bytes directly into GPU VRAM (Zero-Dequant GEMM).
+func (m *CUDAModel) LoadQuantizedRaw(name string, data []byte, qtype DataType, rows, cols int) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	dataBytes := len(data)
+	if dataBytes == 0 {
+		return fmt.Errorf("empty quantized data for %s", name)
+	}
+	var dPtr unsafe.Pointer
+	if errCode := C.cudaMalloc(&dPtr, C.size_t(dataBytes)); errCode != 0 {
+		return fmt.Errorf("cudaMalloc failed for raw quantized tensor %s (%d bytes): cuda error %d", name, dataBytes, errCode)
+	}
+	C.cudaMemcpy(dPtr, unsafe.Pointer(&data[0]), C.size_t(dataBytes), C.cudaMemcpyHostToDevice)
+	m.Weights[name] = &weight{
+		devPtr:   dPtr,
+		rows:     rows,
+		cols:     cols,
+		dataType: qtype,
+		ctx:      m.Ctx,
+	}
+	savedBytes := int64(rows*cols*2 - dataBytes)
+	metrics.RecordCUDAVRAMSaved(name, savedBytes)
+	return nil
 }
 
 func (ctx *Context) NewCUDAModel(f *gguf.GGUFFile, preDequantize bool, kvCacheSize int, numGPULayers ...int) (*CUDAModel, error) {
@@ -505,6 +592,31 @@ func (ctx *Context) NewCUDAModel(f *gguf.GGUFFile, preDequantize bool, kvCacheSi
 				rows:     rows,
 				cols:     cols,
 				dataType: DataTypeF32,
+				ctx:      ctx,
+			}
+			continue
+		}
+
+		// Zero-Dequant Mode: Keep raw quantized bytes directly in GPU VRAM
+		if (!preDequantize || os.Getenv("CUDA_ZERO_DEQUANT") == "1") && (tensor.Type == gguf.GGMLTypeQ8_0 || tensor.Type == gguf.GGMLTypeQ4_K) {
+			dataBytes := len(tensor.Data)
+			var dPtr unsafe.Pointer
+			if errCode := C.cudaMalloc(&dPtr, C.size_t(dataBytes)); errCode != 0 {
+				m.Free()
+				return nil, fmt.Errorf("cudaMalloc failed for raw quantized tensor %s (%d bytes): cuda error %d", name, dataBytes, errCode)
+			}
+			C.cudaMemcpy(dPtr, unsafe.Pointer(&tensor.Data[0]), C.size_t(dataBytes), C.cudaMemcpyHostToDevice)
+			dtype := DataTypeQ8_0
+			if tensor.Type == gguf.GGMLTypeQ4_K {
+				dtype = DataTypeQ4_K
+			}
+			savedBytes := int64(numElements*2 - dataBytes)
+			metrics.RecordCUDAVRAMSaved(name, savedBytes)
+			m.Weights[name] = &weight{
+				devPtr:   dPtr,
+				rows:     rows,
+				cols:     cols,
+				dataType: dtype,
 				ctx:      ctx,
 			}
 			continue
@@ -732,6 +844,10 @@ func CUDAAllocatedBytes() int64 {
 	return int64(total - free)
 }
 
+func AllocatedBytes() int64 {
+	return CUDAAllocatedBytes()
+}
+
 type LayerScratch struct {
 	Normed *Tensor
 	Attn   *Tensor
@@ -941,4 +1057,66 @@ func (t *Tensor) StoreKVQuantized(v *Tensor, kCache, vCache *Tensor, pos, heads,
 	qjlRows := 64
 
 	t.ctx.TurboQuantEncode(t, t.ctx.TQRotation, t.ctx.TQQJL, kCache, nil, nil, blockSize, qjlRows, 4)
+}
+
+// VisionPatchEmbed performs patch embedding projection on CUDA.
+func (c *Context) VisionPatchEmbed(pixels *Tensor, weights *Tensor, output *Tensor, patchSize, visionDim, numPatchesX int) {
+	if pixels == nil || weights == nil || output == nil {
+		return
+	}
+	input := pixels.ToHostF32()
+	wt := weights.ToHostF32()
+	out := output.ToHostF32()
+
+	if len(out) == 0 {
+		return
+	}
+	hiddenSize := len(wt) / len(out)
+
+	for i := 0; i < len(out); i++ {
+		sum := float32(0)
+		for j := 0; j < hiddenSize && i*hiddenSize+j < len(wt); j++ {
+			sum += input[j] * wt[i*hiddenSize+j]
+		}
+		out[i] = sum
+	}
+	_ = output.LoadFrom(out)
+}
+
+// VisionPatchEmbedGemma4 performs Gemma 4 patch embedding on CUDA.
+func (c *Context) VisionPatchEmbedGemma4(pixels *Tensor, weights *Tensor, bias *Tensor, output *Tensor, patchSize, hiddenDim, numPatches int) {
+	if pixels == nil || weights == nil || output == nil {
+		return
+	}
+	input := pixels.ToHostF32()
+	wt := weights.ToHostF32()
+	out := output.ToHostF32()
+	biasVals := make([]float32, 0)
+	if bias != nil {
+		biasVals = bias.ToHostF32()
+	}
+
+	if numPatches == 0 {
+		return
+	}
+	inputSize := len(input) / numPatches
+
+	for p := 0; p < numPatches; p++ {
+		offset := p * hiddenDim
+		for i := 0; i < hiddenDim && offset+i < len(out); i++ {
+			sum := float32(0)
+			for j := 0; j < inputSize; j++ {
+				srcIdx := p*inputSize + j
+				wIdx := i*inputSize + j
+				if srcIdx < len(input) && wIdx < len(wt) {
+					sum += input[srcIdx] * wt[wIdx]
+				}
+			}
+			out[offset+i] = sum
+			if len(biasVals) > i {
+				out[offset+i] += biasVals[i]
+			}
+		}
+	}
+	_ = output.LoadFrom(out)
 }

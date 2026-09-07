@@ -11,6 +11,9 @@ var (
 	hasAVX2      bool
 	hasAVX512    bool
 	hasAVXVNNI   bool
+	hasAMXTile   bool
+	hasAMXInt8   bool
+	hasAMXBF16   bool
 	hasFMA       bool
 	hasGFNI      bool
 	hasVAES      bool
@@ -41,7 +44,10 @@ func detectCPU() {
 
 	hasAVX2 = containsFlag(flags, "avx2")
 	hasAVX512 = containsFlag(flags, "avx512f") && containsFlag(flags, "avx512bw")
-	hasAVXVNNI = containsFlag(flags, "avx_vnni")
+	hasAVXVNNI = containsFlag(flags, "avx_vnni") || containsFlag(flags, "avx512_vnni")
+	hasAMXTile = containsFlag(flags, "amx_tile")
+	hasAMXInt8 = containsFlag(flags, "amx_int8")
+	hasAMXBF16 = containsFlag(flags, "amx_bf16")
 	hasFMA = containsFlag(flags, "fma")
 	hasGFNI = containsFlag(flags, "gfni")
 	hasVAES = containsFlag(flags, "vaes")
@@ -168,4 +174,20 @@ func GetCPULevel() int {
 		detectCPU()
 	}
 	return cpuLevel
+}
+
+// HasAMX returns whether Intel Advanced Matrix Extensions (AMX) are available.
+func HasAMX() bool {
+	if !cpuInitDone {
+		detectCPU()
+	}
+	return hasAMXTile && (hasAMXInt8 || hasAMXBF16)
+}
+
+// HasAVXVNNI returns whether AVX VNNI instructions are available.
+func HasAVXVNNI() bool {
+	if !cpuInitDone {
+		detectCPU()
+	}
+	return hasAVXVNNI
 }

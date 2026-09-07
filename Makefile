@@ -61,7 +61,7 @@ cpu-linux-arm64:
 cpu-darwin-amd64:
 	@echo "Building $(BINARY_NAME) for darwin/amd64 (CPU)..."
 	CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 $(GO) build -ldflags "$(LDFLAGS) -X main.Version=$(VERSION) -X main.BuildTime=$(BUILD_TIME)" \
-		-destdir=$(BIN_DIR) -o $(BIN_DIR)/$(BINARY_NAME)-darwin-amd64 ./cmd/quarrel
+		-o $(BIN_DIR)/$(BINARY_NAME)-darwin-amd64 ./cmd/quarrel
 
 cpu-darwin-arm64:
 	@echo "Building $(BINARY_NAME) for darwin/arm64 (CPU)..."
@@ -221,13 +221,52 @@ fmt:
 # =============================================================================
 
 # Build all binaries for release
-release: release-linux release-darwin release-docker
+release: release-linux release-darwin changelog package-dist
 
-release-linux: cpu-linux-amd64 cpu-linux-arm64 nvidia-cuda tpu-xla
+release-linux: cpu-linux-amd64 cpu-linux-arm64 nvidia-cuda
 
-release-darwin: cpu-darwin-amd64 cpu-darwin-arm64 metal-darwin-arm64
+release-darwin: cpu-darwin-amd64 cpu-darwin-arm64
 
 release-docker: docker-all
+
+# Comprehensive test runner target
+test-all:
+	./scripts/run_all_tests.sh
+
+# Changelog generator
+changelog:
+	@echo "Generating release changelog..."
+	@mkdir -p $(DIST_DIR)
+	@echo "# Release $(VERSION) ($(BUILD_TIME))" > $(DIST_DIR)/CHANGELOG.md
+	@echo "" >> $(DIST_DIR)/CHANGELOG.md
+	@echo "## Highlights" >> $(DIST_DIR)/CHANGELOG.md
+	@echo "- Native CUDA Zero-Dequant GEMM for Q4_K and Q8_0 weights" >> $(DIST_DIR)/CHANGELOG.md
+	@echo "- CUDA Prefill Flash Attention-2 with Gemma 4 / Mistral Sliding Window support" >> $(DIST_DIR)/CHANGELOG.md
+	@echo "- Continuous Batching & Paged Attention with dynamic preemption" >> $(DIST_DIR)/CHANGELOG.md
+	@echo "- Cross-engine Asymmetric Speculative Decoding with EMA draft length adaptation" >> $(DIST_DIR)/CHANGELOG.md
+	@echo "- Multiplatform Vision-Language (VLM) pipeline & OpenAI-compatible /v1/chat/completions" >> $(DIST_DIR)/CHANGELOG.md
+	@echo "- Grammar-constrained PDA JSON schema and regex token-mask sampling" >> $(DIST_DIR)/CHANGELOG.md
+	@echo "- AVX-512 VNNI and Intel AMX quantized dot product SIMD acceleration" >> $(DIST_DIR)/CHANGELOG.md
+	@echo "- FP8 and Q8_0 quantized Paged KV cache with dynamic per-block scale tracking" >> $(DIST_DIR)/CHANGELOG.md
+	@echo "- Distributed Pipeline & Tensor Parallelism over Arrow Flight RPC" >> $(DIST_DIR)/CHANGELOG.md
+	@echo "- Proactive memory governor & Prometheus telemetry instrumentation" >> $(DIST_DIR)/CHANGELOG.md
+	@echo "" >> $(DIST_DIR)/CHANGELOG.md
+	@echo "## Commits" >> $(DIST_DIR)/CHANGELOG.md
+	@git log -n 50 --pretty=format:"* %s (%h)" >> $(DIST_DIR)/CHANGELOG.md 2>/dev/null || echo "* Initial v0.4.0 commit" >> $(DIST_DIR)/CHANGELOG.md
+	@echo "" >> $(DIST_DIR)/CHANGELOG.md
+
+# Package distribution tarballs with SHA256 checksums
+package-dist:
+	@echo "Packaging release distribution into $(DIST_DIR)..."
+	@mkdir -p $(DIST_DIR)
+	@for f in $(BIN_DIR)/$(BINARY_NAME)-*; do \
+		if [ -f "$$f" ]; then \
+			bname=$$(basename "$$f"); \
+			tar -czf "$(DIST_DIR)/$${bname}-$(VERSION).tar.gz" -C "$(BIN_DIR)" "$$bname"; \
+		fi; \
+	done
+	@cd $(DIST_DIR) && (sha256sum *.tar.gz > checksums.txt 2>/dev/null || shasum -a 256 *.tar.gz > checksums.txt 2>/dev/null || true)
+	@echo "Release artifacts packaged in $(DIST_DIR)/"
 
 # Build with race detector
 race:

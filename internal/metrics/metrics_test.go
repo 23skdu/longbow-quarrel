@@ -219,4 +219,22 @@ func TestRecordAdditionalMetrics(t *testing.T) {
 	RecordTurboQuantLatency(0.015)
 }
 
+func TestRecordV040Metrics(t *testing.T) {
+	RecordCUDADequantGEMM("Q4_K", 2*time.Millisecond)
+	RecordCUDAVRAMSaved("gemma-4", 1024*1024*1024)
+	RecordFlashAttentionPrefill(15*time.Millisecond, 512)
+	RecordContinuousBatchIteration(8, 12*time.Millisecond, true)
+	RecordContinuousBatchIteration(4, 8*time.Millisecond, false)
+	RecordSpeculativeStep(5, 4, 6)
+	RecordVLMEncoding(256, 30*time.Millisecond)
+	RecordGrammarFilter(500 * time.Microsecond)
+	RecordVNNIDotProduct(100 * time.Microsecond)
+	RecordKVCacheQuantization("FP8", 32, 2.0)
+	RecordDistributedTransfer("egress", "arrow_flight", 4096, 5*time.Millisecond)
+	RecordMemoryPressureEvent("vram", "defrag", 0.89)
+	RecordTTFTLatency(45 * time.Millisecond)
+	RecordInterTokenLatency(12 * time.Millisecond)
+}
+
+
 

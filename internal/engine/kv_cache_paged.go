@@ -52,6 +52,10 @@ type PagedKVCache struct {
 	tqQJL      *device.Tensor
 	qjlRows    int
 
+	// Dynamic Block Scales for quantized KV cache (FP8 / Q8_0)
+	kScales [][]float32
+	vScales [][]float32
+
 	initialized bool
 }
 
@@ -130,16 +134,20 @@ func (c *PagedKVCache) Init(ctx *device.Context, config config.Config) error {
 	}
 
 	allocLayers := c.layers
-	if config.NumGPULayers >= 0 && config.NumGPULayers < c.layers {
+	if config.NumGPULayers > 0 && config.NumGPULayers < c.layers && ctx.DeviceID() >= 0 {
 		allocLayers = config.NumGPULayers
 	}
 
 	for i := 0; i < allocLayers; i++ {
 		var k, v *device.Tensor
-		if c.Precision == device.DataTypeTQ1_0 || c.Precision == device.DataTypeTQ2_0 {
+		switch c.Precision {
+		case device.DataTypeTQ1_0, device.DataTypeTQ2_0, device.DataTypeQ8_0:
 			k = ctx.NewTensorWithType(capacity, kvDim, device.DataTypeINT8)
 			v = ctx.NewTensorWithType(capacity, kvDim, device.DataTypeINT8)
-		} else {
+		case device.DataTypeFP8:
+			k = ctx.NewTensorWithType(capacity, kvDim, device.DataTypeFP8)
+			v = ctx.NewTensorWithType(capacity, kvDim, device.DataTypeFP8)
+		default:
 			k = ctx.NewTensorFP32(capacity, kvDim)
 			v = ctx.NewTensorFP32(capacity, kvDim)
 		}
@@ -150,6 +158,17 @@ func (c *PagedKVCache) Init(ctx *device.Context, config config.Config) error {
 		}
 		c.kPools[i] = k
 		c.vPools[i] = v
+	}
+
+	c.kScales = make([][]float32, allocLayers)
+	c.vScales = make([][]float32, allocLayers)
+	for i := 0; i < allocLayers; i++ {
+		c.kScales[i] = make([]float32, c.totalBlocks)
+		c.vScales[i] = make([]float32, c.totalBlocks)
+		for b := 0; b < c.totalBlocks; b++ {
+			c.kScales[i][b] = 1.0
+			c.vScales[i][b] = 1.0
+		}
 	}
 
 	// Initialize TurboQuant matrices from device context or fallbacks if available
@@ -640,8 +659,15 @@ func (c *PagedKVCache) Update(seqID string, layer, pos int, k, v *device.Tensor)
 	// But `TensorKVCache` uses `pos` logic.
 	// `PagedKVCache` calculates `physPos`.
 
+	if layer < 0 || layer >= len(c.kPools) {
+		return fmt.Errorf("layer %d out of bounds (max %d)", layer, len(c.kPools)-1)
+	}
+
 	kTarget := c.kPools[layer]
 	vTarget := c.vPools[layer]
+	if kTarget == nil || vTarget == nil {
+		return nil
+	}
 
 	// We treat the pool as a large contiguous buffer.
 	// Passing `physPos` works.
@@ -652,10 +678,16 @@ func (c *PagedKVCache) Update(seqID string, layer, pos int, k, v *device.Tensor)
 		return fmt.Errorf("physical position %d exceeds total KV cache capacity %d", physPos, capacity)
 	}
 
-	// Dynamic KV Cache Quantization downcast (FP8/INT8)
+	// Dynamic KV Cache Quantization downcast (FP8/INT8/Q8_0)
 	if kTarget.DataType() == device.DataTypeINT8 || kTarget.DataType() == device.DataTypeFP8 {
-		// Mock: Downcast directly using StoreKVQuantized wrapper (to be added in tensor.go)
 		k.StoreKVQuantized(v, kTarget, vTarget, physPos, c.kvHeads, c.headDim, capacity)
+		precisionStr := "FP8"
+		compRatio := 4.0
+		if kTarget.DataType() == device.DataTypeINT8 {
+			precisionStr = "Q8_0"
+			compRatio = 3.8
+		}
+		metrics.RecordKVCacheQuantization(precisionStr, 1, compRatio)
 	} else {
 		// Default FP16 Store
 		k.StoreKV(v, kTarget, vTarget, physPos, c.kvHeads, c.headDim, capacity)
@@ -861,4 +893,24 @@ func (c *PagedKVCache) Free() {
 		c.blockTablesDevice = nil
 	}
 	c.initialized = false
+}
+
+// GetBlockScales returns the scale factors for a given layer's quantized KV blocks.
+func (c *PagedKVCache) GetBlockScales(layer int) (kScales, vScales []float32) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if layer >= 0 && layer < len(c.kScales) {
+		return c.kScales[layer], c.vScales[layer]
+	}
+	return nil, nil
+}
+
+// SetBlockScale updates the scale factors for a specific physical block.
+func (c *PagedKVCache) SetBlockScale(layer int, blockID int32, kScale, vScale float32) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if layer >= 0 && layer < len(c.kScales) && int(blockID) >= 0 && int(blockID) < len(c.kScales[layer]) {
+		c.kScales[layer][blockID] = kScale
+		c.vScales[layer][blockID] = vScale
+	}
 }

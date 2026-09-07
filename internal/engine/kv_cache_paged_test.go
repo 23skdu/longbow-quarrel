@@ -89,3 +89,55 @@ func TestPagedKVCache_Lifecycle(t *testing.T) {
 	// Assuming it exists or I can add it/use ToHost() and cast.
 	// Float32 bits can be read as Int32.
 }
+
+func TestPagedKVCache_FP8_And_Q8(t *testing.T) {
+	ctx := device.NewContext()
+	defer ctx.Free()
+
+	// 1. Test FP8 Cache
+	cacheFP8 := &PagedKVCache{Precision: device.DataTypeFP8}
+	cfg := conf.Config{
+		KVHeads:    2,
+		HeadDim:    32,
+		Layers:     2,
+		WindowSize: 512,
+	}
+
+	if err := cacheFP8.Init(ctx, cfg); err != nil {
+		t.Fatalf("Init FP8 cache failed: %v", err)
+	}
+	defer cacheFP8.Free()
+
+	k := ctx.NewTensorFP32(1, 2*32)
+	v := ctx.NewTensorFP32(1, 2*32)
+	kHost := make([]float32, 64)
+	vHost := make([]float32, 64)
+	for i := range kHost {
+		kHost[i] = float32(i) * 0.1
+		vHost[i] = -float32(i) * 0.1
+	}
+	_ = k.LoadFrom(kHost)
+	_ = v.LoadFrom(vHost)
+
+	if err := cacheFP8.Update("seq-fp8", 0, 0, k, v); err != nil {
+		t.Fatalf("FP8 Update failed: %v", err)
+	}
+	if len(cacheFP8.blockTables["seq-fp8"]) != 1 {
+		t.Errorf("expected 1 block in FP8 block table, got %d", len(cacheFP8.blockTables["seq-fp8"]))
+	}
+
+	// 2. Test Q8_0 Cache
+	cacheQ8 := &PagedKVCache{Precision: device.DataTypeQ8_0}
+	if err := cacheQ8.Init(ctx, cfg); err != nil {
+		t.Fatalf("Init Q8 cache failed: %v", err)
+	}
+	defer cacheQ8.Free()
+
+	if err := cacheQ8.Update("seq-q8", 0, 0, k, v); err != nil {
+		t.Fatalf("Q8 Update failed: %v", err)
+	}
+	if len(cacheQ8.blockTables["seq-q8"]) != 1 {
+		t.Errorf("expected 1 block in Q8 block table, got %d", len(cacheQ8.blockTables["seq-q8"]))
+	}
+}
+

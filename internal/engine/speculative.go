@@ -8,24 +8,40 @@ import (
 	"sync"
 	"time"
 
+	"github.com/23skdu/longbow-quarrel/internal/config"
+	"github.com/23skdu/longbow-quarrel/internal/device"
 	"github.com/23skdu/longbow-quarrel/internal/logger"
 	"github.com/23skdu/longbow-quarrel/internal/metrics"
 )
 
 // SpeculativeManager orchestrates draft-model generation logic.
 type SpeculativeManager struct {
-	mu           sync.Mutex
-	targetEngine Engine
-	draftEngine  Engine
-	rng          *rand.Rand
+	mu            sync.Mutex
+	targetEngine  Engine
+	draftEngine   Engine
+	rng           *rand.Rand
+	currentDraftK int
+	acceptanceEMA float64
 }
 
 func NewSpeculativeManager(target, draft Engine) *SpeculativeManager {
 	return &SpeculativeManager{
-		targetEngine: target,
-		draftEngine:  draft,
-		rng:          rand.New(rand.NewSource(time.Now().UnixNano())), // #nosec G404 -- math/rand is fine for speculative sampling
+		targetEngine:  target,
+		draftEngine:   draft,
+		rng:           rand.New(rand.NewSource(time.Now().UnixNano())), // #nosec G404 -- math/rand is fine for speculative sampling
+		currentDraftK: 4,
+		acceptanceEMA: 0.65,
 	}
+}
+
+// GetDynamicDraftLength returns the current adaptive draft length.
+func (sm *SpeculativeManager) GetDynamicDraftLength() int {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if sm.currentDraftK < 1 {
+		sm.currentDraftK = 4
+	}
+	return sm.currentDraftK
 }
 
 // GenerateSpeculativeMultiPath performs continuous decoding using multiple parallel draft paths.
@@ -35,9 +51,18 @@ func (sm *SpeculativeManager) GenerateSpeculativeMultiPath(ctx context.Context, 
 	}
 
 	numPaths := seq.NumPaths
-	if numPaths < 1 { numPaths = 1 }
+	if numPaths < 1 {
+		numPaths = 1
+	}
+	sm.mu.Lock()
 	draftK := seq.DraftK
-	if draftK < 1 { draftK = 4 }
+	if draftK < 1 {
+		draftK = sm.currentDraftK
+	}
+	if draftK < 1 {
+		draftK = 4
+	}
+	sm.mu.Unlock()
 
 	currentPos := seq.Pos
 
@@ -48,17 +73,11 @@ func (sm *SpeculativeManager) GenerateSpeculativeMultiPath(ctx context.Context, 
 		candidates[i] = make([]int, 0, draftK)
 	}
 
-	// For simplicity in this implementation, we run draft sampling in a loop
-	// but using the DraftEngine's internal batching if it were exposed.
-	// Since the current Engine interface is sequence-oriented for Infer, 
-	// we will run N parallel inferences.
-	
 	var wg sync.WaitGroup
 	wg.Add(numPaths)
 	for p := 0; p < numPaths; p++ {
 		go func(pathIdx int) {
 			defer wg.Done()
-			// Each path gets its own stochastic sample
 			pathTokens := append([]int{}, seq.Tokens...)
 			for k := 0; k < draftK; k++ {
 				token, _, err := sm.draftEngine.InferWithLogits(pathTokens, 1, seq.Config)
@@ -66,27 +85,27 @@ func (sm *SpeculativeManager) GenerateSpeculativeMultiPath(ctx context.Context, 
 					logger.Log.Error("Draft path inference failed", "path", pathIdx, "error", err)
 					return
 				}
-				candidates[pathIdx] = append(candidates[pathIdx], token[0])
-				pathTokens = append(pathTokens, token[0])
+				if len(token) > 0 {
+					candidates[pathIdx] = append(candidates[pathIdx], token[0])
+					pathTokens = append(pathTokens, token[0])
+				}
 			}
 		}(p)
 	}
 	wg.Wait()
 
 	// 2. Target model evaluates all draft paths
-	// In a real implementation, we would pack all candidates into a single ForwardBatch call.
-	// For now, we'll implement the "Best Path" selection.
-	
 	bestAcceptedCount := 0
 	bestPathIdx := -1
 
 	for p := 0; p < numPaths; p++ {
-		if len(candidates[p]) == 0 { continue }
-		
-		// Evaluate this candidate path against the target model
+		if len(candidates[p]) == 0 {
+			continue
+		}
+
 		candidateTokens := append([]int{}, seq.Tokens...)
 		candidateTokens = append(candidateTokens, candidates[p]...)
-		
+
 		targetLogits, err := sm.targetEngine.ForwardDraft(candidateTokens)
 		if err != nil {
 			continue
@@ -111,22 +130,31 @@ func (sm *SpeculativeManager) GenerateSpeculativeMultiPath(ctx context.Context, 
 		if len(corrected) > 0 {
 			candidates[p] = append(candidates[p][:accepted], corrected[0])
 		}
-		
+
 		if accepted > bestAcceptedCount {
 			bestAcceptedCount = accepted
 			bestPathIdx = p
 		}
 	}
 
+	// Dynamic draft length adaptation
+	sm.mu.Lock()
+	accRate := float64(bestAcceptedCount) / float64(draftK)
+	sm.acceptanceEMA = 0.8*sm.acceptanceEMA + 0.2*accRate
+	if sm.acceptanceEMA > 0.8 && sm.currentDraftK < 8 {
+		sm.currentDraftK++
+	} else if sm.acceptanceEMA < 0.5 && sm.currentDraftK > 1 {
+		sm.currentDraftK--
+	}
+	dynamicLen := sm.currentDraftK
+	sm.mu.Unlock()
+
+	metrics.RecordSpeculativeStep(draftK, bestAcceptedCount, dynamicLen)
+
 	// 3. Finalize best path
 	if bestPathIdx != -1 && bestAcceptedCount > 0 {
 		seq.Tokens = append(seq.Tokens, candidates[bestPathIdx][:bestAcceptedCount]...)
 		seq.Pos = currentPos + bestAcceptedCount
-		
-		// Re-sync KV caches if needed (Handled by targetEngine.ForwardBatch in real loop)
-	} else {
-		// All paths rejected, sample 1 token from target normally
-		// (This logic will be moved into the runBatchLoop orchestrator)
 	}
 
 	return nil
@@ -135,8 +163,137 @@ func (sm *SpeculativeManager) GenerateSpeculativeMultiPath(ctx context.Context, 
 // GenerateSpeculative is kept for backward compatibility with single-path logic
 func (sm *SpeculativeManager) GenerateSpeculative(ctx context.Context, seq *Sequence) error {
 	seq.NumPaths = 1
-	seq.DraftK = 4 // Default
+	seq.DraftK = sm.GetDynamicDraftLength()
 	return sm.GenerateSpeculativeMultiPath(ctx, seq)
+}
+
+// AsymmetricSpeculativeEngine combines an arbitrary draft engine with a primary target engine.
+type AsymmetricSpeculativeEngine struct {
+	targetEngine Engine
+	draftEngine  Engine
+	manager      *SpeculativeManager
+}
+
+func NewAsymmetricSpeculativeEngine(target, draft Engine) *AsymmetricSpeculativeEngine {
+	return &AsymmetricSpeculativeEngine{
+		targetEngine: target,
+		draftEngine:  draft,
+		manager:      NewSpeculativeManager(target, draft),
+	}
+}
+
+func (e *AsymmetricSpeculativeEngine) Infer(tokens []int, count int, cfg SamplerConfig) ([]int, error) {
+	return e.InferWithCallback(tokens, count, cfg, nil)
+}
+
+func (e *AsymmetricSpeculativeEngine) InferWithLogits(tokens []int, count int, cfg SamplerConfig) ([]int, []float32, error) {
+	out, err := e.Infer(tokens, count, cfg)
+	return out, nil, err
+}
+
+func (e *AsymmetricSpeculativeEngine) InferWithCallback(tokens []int, count int, cfg SamplerConfig, callback func(int)) ([]int, error) {
+	currentTokens := append([]int{}, tokens...)
+	seq := &Sequence{
+		Tokens:   currentTokens,
+		Pos:      len(tokens),
+		DraftK:   e.manager.GetDynamicDraftLength(),
+		NumPaths: 2,
+		Config:   cfg,
+	}
+
+	generated := 0
+	ctx := context.Background()
+
+	for generated < count {
+		seq.DraftK = e.manager.GetDynamicDraftLength()
+		startLen := len(seq.Tokens)
+		if err := e.manager.GenerateSpeculativeMultiPath(ctx, seq); err != nil {
+			single, err2 := e.targetEngine.Infer(seq.Tokens, 1, cfg)
+			if err2 != nil {
+				return seq.Tokens[len(tokens):], err
+			}
+			if len(single) > 0 {
+				seq.Tokens = append(seq.Tokens, single[0])
+				if callback != nil {
+					callback(single[0])
+				}
+				generated++
+			}
+			continue
+		}
+
+		newTokens := len(seq.Tokens) - startLen
+		if newTokens > 0 {
+			for i := startLen; i < len(seq.Tokens); i++ {
+				if callback != nil {
+					callback(seq.Tokens[i])
+				}
+				generated++
+				if generated >= count {
+					break
+				}
+			}
+		} else {
+			single, err := e.targetEngine.Infer(seq.Tokens, 1, cfg)
+			if err != nil {
+				return seq.Tokens[len(tokens):], err
+			}
+			if len(single) > 0 {
+				seq.Tokens = append(seq.Tokens, single[0])
+				if callback != nil {
+					callback(single[0])
+				}
+				generated++
+			}
+		}
+	}
+
+	return seq.Tokens[len(tokens):], nil
+}
+
+func (e *AsymmetricSpeculativeEngine) InferWithCallbackLogits(tokens []int, count int, cfg SamplerConfig, tokenCallback func(int), logitsCallback func([]float32)) ([]int, error) {
+	return e.InferWithCallback(tokens, count, cfg, tokenCallback)
+}
+
+func (e *AsymmetricSpeculativeEngine) Config() config.Config {
+	return e.targetEngine.Config()
+}
+
+func (e *AsymmetricSpeculativeEngine) Close() {
+	if e.targetEngine != nil {
+		e.targetEngine.Close()
+	}
+	if e.draftEngine != nil {
+		e.draftEngine.Close()
+	}
+}
+
+func (e *AsymmetricSpeculativeEngine) SwapModel(modelPath string, cfg config.Config) error {
+	return e.targetEngine.SwapModel(modelPath, cfg)
+}
+
+func (e *AsymmetricSpeculativeEngine) LoadAdapter(path, id string) error {
+	return e.targetEngine.LoadAdapter(path, id)
+}
+
+func (e *AsymmetricSpeculativeEngine) GetSeqCachePos(seqID string) int {
+	return e.targetEngine.GetSeqCachePos(seqID)
+}
+
+func (e *AsymmetricSpeculativeEngine) ForwardDraft(tokens []int) ([][]float32, error) {
+	return e.targetEngine.ForwardDraft(tokens)
+}
+
+func (e *AsymmetricSpeculativeEngine) RollbackKV(seqID string, newPos int) error {
+	_ = e.targetEngine.RollbackKV(seqID, newPos)
+	if e.draftEngine != nil {
+		_ = e.draftEngine.RollbackKV(seqID, newPos)
+	}
+	return nil
+}
+
+func (e *AsymmetricSpeculativeEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, error) {
+	return e.targetEngine.ForwardBatch(desc)
 }
 
 func rejectSample(targetLogits []float32, draftToken int, _ SamplerConfig, rng *rand.Rand) (accepted bool, correctedToken int) {

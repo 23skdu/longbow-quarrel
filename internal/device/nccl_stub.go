@@ -10,19 +10,19 @@ import (
 // ncclCommHandle is a stub when NCCL is not available.
 type ncclCommHandle struct{}
 
-func ncclInit(rank, worldSize, deviceID int) (*ncclCommHandle, error) {
+func ncclInit(_, _, _ int) (*ncclCommHandle, error) {
 	return nil, fmt.Errorf("NCCL not available: build with nccl tag to enable")
 }
 
-func (h *ncclCommHandle) ncclAllReduce(sendBuf, recvBuf unsafe.Pointer, count int, stream unsafe.Pointer) error {
+func (h *ncclCommHandle) ncclAllReduce(_, _ unsafe.Pointer, _ int, _ unsafe.Pointer) error {
 	return fmt.Errorf("NCCL not available")
 }
 
-func (h *ncclCommHandle) ncclBroadcast(buff unsafe.Pointer, count int, root int, stream unsafe.Pointer) error {
+func (h *ncclCommHandle) ncclBroadcast(_ unsafe.Pointer, _ int, _ int, _ unsafe.Pointer) error {
 	return fmt.Errorf("NCCL not available")
 }
 
-func (h *ncclCommHandle) ncclAllGather(sendBuf, recvBuf unsafe.Pointer, count int, stream unsafe.Pointer) error {
+func (h *ncclCommHandle) ncclAllGather(_, _ unsafe.Pointer, _ int, _ unsafe.Pointer) error {
 	return fmt.Errorf("NCCL not available")
 }
 

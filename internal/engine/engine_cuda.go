@@ -774,7 +774,11 @@ func (e *cudaEngine) forward(token int, pos int, _ []int) ([]float32, error) {
 		}
 
 		scale := float32(1.0 / math.Sqrt(float64(headDim)))
-		ctx.FusedAttention(q, k, v, attnOut, kCache, vCache, 1, heads, 1, pos+1, headDim, scale, 1, windowSize)
+		if q.Rows() > 1 {
+			ctx.FlashAttentionPrefill(q, k, v, attnOut, 1, heads, kvHeads, q.Rows(), pos+q.Rows(), headDim, scale, windowSize)
+		} else {
+			ctx.FusedAttention(q, k, v, attnOut, kCache, vCache, 1, heads, 1, pos+1, headDim, scale, 1, windowSize)
+		}
 
 		// Cleanup intermediate projections
 		q.ReturnToPool()

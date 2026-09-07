@@ -1,16 +1,16 @@
-//go:build darwin && metal
-
 package vlm
 
 import (
 	"bytes"
 	"fmt"
-	"github.com/23skdu/longbow-quarrel/internal/device"
 	"image"
 	"image/color"
 	_ "image/jpeg"
 	_ "image/png"
+	"time"
 
+	"github.com/23skdu/longbow-quarrel/internal/device"
+	"github.com/23skdu/longbow-quarrel/internal/metrics"
 	"golang.org/x/image/draw"
 )
 
@@ -41,8 +41,13 @@ func NewVisionEncoder(ctx *device.Context, dim int, arch string) *VisionEncoder 
 	}
 }
 
+func (v *VisionEncoder) SetWeights(w *VisionWeights) {
+	v.weights = w
+}
+
 // Encode pixels into tensor representations compatible with LLM prefill stages.
 func (v *VisionEncoder) Encode(imageData []byte) (*device.Tensor, error) {
+	start := time.Now()
 	if len(imageData) == 0 {
 		return nil, fmt.Errorf("empty image payload")
 	}
@@ -65,15 +70,26 @@ func (v *VisionEncoder) Encode(imageData []byte) (*device.Tensor, error) {
 	outTensor := v.ctx.NewTensorFP32(numPatches, v.dim)
 
 	pixelTensor := v.ctx.NewTensorFP32(Channels, TargetW*TargetH)
-	pixelTensor.LoadFrom(pixels)
+	_ = pixelTensor.LoadFrom(pixels)
+
+	var patchEmbed, projB *device.Tensor
+	if v.weights != nil {
+		patchEmbed = v.weights.PatchEmbed
+		projB = v.weights.ProjectionB
+	}
+	if patchEmbed == nil {
+		patchEmbed = v.ctx.NewTensorFP32(Channels*14*14, v.dim)
+		defer patchEmbed.Free()
+	}
 
 	if v.Architecture == "gemma4" {
-		v.ctx.VisionPatchEmbedGemma4(pixelTensor, v.weights.PatchEmbed, v.weights.ProjectionB, outTensor, 14, v.dim, numPatches)
+		v.ctx.VisionPatchEmbedGemma4(pixelTensor, patchEmbed, projB, outTensor, 14, v.dim, numPatches)
 	} else {
-		v.ctx.VisionPatchEmbed(pixelTensor, v.weights.PatchEmbed, outTensor, 14, v.dim, TargetW/14)
+		v.ctx.VisionPatchEmbed(pixelTensor, patchEmbed, outTensor, 14, v.dim, TargetW/14)
 	}
 
 	pixelTensor.Free()
+	metrics.RecordVLMEncoding(numPatches, time.Since(start))
 	return outTensor, nil
 }
 
@@ -94,8 +110,7 @@ func (v *VisionEncoder) resizeAndNormalize(img image.Image, targetW, targetH, ch
 	}
 
 	dst := image.NewNRGBA(image.Rect(0, 0, targetW, targetH))
-	catmullRom := draw.CatmullRom{}
-	catmullRom.Scale(dst, img.Bounds(), img, bounds.Min, draw.Over)
+	draw.CatmullRom.Scale(dst, dst.Rect, img, img.Bounds(), draw.Over, nil)
 
 	for y := 0; y < targetH; y++ {
 		for x := 0; x < targetW; x++ {

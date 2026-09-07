@@ -6,8 +6,10 @@ import (
 
 func TestGrammar_Basic(t *testing.T) {
 	t.Run("Initialize", func(t *testing.T) {
-		// Mock a simple grammar rule
-		_ = &Grammar{Active: true}
+		g := &Grammar{Active: true}
+		if !g.Active {
+			t.Errorf("expected Active to be true")
+		}
 	})
 	
 	t.Run("ApplyMask", func(t *testing.T) {

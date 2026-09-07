@@ -457,7 +457,7 @@ func BenchmarkAllReduce(b *testing.B) {
 	}
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		AllReduceDistributed(tensors, ReduceSum)
 	}
 }
@@ -472,7 +472,7 @@ func BenchmarkLayerDistribution(b *testing.B) {
 	}
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		hm.DistributeLayers(80)
 	}
 }

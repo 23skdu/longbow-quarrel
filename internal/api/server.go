@@ -1,14 +1,19 @@
 package api
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
+	"github.com/23skdu/longbow-quarrel/internal/device"
 	"github.com/23skdu/longbow-quarrel/internal/engine"
 	"github.com/23skdu/longbow-quarrel/internal/logger"
 	"github.com/23skdu/longbow-quarrel/internal/sampler"
 	"github.com/23skdu/longbow-quarrel/internal/telemetry"
+	"github.com/23skdu/longbow-quarrel/internal/vlm"
 )
 
 // Server handles REST endpoints including orchestration health checks.
@@ -83,6 +88,7 @@ func InitServer(maxMemory int64, memCallback func() int64, e engine.Engine, t To
 
 	http.HandleFunc("/healthz", globalServer.HealthzEndpoint)
 	http.HandleFunc("/v1/completions", globalServer.CompletionsHandler)
+	http.HandleFunc("/v1/chat/completions", globalServer.ChatCompletionsHandler)
 	http.HandleFunc("/v1/adapters/load", globalServer.LoadAdapterHandler)
 	http.HandleFunc("/v1/adapters/list", globalServer.ListAdaptersHandler)
 	http.HandleFunc("/readyz", globalServer.ReadyzEndpoint)
@@ -204,5 +210,169 @@ func (s *Server) CompletionsHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		logger.Log.Error("failed to encode completion response", "error", err)
+	}
+}
+
+type ChatMessage struct {
+	Role    string      `json:"role"`
+	Content interface{} `json:"content"`
+}
+
+type ChatContentPart struct {
+	Type     string         `json:"type"`
+	Text     string         `json:"text,omitempty"`
+	ImageURL *ChatImageURL `json:"image_url,omitempty"`
+}
+
+type ChatImageURL struct {
+	URL    string `json:"url"`
+	Detail string `json:"detail,omitempty"`
+}
+
+type ChatCompletionRequest struct {
+	Model       string        `json:"model"`
+	Messages    []ChatMessage `json:"messages"`
+	MaxTokens   int           `json:"max_tokens"`
+	Temperature float64       `json:"temperature"`
+	TopP        float64       `json:"top_p"`
+	Stream      bool          `json:"stream"`
+	Grammar     string        `json:"grammar,omitempty"`
+}
+
+type ChatCompletionResponse struct {
+	ID      string `json:"id"`
+	Object  string `json:"object"`
+	Created int64  `json:"created"`
+	Model   string `json:"model"`
+	Choices []struct {
+		Index        int         `json:"index"`
+		Message      ChatMessage `json:"message"`
+		FinishReason string      `json:"finish_reason"`
+	} `json:"choices"`
+}
+
+func (s *Server) ChatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
+	ctx, span := telemetry.StartSpan(r.Context(), "ChatCompletionsHandler")
+	defer span.End()
+	_ = ctx
+
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req ChatCompletionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if len(req.Messages) == 0 {
+		http.Error(w, "messages are required", http.StatusBadRequest)
+		return
+	}
+
+	if s.Tokenizer == nil || s.Engine == nil {
+		http.Error(w, "Inference components not initialized", http.StatusServiceUnavailable)
+		return
+	}
+
+	var promptBuilder strings.Builder
+	var imagePayloads [][]byte
+
+	for _, msg := range req.Messages {
+		promptBuilder.WriteString(fmt.Sprintf("<|im_start|>%s\n", msg.Role))
+		switch c := msg.Content.(type) {
+		case string:
+			promptBuilder.WriteString(c)
+		case []interface{}:
+			for _, partObj := range c {
+				partBytes, _ := json.Marshal(partObj)
+				var part ChatContentPart
+				if err := json.Unmarshal(partBytes, &part); err == nil {
+					if part.Type == "text" {
+						promptBuilder.WriteString(part.Text)
+					} else if part.Type == "image_url" && part.ImageURL != nil {
+						rawURL := part.ImageURL.URL
+						// Support base64 data URIs: data:image/...;base64,...
+						commaIdx := strings.Index(rawURL, ",")
+						b64Data := rawURL
+						if commaIdx >= 0 {
+							b64Data = rawURL[commaIdx+1:]
+						}
+						decoded, err := base64.StdEncoding.DecodeString(b64Data)
+						if err == nil && len(decoded) > 0 {
+							imagePayloads = append(imagePayloads, decoded)
+						}
+					}
+				}
+			}
+		}
+		promptBuilder.WriteString("<|im_end|>\n")
+	}
+	promptBuilder.WriteString("<|im_start|>assistant\n")
+
+	// If images were decoded, process through VisionEncoder if available
+	if len(imagePayloads) > 0 {
+		devCtx := device.NewContext()
+		defer devCtx.Free()
+		vEncoder := vlm.NewVisionEncoder(devCtx, 512, "clip")
+		for _, imgData := range imagePayloads {
+			_, _ = vEncoder.Encode(imgData)
+		}
+	}
+
+	prompt := promptBuilder.String()
+	tokens := s.Tokenizer.Encode(prompt)
+
+	maxTokens := req.MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = 64
+	}
+
+	samplerCfg := engine.SamplerConfig{
+		Temperature: req.Temperature,
+		TopP:        0.95,
+		TopK:        40,
+	}
+
+	if req.Grammar != "" {
+		vocabList := s.Tokenizer.GetVocab()
+		if vocabList != nil {
+			grammar := sampler.NewJSONGrammar(vocabList)
+			samplerCfg.Grammar = grammar
+		}
+	}
+
+	resTokens, err := s.Engine.Infer(tokens, maxTokens, samplerCfg)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	resp := ChatCompletionResponse{
+		ID:      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
+		Object:  "chat.completion",
+		Created: time.Now().Unix(),
+		Model:   req.Model,
+		Choices: []struct {
+			Index        int         `json:"index"`
+			Message      ChatMessage `json:"message"`
+			FinishReason string      `json:"finish_reason"`
+		}{
+			{
+				Index: 0,
+				Message: ChatMessage{
+					Role:    "assistant",
+					Content: s.Tokenizer.Decode(resTokens),
+				},
+				FinishReason: "stop",
+			},
+		},
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		logger.Log.Error("failed to encode chat completion response", "error", err)
 	}
 }

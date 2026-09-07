@@ -1668,6 +1668,228 @@ __global__ void paged_attention_turboquant_kernel(const float* q, const int8_t* 
     }
 }
 
+// ===== Native CUDA Zero-Dequant GEMM Kernels (Part 1) =====
+
+__global__ void dequant_q8_0_gemm_kernel(
+    const unsigned char* __restrict__ weight, // [M, K] quantized blocks: M * (K/32 * 34) bytes
+    const float* __restrict__ x,              // [K]
+    float* __restrict__ y,                    // [M]
+    int M, int K) {
+    int row = blockIdx.x * blockDim.y + threadIdx.y;
+    if (row >= M) return;
+
+    int lane = threadIdx.x; // 0..31
+    int numBlocksK = K / 32;
+    const unsigned char* rowWeight = weight + (int64_t)row * (numBlocksK * 34);
+
+    float sum = 0.0f;
+    for (int b = 0; b < numBlocksK; b++) {
+        const unsigned char* blockPtr = rowWeight + b * 34;
+        unsigned short scale16 = *(const unsigned short*)blockPtr;
+        float d = fp16_to_fp32(scale16);
+        int8_t qVal = (int8_t)blockPtr[2 + lane];
+        float xVal = x[b * 32 + lane];
+        sum += d * (float)qVal * xVal;
+    }
+
+    sum = warp_reduce_sum(sum);
+    if (lane == 0) {
+        y[row] = sum;
+    }
+}
+
+__global__ void dequant_q4_k_gemm_kernel(
+    const unsigned char* __restrict__ weight, // [M, K] quantized blocks: M * (K/256 * 144) bytes
+    const float* __restrict__ x,              // [K]
+    float* __restrict__ y,                    // [M]
+    int M, int K) {
+    int row = blockIdx.x * blockDim.y + threadIdx.y;
+    if (row >= M) return;
+
+    int lane = threadIdx.x; // 0..31
+    int numBlocksK = K / 256;
+    const unsigned char* rowWeight = weight + (int64_t)row * (numBlocksK * 144);
+
+    float totalSum = 0.0f;
+    for (int b = 0; b < numBlocksK; b++) {
+        const unsigned char* bPtr = rowWeight + b * 144;
+        float d = fp16_to_fp32(*(const unsigned short*)bPtr);
+        float dmin = fp16_to_fp32(*(const unsigned short*)(bPtr + 2));
+
+        const unsigned char* sPtr = bPtr + 4;
+        unsigned char scales[8];
+        unsigned char mins[8];
+        for (int j = 0; j < 4; j++) {
+            scales[j] = sPtr[j] & 63;
+            mins[j] = sPtr[j + 4] & 63;
+        }
+        for (int j = 4; j < 8; j++) {
+            scales[j] = (sPtr[j + 4] & 0xF) | ((sPtr[j - 4] >> 6) << 4);
+            mins[j] = (sPtr[j + 4] >> 4) | ((sPtr[j] >> 6) << 4);
+        }
+
+        const unsigned char* qPtr = bPtr + 16;
+        for (int sb = 0; sb < 8; sb++) {
+            float dSub = d * (float)scales[sb];
+            float mSub = dmin * (float)mins[sb];
+            int qByteOffset = (sb / 2) * 32 + (sb % 2) * 16 + (lane / 2);
+            unsigned char byteVal = qPtr[qByteOffset];
+            unsigned char nibble = (lane % 2 == 0) ? (byteVal & 0x0F) : (byteVal >> 4);
+            float w = dSub * (float)nibble - mSub;
+            totalSum += w * x[b * 256 + sb * 32 + lane];
+        }
+    }
+
+    totalSum = warp_reduce_sum(totalSum);
+    if (lane == 0) {
+        y[row] = totalSum;
+    }
+}
+
+// ===== FlashAttention-2 Prefill Kernel with Sliding Window (Part 2) =====
+
+__global__ void flash_attention_prefill_kernel(
+    const float* __restrict__ q,       // [batch, heads, qSeqLen, headDim]
+    const float* __restrict__ k,       // [batch, kvHeads, kvSeqLen, headDim]
+    const float* __restrict__ v,       // [batch, kvHeads, kvSeqLen, headDim]
+    float* __restrict__ output,        // [batch, heads, qSeqLen, headDim]
+    int batch, int heads, int kvHeads, int qSeqLen, int kvSeqLen, int headDim,
+    float scale, int slidingWindow) {
+
+    int tid = threadIdx.x; // 0..31
+    int qPos = blockIdx.x; // current query token position 0..qSeqLen-1
+    int h = blockIdx.y;    // current query head 0..heads-1
+    int b = blockIdx.z;    // current batch item 0..batch-1
+
+    if (qPos >= qSeqLen || h >= heads || b >= batch) return;
+
+    int kvHead = h * kvHeads / heads;
+    int qOffset = ((b * heads + h) * qSeqLen + qPos) * headDim;
+    int outOffset = qOffset;
+
+    float qLocal = 0.0f;
+    if (tid < headDim) {
+        qLocal = q[qOffset + tid];
+    }
+
+    int startKV = 0;
+    if (slidingWindow > 0 && qPos >= slidingWindow) {
+        startKV = qPos - slidingWindow + 1;
+    }
+    int endKV = qPos + 1;
+    if (endKV > kvSeqLen) endKV = kvSeqLen;
+
+    float runningMax = -1e30f;
+    float runningSum = 0.0f;
+    float accOut = 0.0f;
+
+    for (int kvPos = startKV; kvPos < endKV; kvPos++) {
+        int kvOffset = ((b * kvHeads + kvHead) * kvSeqLen + kvPos) * headDim;
+        float kVal = (tid < headDim) ? k[kvOffset + tid] : 0.0f;
+        float dot = qLocal * kVal;
+        dot = warp_reduce_sum(dot) * scale;
+        float score = __shfl_sync(0xffffffff, dot, 0);
+
+        float nextMax = fmaxf(runningMax, score);
+        float expOld = expf(runningMax - nextMax);
+        float expCur = expf(score - nextMax);
+
+        runningSum = runningSum * expOld + expCur;
+        runningMax = nextMax;
+
+        float vVal = (tid < headDim) ? v[kvOffset + tid] : 0.0f;
+        accOut = accOut * expOld + expCur * vVal;
+    }
+
+    if (tid < headDim) {
+        if (runningSum > 0.0f) {
+            output[outOffset + tid] = accOut / runningSum;
+        } else {
+            output[outOffset + tid] = 0.0f;
+        }
+    }
+}
+
+// ===== Quantized Paged Attention Kernel (Part 8) =====
+
+__global__ void paged_attention_quantized_kernel(
+    const float* __restrict__ q,
+    const int8_t* __restrict__ kPool,
+    const int8_t* __restrict__ vPool,
+    const float* __restrict__ kScales,
+    const float* __restrict__ vScales,
+    float* __restrict__ output,
+    const int* __restrict__ tokenPositions,
+    const int* __restrict__ blockTables,
+    const int* __restrict__ tokenToSeq,
+    int maxBlocks, int heads, int kvHeads, int headDim, int blockSize,
+    int numTokens, float scale, int isFP8) {
+
+    int tokenIdx = blockIdx.x;
+    int headIdx = threadIdx.y;
+    int tid = threadIdx.x;
+
+    if (tokenIdx >= numTokens || headIdx >= heads) return;
+
+    int seqIdx = tokenToSeq[tokenIdx];
+    int pos = tokenPositions[tokenIdx];
+    int kvHeadIdx = headIdx * kvHeads / heads;
+    int kvDim = kvHeads * headDim;
+
+    float* out_row = output + (tokenIdx * heads + headIdx) * headDim;
+    const float* q_row = q + (tokenIdx * heads + headIdx) * headDim;
+
+    float max_score = -INFINITY;
+    float sum_exp = 0.0f;
+    float res[128];
+    if (headDim > 128) return;
+    for (int d = 0; d < headDim; d++) res[d] = 0.0f;
+
+    int numBlocksNeeded = (pos + 1 + blockSize - 1) / blockSize;
+    for (int b = 0; b < numBlocksNeeded; b++) {
+        int physicalBlockIdx = blockTables[seqIdx * maxBlocks + b];
+        int tokensInThisBlock = (b == numBlocksNeeded - 1) ? (pos % blockSize) + 1 : blockSize;
+
+        float kScale = (kScales != NULL) ? kScales[physicalBlockIdx] : 1.0f;
+        float vScale = (vScales != NULL) ? vScales[physicalBlockIdx] : 1.0f;
+
+        for (int t = 0; t < tokensInThisBlock; t++) {
+            float score = 0.0f;
+            int poolSlotIdx = physicalBlockIdx * blockSize + t;
+            const int8_t* k_ptr = kPool + poolSlotIdx * kvDim + kvHeadIdx * headDim;
+            const int8_t* v_ptr = vPool + poolSlotIdx * kvDim + kvHeadIdx * headDim;
+
+            for (int d = 0; d < headDim; d++) {
+                float kVal = (float)k_ptr[d] * kScale;
+                score += q_row[d] * kVal;
+            }
+            score *= scale;
+
+            float prev_max = max_score;
+            if (score > max_score) {
+                max_score = score;
+                float factor = expf(prev_max - max_score);
+                sum_exp = sum_exp * factor + 1.0f;
+                for (int d = 0; d < headDim; d++) {
+                    res[d] = res[d] * factor + (float)v_ptr[d] * vScale;
+                }
+            } else {
+                float exp_val = expf(score - max_score);
+                sum_exp += exp_val;
+                for (int d = 0; d < headDim; d++) {
+                    res[d] += exp_val * ((float)v_ptr[d] * vScale);
+                }
+            }
+        }
+    }
+
+    if (sum_exp > 0.0f) {
+        for (int d = tid; d < headDim; d += blockDim.x) {
+            out_row[d] = res[d] / sum_exp;
+        }
+    }
+}
+
 extern "C" {
 
 void cudaStoreKVTurboQuant(cudaStream_t stream, const float* k, const float* v,
@@ -1709,6 +1931,43 @@ void cudaPagedAttentionTurboQuant(cudaStream_t stream, const float* q, const voi
     paged_attention_turboquant_kernel<<<grid, block, 0, stream>>>(q, (const int8_t*)kPool, (const int8_t*)vPool, output,
                                                                    tokenPositions, blockTables, tokenToSeq,
                                                                    maxBlocks, heads, kvHeads, headDim, blockSize, numTokens, scale, qjlRows);
+}
+
+void cudaMatVecDequantQ8_0(cudaStream_t stream, const void* weight, const float* x, float* y, int M, int K) {
+    if (M == 0 || K == 0) return;
+    dim3 block(32, 4);
+    dim3 grid((M + 3) / 4);
+    dequant_q8_0_gemm_kernel<<<grid, block, 0, stream>>>((const unsigned char*)weight, x, y, M, K);
+}
+
+void cudaMatVecDequantQ4_K(cudaStream_t stream, const void* weight, const float* x, float* y, int M, int K) {
+    if (M == 0 || K == 0) return;
+    dim3 block(32, 4);
+    dim3 grid((M + 3) / 4);
+    dequant_q4_k_gemm_kernel<<<grid, block, 0, stream>>>((const unsigned char*)weight, x, y, M, K);
+}
+
+void cudaFlashAttentionPrefill(cudaStream_t stream, const float* q, const float* k, const float* v,
+                               float* output, int batch, int heads, int kvHeads, int qSeqLen, int kvSeqLen,
+                               int headDim, float scale, int slidingWindow) {
+    if (qSeqLen == 0 || kvSeqLen == 0) return;
+    dim3 block(32);
+    dim3 grid(qSeqLen, heads, batch);
+    flash_attention_prefill_kernel<<<grid, block, 0, stream>>>(q, k, v, output, batch, heads, kvHeads,
+                                                               qSeqLen, kvSeqLen, headDim, scale, slidingWindow);
+}
+
+void cudaPagedAttentionQuantized(cudaStream_t stream, const float* q, const void* kPool, const void* vPool,
+                                 const float* kScales, const float* vScales, float* output,
+                                 const int* tokenPositions, const int* blockTables, const int* tokenToSeq,
+                                 int maxBlocks, int heads, int kvHeads, int headDim, int blockSize,
+                                 int numTokens, float scale, int isFP8) {
+    if (numTokens == 0) return;
+    dim3 grid(numTokens);
+    dim3 block(32, heads);
+    paged_attention_quantized_kernel<<<grid, block, 0, stream>>>(
+        q, (const int8_t*)kPool, (const int8_t*)vPool, kScales, vScales, output,
+        tokenPositions, blockTables, tokenToSeq, maxBlocks, heads, kvHeads, headDim, blockSize, numTokens, scale, isFP8);
 }
 
 } // extern "C"

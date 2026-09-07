@@ -1,5 +1,3 @@
-//go:build darwin && metal
-
 package vlm
 
 import (
@@ -71,7 +69,7 @@ func (e *MultiModalEncoder) Decode(imageData []byte) (*device.Tensor, error) {
 		return nil, err
 	}
 
-	projected := e.ctx.NewTensor(tensor.Rows(), e.config.HiddenDim)
+	projected := e.ctx.NewTensorFP32(tensor.Rows(), e.config.HiddenDim)
 	e.ctx.VisionPatchEmbed(tensor, nil, projected, e.config.PatchSize, e.config.HiddenDim, tensor.Rows())
 
 	return projected, nil

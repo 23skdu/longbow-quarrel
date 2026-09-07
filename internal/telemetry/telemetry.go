@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"sync"
+	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
@@ -94,12 +95,56 @@ func InitTracer() func(context.Context) error {
 	}
 }
 
-// StartSpan starts a new span from the given context.
-func StartSpan(ctx context.Context, name string) (context.Context, trace.Span) {
+// GetTracer returns the active OpenTelemetry tracer.
+func GetTracer() trace.Tracer {
 	if tracer == nil {
 		once.Do(func() {
 			tracer = otel.Tracer(tracerName)
 		})
 	}
-	return tracer.Start(ctx, name)
+	return tracer
 }
+
+// StartSpan starts a new span from the given context.
+func StartSpan(ctx context.Context, name string) (context.Context, trace.Span) {
+	return GetTracer().Start(ctx, name)
+}
+
+// StartRequestSpan starts an inference request span with standard metadata.
+func StartRequestSpan(ctx context.Context, requestID, model string) (context.Context, trace.Span) {
+	ctx, span := StartSpan(ctx, "llm.request")
+	span.SetAttributes(
+		semconv.ServiceNameKey.String("longbow-quarrel"),
+	)
+	span.AddEvent("request_started")
+	return ctx, span
+}
+
+// RecordTTFT records Time To First Token on the given span.
+func RecordTTFT(span trace.Span, d time.Duration) {
+	if span != nil {
+		span.AddEvent("first_token_emitted")
+	}
+}
+
+// RecordInterTokenLatency records inter-token generation duration on the span.
+func RecordInterTokenLatency(span trace.Span, d time.Duration) {
+	if span != nil {
+		span.AddEvent("token_generated")
+	}
+}
+
+// RecordKVPageAlloc records KV page block allocation events on the span.
+func RecordKVPageAlloc(span trace.Span, pagesAllocated, freePages int) {
+	if span != nil {
+		span.AddEvent("kv_page_allocated")
+	}
+}
+
+// RecordMemoryPressure records high memory events and proactive actions on the span.
+func RecordMemoryPressure(span trace.Span, ramPct, vramPct float64, action string) {
+	if span != nil {
+		span.AddEvent("memory_pressure_event")
+	}
+}
+

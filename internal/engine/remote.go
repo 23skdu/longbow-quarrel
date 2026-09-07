@@ -3,9 +3,12 @@ package engine
 import (
 	"context"
 	"fmt"
+	"time"
+
 	"github.com/23skdu/longbow-quarrel/internal/arrow_client"
 	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/device"
+	"github.com/23skdu/longbow-quarrel/internal/metrics"
 )
 
 // RemoteWorkerEngine is an implementation of DistributedEngine that
@@ -117,15 +120,19 @@ func (e *RemoteWorkerEngine) Infer(tokens []int, count int, cfg SamplerConfig) (
 	}
 
 	// Send encoded tokens via Flight DoPut as a record batch
+	t0 := time.Now()
 	if err := e.client.DoPut(ctx, vectors, ids, meta); err != nil {
 		return nil, fmt.Errorf("DoPut failed for inference: %w", err)
 	}
+	metrics.RecordDistributedTransfer("egress", "arrow_flight", int64(len(tokens)*4), time.Since(t0))
 
 	// Retrieve generated token IDs via Flight DoGet
+	t1 := time.Now()
 	result, err := e.client.DoGet(ctx, ids)
 	if err != nil {
 		return nil, fmt.Errorf("DoGet failed for inference results: %w", err)
 	}
+	metrics.RecordDistributedTransfer("ingress", "arrow_flight", int64(len(result.Vectors)*4), time.Since(t1))
 
 	// Convert result vectors back to token IDs
 	generated := make([]int, 0, len(result.Vectors))
@@ -173,15 +180,19 @@ func (e *RemoteWorkerEngine) InferWithCallback(tokens []int, count int, cfg Samp
 	}
 
 	// Send encoded tokens via Flight DoPut as a record batch
+	t0 := time.Now()
 	if err := e.client.DoPut(ctx, vectors, ids, meta); err != nil {
 		return nil, fmt.Errorf("DoPut failed for streaming inference: %w", err)
 	}
+	metrics.RecordDistributedTransfer("egress", "arrow_flight", int64(len(tokens)*4), time.Since(t0))
 
 	// Retrieve generated token IDs via Flight DoGet
+	t1 := time.Now()
 	result, err := e.client.DoGet(ctx, ids)
 	if err != nil {
 		return nil, fmt.Errorf("DoGet failed for streaming inference results: %w", err)
 	}
+	metrics.RecordDistributedTransfer("ingress", "arrow_flight", int64(len(result.Vectors)*4), time.Since(t1))
 
 	// Convert result vectors to token IDs and invoke the callback for each
 	generated := make([]int, 0, len(result.Vectors))
@@ -263,6 +274,7 @@ func (e *RemoteWorkerEngine) ForwardBatch(batch *BatchDescriptor) ([]*device.Ten
 
 		// Forward each sequence through the remote worker via DoPutTensor
 		// #nosec G115 -- safe: sequence token count is bounded and fits in int32
+		t0 := time.Now()
 		resultData, err := e.client.DoPutTensor(ctx, tokenData, []int32{int32(len(seqTokens))}, meta)
 		if err != nil {
 			for j := 0; j < idx; j++ {
@@ -272,6 +284,9 @@ func (e *RemoteWorkerEngine) ForwardBatch(batch *BatchDescriptor) ([]*device.Ten
 			}
 			return nil, fmt.Errorf("ForwardBatch DoPutTensor failed for sequence %d: %w", idx, err)
 		}
+		duration := time.Since(t0)
+		metrics.RecordDistributedTransfer("egress", "arrow_flight", int64(len(tokenData)*4), duration)
+		metrics.RecordDistributedTransfer("ingress", "arrow_flight", int64(len(resultData)*4), duration)
 
 		if e.deviceCtx == nil {
 			e.deviceCtx = device.NewContext()
@@ -344,10 +359,14 @@ func (e *RemoteWorkerEngine) ForwardShardedLayer(ctx context.Context, layerIdx i
 	}
 
 	// Send input tensor to worker via DoPut
+	t0 := time.Now()
 	resultData, err := e.client.DoPutTensor(ctx, inputData, []int32{int32(input.Rows())}, meta) // #nosec G115 -- safe: Rows() is bounded by model config
 	if err != nil {
 		return nil, fmt.Errorf("DoPutTensor failed: %w", err)
 	}
+	duration := time.Since(t0)
+	metrics.RecordDistributedTransfer("egress", "arrow_flight", int64(len(inputData)*4), duration)
+	metrics.RecordDistributedTransfer("ingress", "arrow_flight", int64(len(resultData)*4), duration)
 
 	if e.deviceCtx == nil {
 		e.deviceCtx = device.NewContext()

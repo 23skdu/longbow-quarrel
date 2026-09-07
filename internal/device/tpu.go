@@ -384,6 +384,10 @@ func TPUAllocatedBytes() uint64 {
 	return 0
 }
 
+func AllocatedBytes() int64 {
+	return int64(TPUAllocatedBytes())
+}
+
 func TPUDeviceCount() int {
 	if !tpuInitialized {
 		return 0

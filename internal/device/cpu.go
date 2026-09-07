@@ -730,8 +730,46 @@ func (c *Context) StoreKVPagedBatch(k, v, kCache, vCache, physicalPositions *Ten
 	}
 }
 
-// StoreKVQuantized is a stub for future quantized KV cache storage support.
+// StoreKVQuantized stores K and V projections into quantized KV cache (FP8 or INT8/Q8_0).
 func (t *Tensor) StoreKVQuantized(v *Tensor, kCache, vCache *Tensor, pos, heads, headDim, windowSize int) {
+	if kCache == nil || vCache == nil || t == nil || v == nil || windowSize <= 0 {
+		return
+	}
+	off := (pos % windowSize) * heads * headDim
+	size := heads * headDim
+
+	tData := t.ToHostF32()
+	vData := v.ToHostF32()
+	if len(tData) < size || len(vData) < size {
+		return
+	}
+
+	if kCache.dataType == DataTypeFP8 {
+		if kCache.rawData != nil && len(kCache.rawData) >= off+size &&
+			vCache.rawData != nil && len(vCache.rawData) >= off+size {
+			for i := 0; i < size; i++ {
+				kCache.rawData[off+i] = Float32ToFP8E4M3(tData[i])
+				vCache.rawData[off+i] = Float32ToFP8E4M3(vData[i])
+			}
+			return
+		}
+	}
+
+	if kCache.dataType == DataTypeINT8 {
+		if kCache.rawData != nil && len(kCache.rawData) >= off+size &&
+			vCache.rawData != nil && len(vCache.rawData) >= off+size {
+			tmpK := make([]int8, size)
+			tmpV := make([]int8, size)
+			QuantizeBlockQ8_0(tData[:size], tmpK)
+			QuantizeBlockQ8_0(vData[:size], tmpV)
+			for i := 0; i < size; i++ {
+				kCache.rawData[off+i] = byte(tmpK[i]) // #nosec G115
+				vCache.rawData[off+i] = byte(tmpV[i]) // #nosec G115
+			}
+			return
+		}
+	}
+
 	// Fallback to standard StoreKV
 	t.StoreKV(v, kCache, vCache, pos, heads, headDim, windowSize)
 }
@@ -780,8 +818,9 @@ func (c *Context) VisionPatchEmbedGemma4(pixels *Tensor, weights *Tensor, bias *
 			sum := float32(0)
 			for j := 0; j < inputSize; j++ {
 				srcIdx := p*inputSize + j
-				if srcIdx < len(input) {
-					sum += input[srcIdx] * wt[(offset+i)*inputSize+j]
+				wIdx := i*inputSize + j
+				if srcIdx < len(input) && wIdx < len(wt) {
+					sum += input[srcIdx] * wt[wIdx]
 				}
 			}
 			out[offset+i] = sum

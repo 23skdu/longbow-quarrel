@@ -43,6 +43,10 @@ func TestPlaywrightE2E_API(t *testing.T) {
 	}()
 	defer httpServer.Close()
 
+	if err := waitServer(baseURL); err != nil {
+		t.Fatalf("server failed to start: %v", err)
+	}
+
 	// 3. Setup API Request Context
 	requestContext, err := pw.Request.NewContext(playwright.APIRequestNewContextOptions{
 		BaseURL: &baseURL,
