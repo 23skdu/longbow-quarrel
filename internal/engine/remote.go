@@ -52,9 +52,20 @@ func (e *RemoteWorkerEngine) ShardRole() ShardRole {
 }
 
 func (e *RemoteWorkerEngine) SyncWeights(ctx context.Context) error {
-	// In a worker scenario, we might want to fetch weights from the master
-	// or signaling that we are ready.
-	return e.client.Connect(ctx)
+	if e.client == nil {
+		return fmt.Errorf("worker client not connected")
+	}
+	// Connect and signal readiness for weight synchronization
+	if err := e.client.Connect(ctx); err != nil {
+		return fmt.Errorf("weight sync connect failed: %w", err)
+	}
+	// Send a weight sync request with barrier metadata
+	meta := map[string]string{
+		"operation": "sync_weights",
+		"barrier":   "true",
+		"layers":    fmt.Sprintf("%d", e.config.Layers),
+	}
+	return e.client.DoPut(ctx, nil, []string{"weight_sync"}, meta)
 }
 
 func (e *RemoteWorkerEngine) ForwardShard(ctx context.Context, input *device.Tensor) (*device.Tensor, error) {
@@ -324,11 +335,74 @@ func (e *RemoteWorkerEngine) LoadAdapter(path, id string) error {
 }
 
 func (e *RemoteWorkerEngine) RollbackKV(seqID string, newPos int) error {
+	if e.client == nil {
+		return fmt.Errorf("worker client not connected")
+	}
+	ctx := context.Background()
+	meta := map[string]string{
+		"operation": "rollback_kv",
+		"seq_id":    seqID,
+		"new_pos":   fmt.Sprintf("%d", newPos),
+	}
+	t0 := time.Now()
+	err := e.client.DoPut(ctx, nil, []string{seqID}, meta)
+	if err != nil {
+		return fmt.Errorf("rollback_kv failed for seq %s: %w", seqID, err)
+	}
+	metrics.RecordDistributedTransfer("control", "rollback_kv", 0, time.Since(t0))
 	return nil
 }
 
 func (e *RemoteWorkerEngine) ForwardDraft(tokens []int) ([][]float32, error) {
-	return nil, nil
+	if e.client == nil {
+		return nil, fmt.Errorf("worker client not connected")
+	}
+	if len(tokens) == 0 {
+		return nil, nil
+	}
+	ctx := context.Background()
+
+	// Convert tokens to float32 for transmission
+	tokenFloats := make([]float32, len(tokens))
+	for i, t := range tokens {
+		tokenFloats[i] = float32(t)
+	}
+
+	meta := map[string]string{
+		"operation": "forward_draft",
+		"num_tokens": fmt.Sprintf("%d", len(tokens)),
+	}
+	t0 := time.Now()
+	resultData, err := e.client.DoPutTensor(ctx, tokenFloats, []int32{int32(len(tokens))}, meta)
+	if err != nil {
+		return nil, fmt.Errorf("forward_draft failed: %w", err)
+	}
+	duration := time.Since(t0)
+	metrics.RecordDistributedTransfer("draft", "arrow_flight", int64(len(tokenFloats)*4), duration)
+
+	if len(resultData) == 0 {
+		return nil, nil
+	}
+
+	// Reshape result into per-token logit vectors
+	vocabSize := e.config.VocabSize
+	if vocabSize <= 0 {
+		vocabSize = len(resultData) / len(tokens)
+	}
+	if vocabSize <= 0 {
+		return nil, fmt.Errorf("invalid vocab size for draft result")
+	}
+
+	results := make([][]float32, len(tokens))
+	for i := 0; i < len(tokens) && i*vocabSize < len(resultData); i++ {
+		start := i * vocabSize
+		end := start + vocabSize
+		if end > len(resultData) {
+			end = len(resultData)
+		}
+		results[i] = resultData[start:end]
+	}
+	return results, nil
 }
 
 // ForwardShardedLayer processes a layer shard via Arrow Flight RPC.

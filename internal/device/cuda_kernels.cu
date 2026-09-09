@@ -1574,11 +1574,9 @@ __global__ void paged_attention_kernel(
     float max_score = -INFINITY;
     float sum_exp = 0.0f;
     
-    // We'll use a local buffer for out values (dim)
-    // This is a naive implementation; production kernels use tiling and shared memory
-    float res[128]; // Max headDim supported in this stub
-    if (headDim > 128) return; 
-    for(int d=0; d<headDim; d++) res[d] = 0.0f;
+    // Use output buffer directly for accumulator (supports arbitrary headDim)
+    for(int d = tid; d < headDim; d += blockDim.x) out_row[d] = 0.0f;
+    __syncthreads();
 
     // Iterate through all blocks for this sequence
     int numBlocksNeeded = (pos + 1 + blockSize - 1) / blockSize;
@@ -1592,11 +1590,16 @@ __global__ void paged_attention_kernel(
             const __half* k_ptr = kPool + poolSlotIdx * kvDim + kvHeadIdx * headDim;
             const __half* v_ptr = vPool + poolSlotIdx * kvDim + kvHeadIdx * headDim;
 
-            // Dot product Q*K
-            for (int d = 0; d < headDim; d++) {
+            // Dot product Q*K with warp reduction
+            for (int d = tid; d < headDim; d += blockDim.x) {
                 score += q_row[d] * __half2float(k_ptr[d]);
             }
+            for (int offset = blockDim.x / 2; offset > 0; offset /= 2)
+                score += __shfl_down_sync(0xffffffff, score, offset);
             score *= scale;
+
+            // Broadcast score from lane 0
+            score = __shfl_sync(0xffffffff, score, 0);
 
             // Softmax update
             float old_max = max_score;
@@ -1608,8 +1611,8 @@ __global__ void paged_attention_kernel(
             sum_exp = sum_exp * scale_old + exp_val;
 
             // Weighted sum update
-            for (int d = 0; d < headDim; d++) {
-                res[d] = res[d] * scale_old + exp_val * __half2float(v_ptr[d]);
+            for (int d = tid; d < headDim; d += blockDim.x) {
+                out_row[d] = out_row[d] * scale_old + exp_val * __half2float(v_ptr[d]);
             }
         }
     }
@@ -1617,7 +1620,7 @@ __global__ void paged_attention_kernel(
     // Final normalization
     float inv_sum = 1.0f / (sum_exp + 1e-9f);
     for (int d = tid; d < headDim; d += blockDim.x) {
-        out_row[d] = res[d] * inv_sum;
+        out_row[d] *= inv_sum;
     }
 }
 
@@ -1746,7 +1749,53 @@ __global__ void dequant_q4_k_gemm_kernel(
     }
 }
 
-// ===== FlashAttention-2 Prefill Kernel with Sliding Window (Part 2) =====
+__global__ void dequant_q6_k_gemm_kernel(
+    const unsigned char* __restrict__ weight, // [M, K] quantized blocks: M * (K/256 * 210) bytes
+    const float* __restrict__ x,              // [K]
+    float* __restrict__ y,                    // [M]
+    int M, int K) {
+    int row = blockIdx.x * blockDim.y + threadIdx.y;
+    if (row >= M) return;
+
+    int lane = threadIdx.x; // 0..31
+    int numBlocksK = K / 256;
+    const unsigned char* rowWeight = weight + (int64_t)row * (numBlocksK * 210);
+
+    float totalSum = 0.0f;
+    for (int b = 0; b < numBlocksK; b++) {
+        const unsigned char* bPtr = rowWeight + b * 210;
+        const unsigned char* qs = bPtr;          // 128 bytes: low 4 bits of each element
+        const unsigned char* qh = bPtr + 128;    // 64 bytes: high 2 bits of each element
+        const unsigned char* sc = bPtr + 192;    // 16 bytes: sub-block scales
+        float d = fp16_to_fp32(*(const unsigned short*)(bPtr + 208));
+
+        // Each lane handles elements at stride 32 within 256-element block
+        for (int elem = lane; elem < 256; elem += 32) {
+            int subBlock = elem / 16;   // 0..15
+            float s = d * (float)(int8_t)sc[subBlock];
+
+            unsigned char q4 = qs[elem / 2];
+            if (elem % 2 == 0) {
+                q4 &= 0x0F;
+            } else {
+                q4 >>= 4;
+            }
+            unsigned char q2 = (qh[elem / 4] >> ((elem % 4) * 2)) & 0x03;
+            int8_t q = (int8_t)((q2 << 4) | q4);
+
+            totalSum += s * ((float)q - 32.0f) * x[b * 256 + elem];
+        }
+    }
+
+    totalSum = warp_reduce_sum(totalSum);
+    if (lane == 0) {
+        y[row] = totalSum;
+    }
+}
+
+// ===== FlashAttention-2 Prefill Kernel with Shared Memory Tiling (Part 2) =====
+
+#define FA_TILE_KV 32
 
 __global__ void flash_attention_prefill_kernel(
     const float* __restrict__ q,       // [batch, heads, qSeqLen, headDim]
@@ -1756,21 +1805,20 @@ __global__ void flash_attention_prefill_kernel(
     int batch, int heads, int kvHeads, int qSeqLen, int kvSeqLen, int headDim,
     float scale, int slidingWindow) {
 
-    int tid = threadIdx.x; // 0..31
-    int qPos = blockIdx.x; // current query token position 0..qSeqLen-1
-    int h = blockIdx.y;    // current query head 0..heads-1
-    int b = blockIdx.z;    // current batch item 0..batch-1
+    extern __shared__ float smem[];
+    float* sK = smem;                                    // [FA_TILE_KV][headDim]
+    float* sV = smem + FA_TILE_KV * headDim;             // [FA_TILE_KV][headDim]
+
+    int tid = threadIdx.x;   // 0..31
+    int qPos = blockIdx.x;
+    int h = blockIdx.y;
+    int b = blockIdx.z;
 
     if (qPos >= qSeqLen || h >= heads || b >= batch) return;
 
     int kvHead = h * kvHeads / heads;
     int qOffset = ((b * heads + h) * qSeqLen + qPos) * headDim;
     int outOffset = qOffset;
-
-    float qLocal = 0.0f;
-    if (tid < headDim) {
-        qLocal = q[qOffset + tid];
-    }
 
     int startKV = 0;
     if (slidingWindow > 0 && qPos >= slidingWindow) {
@@ -1781,32 +1829,49 @@ __global__ void flash_attention_prefill_kernel(
 
     float runningMax = -1e30f;
     float runningSum = 0.0f;
-    float accOut = 0.0f;
+    float acc = 0.0f;
 
-    for (int kvPos = startKV; kvPos < endKV; kvPos++) {
-        int kvOffset = ((b * kvHeads + kvHead) * kvSeqLen + kvPos) * headDim;
-        float kVal = (tid < headDim) ? k[kvOffset + tid] : 0.0f;
-        float dot = qLocal * kVal;
-        dot = warp_reduce_sum(dot) * scale;
-        float score = __shfl_sync(0xffffffff, dot, 0);
+    for (int kvStart = startKV; kvStart < endKV; kvStart += FA_TILE_KV) {
+        int tileEnd = kvStart + FA_TILE_KV;
+        if (tileEnd > endKV) tileEnd = endKV;
+        int tileWidth = tileEnd - kvStart;
 
-        float nextMax = fmaxf(runningMax, score);
-        float expOld = expf(runningMax - nextMax);
-        float expCur = expf(score - nextMax);
+        // Cooperative load of K and V tiles into shared memory
+        for (int i = tid; i < tileWidth * headDim; i += 32) {
+            int pos = i / headDim;
+            int d = i % headDim;
+            int kvIdx = kvStart + pos;
+            int kvGlobalOffset = ((b * kvHeads + kvHead) * kvSeqLen + kvIdx) * headDim + d;
+            sK[pos * headDim + d] = k[kvGlobalOffset];
+            sV[pos * headDim + d] = v[kvGlobalOffset];
+        }
+        __syncthreads();
 
-        runningSum = runningSum * expOld + expCur;
-        runningMax = nextMax;
+        // Compute QK dot products across the tile
+        for (int t = 0; t < tileWidth; t++) {
+            float dot = 0.0f;
+            for (int d = tid; d < headDim; d += 32) {
+                dot += q[qOffset + d] * sK[t * headDim + d];
+            }
+            dot = warp_reduce_sum(dot) * scale;
 
-        float vVal = (tid < headDim) ? v[kvOffset + tid] : 0.0f;
-        accOut = accOut * expOld + expCur * vVal;
+            // Online softmax update
+            float nextMax = fmaxf(runningMax, dot);
+            float expOld = expf(runningMax - nextMax);
+            float expCur = expf(dot - nextMax);
+            runningSum = runningSum * expOld + expCur;
+            runningMax = nextMax;
+
+            // Accumulate V weighted by attention
+            for (int d = tid; d < headDim; d += 32) {
+                acc = acc * expOld + expCur * sV[t * headDim + d];
+            }
+        }
+        __syncthreads();
     }
 
     if (tid < headDim) {
-        if (runningSum > 0.0f) {
-            output[outOffset + tid] = accOut / runningSum;
-        } else {
-            output[outOffset + tid] = 0.0f;
-        }
+        output[outOffset + tid] = (runningSum > 0.0f) ? acc / runningSum : 0.0f;
     }
 }
 
@@ -1947,14 +2012,22 @@ void cudaMatVecDequantQ4_K(cudaStream_t stream, const void* weight, const float*
     dequant_q4_k_gemm_kernel<<<grid, block, 0, stream>>>((const unsigned char*)weight, x, y, M, K);
 }
 
+void cudaMatVecDequantQ6_K(cudaStream_t stream, const void* weight, const float* x, float* y, int M, int K) {
+    if (M == 0 || K == 0) return;
+    dim3 block(32, 4);
+    dim3 grid((M + 3) / 4);
+    dequant_q6_k_gemm_kernel<<<grid, block, 0, stream>>>((const unsigned char*)weight, x, y, M, K);
+}
+
 void cudaFlashAttentionPrefill(cudaStream_t stream, const float* q, const float* k, const float* v,
                                float* output, int batch, int heads, int kvHeads, int qSeqLen, int kvSeqLen,
                                int headDim, float scale, int slidingWindow) {
     if (qSeqLen == 0 || kvSeqLen == 0) return;
     dim3 block(32);
     dim3 grid(qSeqLen, heads, batch);
-    flash_attention_prefill_kernel<<<grid, block, 0, stream>>>(q, k, v, output, batch, heads, kvHeads,
-                                                               qSeqLen, kvSeqLen, headDim, scale, slidingWindow);
+    size_t smemSize = 2 * FA_TILE_KV * headDim * sizeof(float);
+    flash_attention_prefill_kernel<<<grid, block, smemSize, stream>>>(q, k, v, output, batch, heads, kvHeads,
+                                                                       qSeqLen, kvSeqLen, headDim, scale, slidingWindow);
 }
 
 void cudaPagedAttentionQuantized(cudaStream_t stream, const float* q, const void* kPool, const void* vPool,

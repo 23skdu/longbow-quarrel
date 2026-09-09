@@ -2,9 +2,19 @@ package engine
 
 import (
 	"fmt"
+	"sort"
 	"sync"
+	"time"
 
 	"github.com/23skdu/longbow-quarrel/internal/metrics"
+)
+
+// Priority levels for inference requests (higher = more important)
+const (
+	PriorityLow     = 0
+	PriorityNormal  = 5
+	PriorityHigh    = 10
+	PriorityUrgent  = 15
 )
 
 // InferenceRequest encapsulates a user generation request to be placed in the continuous batching queue.
@@ -15,6 +25,7 @@ type InferenceRequest struct {
 	Config    SamplerConfig
 	Result    chan []int
 	Err       chan error
+	Priority  int // Scheduling priority (higher = more important)
 
 	TokenCallback  func(int)
 	LogitsCallback func([]float32)
@@ -63,9 +74,19 @@ func (q *RequestQueue) Push(req *InferenceRequest) {
 	q.requests = append(q.requests, req)
 }
 
+// PopUpTo pops up to n requests, highest priority first.
 func (q *RequestQueue) PopUpTo(n int) []*InferenceRequest {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+
+	if len(q.requests) == 0 {
+		return nil
+	}
+
+	// Sort by priority descending (highest first), stable for FIFO within same priority
+	sort.SliceStable(q.requests, func(i, j int) bool {
+		return q.requests[i].Priority > q.requests[j].Priority
+	})
 
 	var popCount int
 	if len(q.requests) > n {
@@ -83,6 +104,62 @@ func (q *RequestQueue) Depth() int {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	return len(q.requests)
+}
+
+// PreemptLowestPriority removes the lowest-priority running sequence, frees its KV blocks,
+// and re-queues it for later resumption. Returns the evicted sequence ID, or 0 if none evicted.
+func (cm *ContinuousBatchManager) PreemptLowestPriority(kvCache *PagedKVCache) uint64 {
+	if len(cm.running) == 0 {
+		return 0
+	}
+
+	// Find the running sequence with lowest priority
+	var lowestID uint64
+	lowestPrio := PriorityUrgent + 1
+	for id, seq := range cm.running {
+		if seq.Priority < lowestPrio {
+			lowestPrio = seq.Priority
+			lowestID = id
+		}
+	}
+	if lowestID == 0 {
+		return 0
+	}
+
+	// Don't preempt urgent requests
+	if lowestPrio >= PriorityUrgent {
+		return 0
+	}
+
+	seq := cm.running[lowestID]
+	delete(cm.running, lowestID)
+
+	// Free KV blocks for this sequence
+	if kvCache != nil {
+		seqIDStr := fmt.Sprintf("seq-%d", lowestID)
+		kvCache.FreeSequence(seqIDStr)
+	}
+
+	// Re-queue as a new request (preserving prompt, resetting position)
+	requeue := &InferenceRequest{
+		ID:               seq.ID,
+		Prompt:           seq.Tokens[:seq.PromptLen],
+		MaxTokens:        seq.MaxTokens,
+		Config:           seq.Config,
+		Result:           seq.Result,
+		Err:              seq.Err,
+		Priority:         seq.Priority,
+		TokenCallback:    seq.TokenCallback,
+		LogitsCallback:   seq.LogitsCallback,
+		AdapterID:        seq.AdapterID,
+		Speculative:      seq.Speculative,
+		DraftK:           seq.DraftK,
+		NumPaths:         seq.NumPaths,
+		PrefillCompleted: false,
+	}
+	cm.waitingQueue.Push(requeue)
+
+	return lowestID
 }
 
 // ContinuousBatchManager oversees the lifecycle of sequences during decoding.
@@ -135,6 +212,17 @@ func (cm *ContinuousBatchManager) Step(maxBatchSize int, kvCache *PagedKVCache, 
 		canAdmit = canAdmit && kvCache.FreeBlocksCount() > cm.LowWaterMark
 	}
 
+	// Preemption: when KV cache is under pressure and we can't admit new requests,
+	// preempt the lowest-priority running sequence to free blocks
+	if !canAdmit && kvCache != nil && kvCache.FreeBlocksCount() < cm.LowWaterMark/2 {
+		if preemptedID := cm.PreemptLowestPriority(kvCache); preemptedID > 0 {
+			metrics.RecordContinuousBatchIteration(0, time.Duration(0), true)
+			// Re-check admission after preemption freed blocks
+			availableSlots = maxBatchSize - len(cm.running) - len(cm.prefill)
+			canAdmit = availableSlots > 0 && kvCache.FreeBlocksCount() > cm.LowWaterMark
+		}
+	}
+
 	if canAdmit {
 		newReqs := cm.waitingQueue.PopUpTo(availableSlots)
 		for _, req := range newReqs {
@@ -171,11 +259,12 @@ func (cm *ContinuousBatchManager) Step(maxBatchSize int, kvCache *PagedKVCache, 
 				Pos:       0,
 				Status:    SequenceStatusRunning,
 			}
-			seq.TokenCallback = req.TokenCallback
-			seq.LogitsCallback = req.LogitsCallback
-			seq.AdapterID = req.AdapterID
-			
-			// Speculative Decoding Parameters
+		seq.TokenCallback = req.TokenCallback
+		seq.LogitsCallback = req.LogitsCallback
+		seq.AdapterID = req.AdapterID
+		seq.Priority = req.Priority
+		
+		// Speculative Decoding Parameters
 			seq.Speculative = req.Speculative
 			seq.DraftK = req.DraftK
 			seq.NumPaths = req.NumPaths

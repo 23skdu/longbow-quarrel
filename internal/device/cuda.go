@@ -57,6 +57,7 @@ extern void cudaStoreKVTurboQuant(cudaStream_t stream, const float* k, const flo
 
 extern void cudaMatVecDequantQ8_0(cudaStream_t stream, const void* weight, const float* x, float* y, int M, int K);
 extern void cudaMatVecDequantQ4_K(cudaStream_t stream, const void* weight, const float* x, float* y, int M, int K);
+extern void cudaMatVecDequantQ6_K(cudaStream_t stream, const void* weight, const float* x, float* y, int M, int K);
 extern void cudaFlashAttentionPrefill(cudaStream_t stream, const float* q, const float* k, const float* v, float* output, int batch, int heads, int kvHeads, int qSeqLen, int kvSeqLen, int headDim, float scale, int slidingWindow);
 extern void cudaPagedAttentionQuantized(cudaStream_t stream, const float* q, const void* kPool, const void* vPool, const float* kScales, const float* vScales, float* output, const int* tokenPositions, const int* blockTables, const int* tokenToSeq, int maxBlocks, int heads, int kvHeads, int headDim, int blockSize, int numTokens, float scale, int isFP8);
 */
@@ -383,6 +384,10 @@ func (ctx *Context) MatmulF16(a, b *Tensor) (*Tensor, error) {
 		ctx.MatVecDequantQ4_K(b, a, out, n, k)
 		return out, nil
 	}
+	if b.dataType == DataTypeQ6_K {
+		ctx.MatVecDequantQ6_K(b, a, out, n, k)
+		return out, nil
+	}
 
 	alpha := C.float(1.0)
 	beta := C.float(0.0)
@@ -437,6 +442,12 @@ func (ctx *Context) MatVecDequantQ4_K(weight, x, y *Tensor, M, K int) {
 	start := time.Now()
 	C.cudaMatVecDequantQ4_K(ctx.Ctx, weight.devPtr, (*C.float)(x.devPtr), (*C.float)(y.devPtr), C.int(M), C.int(K))
 	metrics.RecordCUDADequantGEMM("Q4_K", time.Since(start))
+}
+
+func (ctx *Context) MatVecDequantQ6_K(weight, x, y *Tensor, M, K int) {
+	start := time.Now()
+	C.cudaMatVecDequantQ6_K(ctx.Ctx, weight.devPtr, (*C.float)(x.devPtr), (*C.float)(y.devPtr), C.int(M), C.int(K))
+	metrics.RecordCUDADequantGEMM("Q6_K", time.Since(start))
 }
 
 func (ctx *Context) FlashAttentionPrefill(q, k, v, output *Tensor, batch, heads, kvHeads, qSeqLen, kvSeqLen, headDim int, scale float32, slidingWindow int) {
@@ -598,7 +609,7 @@ func (ctx *Context) NewCUDAModel(f *gguf.GGUFFile, preDequantize bool, kvCacheSi
 		}
 
 		// Zero-Dequant Mode: Keep raw quantized bytes directly in GPU VRAM
-		if (!preDequantize || os.Getenv("CUDA_ZERO_DEQUANT") == "1") && (tensor.Type == gguf.GGMLTypeQ8_0 || tensor.Type == gguf.GGMLTypeQ4_K) {
+		if (!preDequantize || os.Getenv("CUDA_ZERO_DEQUANT") == "1") && (tensor.Type == gguf.GGMLTypeQ8_0 || tensor.Type == gguf.GGMLTypeQ4_K || tensor.Type == gguf.GGMLTypeQ6_K) {
 			dataBytes := len(tensor.Data)
 			var dPtr unsafe.Pointer
 			if errCode := C.cudaMalloc(&dPtr, C.size_t(dataBytes)); errCode != 0 {
@@ -607,8 +618,11 @@ func (ctx *Context) NewCUDAModel(f *gguf.GGUFFile, preDequantize bool, kvCacheSi
 			}
 			C.cudaMemcpy(dPtr, unsafe.Pointer(&tensor.Data[0]), C.size_t(dataBytes), C.cudaMemcpyHostToDevice)
 			dtype := DataTypeQ8_0
-			if tensor.Type == gguf.GGMLTypeQ4_K {
+			switch tensor.Type {
+			case gguf.GGMLTypeQ4_K:
 				dtype = DataTypeQ4_K
+			case gguf.GGMLTypeQ6_K:
+				dtype = DataTypeQ6_K
 			}
 			savedBytes := int64(numElements*2 - dataBytes)
 			metrics.RecordCUDAVRAMSaved(name, savedBytes)

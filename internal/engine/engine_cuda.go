@@ -59,6 +59,8 @@ type cudaEngine struct {
 	stopChan     chan struct{}
 	doneChan     chan struct{}
 	lora         *LoRAManager
+	governor     *device.MemoryGovernor
+	seqTTFTStart map[uint64]time.Time
 }
 
 func NewcudaEngine(modelPath string, cfg config.Config) (Engine, error) {
@@ -170,6 +172,8 @@ func NewcudaEngine(modelPath string, cfg config.Config) (Engine, error) {
 		BatchManager: NewContinuousBatchManager(),
 		stopChan:     make(chan struct{}),
 		doneChan:     make(chan struct{}),
+		governor:     device.NewMemoryGovernor(),
+		seqTTFTStart: make(map[uint64]time.Time),
 	}
 
 	// Initialize scratch space
@@ -309,6 +313,13 @@ func (e *cudaEngine) runBatchLoop() {
 		default:
 		}
 
+		// Memory governor: check pressure and trigger if needed
+		if e.governor != nil {
+			if action := e.governor.TriggerGovernor(0.85); action != "none" {
+				metrics.RecordMemoryPressureEvent("gpu", action, 0.0)
+			}
+		}
+
 		// 1. Pull active sequences
 		desc, _ := e.BatchManager.Step(16, e.cache, e.PromptCache)
 		if desc == nil || len(desc.Sequences) == 0 {
@@ -346,6 +357,16 @@ func (e *cudaEngine) runBatchLoop() {
 
 			sampler := NewSampler(seq.Config)
 			token := sampler.Sample(logits, seq.Tokens)
+
+			// Record TTFT on first generated token
+			if !seq.PrefillCompleted || len(seq.Tokens) == seq.PromptLen {
+				if seq_ttft, ok := e.seqTTFTStart[seq.ID]; ok {
+					metrics.RecordTTFTLatency(time.Since(seq_ttft))
+					delete(e.seqTTFTStart, seq.ID)
+				}
+			} else {
+				metrics.RecordInterTokenLatency(time.Duration(0))
+			}
 
 			// Update Sequence State
 			chunkLen := 1
@@ -615,8 +636,14 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 		ctx.StoreKVPagedBatch(k, v, kCache, vCache, physPosTensor, kvHeads*headDim, batchSize)
 		physPosTensor.ReturnToPool()
 
-		// Attention
-		ctx.AttentionPagedBatch(q, kCache, vCache, attnOut, tokenPosTensor, blockTableTensor, maxBlocks, heads, kvHeads, headDim, e.cache.blockSize, tokenToSeqTensor, batchSize)
+		// Attention — use quantized path if cache is FP8/Q8_0
+		if e.cache != nil && (e.cache.Precision == device.DataTypeFP8 || e.cache.Precision == device.DataTypeQ8_0) {
+			kScales, vScales := e.cache.GetBlockScales(layer)
+			isFP8 := e.cache.Precision == device.DataTypeFP8
+			ctx.PagedAttentionQuantized(q, kCache, vCache, kScales, vScales, attnOut, tokenPosTensor, blockTableTensor, tokenToSeqTensor, maxBlocks, heads, kvHeads, headDim, e.cache.blockSize, batchSize, scale, isFP8)
+		} else {
+			ctx.AttentionPagedBatch(q, kCache, vCache, attnOut, tokenPosTensor, blockTableTensor, maxBlocks, heads, kvHeads, headDim, e.cache.blockSize, tokenToSeqTensor, batchSize)
+		}
 
 		q.ReturnToPool()
 		k.ReturnToPool()
@@ -712,6 +739,7 @@ func (e *cudaEngine) inferInternal(inputTokens []int, tokensToGenerate int, samp
 	}
 
 	e.BatchManager.Submit(req)
+	e.seqTTFTStart[req.ID] = time.Now()
 
 	select {
 	case tokens := <-resChan:
@@ -771,6 +799,8 @@ func (e *cudaEngine) forward(token int, pos int, _ []int) ([]float32, error) {
 		windowSize := 0
 		if e.config.IsGemma4 && (layer%6) != 5 {
 			windowSize = e.config.Gemma4SlidingWindowSize
+		} else if e.config.WindowSize > 0 {
+			windowSize = e.config.WindowSize
 		}
 
 		scale := float32(1.0 / math.Sqrt(float64(headDim)))

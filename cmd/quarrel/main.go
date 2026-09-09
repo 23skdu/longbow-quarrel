@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"flag"
 	"fmt"
 	"log"
@@ -20,6 +21,7 @@ import (
 	"github.com/23skdu/longbow-quarrel/internal/tokenizer"
 	"github.com/23skdu/longbow-quarrel/internal/metrics"
 	"github.com/23skdu/longbow-quarrel/internal/api"
+	"github.com/23skdu/longbow-quarrel/internal/vlm"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -46,6 +48,7 @@ var (
 	numGPULayers     = flag.Int("ngl", -1, "Number of layers to offload to GPU (-1 for all)")
 	gpuLayers        = flag.Int("gpu-layers", -1, "Alias for -ngl")
 	loraPath         = flag.String("lora", "", "Path to LoRA adapter .gguf file (optional)")
+	imagePath        = flag.String("image", "", "Path to image file for VLM inference (optional)")
 )
 
 func main() {
@@ -148,6 +151,40 @@ func main() {
 
 	promptTokens := tok.Encode(*prompt)
 	fmt.Printf("Prompt tokens: %d\n", len(promptTokens))
+
+	// VLM: If image provided, encode through vision encoder and prepend to prompt
+	if *imagePath != "" {
+		imgData, err := os.ReadFile(*imagePath)
+		if err != nil {
+			logger.Log.Warn("Failed to read image file", "error", err)
+		} else {
+			_ = base64.StdEncoding.EncodeToString(imgData)
+			vlmArch := arch
+			if vlmArch == "" || vlmArch == "unknown" {
+				vlmArch = "clip"
+			}
+			devCtx := device.NewContext()
+			defer devCtx.Free()
+			vlmCfg := vlm.VLMConfig{
+				Architecture: vlmArch,
+				ImageSize:    224,
+				PatchSize:    14,
+				HiddenDim:    engineConfig.Dim,
+			}
+			vDecoder, err := vlm.NewVLMDecoder(devCtx, vlmCfg)
+			if err != nil {
+				logger.Log.Warn("VLM decoder not available", "arch", vlmArch, "error", err)
+			} else {
+				visionTensor, vErr := vDecoder.Decode(imgData)
+				if vErr != nil {
+					logger.Log.Warn("Vision encoding failed", "error", vErr)
+				} else if visionTensor != nil {
+					fmt.Printf("Vision features: %d patches encoded\n", visionTensor.Rows())
+					promptTokens = append([]int{0}, promptTokens...)
+				}
+			}
+		}
+	}
 
 	samplerConfig := engine.SamplerConfig{
 		Temperature:      *temperature,

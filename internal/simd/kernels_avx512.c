@@ -303,3 +303,95 @@ void fp32_to_fp16_avx512(const float* src, uint16_t* dst, int n) {
         dst[i] = h;
     }
 }
+
+// ===== VNNI Dot Product Kernels =====
+
+#pragma GCC target("avx512f,avx512bw,avx512dq,avx512vl,avx512vnni,f16c")
+
+// Q8_0 VNNI dot product: 32 elements per block, 34 bytes (2B scale + 32B int8)
+// Uses vpdpbusd to compute int8 dot product with unsigned byte accumulation
+void dot_q8_0_vnni(const uint8_t* data, const float* vector, int n, float* result) {
+    float sum = 0.0f;
+    int numBlocks = n / 32;
+    for (int b = 0; b < numBlocks; b++) {
+        const uint8_t* block = data + b * 34;
+        uint16_t scaleBits = (uint16_t)block[0] | ((uint16_t)block[1] << 8);
+        float scale = fp16_to_float(scaleBits);
+        const int8_t* q = (const int8_t*)(block + 2);
+        __m256i acc = _mm256_setzero_si256();
+        for (int i = 0; i < 32; i += 32) {
+            __m256i w = _mm256_loadu_si256((const __m256i*)(q + i));
+            __m256i x_lo = _mm256_cvtepi8_epi16(_mm256_and_si256(w, _mm256_set1_epi8(0x7F)));
+            __m256i x_hi = _mm256_cvtepi8_epi16(_mm256_srai_epi16(_mm256_unpackhi_epi8(w, w), 8));
+            __m256 v_lo = _mm256_loadu_ps(vector + b * 32 + i);
+            __m256 v_hi = _mm256_loadu_ps(vector + b * 32 + i + 8);
+            __m256i vi_lo = _mm256_cvtps_epi32(v_lo);
+            __m256i vi_hi = _mm256_cvtps_epi32(v_hi);
+            acc = _mm256_dpwssd_epi32(acc, x_lo, vi_lo);
+            acc = _mm256_dpwssd_epi32(acc, x_hi, vi_hi);
+        }
+        __m128i lo128 = _mm256_castsi256_si128(acc);
+        __m128i hi128 = _mm256_extracti128_si256(acc, 1);
+        __m128i sum128 = _mm_add_epi32(lo128, hi128);
+        sum128 = _mm_add_epi32(sum128, _mm_shuffle_epi32(sum128, _MM_SHUFFLE(0,1,2,3)));
+        sum128 = _mm_add_epi32(sum128, _mm_shuffle_epi32(sum128, _MM_SHUFFLE(2,3,0,1)));
+        sum128 = _mm_add_epi32(sum128, _mm_shuffle_epi32(sum128, _MM_SHUFFLE(1,0,3,2)));
+        sum += scale * (float)_mm_cvtsi128_si32(sum128);
+    }
+    *result = sum;
+}
+
+// Q4_K VNNI dot product: 256 elements per block, 144 bytes
+// Decomposes 4-bit values to int8 pairs, uses vpdpbusd on each half
+void dot_q4_k_vnni(const uint8_t* data, const float* vector, int n, float* result) {
+    float sum = 0.0f;
+    int numBlocks = n / 256;
+    for (int b = 0; b < numBlocks; b++) {
+        const uint8_t* block = data + b * 144;
+        float d = fp16_to_float((uint16_t)block[0] | ((uint16_t)block[1] << 8));
+        float dmin = fp16_to_float((uint16_t)block[2] | ((uint16_t)block[3] << 8));
+        const uint8_t* sPtr = block + 4;
+        const uint8_t* qPtr = block + 16;
+        float blockSum = 0.0f;
+        for (int sb = 0; sb < 8; sb++) {
+            uint8_t scaleByte, minByte;
+            if (sb < 4) {
+                scaleByte = sPtr[sb] & 63;
+                minByte = sPtr[sb + 4] & 63;
+            } else {
+                scaleByte = (sPtr[sb + 4] & 0x0F) | ((sPtr[sb - 4] >> 6) << 4);
+                minByte = (sPtr[sb + 4] >> 4) | ((sPtr[sb] >> 6) << 4);
+            }
+            float sVal = d * (float)scaleByte / 225.0f;
+            float mVal = dmin * (float)minByte;
+            int qOffset = (sb / 2) * 32 + (sb % 2) * 16;
+            int vBase = b * 256 + sb * 32;
+            __m128i zero = _mm_setzero_si128();
+            __m256i acc = _mm256_setzero_si256();
+            for (int k = 0; k < 16; k++) {
+                uint8_t bVal = qPtr[qOffset + k];
+                uint8_t lo = bVal & 0x0F;
+                uint8_t hi = bVal >> 4;
+                __m128i wl = _mm_cvtepu8_epi16(_mm_set1_epi8(lo));
+                __m128i wh = _mm_cvtepu8_epi16(_mm_set1_epi8(hi));
+                __m256i w256 = _mm256_set_m128i(wh, wl);
+                __m256 v_lo = _mm256_loadu_ps(vector + vBase + k);
+                __m256 v_hi = _mm256_loadu_ps(vector + vBase + k + 16);
+                __m256i vi_lo = _mm256_cvtps_epi32(v_lo);
+                __m256i vi_hi = _mm256_cvtps_epi32(v_hi);
+                acc = _mm256_dpwssd_epi32(acc, w256, vi_lo);
+                acc = _mm256_dpwssd_epi32(acc, w256, vi_hi);
+            }
+            __m128i lo128 = _mm256_castsi256_si128(acc);
+            __m128i hi128 = _mm256_extracti128_si256(acc, 1);
+            __m128i sum128 = _mm_add_epi32(lo128, hi128);
+            sum128 = _mm_add_epi32(sum128, _mm_shuffle_epi32(sum128, _MM_SHUFFLE(0,1,2,3)));
+            sum128 = _mm_add_epi32(sum128, _mm_shuffle_epi32(sum128, _MM_SHUFFLE(2,3,0,1)));
+            sum128 = _mm_add_epi32(sum128, _mm_shuffle_epi32(sum128, _MM_SHUFFLE(1,0,3,2)));
+            float dotInt = (float)_mm_cvtsi128_si32(sum128);
+            blockSum += sVal * dotInt - mVal * dotInt;
+        }
+        sum += blockSum;
+    }
+    *result = sum;
+}

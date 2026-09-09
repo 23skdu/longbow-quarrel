@@ -10,6 +10,12 @@ import (
 	"github.com/23skdu/longbow-quarrel/internal/metrics"
 )
 
+// VNNI dot product function pointers (set from avx512.go when VNNI is available)
+var (
+	dotQ8_0VNNI func(data []byte, vector []float32, n int) float32
+	dotQ4KVNNI  func(data []byte, vector []float32, n int) float32
+)
+
 func SoftmaxF32(x []float32) {
 	if len(x) == 0 {
 		return
@@ -302,6 +308,9 @@ func VecDotQ8_0_VNNI(data []byte, vector []float32) float32 {
 
 	if HasAVXVNNI() || HasAMX() {
 		metrics.RecordSIMDDispatch("vnni_q8_0")
+		if dotQ8_0VNNI != nil {
+			return dotQ8_0VNNI(data, vector, n)
+		}
 	} else {
 		metrics.RecordSIMDDispatch("fallback_q8_0")
 	}
@@ -346,6 +355,9 @@ func VecDotQ4_K_VNNI(data []byte, vector []float32) float32 {
 
 	if HasAVXVNNI() || HasAMX() {
 		metrics.RecordSIMDDispatch("vnni_q4_k")
+		if dotQ4KVNNI != nil {
+			return dotQ4KVNNI(data, vector, n)
+		}
 	} else {
 		metrics.RecordSIMDDispatch("fallback_q4_k")
 	}

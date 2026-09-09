@@ -146,6 +146,7 @@ type Sequence struct {
 	Config         SamplerConfig
 	Result         chan []int
 	Err            chan error
+	Priority       int // Scheduling priority (higher = more important)
 	TokenCallback  func(int)
 	LogitsCallback func([]float32)
 	AdapterID      string // Active LoRA adapter for this sequence

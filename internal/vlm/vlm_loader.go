@@ -22,6 +22,8 @@ func NewVLMDecoder(ctx *device.Context, cfg VLMConfig) (VLMDecoder, error) {
 	switch cfg.Architecture {
 	case "clip", "siglip":
 		return newCLIPEncoder(ctx, cfg), nil
+	case "gemma4":
+		return newCLIPEncoder(ctx, cfg), nil
 	case "llava", "qwen-vl":
 		return newMultiModalEncoder(ctx, cfg), nil
 	default:

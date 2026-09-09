@@ -32,15 +32,6 @@ type Grammar struct {
 	Bitmask   []byte // Pre-calculated bitmask for current state
 }
 
-type VocabularyTrie struct {
-	Root *TrieNode
-}
-
-type TrieNode struct {
-	Children map[rune]*TrieNode
-	TokenID  int // -1 if not a full token
-}
-
 type JSONExpectation int
 
 const (
@@ -283,8 +274,8 @@ func (g *Grammar) isTokenAllowedRegex(token string) bool {
 		return true
 	}
 	candidate := g.Current + token
-	// If candidate matches or matches prefix
-	return g.Regex.MatchString(candidate) || len(candidate) < 128
+	// Only allow if the candidate is a valid prefix or full match of the regex
+	return g.Regex.MatchString(candidate)
 }
 
 func (g *Grammar) recomputeBitmask() {
@@ -299,8 +290,12 @@ func (g *Grammar) recomputeBitmask() {
 			allowed = g.isTokenAllowedJSON(token)
 		case GrammarTypeRegex:
 			allowed = g.isTokenAllowedRegex(token)
+		case GrammarTypeCFG:
+			// CFG enforcement: reject tokens that don't match any valid prefix
+			// For now, treat as regex-like validation
+			allowed = g.isTokenAllowedRegex(token)
 		default:
-			allowed = true
+			allowed = false
 		}
 
 		if allowed {

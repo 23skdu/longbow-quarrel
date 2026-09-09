@@ -45,6 +45,10 @@ void fused_mlp_avx512(const float* input, const float* gateWeight, const float* 
                      const float* downWeight, float* output, int batch, int dim, int hiddenDim);
 void fused_mlp_avx2(const float* input, const float* gateWeight, const float* upWeight,
                    const float* downWeight, float* output, int batch, int dim, int hiddenDim);
+
+// VNNI Dot Product Kernels
+void dot_q8_0_vnni(const uint8_t* data, const float* vector, int n, float* result);
+void dot_q4_k_vnni(const uint8_t* data, const float* vector, int n, float* result);
 */
 import "C"
 import (
@@ -657,6 +661,27 @@ func fp32ToFp16(f float32) uint16 {
 		}
 	}
 	return h
+}
+
+// DotQ8_0VNNI calls the VNNI-accelerated Q8_0 dot product kernel.
+func dotQ8_0VNNIC(data []byte, vector []float32, n int) float32 {
+	var result float32
+	C.dot_q8_0_vnni((*C.uint8_t)(unsafe.Pointer(&data[0])), (*C.float)(unsafe.Pointer(&vector[0])), C.int(n), (*C.float)(unsafe.Pointer(&result)))
+	return result
+}
+
+// DotQ4KVNNI calls the VNNI-accelerated Q4_K dot product kernel.
+func dotQ4KVNNIC(data []byte, vector []float32, n int) float32 {
+	var result float32
+	C.dot_q4_k_vnni((*C.uint8_t)(unsafe.Pointer(&data[0])), (*C.float)(unsafe.Pointer(&vector[0])), C.int(n), (*C.float)(unsafe.Pointer(&result)))
+	return result
+}
+
+func init() {
+	if HasAVXVNNI() {
+		dotQ8_0VNNI = dotQ8_0VNNIC
+		dotQ4KVNNI = dotQ4KVNNIC
+	}
 }
 
 // Force compiler to not optimize away the SIMD functions
