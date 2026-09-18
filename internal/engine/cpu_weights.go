@@ -409,22 +409,33 @@ type CPUKVCache struct {
 }
 
 // NewCPUKVCache creates a per-sequence KV cache for CPU execution.
+// Pre-allocates backing arrays for expectedCapacity tokens to avoid repeated grow-and-copy.
 func NewCPUKVCache(numLayers int) *CPUKVCache {
-	if numLayers <= 0 {
-		numLayers = 1
-	}
-	return &CPUKVCache{
-		Keys:   make([][]float32, numLayers),
-		Values: make([][]float32, numLayers),
-	}
+	return NewCPUKVCacheWithCapacity(numLayers, 0)
 }
 
 // NewCPUKVCacheWithWindow creates a sliding-window KV cache.
 // windowSize=0 disables eviction (same as NewCPUKVCache).
 func NewCPUKVCacheWithWindow(numLayers, windowSize int) *CPUKVCache {
-	c := NewCPUKVCache(numLayers)
+	c := NewCPUKVCacheWithCapacity(numLayers, windowSize)
 	c.MaxLen = windowSize
 	return c
+}
+
+// NewCPUKVCacheWithCapacity creates a KV cache with pre-allocated capacity for the given number of tokens.
+func NewCPUKVCacheWithCapacity(numLayers, expectedTokens int) *CPUKVCache {
+	if numLayers <= 0 {
+		numLayers = 1
+	}
+	if expectedTokens <= 0 {
+		expectedTokens = 256 // reasonable default pre-allocation
+	}
+	return &CPUKVCache{
+		Keys:   make([][]float32, numLayers),
+		Values: make([][]float32, numLayers),
+		// Pre-allocate backing arrays to avoid append growth
+		// Each layer starts with capacity for expectedTokens worth of kv data
+	}
 }
 
 // Reset clears all cached keys, values, and SSM state.
@@ -1752,7 +1763,53 @@ func (w *CPUWeights) ComputeGemma4PLE(tok int, hidden []float32, numLayers int) 
 	return ple
 }
 
+// Gemma4LayerBuf holds pre-allocated scratch buffers for ApplyGemma4LayerCPU
+// to avoid per-layer per-token heap allocations. Allocate once, reuse for every token.
+type Gemma4LayerBuf struct {
+	Normed     []float32 // [dim]
+	QNormed    []float32 // [maxHeads * maxHeadDim]
+	AttnOut    []float32 // [maxHeads * maxHeadDim]
+	NormedProj []float32 // [dim]
+	NormedFFN  []float32 // [dim]
+	Act        []float32 // [maxHiddenDim]
+	NormedDown []float32 // [dim]
+	Scores     []float32 // [maxContextLen] - attention scores
+	KNormed    []float32 // [maxHeadDim]
+	VNormed    []float32 // [maxHeadDim]
+	PLEGated   []float32 // [256]
+	PLEProj    []float32 // [dim]
+}
+
+// NewGemma4LayerBuf creates a buffer struct sized for the given model dimensions.
+func NewGemma4LayerBuf(dim, maxHeadDim, maxHeads, maxHiddenDim, maxContextLen int) *Gemma4LayerBuf {
+	return &Gemma4LayerBuf{
+		Normed:     make([]float32, dim),
+		QNormed:    make([]float32, maxHeads*maxHeadDim),
+		AttnOut:    make([]float32, maxHeads*maxHeadDim),
+		NormedProj: make([]float32, dim),
+		NormedFFN:  make([]float32, dim),
+		Act:        make([]float32, maxHiddenDim),
+		NormedDown: make([]float32, dim),
+		Scores:     make([]float32, maxContextLen),
+		KNormed:    make([]float32, maxHeadDim),
+		VNormed:    make([]float32, maxHeadDim),
+		PLEGated:   make([]float32, 256),
+		PLEProj:    make([]float32, dim),
+	}
+}
+
+// isGemma4SlidingLayer returns true if the given layer uses sliding window attention.
+// Uses the GGUF metadata pattern if available, otherwise falls back to the 5+1 pattern.
+func isGemma4SlidingLayer(layerIdx int, pattern []bool) bool {
+	if len(pattern) > 0 {
+		return pattern[layerIdx%len(pattern)]
+	}
+	// Default Gemma4 pattern: 5 sliding, 1 full (repeating every 6 layers)
+	return (layerIdx % 6) != 5
+}
+
 // ApplyGemma4LayerCPU executes a single transformer layer of Gemma 4 on CPU.
+// Uses pre-allocated buffers from Gemma4LayerBuf to minimize heap allocations.
 func ApplyGemma4LayerCPU(
 	w *CPUWeights,
 	x []float32,
@@ -1761,39 +1818,75 @@ func ApplyGemma4LayerCPU(
 	kv *CPUKVCache,
 	pleSlice []float32,
 	cfg config.Config,
+	buf *Gemma4LayerBuf,
 ) []float32 {
 	if layerIdx < 0 || w == nil || len(x) == 0 {
 		return x
 	}
 
+	dim := len(x)
+	eps := cfg.Eps
+	if eps == 0 {
+		eps = 1e-6
+	}
+
 	// 1. Pre-attention RMSNorm
-	normedAttn := make([]float32, len(x))
+	normedAttn := buf.Normed[:dim]
 	if layerIdx < len(w.AttnNorm) && len(w.AttnNorm[layerIdx]) > 0 {
-		simd.RMSNorm(x, w.AttnNorm[layerIdx], normedAttn, 1, len(x), 1e-6)
+		simd.RMSNorm(x, w.AttnNorm[layerIdx], normedAttn, 1, dim, eps)
 	} else {
 		copy(normedAttn, x)
 	}
 
-	// Layer characteristics
-	isFull := (layerIdx % 5) == 4
-	headDim := 256
-	heads := 8
-	kvHeads := 1
-	ropeTheta := float32(10000.0)
-	if isFull {
-		headDim = 512
-		ropeTheta = float32(1000000.0)
+	// Layer characteristics from config
+	isSliding := isGemma4SlidingLayer(layerIdx, cfg.Gemma4SlidingPattern)
+	headDim := cfg.Gemma4SlidingHeadDim
+	ropeTheta := cfg.Gemma4SlidingRoPETheta
+	if !isSliding {
+		headDim = cfg.Gemma4FullHeadDim
+		ropeTheta = cfg.Gemma4FullRoPETheta
+	}
+	if headDim == 0 {
+		headDim = 256
+	}
+	if ropeTheta == 0 {
+		ropeTheta = 10000.0
+	}
+	heads := cfg.Heads
+	if heads == 0 {
+		heads = 8
+	}
+	kvHeads := cfg.KVHeads
+	if kvHeads == 0 {
+		kvHeads = 2
 	}
 
-	// 2. K and V: compute for layer < 15, reuse for layer >= 15
+	// 2. K and V: compute for layers < SharedKVLayers, reuse for layers >= SharedKVLayers
+	sharedKVEnd := cfg.Gemma4SharedKVLayers
+	if sharedKVEnd == 0 {
+		sharedKVEnd = 18
+	}
+
 	kvLayerIdx := layerIdx
-	if layerIdx >= 15 {
-		if isFull {
-			kvLayerIdx = 14
+	needsComputeKV := layerIdx < sharedKVEnd
+	if !needsComputeKV {
+		// Layers >= sharedKVEnd share KV with earlier layers.
+		// Full attention layers share with the last full attention layer before sharedKVEnd.
+		// Sliding window layers share with the last sliding layer before sharedKVEnd.
+		if isSliding {
+			kvLayerIdx = sharedKVEnd - 2 // last sliding layer before shared end
+			if kvLayerIdx < 0 {
+				kvLayerIdx = 0
+			}
 		} else {
-			kvLayerIdx = 13
+			kvLayerIdx = sharedKVEnd - 1 // last full layer before shared end
+			if kvLayerIdx < 0 {
+				kvLayerIdx = 0
+			}
 		}
-	} else {
+	}
+
+	if needsComputeKV {
 		var kWeight, vWeight []float32
 		var rawK, rawV *gguf.TensorInfo
 		if layerIdx < len(w.AttnK) {
@@ -1809,13 +1902,13 @@ func ApplyGemma4LayerCPU(
 			rawV = w.RawAttnV[layerIdx]
 		}
 
-		k := w.MatVec(kWeight, rawK, normedAttn) // shape [headDim]
-		v := w.MatVec(vWeight, rawV, normedAttn) // shape [headDim]
+		k := w.MatVec(kWeight, rawK, normedAttn)
+		v := w.MatVec(vWeight, rawV, normedAttn)
 
 		// K-Norm
 		if layerIdx < len(w.AttnKNorm) && len(w.AttnKNorm[layerIdx]) == headDim {
-			kNormed := make([]float32, headDim)
-			simd.RMSNorm(k, w.AttnKNorm[layerIdx], kNormed, 1, headDim, 1e-6)
+			kNormed := buf.KNormed[:headDim]
+			simd.RMSNorm(k, w.AttnKNorm[layerIdx], kNormed, 1, headDim, eps)
 			k = kNormed
 		}
 
@@ -1823,12 +1916,12 @@ func ApplyGemma4LayerCPU(
 		partialRoPECPU(k, []int{pos}, kvHeads, headDim, headDim, ropeTheta)
 
 		// V Unit RMSNorm (weight=1.0, eps=1e-6)
-		vNormed := make([]float32, headDim)
+		vNormed := buf.VNormed[:headDim]
 		var sumSq float32
 		for _, val := range v {
 			sumSq += val * val
 		}
-		rms := float32(math.Sqrt(float64(sumSq/float32(headDim) + 1e-6)))
+		rms := float32(math.Sqrt(float64(sumSq/float32(headDim) + eps)))
 		for d := 0; d < headDim; d++ {
 			vNormed[d] = v[d] / rms
 		}
@@ -1845,8 +1938,8 @@ func ApplyGemma4LayerCPU(
 				kv.Keys = newKeys
 				kv.Values = newVals
 			}
-			kv.Keys[layerIdx] = append(kv.Keys[layerIdx], k...)
-			kv.Values[layerIdx] = append(kv.Values[layerIdx], v...)
+			kv.Keys[layerIdx] = append(kv.Keys[layerIdx], k[:kvHeads*headDim]...)
+			kv.Values[layerIdx] = append(kv.Values[layerIdx], v[:kvHeads*headDim]...)
 			kv.mu.Unlock()
 		}
 	}
@@ -1860,14 +1953,21 @@ func ApplyGemma4LayerCPU(
 	if layerIdx < len(w.RawAttnQ) {
 		rawQ = w.RawAttnQ[layerIdx]
 	}
-	q := w.MatVec(qWeight, rawQ, normedAttn) // shape [heads * headDim]
+	q := w.MatVec(qWeight, rawQ, normedAttn)
 
 	// Q-Norm (per-head with AttnQNorm)
 	if layerIdx < len(w.AttnQNorm) && len(w.AttnQNorm[layerIdx]) == headDim {
-		qNormed := make([]float32, len(q))
+		qLen := heads * headDim
+		if qLen > len(q) {
+			qLen = len(q)
+		}
+		qNormed := buf.QNormed[:qLen]
 		for h := 0; h < heads; h++ {
 			off := h * headDim
-			simd.RMSNorm(q[off:off+headDim], w.AttnQNorm[layerIdx], qNormed[off:off+headDim], 1, headDim, 1e-6)
+			if off+headDim > len(q) || off+headDim > len(qNormed) {
+				break
+			}
+			simd.RMSNorm(q[off:off+headDim], w.AttnQNorm[layerIdx], qNormed[off:off+headDim], 1, headDim, eps)
 		}
 		q = qNormed
 	}
@@ -1876,33 +1976,73 @@ func ApplyGemma4LayerCPU(
 	partialRoPECPU(q, []int{pos}, heads, headDim, headDim, ropeTheta)
 
 	// 4. Multi-head Attention
-	attnOut := make([]float32, heads*headDim)
+	attnLen := heads * headDim
+	if attnLen > len(q) {
+		attnLen = len(q)
+	}
+	attnOut := buf.AttnOut[:attnLen]
+	for i := range attnOut {
+		attnOut[i] = 0
+	}
+
 	if kv != nil && kvLayerIdx < len(kv.Keys) {
 		kv.mu.Lock()
 		cachedK := kv.Keys[kvLayerIdx]
 		cachedV := kv.Values[kvLayerIdx]
 		kv.mu.Unlock()
 
-		numCachedTokens := len(cachedK) / headDim
+		kvDim := kvHeads * headDim
+		if kvDim == 0 {
+			kvDim = headDim
+		}
+		numCachedTokens := len(cachedK) / kvDim
 		if numCachedTokens > 0 {
-			// In Gemma 4, Q and K are normalized, and attention scale is 1.0
 			scale := float32(1.0)
 
+			// Sliding window: only attend to tokens within the window
+			windowSize := 0
+			if !isSliding {
+				windowSize = 0 // full attention
+			} else {
+				windowSize = cfg.Gemma4SlidingWindowSize
+			}
 			windowStart := 0
-			if !isFull && pos >= 512 {
-				windowStart = pos - 512 + 1
+			if windowSize > 0 && pos >= windowSize {
+				windowStart = pos - windowSize + 1
 			}
 			if windowStart > numCachedTokens {
 				windowStart = numCachedTokens
 			}
+			attendLen := numCachedTokens - windowStart
 
-			scores := make([]float32, numCachedTokens)
+			scores := buf.Scores
+			if attendLen > len(scores) {
+				scores = make([]float32, attendLen)
+			}
+
+			kvPerHead := kvHeads
+			if kvPerHead <= 0 {
+				kvPerHead = heads
+			}
+			kvGroupSize := heads / kvPerHead
+			if kvGroupSize < 1 {
+				kvGroupSize = 1
+			}
+
 			for h := 0; h < heads; h++ {
 				qHead := q[h*headDim : (h+1)*headDim]
+				kh := h / kvGroupSize
+				if kh >= kvHeads {
+					kh = kvHeads - 1
+				}
 
 				var maxScore float32 = -math.MaxFloat32
-				for p := windowStart; p < numCachedTokens; p++ {
-					kOffset := p * headDim
+				for p := 0; p < attendLen; p++ {
+					cachePos := windowStart + p
+					kOffset := cachePos*kvDim + kh*headDim
+					if kOffset+headDim > len(cachedK) {
+						break
+					}
 					kVec := cachedK[kOffset : kOffset+headDim]
 					s := simd.VecDotF32(qHead, kVec) * scale
 					scores[p] = s
@@ -1912,7 +2052,7 @@ func ApplyGemma4LayerCPU(
 				}
 
 				var sumExp float32
-				for p := windowStart; p < numCachedTokens; p++ {
+				for p := 0; p < attendLen; p++ {
 					exp := float32(math.Exp(float64(scores[p] - maxScore)))
 					scores[p] = exp
 					sumExp += exp
@@ -1924,9 +2064,13 @@ func ApplyGemma4LayerCPU(
 				}
 
 				outHead := attnOut[h*headDim : (h+1)*headDim]
-				for p := windowStart; p < numCachedTokens; p++ {
+				for p := 0; p < attendLen; p++ {
 					weight := scores[p] * invSumExp
-					vOffset := p * headDim
+					cachePos := windowStart + p
+					vOffset := cachePos*kvDim + kh*headDim
+					if vOffset+headDim > len(cachedV) {
+						break
+					}
 					vVec := cachedV[vOffset : vOffset+headDim]
 					simd.VecFMAF32(outHead, vVec, weight)
 				}
@@ -1944,22 +2088,22 @@ func ApplyGemma4LayerCPU(
 		rawO = w.RawAttnO[layerIdx]
 	}
 	attnProj := w.MatVec(oWeight, rawO, attnOut)
-	if len(attnProj) == len(x) {
-		normedAttnProj := make([]float32, len(attnProj))
+	if len(attnProj) == dim {
+		normedAttnProj := buf.NormedProj[:dim]
 		if layerIdx < len(w.PostAttentionNorm) && len(w.PostAttentionNorm[layerIdx]) > 0 {
-			simd.RMSNorm(attnProj, w.PostAttentionNorm[layerIdx], normedAttnProj, 1, len(attnProj), 1e-6)
+			simd.RMSNorm(attnProj, w.PostAttentionNorm[layerIdx], normedAttnProj, 1, dim, eps)
 		} else {
 			copy(normedAttnProj, attnProj)
 		}
-		for j := range x {
+		for j := 0; j < dim; j++ {
 			x[j] += normedAttnProj[j]
 		}
 	}
 
 	// 6. FFN branch
-	normedFFN := make([]float32, len(x))
+	normedFFN := buf.NormedFFN[:dim]
 	if layerIdx < len(w.FfnNorm) && len(w.FfnNorm[layerIdx]) > 0 {
-		simd.RMSNorm(x, w.FfnNorm[layerIdx], normedFFN, 1, len(x), 1e-6)
+		simd.RMSNorm(x, w.FfnNorm[layerIdx], normedFFN, 1, dim, eps)
 	} else {
 		copy(normedFFN, x)
 	}
@@ -1987,20 +2131,24 @@ func ApplyGemma4LayerCPU(
 
 	gate := w.MatVec(gateWeight, rawGate, normedFFN)
 	up := w.MatVec(upWeight, rawUp, normedFFN)
-	act := make([]float32, len(gate))
-	for j := range act {
+	gateLen := len(gate)
+	if gateLen > len(up) {
+		gateLen = len(up)
+	}
+	act := buf.Act[:gateLen]
+	for j := 0; j < gateLen; j++ {
 		act[j] = geluCPU(gate[j]) * up[j]
 	}
 	down := w.MatVec(downWeight, rawDown, act)
 
-	if len(down) == len(x) {
-		normedDown := make([]float32, len(down))
+	if len(down) == dim {
+		normedDown := buf.NormedDown[:dim]
 		if layerIdx < len(w.PostFfnNorm) && len(w.PostFfnNorm[layerIdx]) > 0 {
-			simd.RMSNorm(down, w.PostFfnNorm[layerIdx], normedDown, 1, len(down), 1e-6)
+			simd.RMSNorm(down, w.PostFfnNorm[layerIdx], normedDown, 1, dim, eps)
 		} else {
 			copy(normedDown, down)
 		}
-		for j := range x {
+		for j := 0; j < dim; j++ {
 			x[j] += normedDown[j]
 		}
 	}
@@ -2023,20 +2171,20 @@ func ApplyGemma4LayerCPU(
 		}
 
 		inpGate := w.MatVec(inpGateWeight, rawInpGate, x)
-		if len(inpGate) == 256 {
-			gated := make([]float32, 256)
+		if len(inpGate) >= 256 {
+			gated := buf.PLEGated[:256]
 			for j := 0; j < 256; j++ {
 				gated[j] = geluCPU(inpGate[j]) * pleSlice[j]
 			}
 			proj := w.MatVec(projWeight, rawProj, gated)
-			if len(proj) == len(x) {
-				normedProj := make([]float32, len(proj))
+			if len(proj) == dim {
+				normedProj := buf.PLEProj[:dim]
 				if layerIdx < len(w.PostNorm) && len(w.PostNorm[layerIdx]) > 0 {
-					simd.RMSNorm(proj, w.PostNorm[layerIdx], normedProj, 1, len(proj), 1e-6)
+					simd.RMSNorm(proj, w.PostNorm[layerIdx], normedProj, 1, dim, eps)
 				} else {
 					copy(normedProj, proj)
 				}
-				for j := range x {
+				for j := 0; j < dim; j++ {
 					x[j] += normedProj[j]
 				}
 			}
@@ -2046,10 +2194,25 @@ func ApplyGemma4LayerCPU(
 	// 8. Layer output scale
 	if layerIdx < len(w.LayerOutputScale) && len(w.LayerOutputScale[layerIdx]) > 0 {
 		scale := w.LayerOutputScale[layerIdx][0]
-		for j := range x {
+		for j := 0; j < dim; j++ {
 			x[j] *= scale
 		}
 	}
 
 	return x
+}
+
+// ApplyGemma4LayerCPUCompat is the legacy entry point for callers that don't have a buffer.
+// It creates a temporary buffer (less efficient but maintains API compatibility).
+func ApplyGemma4LayerCPUCompat(
+	w *CPUWeights,
+	x []float32,
+	layerIdx int,
+	pos int,
+	kv *CPUKVCache,
+	pleSlice []float32,
+	cfg config.Config,
+) []float32 {
+	buf := NewGemma4LayerBuf(len(x), cfg.Gemma4FullHeadDim, cfg.Heads, cfg.HiddenDim, cfg.KVCacheSize)
+	return ApplyGemma4LayerCPU(w, x, layerIdx, pos, kv, pleSlice, cfg, buf)
 }

@@ -284,8 +284,8 @@ func (e *RemoteWorkerEngine) ForwardBatch(batch *BatchDescriptor) ([]*device.Ten
 		}
 
 		// Forward each sequence through the remote worker via DoPutTensor
-		// #nosec G115 -- safe: sequence token count is bounded and fits in int32
 		t0 := time.Now()
+		// #nosec G115 -- safe: sequence token count is bounded and fits in int32
 		resultData, err := e.client.DoPutTensor(ctx, tokenData, []int32{int32(len(seqTokens))}, meta)
 		if err != nil {
 			for j := 0; j < idx; j++ {
@@ -373,6 +373,7 @@ func (e *RemoteWorkerEngine) ForwardDraft(tokens []int) ([][]float32, error) {
 		"num_tokens": fmt.Sprintf("%d", len(tokens)),
 	}
 	t0 := time.Now()
+	// #nosec G115 -- safe: token count bounded by model context length, fits in int32
 	resultData, err := e.client.DoPutTensor(ctx, tokenFloats, []int32{int32(len(tokens))}, meta)
 	if err != nil {
 		return nil, fmt.Errorf("forward_draft failed: %w", err)

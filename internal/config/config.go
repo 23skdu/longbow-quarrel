@@ -66,6 +66,8 @@ type Config struct {
 	Gemma4PartialRoPEFactor float32 // Default 0.25 for full attention layers
 	Gemma4SlidingHeadDim    int     // Default 256 for sliding window layers
 	Gemma4FullHeadDim       int     // Default 512 for full attention layers
+	Gemma4SharedKVLayers    int     // Number of KV layers that are shared (default 18)
+	Gemma4SlidingPattern    []bool  // Per-layer sliding window pattern (true=sliding, false=full)
 	FinalLogitSoftcapping   float32 // e.g. 30.0 for Gemma4
 
 	DebugDequant     bool
@@ -97,6 +99,8 @@ type Gemma4Config struct {
 	PartialRoPEFactor    float32
 	SlidingHeadDim       int
 	FullHeadDim          int
+	SharedKVLayers       int
+	SlidingPattern       []bool
 }
 
 func (c *Config) Validate() error {

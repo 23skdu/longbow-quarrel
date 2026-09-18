@@ -166,8 +166,60 @@ func ExtractModelConfig(f *gguf.GGUFFile) config.Config {
 		cfg.Gemma4PartialRoPEFactor = 0.25
 		cfg.Gemma4SlidingHeadDim = 256
 		cfg.Gemma4FullHeadDim = 512
+		cfg.Gemma4SharedKVLayers = 18
 		cfg.FinalLogitSoftcapping = 30.0
 		cfg.Eps = 1e-6
+
+		// Read shared KV layers from GGUF metadata
+		if val, ok := getKV(f, arch+".attention.shared_kv_layers"); ok {
+			cfg.Gemma4SharedKVLayers = int(toFloat64(val))
+		}
+
+		// Read sliding window pattern from GGUF metadata
+		if val, ok := f.KV[arch+".attention.sliding_window_pattern"]; ok {
+			if arr, ok := val.([]interface{}); ok {
+				pattern := make([]bool, len(arr))
+				for i, v := range arr {
+					if f, ok := v.(float64); ok {
+						pattern[i] = f != 0
+					} else if b, ok := v.(bool); ok {
+						pattern[i] = b
+					}
+				}
+				cfg.Gemma4SlidingPattern = pattern
+			}
+		}
+
+		// Read sliding window size from GGUF metadata
+		if val, ok := getKV(f, arch+".attention.sliding_window"); ok {
+			cfg.Gemma4SlidingWindowSize = int(toFloat64(val))
+		}
+
+		// Read head dimensions from GGUF metadata
+		if val, ok := getKV(f, arch+".attention.key_length"); ok {
+			cfg.Gemma4FullHeadDim = int(toFloat64(val))
+		}
+		if val, ok := getKV(f, arch+".attention.key_length_swa"); ok {
+			cfg.Gemma4SlidingHeadDim = int(toFloat64(val))
+		}
+
+		// Read rope freq bases from GGUF metadata
+		if val, ok := getKV(f, arch+".rope.freq_base"); ok {
+			cfg.Gemma4FullRoPETheta = float32(toFloat64(val))
+		}
+		if val, ok := getKV(f, arch+".rope.freq_base_swa"); ok {
+			cfg.Gemma4SlidingRoPETheta = float32(toFloat64(val))
+		}
+
+		// Read final logit softcapping from GGUF metadata
+		if val, ok := getKV(f, arch+".final_logit_softcapping"); ok {
+			cfg.FinalLogitSoftcapping = float32(toFloat64(val))
+		}
+
+		// Read epsilon from GGUF metadata
+		if val, ok := getKV(f, arch+".attention.layer_norm_rms_epsilon"); ok {
+			cfg.Eps = float32(toFloat64(val))
+		}
 	}
 
 	return cfg

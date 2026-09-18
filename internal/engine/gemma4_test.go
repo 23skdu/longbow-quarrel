@@ -40,6 +40,7 @@ func TestGemma4MultiTokenInference(t *testing.T) {
 	// Prompt: "The capital of France is" -> tokens: [2, 818, 5279, 529, 7001, 563]
 	tokens := []int{2, 818, 5279, 529, 7001, 563}
 	kv := &CPUKVCache{}
+	gemma4Buf := NewGemma4LayerBuf(cfg.Dim, cfg.Gemma4FullHeadDim, cfg.Heads, cfg.HiddenDim, cfg.KVCacheSize)
 
 	var lastHidden []float32
 	for pos, tok := range tokens {
@@ -52,7 +53,7 @@ func TestGemma4MultiTokenInference(t *testing.T) {
 
 		ple := w.ComputeGemma4PLE(tok, hidden, cfg.Layers)
 		for layerIdx := 0; layerIdx < cfg.Layers; layerIdx++ {
-			hidden = ApplyGemma4LayerCPU(w, hidden, layerIdx, pos, kv, ple[layerIdx], cfg)
+			hidden = ApplyGemma4LayerCPU(w, hidden, layerIdx, pos, kv, ple[layerIdx], cfg, gemma4Buf)
 		}
 		lastHidden = hidden
 	}

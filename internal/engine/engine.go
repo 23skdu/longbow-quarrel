@@ -310,9 +310,26 @@ func (e *metalEngine) loadModel(path string) error {
 			e.config.Gemma4PartialRoPEFactor = 0.25
 			e.config.Gemma4SlidingHeadDim = 256
 			e.config.Gemma4FullHeadDim = 512
+			e.config.Gemma4SharedKVLayers = 18
 			e.config.FinalLogitSoftcapping = 30.0
 			e.config.Eps = 1e-6
-			logger.Log.Info("Gemma4 architecture detected", "arch", arch)
+
+			// Read from GGUF metadata
+			modelCfg := ExtractModelConfig(f)
+			e.config.Gemma4SharedKVLayers = modelCfg.Gemma4SharedKVLayers
+			e.config.Gemma4SlidingPattern = modelCfg.Gemma4SlidingPattern
+			e.config.Gemma4SlidingWindowSize = modelCfg.Gemma4SlidingWindowSize
+			e.config.Gemma4SlidingHeadDim = modelCfg.Gemma4SlidingHeadDim
+			e.config.Gemma4FullHeadDim = modelCfg.Gemma4FullHeadDim
+			e.config.Gemma4SlidingRoPETheta = modelCfg.Gemma4SlidingRoPETheta
+			e.config.Gemma4FullRoPETheta = modelCfg.Gemma4FullRoPETheta
+			e.config.FinalLogitSoftcapping = modelCfg.FinalLogitSoftcapping
+			e.config.Eps = modelCfg.Eps
+
+			logger.Log.Info("Gemma4 architecture detected", "arch", arch,
+				"shared_kv_layers", e.config.Gemma4SharedKVLayers,
+				"sliding_head_dim", e.config.Gemma4SlidingHeadDim,
+				"full_head_dim", e.config.Gemma4FullHeadDim)
 		}
 		logger.Log.Info("Model architecture confirmed", "arch", arch)
 	}

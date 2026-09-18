@@ -81,6 +81,8 @@ jobs:
           go build -v -tags "darwin,metal" ./cmd/quarrel
           
       - name: Basic unit tests
+        env:
+          GOMEMLIMIT: 1GiB
         run: |
           go test -v ./internal/tokenizer
           go test -v ./internal/gguf
@@ -116,14 +118,20 @@ jobs:
           ollama pull smollm2:135m
           
       - name: Run Metal device tests
+        env:
+          GOMEMLIMIT: 2GiB
         run: |
           go test -v -tags "darwin,metal" ./internal/device -timeout 30m
           
       - name: Run engine tests with Metal
+        env:
+          GOMEMLIMIT: 2GiB
         run: |
           go test -v -tags "darwin,metal" ./internal/engine -timeout 30m
           
       - name: Run integration tests
+        env:
+          GOMEMLIMIT: 2GiB
         run: |
           go test -v -tags "darwin,metal" ./test/integration -timeout 30m
 
@@ -159,6 +167,8 @@ jobs:
           ollama pull smollm2:135m
           
       - name: Run fuzz tests
+        env:
+          GOMEMLIMIT: 1GiB
         run: |
           go test -fuzz=Fuzz${{ matrix.corpus }} -fuzztime=${{ matrix.duration }} -tags "darwin,metal" ./internal/engine
           
@@ -234,6 +244,8 @@ jobs:
           key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
           
       - name: Run tests with coverage
+        env:
+          GOMEMLIMIT: 2GiB
         run: |
           go test -v -coverprofile=coverage.out -covermode=atomic ./...
           

@@ -100,6 +100,8 @@ func NewCPUEngine(modelPath string, cfg config.Config) (Engine, error) {
 		cfg.Gemma4PartialRoPEFactor = modelCfg.Gemma4PartialRoPEFactor
 		cfg.Gemma4SlidingHeadDim = modelCfg.Gemma4SlidingHeadDim
 		cfg.Gemma4FullHeadDim = modelCfg.Gemma4FullHeadDim
+		cfg.Gemma4SharedKVLayers = modelCfg.Gemma4SharedKVLayers
+		cfg.Gemma4SlidingPattern = modelCfg.Gemma4SlidingPattern
 		cfg.FinalLogitSoftcapping = modelCfg.FinalLogitSoftcapping
 		cfg.Eps = modelCfg.Eps
 	}
@@ -328,6 +330,12 @@ func (e *CPUEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, error
 				hiddenSize = 576
 			}
 
+			// Pre-allocate Gemma4 layer buffers once per sequence
+			var gemma4Buf *Gemma4LayerBuf
+			if e.config.IsGemma4 {
+				gemma4Buf = NewGemma4LayerBuf(hiddenSize, e.config.Gemma4FullHeadDim, e.config.Heads, e.config.HiddenDim, e.config.KVCacheSize)
+			}
+
 			var logits []float32
 			for t, tok := range seqTokens {
 				pos := basePos + t
@@ -340,7 +348,7 @@ func (e *CPUEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, error
 					}
 					ple := e.weights.ComputeGemma4PLE(tok, hidden, e.config.Layers)
 					for layerIdx := 0; layerIdx < e.config.Layers; layerIdx++ {
-						hidden = ApplyGemma4LayerCPU(e.weights, hidden, layerIdx, pos, kvCache, ple[layerIdx], e.config)
+						hidden = ApplyGemma4LayerCPU(e.weights, hidden, layerIdx, pos, kvCache, ple[layerIdx], e.config, gemma4Buf)
 					}
 				} else {
 					for layerIdx := 0; layerIdx < e.config.Layers; layerIdx++ {
@@ -445,6 +453,12 @@ func (e *CPUEngine) forward(tokens []int) []float32 {
 	kvCache := NewCPUKVCache(e.config.Layers)
 	var hidden []float32
 
+	// Pre-allocate Gemma4 layer buffers
+	var gemma4Buf *Gemma4LayerBuf
+	if e.config.IsGemma4 {
+		gemma4Buf = NewGemma4LayerBuf(hiddenSize, e.config.Gemma4FullHeadDim, e.config.Heads, e.config.HiddenDim, e.config.KVCacheSize)
+	}
+
 	for pos, tok := range tokens {
 		hidden = e.weights.GetTokenEmbedding(tok, hiddenSize)
 		if e.config.IsGemma4 {
@@ -454,7 +468,7 @@ func (e *CPUEngine) forward(tokens []int) []float32 {
 			}
 			ple := e.weights.ComputeGemma4PLE(tok, hidden, e.config.Layers)
 			for layerIdx := 0; layerIdx < e.config.Layers; layerIdx++ {
-				hidden = ApplyGemma4LayerCPU(e.weights, hidden, layerIdx, pos, kvCache, ple[layerIdx], e.config)
+				hidden = ApplyGemma4LayerCPU(e.weights, hidden, layerIdx, pos, kvCache, ple[layerIdx], e.config, gemma4Buf)
 			}
 		} else {
 			for layerIdx := 0; layerIdx < e.config.Layers; layerIdx++ {

@@ -323,9 +323,13 @@ func VecDotQ8_0_VNNI(data []byte, vector []float32) float32 {
 
 		var s0, s1, s2, s3 float32
 		for j := 0; j < 32; j += 4 {
+			// #nosec G115 -- intentional signed byte reinterpret for Q8_0 quantized weights
 			s0 += float32(int8(data[bOffset+2+j])) * vector[vBase+j]
+			// #nosec G115 -- intentional signed byte reinterpret for Q8_0 quantized weights
 			s1 += float32(int8(data[bOffset+3+j])) * vector[vBase+j+1]
+			// #nosec G115 -- intentional signed byte reinterpret for Q8_0 quantized weights
 			s2 += float32(int8(data[bOffset+4+j])) * vector[vBase+j+2]
+			// #nosec G115 -- intentional signed byte reinterpret for Q8_0 quantized weights
 			s3 += float32(int8(data[bOffset+5+j])) * vector[vBase+j+3]
 		}
 		totalSum += d * ((s0 + s1) + (s2 + s3))

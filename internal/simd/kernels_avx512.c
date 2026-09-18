@@ -316,15 +316,20 @@ void dot_q8_0_vnni(const uint8_t* data, const float* vector, int n, float* resul
     for (int b = 0; b < numBlocks; b++) {
         const uint8_t* block = data + b * 34;
         uint16_t scaleBits = (uint16_t)block[0] | ((uint16_t)block[1] << 8);
-        float scale = fp16_to_float(scaleBits);
+        // Convert FP16 to FP32 using F16C intrinsic
+        __m128i scale16 = _mm_set1_epi16((short)scaleBits);
+        float scale = _mm_cvtss_f32(_mm_cvtph_ps(scale16));
         const int8_t* q = (const int8_t*)(block + 2);
         __m256i acc = _mm256_setzero_si256();
         for (int i = 0; i < 32; i += 32) {
             __m256i w = _mm256_loadu_si256((const __m256i*)(q + i));
-            __m256i x_lo = _mm256_cvtepi8_epi16(_mm256_and_si256(w, _mm256_set1_epi8(0x7F)));
-            __m256i x_hi = _mm256_cvtepi8_epi16(_mm256_srai_epi16(_mm256_unpackhi_epi8(w, w), 8));
+            // Split 256-bit into two 128-bit halves for _mm256_cvtepi8_epi16
+            __m128i w_lo = _mm256_castsi256_si128(w);
+            __m128i w_hi = _mm256_extracti128_si256(w, 1);
+            __m256i x_lo = _mm256_cvtepi8_epi16(w_lo);
+            __m256i x_hi = _mm256_cvtepi8_epi16(w_hi);
             __m256 v_lo = _mm256_loadu_ps(vector + b * 32 + i);
-            __m256 v_hi = _mm256_loadu_ps(vector + b * 32 + i + 8);
+            __m256 v_hi = _mm256_loadu_ps(vector + b * 32 + i + 16);
             __m256i vi_lo = _mm256_cvtps_epi32(v_lo);
             __m256i vi_hi = _mm256_cvtps_epi32(v_hi);
             acc = _mm256_dpwssd_epi32(acc, x_lo, vi_lo);
@@ -348,8 +353,10 @@ void dot_q4_k_vnni(const uint8_t* data, const float* vector, int n, float* resul
     int numBlocks = n / 256;
     for (int b = 0; b < numBlocks; b++) {
         const uint8_t* block = data + b * 144;
-        float d = fp16_to_float((uint16_t)block[0] | ((uint16_t)block[1] << 8));
-        float dmin = fp16_to_float((uint16_t)block[2] | ((uint16_t)block[3] << 8));
+        __m128i d16 = _mm_set1_epi16((short)((uint16_t)block[0] | ((uint16_t)block[1] << 8)));
+        float d = _mm_cvtss_f32(_mm_cvtph_ps(d16));
+        __m128i dmin16 = _mm_set1_epi16((short)((uint16_t)block[2] | ((uint16_t)block[3] << 8)));
+        float dmin = _mm_cvtss_f32(_mm_cvtph_ps(dmin16));
         const uint8_t* sPtr = block + 4;
         const uint8_t* qPtr = block + 16;
         float blockSum = 0.0f;

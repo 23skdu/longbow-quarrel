@@ -13,6 +13,10 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 cd "${REPO_ROOT}"
 
+# Memory limit for test processes to prevent OOM
+# Default: 2GB. Override with QUARREL_TEST_MEMLIMIT env var.
+export GOMEMLIMIT="${QUARREL_TEST_MEMLIMIT:-2GiB}"
+
 # Styling
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -53,7 +57,7 @@ echo -e "Host: $(uname -s) $(uname -m), Go: $(go version)"
 # 1. Standard Unit Tests (CPU)
 # ------------------------------------------------------------------------------
 log_header "1. Running Core Package Unit Tests (CPU)"
-if go test -timeout 120s ./internal/gguf/... ./internal/tokenizer/... ./internal/metrics/... ./internal/config/... ./internal/api/...; then
+if go test -timeout 120s -count=1 ./internal/gguf/... ./internal/tokenizer/... ./internal/metrics/... ./internal/config/... ./internal/api/...; then
     log_pass "Core Package Unit Tests"
 else
     log_fail "Core Package Unit Tests"
@@ -63,7 +67,7 @@ fi
 # 2. SIMD & VNNI / AMX Tests
 # ------------------------------------------------------------------------------
 log_header "2. Running SIMD, AVX-512 VNNI, & AMX Acceleration Tests"
-if go test -v -timeout 60s ./internal/simd/...; then
+if go test -v -timeout 60s -count=1 ./internal/simd/...; then
     log_pass "SIMD & VNNI Tests"
 else
     log_fail "SIMD & VNNI Tests"
@@ -73,7 +77,7 @@ fi
 # 3. Vision-Language Model (VLM) Tests
 # ------------------------------------------------------------------------------
 log_header "3. Running Multiplatform Vision-Language (VLM) Pipeline Tests"
-if go test -v -timeout 60s ./internal/vlm/...; then
+if go test -v -timeout 60s -count=1 ./internal/vlm/...; then
     log_pass "VLM Pipeline Tests"
 else
     log_fail "VLM Pipeline Tests"
@@ -83,7 +87,7 @@ fi
 # 4. Grammar & CFG / Regex Constrained Sampling Tests
 # ------------------------------------------------------------------------------
 log_header "4. Running Grammar-Constrained PDA / Regex Sampling Tests"
-if go test -v -timeout 60s ./internal/sampler/...; then
+if go test -v -timeout 60s -count=1 ./internal/sampler/...; then
     log_pass "Grammar PDA & Sampler Tests"
 else
     log_fail "Grammar PDA & Sampler Tests"
@@ -93,7 +97,7 @@ fi
 # 5. Speculative Decoding & Paged KV Cache Tests
 # ------------------------------------------------------------------------------
 log_header "5. Running Speculative Decoding & Paged Attention Cache Tests"
-if go test -v -timeout 90s ./internal/engine -run 'Speculative|PagedKV|Batch'; then
+if go test -v -timeout 90s -count=1 ./internal/engine -run 'Speculative|PagedKV|Batch'; then
     log_pass "Speculative Decoding & Paged Cache Tests"
 else
     log_fail "Speculative Decoding & Paged Cache Tests"
@@ -120,7 +124,7 @@ if [ "${HAS_CUDA}" -eq 1 ]; then
         rm -f internal/device/cuda_kernels.o
     fi
 
-    if go test -v -tags cuda -timeout 90s ./internal/device -run 'CUDA|Flash|Dequant'; then
+    if go test -v -tags cuda -timeout 90s -count=1 ./internal/device -run 'CUDA|Flash|Dequant'; then
         log_pass "CUDA Zero-Dequant & Flash Attention Tests"
     else
         log_fail "CUDA Zero-Dequant & Flash Attention Tests"
@@ -133,7 +137,7 @@ fi
 # 7. Race Detector Validation
 # ------------------------------------------------------------------------------
 log_header "7. Running Race Detector on Core Concurrency Components"
-if go test -race -timeout 60s ./internal/metrics/... ./internal/sampler/... ./internal/tokenizer/...; then
+if go test -race -timeout 60s -count=1 ./internal/metrics/... ./internal/sampler/... ./internal/tokenizer/...; then
     log_pass "Race Detector Validation"
 else
     log_fail "Race Detector Validation"
@@ -155,7 +159,7 @@ COVERAGE_PKGS=(
 
 COVERAGE_FAILED=0
 for pkg in "${COVERAGE_PKGS[@]}"; do
-    COV_OUT=$(go test -cover "${pkg}" 2>&1 | grep -o 'coverage: [0-9.]*%' | awk '{print $2}' | tr -d '%')
+    COV_OUT=$(go test -cover -timeout 120s -count=1 "${pkg}" 2>&1 | grep -o 'coverage: [0-9.]*%' | awk '{print $2}' | tr -d '%')
     if [ -n "${COV_OUT}" ]; then
         IS_SUFFICIENT=$(awk -v cov="${COV_OUT}" 'BEGIN { if (cov >= 80.0) print "1"; else print "0" }')
         if [ "${IS_SUFFICIENT}" -eq 1 ]; then

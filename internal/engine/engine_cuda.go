@@ -186,6 +186,8 @@ func NewcudaEngine(modelPath string, cfg config.Config) (Engine, error) {
 		e.config.Gemma4PartialRoPEFactor = 0.25
 		e.config.Gemma4SlidingHeadDim = 256
 		e.config.Gemma4FullHeadDim = 512
+		e.config.Gemma4SharedKVLayers = modelCfg.Gemma4SharedKVLayers
+		e.config.Gemma4SlidingPattern = modelCfg.Gemma4SlidingPattern
 	}
 
 	log.Printf("CUDA engine initialized with PagedKVCache: model=%s heads=%d kv_heads=%d", modelPath, heads, kvHeads)
@@ -540,6 +542,13 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 
 			startCPU := time.Now()
 			hiddenHost := hidden.ToHostF32()
+
+			// Pre-allocate Gemma4 layer buffers for this CPU offload batch
+			var gemma4Buf *Gemma4LayerBuf
+			if e.config.IsGemma4 {
+				gemma4Buf = NewGemma4LayerBuf(dim, e.config.Gemma4FullHeadDim, heads, e.config.HiddenDim, e.config.KVCacheSize)
+			}
+
 			for sIdx, seq := range desc.Sequences {
 				seqIDStr := fmt.Sprintf("seq-%d", seq.ID)
 				e.kvMu.Lock()
@@ -573,7 +582,7 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 						tok := desc.Tokens[tokIdx]
 						ple := e.cpuWeights.ComputeGemma4PLE(tok, tokenHidden, e.config.Layers)
 						for l := layer; l < endLayer; l++ {
-							tokenHidden = ApplyGemma4LayerCPU(e.cpuWeights, tokenHidden, l, pos, kvCache, ple[l], e.config)
+							tokenHidden = ApplyGemma4LayerCPU(e.cpuWeights, tokenHidden, l, pos, kvCache, ple[l], e.config, gemma4Buf)
 						}
 					} else {
 						for l := layer; l < endLayer; l++ {
