@@ -1,5 +1,8 @@
 # Go build artifacts
 bench*
+!scripts/benchmark_engines.sh
+!scripts/benchmark_models.sh
+!scripts/benchmark_report.py
 perf*
 bin/
 comp*
