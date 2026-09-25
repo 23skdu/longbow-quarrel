@@ -148,6 +148,9 @@ func DequantizeQ6K_SIMD(data []byte, numElements int) []float32 {
 	return out
 }
 
+// dequantizeQ6KBlocks decodes blocks [startBlock, endBlock) of data into out.
+// It shares decodeQ6KBlock with DequantizeQ6K so the scalar, parallel and
+// matrix-vector paths cannot drift apart.
 func dequantizeQ6KBlocks(data []byte, out []float32, startBlock, endBlock int) {
 	const blockSizeBytes = 210
 
@@ -156,48 +159,7 @@ func dequantizeQ6KBlocks(data []byte, out []float32, startBlock, endBlock int) {
 		if blockOffset+blockSizeBytes > len(data) {
 			break
 		}
-		block := data[blockOffset : blockOffset+blockSizeBytes]
-
-		qs := block[0:128]
-		qh := block[128:192]
-		scales := block[192:208]
-		d := Float16ToFloat32(binary.LittleEndian.Uint16(block[208:210]))
-
-		var effScales [16]float32
-		for s := 0; s < 16; s++ {
-			effScales[s] = d * float32(int8(scales[s])) // #nosec G115
-		}
-
-		base := i * 256
-
-		for si := 0; si < 2; si++ {
-			scOff := si * 8
-			qhOff := si * 32
-			n := si * 128
-
-			for l := 0; l < 32; l++ {
-				is := l / 16
-				s0 := effScales[scOff+is*2+0]
-				s1 := effScales[scOff+is*2+1]
-				s2 := effScales[scOff+is*2+2]
-				s3 := effScales[scOff+is*2+3]
-
-				qhl := qh[l+qhOff]
-				qsl0 := qs[l+0]
-				qsl32 := qs[l+32]
-
-				q1 := int8((qsl0&0xF)|(((qhl>>0)&3)<<4)) - 32  // #nosec G115
-				q2 := int8((qsl32&0xF)|(((qhl>>2)&3)<<4)) - 32 // #nosec G115
-				q3 := int8((qsl0>>4)|(((qhl>>4)&3)<<4)) - 32   // #nosec G115
-				q4 := int8((qsl32>>4)|(((qhl>>6)&3)<<4)) - 32  // #nosec G115
-
-				yIdx := base + n + l
-				out[yIdx+0] = s0 * float32(q1)
-				out[yIdx+32] = s1 * float32(q2)
-				out[yIdx+64] = s2 * float32(q3)
-				out[yIdx+96] = s3 * float32(q4)
-			}
-		}
+		decodeQ6KBlock(data[blockOffset:blockOffset+blockSizeBytes], out[i*256:(i+1)*256])
 	}
 }
 

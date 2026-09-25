@@ -366,6 +366,20 @@ func DequantizeIQ4XS(data []byte, numElements int) []float32 {
 	return out
 }
 
+// DequantizeQ6K decodes Q6_K blocks into f32 values.
+//
+// Block layout (210 bytes per 256 values):
+//
+//	ql     [0:128]    4 low bits per value: ql[i/2], low nibble when i is even
+//	qh     [128:192]  2 high bits per value: (qh[i/4] >> ((i%4)*2)) & 3
+//	scales [192:208]  16 int8 scales; scale g applies to values [g*16, g*16+16)
+//	d      [208:210]  f16 super-block scale
+//
+// value[i] = d * scales[i/16] * (raw - 32), where raw = (high<<4)|low in [0,63].
+//
+// This is the layout used by dequant_q6_k_kernel in internal/device/cuda_kernels.cu
+// and the linear_q6k_* kernels in internal/device/kernels.metal, so CPU and GPU
+// inference must decode identically.
 func DequantizeQ6K(data []byte, numElements int) []float32 {
 	const blockSizeBytes = 210
 	numBlocks := numElements / 256
@@ -376,36 +390,39 @@ func DequantizeQ6K(data []byte, numElements int) []float32 {
 		if blockOffset+blockSizeBytes > len(data) {
 			break
 		}
-		block := data[blockOffset : blockOffset+blockSizeBytes]
-
-		qs := block[0:128]
-		qh := block[128:192]
-		scales := block[192:208]
-		d := Float16ToFloat32(binary.LittleEndian.Uint16(block[208:210]))
-
-		base := i * 256
-
-		for si := 0; si < 2; si++ {
-			scOff := si * 8
-			n := si * 128
-			for l := 0; l < 32; l++ {
-				is := l / 16
-				qhOff := si * 32
-
-				q1 := int8((qs[l+0]&0xF)|(((qh[l+qhOff]>>0)&3)<<4)) - 32  // #nosec G115
-				q2 := int8((qs[l+32]&0xF)|(((qh[l+qhOff]>>2)&3)<<4)) - 32 // #nosec G115
-				q3 := int8((qs[l+0]>>4)|(((qh[l+qhOff]>>4)&3)<<4)) - 32   // #nosec G115
-				q4 := int8((qs[l+32]>>4)|(((qh[l+qhOff]>>6)&3)<<4)) - 32  // #nosec G115
-
-				yIdx := base + n + l
-				out[yIdx+0] = d * float32(int8(scales[scOff+is*2+0])) * float32(q1)  // #nosec G115
-				out[yIdx+32] = d * float32(int8(scales[scOff+is*2+1])) * float32(q2) // #nosec G115
-				out[yIdx+64] = d * float32(int8(scales[scOff+is*2+2])) * float32(q3) // #nosec G115
-				out[yIdx+96] = d * float32(int8(scales[scOff+is*2+3])) * float32(q4) // #nosec G115
-			}
-		}
+		decodeQ6KBlock(data[blockOffset:blockOffset+blockSizeBytes], out[i*256:(i+1)*256])
 	}
 	return out
+}
+
+// decodeQ6KBlock decodes a single 210-byte Q6_K block into dst, which must hold
+// 256 elements. It is the shared reference decode for scalar, parallel and
+// matrix-vector Q6_K paths.
+func decodeQ6KBlock(block []byte, dst []float32) {
+	ql := block[0:128]
+	qh := block[128:192]
+	scales := block[192:208]
+	d := Float16ToFloat32(binary.LittleEndian.Uint16(block[208:210]))
+
+	var effScales [16]float32
+	for g := 0; g < 16; g++ {
+		effScales[g] = d * float32(int8(scales[g])) // #nosec G115 -- int8 scale read from the block
+	}
+
+	for g := 0; g < 16; g++ {
+		s := effScales[g]
+		for i := g * 16; i < g*16+16; i++ {
+			low := ql[i/2]
+			if i%2 == 0 {
+				low &= 0xF
+			} else {
+				low >>= 4
+			}
+			high := (qh[i/4] >> uint((i%4)*2)) & 0x3
+			raw := int((high << 4) | low)
+			dst[i] = s * float32(raw-32)
+		}
+	}
 }
 
 func DequantizeF16(data []byte, numElements int) []float32 {

@@ -2,7 +2,6 @@ package gguf
 
 import (
 	"encoding/binary"
-	"math"
 	"testing"
 )
 
@@ -63,20 +62,28 @@ func TestDequantizeQ4_0_Kernel(t *testing.T) {
 }
 
 func TestDequantizeQ6K_Kernel(t *testing.T) {
-	// Block size 256. Q6_K is 210 bytes.
+	// Q6_K block: 128 bytes low nibbles + 64 bytes high bits
+	//             + 16 int8 scales + 2 bytes f16 scale = 210 bytes.
 	data := make([]byte, 210)
-	// Q6_K layout: 128 bytes (low nibbles) + 64 bytes (high bits) + 16 bytes (scales) + 4 bytes (delta f32)
-
-	binary.LittleEndian.PutUint32(data[206:210], math.Float32bits(1.0)) // delta
-
-	// Just fill with some data to hit the loop
-	for i := 0; i < 206; i++ {
+	for i := 0; i < 208; i++ {
 		data[i] = 0xAA
 	}
+	binary.LittleEndian.PutUint16(data[208:210], Float32ToFloat16(1.5))
 
 	res := DequantizeQ6K(data, 256)
 	if len(res) != 256 {
 		t.Fatalf("expected 256 elements, got %d", len(res))
+	}
+
+	// Every byte is 0xAA, so every value decodes the same way:
+	//   low nibble 0xA, high bits (0xAA>>0)&3 == 2 -> raw 0x2A == 42
+	//   scale int8(0xAA) == -86, d == 1.5 (exactly representable in f16)
+	//   value == 1.5 * -86 * (42-32) == -1290
+	const want = float32(-1290)
+	for i, v := range res {
+		if v != want {
+			t.Fatalf("element %d: got %v, want %v", i, v, want)
+		}
 	}
 }
 

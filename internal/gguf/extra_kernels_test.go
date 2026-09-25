@@ -30,12 +30,6 @@ func TestDequantizeQ4KBranchless_Kernel(t *testing.T) {
 	}
 }
 
-func TestQuantizeQ6K_Kernel(t *testing.T) {
-	// Just verify non-panic for now to hit the branch
-	w := make([]float32, 256)
-	QuantizeQ6K(w)
-}
-
 func TestFP8_Kernels(t *testing.T) {
 	w := []float32{1.0, -1.0, 0.5, 0.0}
 

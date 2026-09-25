@@ -1,6 +1,7 @@
 package gguf
 
 import (
+	"encoding/binary"
 	"math"
 	"testing"
 )
@@ -66,18 +67,69 @@ func TestDequantizeQ4_K(t *testing.T) {
 }
 
 func TestDequantizeQ6_K(t *testing.T) {
-	input := make([]byte, 210) // Approx size for Q6_K
 	dst := make([]float32, 256)
 
-	DequantizeBlock(input, dst, GGMLTypeQ6_K)
-	// Verify non-panic
+	// A zeroed block decodes to all zeros (d == 0).
+	DequantizeBlock(make([]byte, 210), dst, GGMLTypeQ6_K)
+	for i, v := range dst {
+		if v != 0 {
+			t.Fatalf("zeroed Q6_K block: dst[%d] = %v, want 0", i, v)
+		}
+	}
+
+	// A populated block must decode exactly like DequantizeQ6K, which is the
+	// path CPU inference takes.
+	block := make([]byte, 210)
+	for i := 0; i < 208; i++ {
+		block[i] = byte((i*53 + 7) & 0xFF) // #nosec G115 -- masked to byte range
+	}
+	binary.LittleEndian.PutUint16(block[208:210], Float32ToFloat16(-2.5))
+
+	DequantizeBlock(block, dst, GGMLTypeQ6_K)
+	want := DequantizeQ6K(block, 256)
+	for i := range want {
+		if dst[i] != want[i] {
+			t.Fatalf("populated Q6_K block: dst[%d] = %v, want %v", i, dst[i], want[i])
+		}
+	}
+	// d = -2.5 and every scale byte is 0x07+... so the block is not all zero.
+	nonZero := false
+	for _, v := range dst {
+		if v != 0 {
+			nonZero = true
+			break
+		}
+	}
+	if !nonZero {
+		t.Fatal("populated Q6_K block decoded to all zeros; input data is not exercising the decoder")
+	}
 }
 
 func TestDequantizeQ8_0(t *testing.T) {
-	input := make([]byte, 34) // 32 weights @ 8bit + 2 byte scale
 	dst := make([]float32, 32)
 
-	DequantizeBlock(input, dst, GGMLTypeQ8_0)
+	// Zeroed block: f16 scale is 0, so every element is 0.
+	DequantizeBlock(make([]byte, 34), dst, GGMLTypeQ8_0)
+	for i, v := range dst {
+		if v != 0 {
+			t.Fatalf("zeroed Q8_0 block: dst[%d] = %v, want 0", i, v)
+		}
+	}
+
+	// Known block: f16 scale (2 bytes) followed by 32 int8 quants.
+	// value[i] = scale * int8(quants[i]).
+	block := make([]byte, 34)
+	binary.LittleEndian.PutUint16(block[0:2], Float32ToFloat16(0.5))
+	for i := 0; i < 32; i++ {
+		block[2+i] = byte(i - 16) // #nosec G115 -- int8 range [-16,15]
+	}
+	DequantizeBlock(block, dst, GGMLTypeQ8_0)
+	for i := 0; i < 32; i++ {
+		want := float32(0.5) * float32(int8(i-16))
+		if dst[i] != want {
+			t.Fatalf("Q8_0 dst[%d] = %v, want %v", i, dst[i], want)
+		}
+	}
 }
 
 func TestMatVecMulQ8_0(t *testing.T) {
