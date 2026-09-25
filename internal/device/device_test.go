@@ -75,10 +75,6 @@ func TestMetalScale(t *testing.T) {
 	tC.Free()
 }
 
-func TestMetalMatMul(t *testing.T) {
-	// ... (Existing F16 test)
-}
-
 func TestMetalRMSNorm(t *testing.T) {
 	ctx := NewContext()
 	defer ctx.Free()

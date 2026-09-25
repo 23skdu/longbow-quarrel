@@ -39,8 +39,3 @@ func TestPromptCache_Coverage(t *testing.T) {
 		t.Errorf("Expected partial match 3, got %d", matched)
 	}
 }
-
-func TestPromptCache_LRU(t *testing.T) {
-	// If the cache had a max size, we'd test LRU here.
-	// Currently it seems to be a simple map.
-}

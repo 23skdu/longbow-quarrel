@@ -182,10 +182,6 @@ func TestEngineLifecycle(t *testing.T) {
 	}
 }
 
-func TestEngineMetrics(t *testing.T) {
-	// Verify that Engine calls metrics
-}
-
 // TestMistralMetadataSupport was moved to engine_metal_test.go as it requires internal field access.
 
 func TestGetKV(t *testing.T) {

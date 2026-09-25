@@ -3,7 +3,6 @@ package engine
 import (
 	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/device"
-	"testing"
 )
 
 // MockBackend implements the Engine interface for testing the orchestrator
@@ -42,7 +41,3 @@ func (m *MockBackend) InferWithCallbackLogits(tokens []int, count int, cfg Sampl
 func (m *MockBackend) ForwardDraft(tokens []int) ([][]float32, error) { return nil, nil }
 func (m *MockBackend) RollbackKV(seqID string, newPos int) error      { return nil }
 func (m *MockBackend) GetSeqCachePos(seqID string) int                { return 0 }
-
-func TestEngine_Orchestrator_Lifecycle(t *testing.T) {
-	// ... Test logic updated to use common engine structure if accessible, or just test sub-components
-}
