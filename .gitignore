@@ -3,6 +3,7 @@ bench*
 !scripts/benchmark_engines.sh
 !scripts/benchmark_models.sh
 !scripts/benchmark_report.py
+!scripts/bench_gate.sh
 perf*
 bin/
 comp*
@@ -48,6 +49,7 @@ cmd/webui/webui
 # Logs, profiles, and outputs
 *.log
 *.txt
+!scripts/vacuous_tests_allowlist.txt
 *.prof
 *.pprof
 *.bin

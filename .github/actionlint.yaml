@@ -1,0 +1,5 @@
+# actionlint configuration (https://github.com/rhysd/actionlint/blob/main/docs/config.md)
+self-hosted-runner:
+  # Custom labels used by opt-in jobs (see the cuda-compile job in ci.yml).
+  labels:
+    - gpu

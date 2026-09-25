@@ -124,10 +124,22 @@ if [ "${HAS_CUDA}" -eq 1 ]; then
         rm -f internal/device/cuda_kernels.o
     fi
 
+    if go vet -tags cuda ./... && go build -tags cuda ./cmd/quarrel; then
+        log_pass "CUDA Compile & Vet Gate"
+    else
+        log_fail "CUDA Compile & Vet Gate"
+    fi
+
     if go test -v -tags cuda -timeout 90s -count=1 ./internal/device -run 'CUDA|Flash|Dequant'; then
         log_pass "CUDA Zero-Dequant & Flash Attention Tests"
     else
         log_fail "CUDA Zero-Dequant & Flash Attention Tests"
+    fi
+
+    if go test -tags cuda -timeout 300s -count=1 ./internal/engine/...; then
+        log_pass "CUDA Engine Tests"
+    else
+        log_fail "CUDA Engine Tests"
     fi
 else
     log_skip "CUDA tests skipped (no NVIDIA GPU or nvcc compiler detected)"
@@ -136,8 +148,10 @@ fi
 # ------------------------------------------------------------------------------
 # 7. Race Detector Validation
 # ------------------------------------------------------------------------------
-log_header "7. Running Race Detector on Core Concurrency Components"
-if go test -race -timeout 60s -count=1 ./internal/metrics/... ./internal/sampler/... ./internal/tokenizer/...; then
+# engine/api hold the actual concurrent code (batch scheduler, seq manager,
+# resource monitor); the earlier gate only covered leaf packages.
+log_header "7. Running Race Detector on Concurrency-Critical Components"
+if go test -race -timeout 600s -count=1 ./internal/engine/... ./internal/api/... ./internal/metrics/... ./internal/sampler/... ./internal/tokenizer/...; then
     log_pass "Race Detector Validation"
 else
     log_fail "Race Detector Validation"
@@ -158,6 +172,18 @@ COVERAGE_PKGS=(
     "./internal/vector/..."
 )
 
+# Packages that are not yet at 80% are held to a ratchet floor instead: coverage
+# may rise freely but may not drop. Floor values are a few points under the
+# measured baseline so environment noise cannot flip the gate red.
+#   measured 2026-09: engine 49.0, device 73.5, config 78.0, arrow_client 63.0, ollama 40.0
+RATCHET_PKGS=(
+    "./internal/engine/...:45.0"
+    "./internal/device/...:68.0"
+    "./internal/config/...:73.0"
+    "./internal/arrow_client/...:55.0"
+    "./internal/ollama/...:35.0"
+)
+
 COVERAGE_FAILED=0
 for pkg in "${COVERAGE_PKGS[@]}"; do
     COV_OUT=$(go test -cover -timeout 120s -count=1 "${pkg}" 2>&1 | grep -o 'coverage: [0-9.]*%' | awk '{print $2}' | tr -d '%')
@@ -176,6 +202,35 @@ if [ "${COVERAGE_FAILED}" -eq 0 ]; then
     log_pass "Core Package Coverage Gate (>= 80%)"
 else
     log_fail "Core Package Coverage Gate (< 80%)"
+fi
+
+# ------------------------------------------------------------------------------
+# 9. Coverage Ratchet (must not drop below the recorded floor)
+# ------------------------------------------------------------------------------
+log_header "9. Validating Coverage Ratchet Floors"
+RATCHET_FAILED=0
+for entry in "${RATCHET_PKGS[@]}"; do
+    pkg="${entry%:*}"
+    floor="${entry##*:}"
+    COV_OUT=$(go test -cover -timeout 180s -count=1 "${pkg}" 2>&1 | grep -o 'coverage: [0-9.]*%' | awk '{print $2}' | tr -d '%')
+    if [ -z "${COV_OUT}" ]; then
+        echo -e "${RED}✗ ${pkg}:${NC} no coverage result reported"
+        RATCHET_FAILED=1
+        continue
+    fi
+    MEETS=$(awk -v cov="${COV_OUT}" -v floor="${floor}" 'BEGIN { if (cov >= floor) print "1"; else print "0" }')
+    if [ "${MEETS}" -eq 1 ]; then
+        echo -e "${GREEN}✓ ${pkg}:${NC} ${COV_OUT}% (>= floor ${floor}%)"
+    else
+        echo -e "${RED}✗ ${pkg}:${NC} ${COV_OUT}% (< floor ${floor}%)"
+        RATCHET_FAILED=1
+    fi
+done
+
+if [ "${RATCHET_FAILED}" -eq 0 ]; then
+    log_pass "Coverage Ratchet Floors"
+else
+    log_fail "Coverage Ratchet Floors"
 fi
 
 # ------------------------------------------------------------------------------

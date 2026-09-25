@@ -12,20 +12,26 @@ on:
 env:
   GO_VERSION: '1.27'
   MODEL_PATH: '~/.ollama/models'
+  # Pinned toolchain versions so a red build always reproduces locally.
+  # golangci-lint must be v2: the repo config file is `version: "2"`.
+  GOLANGCI_LINT_VERSION: 'v2.14.0'
+  GOIMPORTS_VERSION: 'v0.37.0'
+  GOSEC_VERSION: 'v2.29.0'
+  GOVULNCHECK_VERSION: 'v1.8.0'
 
 jobs:
   # ===== LINT AND CODE QUALITY =====
   lint:
     name: Code Quality
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
-          
+
       - name: Cache Go modules
         uses: actions/cache@v4
         with:
@@ -33,188 +39,334 @@ jobs:
           key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
           restore-keys: |
             ${{ runner.os }}-go-
-            
-      - name: Install dependencies
+
+      - name: Install pinned tools
         run: |
-          go mod download
-          go install golang.org/x/tools/cmd/goimports@latest
-          go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
-          
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${GOLANGCI_LINT_VERSION}
+          go install golang.org/x/tools/cmd/goimports@${GOIMPORTS_VERSION}
+
       - name: Run golangci-lint
-        run: |
-          golangci-lint run --timeout=10m --verbose
-          
+        # .golangci.yml sets max-issues-per-linter/max-same-issues to 0, so a
+        # finding can never be hidden behind the default 50/3 report caps.
+        run: golangci-lint run --timeout=10m
+
       - name: Check goimports
         run: |
-          goimports -l . | tee /dev/stderr
-          
+          UNFORMATTED=$(goimports -l .)
+          if [ -n "${UNFORMATTED}" ]; then
+            echo "::error::goimports reported unformatted files"
+            echo "${UNFORMATTED}"
+            exit 1
+          fi
+
       - name: Run go vet
-        run: |
-          go vet ./...
+        run: go vet ./...
+
+      - name: Check for tests that cannot fail
+        # Fails when a test that is not on scripts/vacuous_tests_allowlist.txt
+        # has no assertion at all. The allowlist only ever shrinks.
+        run: go run ./scripts/vacuous_tests
 
   # ===== BUILD AND BASIC TESTS =====
   build:
     name: Build and Test
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
     needs: lint
-    strategy:
-      matrix:
-        go-version: ['1.27']
-        
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Set up Go ${{ matrix.go-version }}
+
+      - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: ${{ matrix.go-version }}
-          
+          go-version: ${{ env.GO_VERSION }}
+
       - name: Cache Go modules
         uses: actions/cache@v4
         with:
           path: ~/go/pkg/mod
-          key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
-          
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
       - name: Build
-        run: |
-          go build -v ./cmd/quarrel
-          go build -v -tags "darwin,metal" ./cmd/quarrel
-          
-      - name: Basic unit tests
+        run: go build -v ./cmd/quarrel
+
+      - name: Unit tests
         env:
           GOMEMLIMIT: 1GiB
+        run: go test -count=1 ./...
+
+      - name: Race detector on concurrency-critical packages
+        env:
+          GOMEMLIMIT: 1GiB
+        run: go test -race -timeout 600s -count=1 ./internal/engine/... ./internal/api/... ./internal/metrics/... ./internal/sampler/... ./internal/tokenizer/...
+
+  # ===== NESTED WEBUI MODULE =====
+  # cmd/webui is its own Go module, so `go build ./...` at the repo root never
+  # touches it. Without this job it has no CI coverage at all.
+  webui:
+    name: WebUI Module
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Build, vet and test cmd/webui
+        working-directory: cmd/webui
         run: |
-          go test -v ./internal/tokenizer
-          go test -v ./internal/gguf
-          go test -v ./internal/metrics
+          set -euo pipefail
+          go build ./...
+          go build -tags webui ./...
+          go vet ./...
+          go test -count=1 ./...
+          # Most of cmd/webui/handlers is behind `//go:build webui`, so the
+          # default-tag run above would not type-check it. Also vet/test with
+          # the tag, excluding tests/e2e: that package references
+          # handlers.Config / handlers.ModelInfo, which no longer exist and
+          # make it fail to compile (pre-existing, owner-owned).
+          pkgs=$(go list ./... | grep -v '/tests/e2e')
+          go vet -tags webui $pkgs
+          go test -count=1 -tags webui $pkgs
+
+  # ===== CUDA COMPILE GATE (opt-in) =====
+  # The cuda build tag pulls in cgo + nvcc + cuBLAS/cuDNN, which GitHub-hosted
+  # runners do not provide, so this stays opt-in: set the repository variable
+  # HAS_GPU_RUNNER=true and register a runner with the `gpu` label to turn it
+  # into a hard gate. scripts/run_all_tests.sh already runs the same checks
+  # locally whenever nvcc and a GPU are present.
+  cuda-compile:
+    name: CUDA Compile Gate
+    if: ${{ vars.HAS_GPU_RUNNER == 'true' }}
+    runs-on: [self-hosted, gpu]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Vet and build with the cuda tag
+        run: |
+          go vet -tags cuda ./...
+          go build -tags cuda ./cmd/quarrel
+
+      - name: Test with the cuda tag
+        env:
+          GOMEMLIMIT: 1GiB
+        run: go test -count=1 -tags cuda ./internal/engine/... ./internal/device/...
+
+  # ===== METAL BUILD (macOS only) =====
+  metal-build:
+    name: Metal Build
+    runs-on: macos-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Build with Metal tags
+        run: go build -v -tags "darwin,metal" ./cmd/quarrel
 
   # ===== METAL GPU TESTS =====
   metal-tests:
     name: Metal GPU Tests
     runs-on: macos-latest
-    needs: build
+    needs: metal-build
     if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'run-metal-tests')
-    
+
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
-          
+
       - name: Cache Go modules
         uses: actions/cache@v4
         with:
           path: ~/go/pkg/mod
           key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
-          
+          restore-keys: |
+            ${{ runner.os }}-go-
+
       - name: Install Ollama and test model
         run: |
           # Install Ollama
           curl -fsSL https://ollama.com/install.sh | sh
-          
           # Pull a small test model
           ollama pull smollm2:135m
-          
+
       - name: Run Metal device tests
         env:
           GOMEMLIMIT: 2GiB
-        run: |
-          go test -v -tags "darwin,metal" ./internal/device -timeout 30m
-          
+        run: go test -v -tags "darwin,metal" ./internal/device -timeout 30m
+
       - name: Run engine tests with Metal
         env:
           GOMEMLIMIT: 2GiB
-        run: |
-          go test -v -tags "darwin,metal" ./internal/engine -timeout 30m
-          
-      - name: Run integration tests
+        run: go test -v -tags "darwin,metal" ./internal/engine -timeout 30m
+
+      - name: Run GGUF tests with Metal
         env:
           GOMEMLIMIT: 2GiB
-        run: |
-          go test -v -tags "darwin,metal" ./test/integration -timeout 30m
+        # ./test/integration was removed in 2ed8034; the integration-style
+        # coverage now lives in internal/gguf and internal/api.
+        run: go test -v -tags "darwin,metal" ./internal/gguf/... ./internal/api/... -timeout 30m
 
   # ===== FUZZ TESTING =====
   fuzz-tests:
     name: Fuzz Testing
     runs-on: macos-latest
-    needs: build
+    needs: metal-build
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    
+
     strategy:
+      fail-fast: false
       matrix:
-        duration: [30s, 1m, 5m]
-        corpus: ['tokenizer', 'sampling', 'model_input']
-        
+        # Every entry is a fuzz target that really exists in ./internal/engine
+        # under the darwin,metal tags used below. (The previous matrix called
+        # Fuzztokenizer/Fuzzsampling/Fuzzmodel_input, which match nothing and
+        # made this job fail outright.)
+        include:
+          - { target: FuzzTokenizerV5, duration: 30s }
+          - { target: FuzzSamplerQualityControl, duration: 30s }
+          - { target: FuzzKVCacheUpdate, duration: 30s }
+          - { target: FuzzTokenizerV5, duration: 1m }
+          - { target: FuzzSamplerQualityControl, duration: 1m }
+          - { target: FuzzKVCacheUpdate, duration: 1m }
+          - { target: FuzzTokenizerV5, duration: 5m }
+          - { target: FuzzSamplerQualityControl, duration: 5m }
+          - { target: FuzzKVCacheUpdate, duration: 5m }
+
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
-          
+
       - name: Cache Go modules
         uses: actions/cache@v4
         with:
           path: ~/go/pkg/mod
           key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
-          
-      - name: Install Ollama and test model
-        run: |
-          curl -fsSL https://ollama.com/install.sh | sh
-          ollama pull smollm2:135m
-          
-      - name: Run fuzz tests
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Run fuzz test
         env:
           GOMEMLIMIT: 1GiB
-        run: |
-          go test -fuzz=Fuzz${{ matrix.corpus }} -fuzztime=${{ matrix.duration }} -tags "darwin,metal" ./internal/engine
-          
+        # -fuzz is a regex anchored to a single target; without the anchors it
+        # aborts when it matches more than one fuzz function in the package.
+        run: go test -fuzz=^${{ matrix.target }}$ -fuzztime=${{ matrix.duration }} -tags "darwin,metal" ./internal/engine
+
       - name: Upload fuzz corpus
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: fuzz-corpus-${{ matrix.corpus }}-${{ matrix.duration }}
+          name: fuzz-corpus-${{ matrix.target }}-${{ matrix.duration }}
           path: testdata/fuzz/
 
-  # ===== PERFORMANCE BENCHMARKS =====
+  # ===== BENCHMARK REGRESSION GATE =====
+  # Runs the same benchmarks on the base commit and on this commit, back to
+  # back on one runner, and fails when a benchmark gets >1.5x slower.
+  bench-gate:
+    name: Benchmark Regression Gate
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Resolve base commit
+        id: base
+        run: |
+          BASE_SHA="${{ github.event.pull_request.base.sha || github.event.before }}"
+          if [ -z "${BASE_SHA}" ] || [ "${BASE_SHA}" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            echo "No usable base commit for this event; skipping the gate."
+            echo "run=false" >> "${GITHUB_OUTPUT}"
+          else
+            echo "Comparing against ${BASE_SHA}"
+            echo "run=true" >> "${GITHUB_OUTPUT}"
+            echo "sha=${BASE_SHA}" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Measure base benchmarks
+        if: steps.base.outputs.run == 'true'
+        run: |
+          git worktree add "${RUNNER_TEMP}/base" "${{ steps.base.outputs.sha }}"
+          cd "${RUNNER_TEMP}/base"
+          "${GITHUB_WORKSPACE}/scripts/bench_gate.sh" measure > "${RUNNER_TEMP}/base.txt"
+
+      - name: Measure head benchmarks
+        if: steps.base.outputs.run == 'true'
+        run: ./scripts/bench_gate.sh measure > "${RUNNER_TEMP}/head.txt"
+
+      - name: Compare
+        if: steps.base.outputs.run == 'true'
+        run: |
+          echo "=== base ==="; cat "${RUNNER_TEMP}/base.txt"
+          echo "=== head ==="; cat "${RUNNER_TEMP}/head.txt"
+          ./scripts/bench_gate.sh compare "${RUNNER_TEMP}/base.txt" "${RUNNER_TEMP}/head.txt" 1.5
+
+  # ===== PERFORMANCE BENCHMARKS (artifact) =====
   benchmarks:
     name: Performance Benchmarks
     runs-on: macos-latest
     needs: metal-tests
     if: github.event_name == 'push' || github.event_name == 'schedule'
-    
+
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
-          
+
       - name: Cache Go modules
         uses: actions/cache@v4
         with:
           path: ~/go/pkg/mod
           key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
-          
+          restore-keys: |
+            ${{ runner.os }}-go-
+
       - name: Install Ollama and test model
         run: |
+          # Install Ollama
           curl -fsSL https://ollama.com/install.sh | sh
+          # Pull a small test model
           ollama pull smollm2:135m
-          
+
       - name: Run benchmarks
         run: |
           go test -bench=. -benchmem -tags "darwin,metal" ./internal/device > bench_results.txt 2>&1
           cat bench_results.txt
-          
+
       - name: Benchmark vs llama.cpp
         run: |
           ./scripts/benchmark_compare.sh -m ~/.ollama/models -p "The capital of France is" -n 32 > benchmark_output.txt 2>&1
           cat benchmark_output.txt
-          
+
       - name: Upload benchmark results
         uses: actions/upload-artifact@v4
         with:
@@ -226,45 +378,44 @@ jobs:
   # ===== COVERAGE AND QUALITY =====
   coverage:
     name: Test Coverage
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
     needs: build
-    
+
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
-          
+
       - name: Cache Go modules
         uses: actions/cache@v4
         with:
           path: ~/go/pkg/mod
           key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
-          
+          restore-keys: |
+            ${{ runner.os }}-go-
+
       - name: Run tests with coverage
         env:
           GOMEMLIMIT: 2GiB
-        run: |
-          go test -v -coverprofile=coverage.out -covermode=atomic ./...
-          
-      - name: Install coverage tool
-        run: go install github.com/wadey/gocovmerge@latest
-          
+        run: go test -v -coverprofile=coverage.out -covermode=atomic ./...
+
       - name: Process coverage
         run: |
           go tool cover -html=coverage.out -o coverage.html
-          
+
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
         with:
           files: ./coverage.out
           flags: unittests
           name: codecov-umbrella
-          
+
       - name: Verify Core Package Coverage Threshold (80%)
         run: |
+          set -euo pipefail
           echo "Validating minimum 80% coverage on core packages..."
           PKGS=(
             "./internal/sampler/..."
@@ -274,16 +425,20 @@ jobs:
             "./internal/vlm/..."
             "./internal/gguf/..."
             "./internal/api/..."
+            "./internal/vector/..."
           )
           FAILED=0
           for pkg in "${PKGS[@]}"; do
-            COV=$(go test -cover "${pkg}" 2>&1 | grep -o 'coverage: [0-9.]*%' | awk '{print $2}' | tr -d '%')
-            if [ -n "${COV}" ]; then
-              echo "Package ${pkg}: ${COV}%"
-              if (( $(echo "${COV} < 80.0" | bc -l) )); then
-                echo "::error::Package ${pkg} coverage (${COV}%) is below required 80% threshold!"
-                FAILED=1
-              fi
+            COV=$(go test -cover -timeout 180s -count=1 "${pkg}" 2>&1 | grep -o 'coverage: [0-9.]*%' | awk '{print $2}' | tr -d '%' || true)
+            if [ -z "${COV}" ]; then
+              echo "::error::${pkg} produced no coverage result"
+              FAILED=1
+              continue
+            fi
+            echo "Package ${pkg}: ${COV}%"
+            if [ "$(awk -v c="${COV}" 'BEGIN { print (c < 80.0) }')" = "1" ]; then
+              echo "::error::Package ${pkg} coverage (${COV}%) is below required 80% threshold!"
+              FAILED=1
             fi
           done
           if [ "${FAILED}" -ne 0 ]; then
@@ -291,6 +446,41 @@ jobs:
             exit 1
           fi
           echo "All core packages meet or exceed the 80% coverage threshold."
+
+      - name: Verify coverage ratchet floors
+        # Packages below 80% are held to a floor instead: coverage may rise
+        # freely but may not drop. Floors sit a few points under the measured
+        # baseline so runner noise cannot flip the gate red.
+        run: |
+          set -euo pipefail
+          ENTRIES=(
+            "./internal/engine/...:45.0"
+            "./internal/device/...:68.0"
+            "./internal/config/...:73.0"
+            "./internal/arrow_client/...:55.0"
+            "./internal/ollama/...:35.0"
+          )
+          FAILED=0
+          for entry in "${ENTRIES[@]}"; do
+            pkg="${entry%:*}"
+            floor="${entry##*:}"
+            COV=$(go test -cover -timeout 240s -count=1 "${pkg}" 2>&1 | grep -o 'coverage: [0-9.]*%' | awk '{print $2}' | tr -d '%' || true)
+            if [ -z "${COV}" ]; then
+              echo "::error::${pkg} produced no coverage result"
+              FAILED=1
+              continue
+            fi
+            if [ "$(awk -v c="${COV}" -v f="${floor}" 'BEGIN { print (c < f) }')" = "1" ]; then
+              echo "::error::Package ${pkg} coverage (${COV}%) fell below its floor (${floor}%)"
+              FAILED=1
+            else
+              echo "Package ${pkg}: ${COV}% (floor ${floor}%)"
+            fi
+          done
+          if [ "${FAILED}" -ne 0 ]; then
+            exit 1
+          fi
+          echo "All ratchet floors satisfied."
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
@@ -303,52 +493,57 @@ jobs:
     name: Security Scan
     runs-on: ubuntu-latest
     needs: lint
-    
+
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
-          
+
+      - name: Install pinned scanners
+        run: |
+          go install github.com/securego/gosec/v2/cmd/gosec@${GOSEC_VERSION}
+          go install golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}
+
       - name: Run Gosec Security Scanner
-        uses: securego/gosec@master
-        with:
-          args: './...'
-          
-      - name: Run SAST scan
-        uses: github/super-linter@v4
-        env:
-          DEFAULT_BRANCH: main
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gosec -quiet ./...
+
+      - name: Run govulncheck
+        # Replaces the archived super-linter@v4 SAST step; the rest of what it
+        # linted (gofmt/goimports/vet/golangci-lint) is already enforced in the
+        # lint job.
+        run: govulncheck ./...
 
   # ===== BUILD ARTIFACTS =====
   build-artifacts:
     name: Build Artifacts
     runs-on: macos-latest
-    needs: [lint, build, metal-tests]
+    needs: [lint, metal-build, metal-tests]
     if: github.event_name == 'push' || github.event_name == 'schedule'
-    
+
     strategy:
       matrix:
         goos: [darwin]
         goarch: [amd64, arm64]
-        
+
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
-          
+
       - name: Cache Go modules
         uses: actions/cache@v4
         with:
           path: ~/go/pkg/mod
-          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
-          
+          key: ${{ runner.os }}-go-${{ matrix.goos }}-${{ matrix.goarch }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
       - name: Build binary
         env:
           GOOS: ${{ matrix.goos }}
@@ -356,11 +551,11 @@ jobs:
           CGO_ENABLED: 1
         run: |
           go build -v -tags "darwin,metal" -ldflags="-s -w" -o quarrel-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/quarrel
-          
+
       - name: Create archive
         run: |
           tar -czf quarrel-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz quarrel-${{ matrix.goos }}-${{ matrix.goarch }}
-          
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -370,32 +565,25 @@ jobs:
   # ===== RELEASE CANDIDATE =====
   release-candidate:
     name: Release Candidate
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
     needs: [coverage, benchmarks, security]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    
+
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          
+
       - name: Generate release notes
         run: |
           # Generate changelog from commits
           echo "## Release Notes" > release_notes.md
           echo "" >> release_notes.md
           git log --oneline --since="1 week ago" >> release_notes.md
-          
+
       - name: Create Draft Release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ github.run_number }}-rc
-          release_name: Release Candidate ${{ github.run_number }}
+          name: Release Candidate ${{ github.run_number }}
           body_path: release_notes.md
           draft: true
           prerelease: true
@@ -417,17 +605,17 @@ jobs:
             tag: webui
           - dockerfile: Dockerfile.tpu
             tag: tpu
-    
+
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-        
+
       - name: Build Docker image
         run: |
           docker build -f ${{ matrix.dockerfile }} -t longbow-quarrel:${{ matrix.tag }} .
-          
+
       - name: Verify Docker image
         run: |
           docker image inspect longbow-quarrel:${{ matrix.tag }}
@@ -439,7 +627,7 @@ jobs:
     needs: [lint, build]
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Validate compose files
         run: |
           docker compose -f docker-compose.cuda.yml config --quiet
@@ -454,17 +642,17 @@ jobs:
     permissions:
       contents: read
       packages: write
-    
+
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-          
+
       - name: Build and push CPU image
         uses: docker/build-push-action@v5
         with:
@@ -473,7 +661,7 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository }}:latest
             ghcr.io/${{ github.repository }}:cpu-latest
-          
+
       - name: Build and push NVIDIA image
         uses: docker/build-push-action@v5
         with:
@@ -487,17 +675,17 @@ jobs:
   notify:
     name: Notify Results
     runs-on: ubuntu-latest
-    needs: [lint, build, metal-tests, coverage, benchmarks, security]
+    needs: [lint, build, webui, metal-build, metal-tests, coverage, bench-gate, benchmarks, security]
     if: always()
-    
+
     steps:
       - name: Notify on success
-        if: needs.lint.result == 'success' && needs.build.result == 'success' && needs.metal-tests.result == 'success'
+        if: ${{ !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
         run: |
-          echo "✅ All CI checks passed successfully!"
-          
+          echo "All CI checks passed successfully!"
+
       - name: Notify on failure
-        if: contains(needs.*.result, 'failure')
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
         run: |
-          echo "❌ CI pipeline failed!"
+          echo "CI pipeline failed!"
           exit 1
