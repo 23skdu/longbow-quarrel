@@ -2,10 +2,11 @@ package engine
 
 import (
 	"fmt"
-	"github.com/23skdu/longbow-quarrel/internal/device"
-	"github.com/23skdu/longbow-quarrel/internal/gguf"
 	"strings"
 	"sync"
+
+	"github.com/23skdu/longbow-quarrel/internal/device"
+	"github.com/23skdu/longbow-quarrel/internal/gguf"
 )
 
 // LoRAWeight holds the rank matrices for a single projection (e.g., blk.0.attn_q).

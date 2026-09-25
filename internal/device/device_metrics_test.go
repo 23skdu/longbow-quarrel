@@ -3,9 +3,10 @@
 package device
 
 import (
+	"testing"
+
 	"github.com/23skdu/longbow-quarrel/internal/metrics"
 	"github.com/prometheus/client_golang/prometheus/testutil"
-	"testing"
 )
 
 func TestDeviceMetrics(t *testing.T) {

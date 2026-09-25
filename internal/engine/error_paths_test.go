@@ -1,9 +1,10 @@
 package engine
 
 import (
-	"github.com/23skdu/longbow-quarrel/internal/gguf"
 	"os"
 	"testing"
+
+	"github.com/23skdu/longbow-quarrel/internal/gguf"
 )
 
 func TestGGUF_Error_Coverage(t *testing.T) {

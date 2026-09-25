@@ -5,9 +5,10 @@ package device
 import (
 	"encoding/binary"
 	"fmt"
-	"github.com/23skdu/longbow-quarrel/internal/gguf"
 	"math"
 	"testing"
+
+	"github.com/23skdu/longbow-quarrel/internal/gguf"
 )
 
 // DequantizeQ4K_Reference implements llama.cpp's Q4K dequantization in Go

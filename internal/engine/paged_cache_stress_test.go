@@ -2,9 +2,10 @@ package engine
 
 import (
 	"fmt"
+	"testing"
+
 	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/device"
-	"testing"
 )
 
 func TestPagedKVCache_AllocationStress(t *testing.T) {

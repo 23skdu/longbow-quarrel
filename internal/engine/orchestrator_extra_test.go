@@ -1,9 +1,10 @@
 package engine
 
 import (
-	"github.com/23skdu/longbow-quarrel/internal/config"
 	"os"
 	"testing"
+
+	"github.com/23skdu/longbow-quarrel/internal/config"
 )
 
 func TestActivationLogger_Coverage(t *testing.T) {

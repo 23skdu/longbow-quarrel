@@ -2,8 +2,9 @@ package engine
 
 import (
 	"context"
-	"github.com/23skdu/longbow-quarrel/internal/config"
 	"testing"
+
+	"github.com/23skdu/longbow-quarrel/internal/config"
 )
 
 type specMockEngine struct {

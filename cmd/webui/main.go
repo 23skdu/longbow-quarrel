@@ -12,11 +12,12 @@ import (
 	"os/signal"
 	"syscall"
 
+	"net/http/pprof"
+
 	"github.com/23skdu/longbow-quarrel/cmd/webui/config"
 	"github.com/23skdu/longbow-quarrel/cmd/webui/handlers"
 	"github.com/23skdu/longbow-quarrel/cmd/webui/templates"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"net/http/pprof"
 )
 
 var (

@@ -5,11 +5,12 @@ package engine
 
 import (
 	"encoding/binary"
+	"os"
+	"testing"
+
 	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/device"
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
-	"os"
-	"testing"
 )
 
 func TestMetalEngineInternalState(t *testing.T) {

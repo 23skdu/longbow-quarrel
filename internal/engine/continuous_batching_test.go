@@ -2,8 +2,9 @@ package engine
 
 import (
 	"errors"
-	"github.com/23skdu/longbow-quarrel/internal/config"
 	"testing"
+
+	"github.com/23skdu/longbow-quarrel/internal/config"
 )
 
 func TestContinuousBatchManager_Lifecycle(t *testing.T) {

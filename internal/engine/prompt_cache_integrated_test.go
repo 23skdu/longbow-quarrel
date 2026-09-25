@@ -4,9 +4,10 @@ package engine
 
 import (
 	"fmt"
+	"testing"
+
 	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/device"
-	"testing"
 )
 
 func TestPromptCache_Integration(t *testing.T) {

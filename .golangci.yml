@@ -1,0 +1,17 @@
+version: "2"
+
+run:
+  timeout: 10m
+
+# Formatting is enforced by the linter so a stale gofmt/goimports result fails
+# the run instead of being silently ignored.
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+issues:
+  # Never truncate the report. With the default caps (50 per linter, 3 per
+  # unique message) a broken run looks like "50 issues" and hides the rest.
+  max-issues-per-linter: 0
+  max-same-issues: 0

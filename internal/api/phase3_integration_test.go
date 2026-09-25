@@ -3,11 +3,12 @@ package api
 import (
 	"bytes"
 	"encoding/json"
-	"github.com/23skdu/longbow-quarrel/internal/config"
-	"github.com/23skdu/longbow-quarrel/internal/engine"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/23skdu/longbow-quarrel/internal/config"
+	"github.com/23skdu/longbow-quarrel/internal/engine"
 )
 
 func TestPhase3_Integration(t *testing.T) {

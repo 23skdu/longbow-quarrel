@@ -3,8 +3,9 @@
 package device
 
 import (
-	"github.com/apache/arrow-go/v18/arrow/memory"
 	"testing"
+
+	"github.com/apache/arrow-go/v18/arrow/memory"
 )
 
 func TestTensor_GPUMetadata(t *testing.T) {
