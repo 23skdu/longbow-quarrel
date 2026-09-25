@@ -4,9 +4,9 @@ package engine
 
 import (
 	"fmt"
-	"testing"
 	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/device"
+	"testing"
 )
 
 func TestPromptCache_Integration(t *testing.T) {
@@ -41,7 +41,7 @@ func TestPromptCache_Integration(t *testing.T) {
 	if active == nil || len(active.Sequences) != 1 {
 		t.Fatalf("expected 1 active sequence, got %v", active)
 	}
-	
+
 	// Simulate engine processing and marking completed
 	seq := active.Sequences[0]
 	seq.Pos = seq.PromptLen

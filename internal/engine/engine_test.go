@@ -186,7 +186,6 @@ func TestEngineMetrics(t *testing.T) {
 	// Verify that Engine calls metrics
 }
 
-
 // TestMistralMetadataSupport was moved to engine_metal_test.go as it requires internal field access.
 
 func TestGetKV(t *testing.T) {
@@ -300,7 +299,7 @@ func TestMetadata_Helpers(t *testing.T) {
 	if isNormWeight("attn_q.weight") {
 		t.Error("attn_q.weight should not be norm")
 	}
-	
+
 	if !isNeededTensor("token_embd.weight") {
 		t.Error("token_embd should be needed")
 	}
@@ -340,6 +339,5 @@ func TestValidateTensorDimensions(t *testing.T) {
 		})
 	}
 }
-
 
 // TestNemotronStyleLoading was moved to engine_metal_test.go as it requires internal field access.

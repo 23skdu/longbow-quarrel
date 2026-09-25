@@ -2,8 +2,6 @@ package engine
 
 import (
 	"strings"
-
-	"github.com/23skdu/longbow-quarrel/internal/gguf"
 )
 
 // PromptWrapper wraps prompts with system prompts and chat templates.
@@ -39,17 +37,6 @@ func NewPromptWrapper() *PromptWrapper {
 			NumPredict:    2048,
 			RepeatPenalty: 1.1,
 		},
-	}
-}
-
-// LoadGGUFChatTemplate reads the tokenizer.chat_template key from a GGUF file and
-// installs it as the active template.  Falls back to the existing template on error.
-func (p *PromptWrapper) LoadGGUFChatTemplate(f *gguf.GGUFFile) {
-	if f == nil {
-		return
-	}
-	if tmpl, ok := f.KV["tokenizer.chat_template"].(string); ok && tmpl != "" {
-		p.ChatTemplate = tmpl
 	}
 }
 
@@ -110,9 +97,9 @@ func (p *PromptWrapper) Wrap(messages []Message) (string, error) {
 func renderJinja2Subset(tmpl string, messages []Message, systemPrompt string) (string, error) {
 	// Build variable context
 	vars := map[string]string{
-		"bos_token":   "<s>",
-		"eos_token":   "</s>",
-		"system":      systemPrompt,
+		"bos_token":             "<s>",
+		"eos_token":             "</s>",
+		"system":                systemPrompt,
 		"add_generation_prompt": "true",
 	}
 

@@ -1,9 +1,9 @@
 package engine
 
 import (
+	"github.com/23skdu/longbow-quarrel/internal/gguf"
 	"os"
 	"testing"
-	"github.com/23skdu/longbow-quarrel/internal/gguf"
 )
 
 func TestGGUF_Error_Coverage(t *testing.T) {
@@ -34,7 +34,7 @@ func TestEngine_Metadata_Fallbacks(t *testing.T) {
 	f := &gguf.GGUFFile{
 		KV: make(map[string]interface{}),
 	}
-	
+
 	// Use the unexported getKV helper if possible, or test via a minimal engine
 	val, ok := getKV(f, "llama.block_count")
 	if ok || val != nil {

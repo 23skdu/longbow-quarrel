@@ -11,10 +11,10 @@ import (
 
 // Priority levels for inference requests (higher = more important)
 const (
-	PriorityLow     = 0
-	PriorityNormal  = 5
-	PriorityHigh    = 10
-	PriorityUrgent  = 15
+	PriorityLow    = 0
+	PriorityNormal = 5
+	PriorityHigh   = 10
+	PriorityUrgent = 15
 )
 
 // InferenceRequest encapsulates a user generation request to be placed in the continuous batching queue.
@@ -170,16 +170,18 @@ type ContinuousBatchManager struct {
 
 	prefill map[uint64]*Sequence
 
-	mu           sync.RWMutex
-	LowWaterMark int
+	mu               sync.RWMutex
+	LowWaterMark     int
+	PrefillChunkSize int
 }
 
 func NewContinuousBatchManager() *ContinuousBatchManager {
 	return &ContinuousBatchManager{
-		waitingQueue:  &RequestQueue{},
-		running:       make(map[uint64]*Sequence),
-		prefill:       make(map[uint64]*Sequence),
-		LowWaterMark:  32,
+		waitingQueue:     &RequestQueue{},
+		running:          make(map[uint64]*Sequence),
+		prefill:          make(map[uint64]*Sequence),
+		LowWaterMark:     32,
+		PrefillChunkSize: 512,
 	}
 }
 
@@ -196,12 +198,21 @@ func (cm *ContinuousBatchManager) Depth() int {
 
 // Step advances the state of the batching iteration, pulling from the waiting queue if resources permit.
 func (cm *ContinuousBatchManager) Step(maxBatchSize int, kvCache *PagedKVCache, promptCache *PromptCache) (*BatchDescriptor, error) {
+	stepStart := time.Now()
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
-	const PrefillChunkSize = 512
+	prefillChunkLimit := cm.PrefillChunkSize
+	if prefillChunkLimit <= 0 {
+		prefillChunkLimit = 512
+	}
 
-	if promptCache != nil && kvCache != nil && kvCache.FreeBlocksCount() < cm.LowWaterMark {
+	lowWaterMark := cm.LowWaterMark
+	if kvCache != nil && kvCache.totalBlocks <= lowWaterMark {
+		lowWaterMark = kvCache.totalBlocks / 4
+	}
+
+	if promptCache != nil && kvCache != nil && kvCache.FreeBlocksCount() < lowWaterMark {
 		promptCache.Evict(kvCache)
 	}
 
@@ -209,17 +220,17 @@ func (cm *ContinuousBatchManager) Step(maxBatchSize int, kvCache *PagedKVCache, 
 
 	canAdmit := availableSlots > 0
 	if kvCache != nil {
-		canAdmit = canAdmit && kvCache.FreeBlocksCount() > cm.LowWaterMark
+		canAdmit = canAdmit && kvCache.FreeBlocksCount() > lowWaterMark
 	}
 
 	// Preemption: when KV cache is under pressure and we can't admit new requests,
 	// preempt the lowest-priority running sequence to free blocks
-	if !canAdmit && kvCache != nil && kvCache.FreeBlocksCount() < cm.LowWaterMark/2 {
+	if !canAdmit && kvCache != nil && lowWaterMark > 0 && kvCache.FreeBlocksCount() < lowWaterMark/2 {
 		if preemptedID := cm.PreemptLowestPriority(kvCache); preemptedID > 0 {
 			metrics.RecordContinuousBatchIteration(0, time.Duration(0), true)
 			// Re-check admission after preemption freed blocks
 			availableSlots = maxBatchSize - len(cm.running) - len(cm.prefill)
-			canAdmit = availableSlots > 0 && kvCache.FreeBlocksCount() > cm.LowWaterMark
+			canAdmit = availableSlots > 0 && kvCache.FreeBlocksCount() > lowWaterMark
 		}
 	}
 
@@ -228,8 +239,8 @@ func (cm *ContinuousBatchManager) Step(maxBatchSize int, kvCache *PagedKVCache, 
 		for _, req := range newReqs {
 			// Admittance check: can we even fit the first chunk?
 			chunkSize := len(req.Prompt)
-			if chunkSize > PrefillChunkSize {
-				chunkSize = PrefillChunkSize
+			if chunkSize > prefillChunkLimit {
+				chunkSize = prefillChunkLimit
 			}
 
 			if kvCache != nil && !kvCache.HasCapacityFor(chunkSize) {
@@ -239,14 +250,14 @@ func (cm *ContinuousBatchManager) Step(maxBatchSize int, kvCache *PagedKVCache, 
 			}
 
 			seqIDStr := fmt.Sprintf("seq-%d", req.ID)
-			
+
 			// 1. Check Prompt Cache for shared prefixes
 			var matchedCount int
 			var cachedBlocks []int32
 			if promptCache != nil {
 				matchedCount, cachedBlocks = promptCache.MatchPrefix(req.Prompt)
 			}
-			
+
 			// 2. Allocate Sequence state
 			seq := &Sequence{
 				ID:        req.ID,
@@ -259,12 +270,12 @@ func (cm *ContinuousBatchManager) Step(maxBatchSize int, kvCache *PagedKVCache, 
 				Pos:       0,
 				Status:    SequenceStatusRunning,
 			}
-		seq.TokenCallback = req.TokenCallback
-		seq.LogitsCallback = req.LogitsCallback
-		seq.AdapterID = req.AdapterID
-		seq.Priority = req.Priority
-		
-		// Speculative Decoding Parameters
+			seq.TokenCallback = req.TokenCallback
+			seq.LogitsCallback = req.LogitsCallback
+			seq.AdapterID = req.AdapterID
+			seq.Priority = req.Priority
+
+			// Speculative Decoding Parameters
 			seq.Speculative = req.Speculative
 			seq.DraftK = req.DraftK
 			seq.NumPaths = req.NumPaths
@@ -287,19 +298,21 @@ func (cm *ContinuousBatchManager) Step(maxBatchSize int, kvCache *PagedKVCache, 
 		TokenToSeq:  make([]int, 0),
 		IsDecode:    make([]bool, 0),
 	}
-	
+
 	// Track added IDs to avoid duplicates
 	added := make(map[uint64]bool)
+	totalPrefillTokens := 0
 
 	// Process prefill sequences (with chunking)
 	for id, seq := range cm.prefill {
 		remainingPrompt := seq.PromptLen - seq.Pos
 		if remainingPrompt > 0 {
 			toProcess := remainingPrompt
-			if toProcess > PrefillChunkSize {
-				toProcess = PrefillChunkSize
+			if toProcess > prefillChunkLimit {
+				toProcess = prefillChunkLimit
 			}
-			
+			totalPrefillTokens += toProcess
+
 			desc.Offsets = append(desc.Offsets, len(desc.Tokens))
 			desc.Tokens = append(desc.Tokens, seq.Tokens[seq.Pos:seq.Pos+toProcess]...)
 			desc.ContextLens = append(desc.ContextLens, seq.Pos)
@@ -311,9 +324,9 @@ func (cm *ContinuousBatchManager) Step(maxBatchSize int, kvCache *PagedKVCache, 
 			desc.AdapterIDs = append(desc.AdapterIDs, seq.AdapterID)
 			desc.IsDecode = append(desc.IsDecode, toProcess == 1 && seq.PrefillCompleted)
 			added[id] = true
-			
+
 			// Update locally for next iteration (actual Pos update happens after kernel success in runBatchLoop)
-			if seq.Pos + toProcess >= seq.PromptLen {
+			if seq.Pos+toProcess >= seq.PromptLen {
 				seq.PrefillCompleted = true
 				delete(cm.prefill, id)
 				cm.running[id] = seq
@@ -330,7 +343,7 @@ func (cm *ContinuousBatchManager) Step(maxBatchSize int, kvCache *PagedKVCache, 
 			continue
 		}
 		desc.AdapterIDs = append(desc.AdapterIDs, seq.AdapterID)
-		
+
 		desc.Offsets = append(desc.Offsets, len(desc.Tokens))
 		desc.Tokens = append(desc.Tokens, seq.Tokens[len(seq.Tokens)-1])
 		desc.ContextLens = append(desc.ContextLens, seq.Pos)
@@ -341,7 +354,10 @@ func (cm *ContinuousBatchManager) Step(maxBatchSize int, kvCache *PagedKVCache, 
 	}
 
 	metrics.RecordBatchStats(cm.waitingQueue.Depth(), len(cm.running), len(cm.prefill))
-	
+	if totalPrefillTokens > 0 {
+		metrics.RecordPrefillChunk(totalPrefillTokens, time.Since(stepStart))
+	}
+
 	if len(desc.Sequences) == 0 {
 		return nil, nil
 	}
@@ -355,7 +371,7 @@ func (cm *ContinuousBatchManager) CompleteSequence(id uint64, kvCache *PagedKVCa
 
 	delete(cm.running, id)
 	delete(cm.prefill, id)
-	
+
 	if kvCache != nil {
 		seqIDStr := fmt.Sprintf("seq-%d", id)
 		kvCache.FreeSequence(seqIDStr)

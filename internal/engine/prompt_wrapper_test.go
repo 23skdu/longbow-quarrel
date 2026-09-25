@@ -62,7 +62,7 @@ func TestPromptWrapper_FindStopString(t *testing.T) {
 	pw := NewPromptWrapper()
 
 	tests := []struct {
-		text    string
+		text   string
 		expect int
 	}{
 		{"Hello [INST] world", 6},
@@ -81,10 +81,10 @@ func TestPromptWrapper_FindStopString(t *testing.T) {
 
 func TestPromptWrapper_ChatTemplates(t *testing.T) {
 	llama3 := "<|start_header_id|>system<|end_header_id|>\n\n{{ .System }}<|eot_id|>\n\n<|start_header_id|>user<|end_header_id|>\n\n{{ .User }}<|eot_id|>\n\n<|start_header_id|>assistant<|end_header_id|>\n\n"
-	
+
 	pw := &PromptWrapper{
 		ChatTemplate: llama3,
-		StopStrings: []string{"<|eot_id|>"},
+		StopStrings:  []string{"<|eot_id|>"},
 	}
 
 	messages := []Message{

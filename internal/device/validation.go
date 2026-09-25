@@ -68,22 +68,6 @@ func (c *ModelConfig) Validate() error {
 	return nil
 }
 
-func GetKernelDurationSum() float64 {
-	return 0
-}
-
-func GetGPUMemoryAllocated() int64 {
-	return 0
-}
-
-func ValidateTensorDimensions(aRows, aCols, bRows, bCols int) error {
-	if aCols != bRows {
-		return fmt.Errorf("matrix dimension mismatch: A[%d,%d] * B[%d,%d] invalid",
-			aRows, aCols, bRows, bCols)
-	}
-	return nil
-}
-
 func ValidateLinearDimensions(inputCols, weightCols int) error {
 	if inputCols != weightCols {
 		return fmt.Errorf("linear dimension mismatch: input cols=%d != weight cols=%d",
@@ -146,20 +130,6 @@ func DetectNaN(data []float32, maxPositions int) *NaNInfo {
 	return info
 }
 
-func (t *Tensor) ScanForNaN(name string, maxReport int) *NaNInfo {
-	data := t.ToHost()
-	return DetectNaN(data, maxReport)
-}
-
-func ValidateAndReport(name string, data []float32, maxNaNAllowed int) (*NaNInfo, error) {
-	info := DetectNaN(data, 10)
-	if info.Count > maxNaNAllowed {
-		return info, fmt.Errorf("%s: too many NaNs (%d > %d allowed), first positions: %v",
-			name, info.Count, maxNaNAllowed, info.Positions)
-	}
-	return info, nil
-}
-
 func HasAnyNaN(data []float32) bool {
 	for _, v := range data {
 		if math.IsNaN(float64(v)) {
@@ -193,46 +163,6 @@ func Float32Max(data []float32) float32 {
 		}
 	}
 	return max
-}
-
-func Float32Min(data []float32) float32 {
-	if len(data) == 0 {
-		return 0
-	}
-	min := data[0]
-	for _, v := range data {
-		if v < min {
-			min = v
-		}
-	}
-	return min
-}
-
-func ValidateAttentionOutput(output *Tensor, numHeads, headDim int) error {
-	expectedRows := 1
-	expectedCols := numHeads * headDim
-
-	if output.Rows() != expectedRows {
-		return fmt.Errorf("attention output rows mismatch: expected %d, got %d",
-			expectedRows, output.Rows())
-	}
-	if output.Cols() != expectedCols {
-		return fmt.Errorf("attention output cols mismatch: expected %d, got %d",
-			expectedCols, output.Cols())
-	}
-	return nil
-}
-
-func (t *Tensor) ValidateForOperation(op string, expectedRows, expectedCols int) error {
-	if t.Rows() != expectedRows {
-		return fmt.Errorf("%s: tensor rows mismatch: expected %d, got %d",
-			op, expectedRows, t.Rows())
-	}
-	if t.Cols() != expectedCols {
-		return fmt.Errorf("%s: tensor cols mismatch: expected %d, got %d",
-			op, expectedCols, t.Cols())
-	}
-	return nil
 }
 
 type ValidationError struct {

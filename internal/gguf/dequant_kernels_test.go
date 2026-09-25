@@ -66,9 +66,9 @@ func TestDequantizeQ6K_Kernel(t *testing.T) {
 	// Block size 256. Q6_K is 210 bytes.
 	data := make([]byte, 210)
 	// Q6_K layout: 128 bytes (low nibbles) + 64 bytes (high bits) + 16 bytes (scales) + 4 bytes (delta f32)
-	
+
 	binary.LittleEndian.PutUint32(data[206:210], math.Float32bits(1.0)) // delta
-	
+
 	// Just fill with some data to hit the loop
 	for i := 0; i < 206; i++ {
 		data[i] = 0xAA

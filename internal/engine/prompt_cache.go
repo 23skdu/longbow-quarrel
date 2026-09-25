@@ -43,13 +43,6 @@ func NewPromptCache() *PromptCache {
 	}
 }
 
-// SetMaxCachedBlocks sets the maximum number of blocks to cache.
-func (pc *PromptCache) SetMaxCachedBlocks(max int) {
-	pc.mu.Lock()
-	defer pc.mu.Unlock()
-	pc.maxCachedBlocks = max
-}
-
 // MatchPrefix finds the longest matching cached prompt prefix for the incoming token sequence.
 func (pc *PromptCache) MatchPrefix(prompt []int) (matchedTokens int, cachedBlocks []int32) {
 	pc.mu.RLock()
@@ -152,13 +145,6 @@ func (pc *PromptCache) removeLRU() {
 		pc.lruHead = nil
 		pc.lruTail = nil
 	}
-}
-
-// CurrentBlockCount returns the current number of cached physical blocks in LRU.
-func (pc *PromptCache) CurrentBlockCount() int {
-	pc.mu.RLock()
-	defer pc.mu.RUnlock()
-	return pc.lruSize
 }
 
 // Evict removes the least recently used cached prompts to free blocks back to the KV cache.

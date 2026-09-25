@@ -40,7 +40,7 @@ func TestServer_FaultInjection(t *testing.T) {
 		s.HealthzEndpoint(w, r)
 		_ = w.status // Ensure used
 	})
-	
+
 	t.Run("CompletionsMalformedJSON", func(t *testing.T) {
 		w := &faultyResponseWriter{}
 		r, _ := http.NewRequest("POST", "/v1/completions", bytes.NewBufferString("{invalid json"))

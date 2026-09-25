@@ -33,7 +33,7 @@ func (m *MasterDistributedEngine) Infer(tokens []int, count int, cfg SamplerConf
 	if len(m.shards) == 0 {
 		return nil, fmt.Errorf("no distributed shards available")
 	}
-	
+
 	// Delegate to primary shard (Master role)
 	return m.shards[0].Infer(tokens, count, cfg)
 }
@@ -99,37 +99,37 @@ func (m *MasterDistributedEngine) ForwardBatch(batch *BatchDescriptor) ([]*devic
 			ctx := context.Background()
 			layerOutputs := make([]*device.Tensor, m.config.Layers)
 
-		for layerIdx := 0; layerIdx < m.config.Layers; layerIdx++ {
-			partialOutputs := make([]*device.Tensor, numShards)
-			layerErrors := make([]error, numShards)
+			for layerIdx := 0; layerIdx < m.config.Layers; layerIdx++ {
+				partialOutputs := make([]*device.Tensor, numShards)
+				layerErrors := make([]error, numShards)
 
-			var shardWg sync.WaitGroup
-			for shardIdx := 0; shardIdx < numShards; shardIdx++ {
-				shardWg.Add(1)
-				go func(sIdx int) {
-					defer shardWg.Done()
+				var shardWg sync.WaitGroup
+				for shardIdx := 0; shardIdx < numShards; shardIdx++ {
+					shardWg.Add(1)
+					go func(sIdx int) {
+						defer shardWg.Done()
 
-					colStart := (sIdx * hiddenSize) / numShards
-					colEnd := ((sIdx + 1) * hiddenSize) / numShards
-					if sIdx == numShards-1 {
-						colEnd = hiddenSize
-					}
+						colStart := (sIdx * hiddenSize) / numShards
+						colEnd := ((sIdx + 1) * hiddenSize) / numShards
+						if sIdx == numShards-1 {
+							colEnd = hiddenSize
+						}
 
-					inputCopy := m.ctx.NewTensorFP32(1, hiddenSize)
-					defer inputCopy.Free()
+						inputCopy := m.ctx.NewTensorFP32(1, hiddenSize)
+						defer inputCopy.Free()
 
-					partialOutputs[sIdx], layerErrors[sIdx] = m.shards[sIdx].ForwardShardedLayer(ctx, layerIdx, colStart, colEnd, inputCopy)
-				}(shardIdx)
-			}
-			shardWg.Wait()
-
-			var layerErr error
-			for _, err := range layerErrors {
-				if err != nil {
-					layerErr = err
-					break
+						partialOutputs[sIdx], layerErrors[sIdx] = m.shards[sIdx].ForwardShardedLayer(ctx, layerIdx, colStart, colEnd, inputCopy)
+					}(shardIdx)
 				}
-			}
+				shardWg.Wait()
+
+				var layerErr error
+				for _, err := range layerErrors {
+					if err != nil {
+						layerErr = err
+						break
+					}
+				}
 
 				if layerErr != nil {
 					mu.Lock()

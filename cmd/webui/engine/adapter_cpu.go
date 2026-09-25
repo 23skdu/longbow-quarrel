@@ -1,4 +1,4 @@
-//go:build !(darwin && metal) && !(linux && cuda)
+//go:build !(darwin && metal) && !(linux && amd64 && cuda && cgo)
 
 package engine
 

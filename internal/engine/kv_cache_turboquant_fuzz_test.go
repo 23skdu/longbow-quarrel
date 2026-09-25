@@ -27,7 +27,7 @@ func FuzzPagedKVCache_TurboQuant(f *testing.F) {
 
 		cache := &PagedKVCache{}
 		cfg := conf.Config{
-			KVHeads:     heads,
+			KVHeads:    heads,
 			HeadDim:    headDim,
 			Layers:     layers,
 			WindowSize: windowSize,

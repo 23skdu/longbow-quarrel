@@ -836,7 +836,6 @@ func TestAVX2Wrappers(t *testing.T) {
 	Fp32ToFp16AVX2(nil, nil)
 }
 
-
 func TestFusedMLP_EdgeCases(t *testing.T) {
 	// Empty inputs
 	out := make([]float32, 2)

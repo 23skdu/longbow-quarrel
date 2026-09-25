@@ -38,21 +38,25 @@ func TestQuantizeQ6K_Kernel(t *testing.T) {
 
 func TestFP8_Kernels(t *testing.T) {
 	w := []float32{1.0, -1.0, 0.5, 0.0}
-	
+
 	// E4M3
 	data, _ := QuantizeToFP8E4M3(w)
 	res, _ := DequantizeFromFP8E4M3(data)
-	if len(res) != 4 { t.Error("length mismatch") }
+	if len(res) != 4 {
+		t.Error("length mismatch")
+	}
 
 	// E5M2
 	data2, _ := QuantizeToFP8E5M2(w)
 	res2, _ := DequantizeFromFP8E5M2(data2)
-	if len(res2) != 4 { t.Error("length mismatch") }
-	
+	if len(res2) != 4 {
+		t.Error("length mismatch")
+	}
+
 	// Weights wrapper
 	dataW, _ := QuantizeWeightsToFP8(w, 4, FP8E4M3)
 	_, _ = DequantizeWeightsFromFP8(dataW, 1, 4, FP8E4M3, 1.0)
-	
+
 	// Config
 	conf := NewFP8Config(FP8E4M3)
 	bin, _ := conf.MarshalBinary()
@@ -67,26 +71,30 @@ func TestTurboQuant_Matrices(t *testing.T) {
 	}
 	// Missing matrices
 	_, _, err := f.GetTurboQuantMatrices()
-	if err == nil { t.Error("expected error for missing matrices") }
-	
+	if err == nil {
+		t.Error("expected error for missing matrices")
+	}
+
 	// Mock some data
 	rotData := make([]byte, 4096*4) // Float32
 	qjlData := make([]byte, 4096*4)
 	f.Tensors = append(f.Tensors, &TensorInfo{
-		Name: "turboquant.rotation_matrix",
-		Type: GGMLTypeF32,
-		Data: rotData,
+		Name:       "turboquant.rotation_matrix",
+		Type:       GGMLTypeF32,
+		Data:       rotData,
 		Dimensions: []uint64{4096},
 	})
 	f.Tensors = append(f.Tensors, &TensorInfo{
-		Name: "turboquant.qjl_matrix",
-		Type: GGMLTypeF32,
-		Data: qjlData,
+		Name:       "turboquant.qjl_matrix",
+		Type:       GGMLTypeF32,
+		Data:       qjlData,
 		Dimensions: []uint64{4096},
 	})
 
 	rot, qjl, err := f.GetTurboQuantMatrices()
-	if err != nil { t.Errorf("failed to get matrices: %v", err) }
+	if err != nil {
+		t.Errorf("failed to get matrices: %v", err)
+	}
 	if len(rot) != 4096 || len(qjl) != 4096 {
 		t.Errorf("unexpected lengths: rot=%d, qjl=%d", len(rot), len(qjl))
 	}

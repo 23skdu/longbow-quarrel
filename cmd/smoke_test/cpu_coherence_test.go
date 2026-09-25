@@ -274,22 +274,3 @@ func TestCPUKVCacheCorrectness(t *testing.T) {
 
 	t.Logf("KV cache correctness test passed (no crashes)")
 }
-
-func isCoherent(text string) bool {
-	if len(text) == 0 {
-		return false
-	}
-
-	common := []string{
-		"the", "and", "with", "for", "not", "but", "are", "was", "this", "have",
-		"from", "they", "will", "would", "there", "their", "what", "about",
-	}
-
-	for _, word := range common {
-		if len(text) >= len(word) {
-			return true
-		}
-	}
-
-	return len(text) > 20
-}

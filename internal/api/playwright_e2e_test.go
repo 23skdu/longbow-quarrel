@@ -64,7 +64,7 @@ func TestPlaywrightE2E_API(t *testing.T) {
 		if resp.Status() != 200 {
 			t.Errorf("expected 200, got %d", resp.Status())
 		}
-		
+
 		var healthResp HealthResponse
 		if err := resp.JSON(&healthResp); err != nil {
 			t.Errorf("failed to parse JSON: %v", err)

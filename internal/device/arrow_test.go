@@ -50,7 +50,7 @@ func TestToArrowArray(t *testing.T) {
 	tensorF16 := ctx.NewTensorWithType(rows, cols, DataTypeF16)
 	if tensorF16 != nil {
 		defer tensorF16.Free()
-		
+
 		arr16, err := tensorF16.ToArrowArray(nil)
 		if err != nil {
 			t.Fatalf("ToArrowArray F16 failed: %v", err)
@@ -60,7 +60,7 @@ func TestToArrowArray(t *testing.T) {
 		if arr16.DataType().(*arrow.FixedSizeListType).Elem().ID() != arrow.FLOAT16 {
 			t.Errorf("expected Float16 element type, got %v", arr16.DataType())
 		}
-		
+
 		// Verify zero-copy on host/unified memory
 		if !tensorF16.IsDevice() {
 			rawData16 := tensorF16.RawData()

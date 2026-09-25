@@ -212,7 +212,7 @@ func NewTPUEngine(modelPath string, cfg config.Config) (Engine, error) {
 		ctx:   ctx,
 		tpu:   tpuModel,
 		config: config.Config{
-			Architecture: arch,
+			Architecture:  arch,
 			Dim:           dim,
 			HiddenDim:     hiddenDim,
 			Layers:        layers,
@@ -230,7 +230,7 @@ func NewTPUEngine(modelPath string, cfg config.Config) (Engine, error) {
 		cache:        cache,
 		BatchManager: NewContinuousBatchManager(),
 		stopChan:     make(chan struct{}),
-		doneChan:    make(chan struct{}),
+		doneChan:     make(chan struct{}),
 	}
 
 	logger.Log.Info("TPU engine initialized", "model", modelPath, "heads", heads, "kv_heads", kvHeads)
@@ -514,7 +514,7 @@ func (e *tpuEngine) inferInternal(inputTokens []int, tokensToGenerate int, sampl
 
 	req := &InferenceRequest{
 		ID:            uint64(time.Now().UnixNano()),
-		Prompt:       inputTokens,
+		Prompt:        inputTokens,
 		MaxTokens:     len(inputTokens) + tokensToGenerate,
 		Config:        samplerConfig,
 		Result:        resChan,

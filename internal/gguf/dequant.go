@@ -216,7 +216,6 @@ func DequantizeQ3K(data []byte, numElements int) []float32 {
 		scales := block[96:108]
 		d := Float16ToFloat32(binary.LittleEndian.Uint16(block[108:110]))
 
-
 		// Unpack scales (same logic as Q4_K but fewer bits/scales? No, same 12 bytes -> 16 scales)
 		// Q3_K uses scales to store 16 6-bit scales.
 		// Layout of scales matches Q4_K's `sc` part (without `m`).

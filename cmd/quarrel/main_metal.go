@@ -16,16 +16,16 @@ import (
 	"github.com/23skdu/longbow-quarrel/internal/engine"
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
 	"github.com/23skdu/longbow-quarrel/internal/logger"
+	"github.com/23skdu/longbow-quarrel/internal/metrics"
 	"github.com/23skdu/longbow-quarrel/internal/ollama"
 	"github.com/23skdu/longbow-quarrel/internal/tokenizer"
-	"github.com/23skdu/longbow-quarrel/internal/metrics"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 var (
-	modelPath   = flag.String("model", "", "Path to GGUF model file")
-	prompt      = flag.String("prompt", "Hello world", "Prompt to generate from")
-	numTokens   = flag.Int("n", 20, "Number of tokens to generate")
+	modelPath    = flag.String("model", "", "Path to GGUF model file")
+	prompt       = flag.String("prompt", "Hello world", "Prompt to generate from")
+	numTokens    = flag.Int("n", 20, "Number of tokens to generate")
 	metricsAddr  = flag.String("metrics", ":9090", "Address to serve Prometheus metrics")
 	kvCacheSize  = flag.Int("kv-cache-size", 2048, "KV cache max sequence length")
 	maxBatchSize = flag.Int("max-batch-size", 16, "Maximum number of sequences in a batch")

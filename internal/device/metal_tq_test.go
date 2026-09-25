@@ -29,7 +29,7 @@ func TestMetal_TurboQuant_Fused(t *testing.T) {
 
 	qjlData := make([]float32, qjlRows*headDim)
 	for i := 0; i < qjlRows*headDim; i++ {
-		qjlData[i] = 1.0 
+		qjlData[i] = 1.0
 	}
 	qjl := ctx.NewTensorFP32(qjlRows, headDim)
 	qjl.LoadFromF32(qjlData)
@@ -47,13 +47,15 @@ func TestMetal_TurboQuant_Fused(t *testing.T) {
 	// 3. Create and fill TQ KV Cache
 	kCache := ctx.NewTurboTensor(ctxLen, numHeads*headDim, DataTypeTQ1_0, headDim, qjlRows)
 	vCache := ctx.NewTurboTensor(ctxLen, numHeads*headDim, DataTypeTQ1_0, headDim, qjlRows)
-	
+
 	kData := make([]byte, kCache.SizeBytes())
 	// Fill KV cache with dynamic data
 	for b := 0; b < ctxLen*numHeads; b++ {
 		// [headDim int8][qjlRows int8][float scale][float sj]
 		offset := b * (headDim + qjlRows + 8)
-		if offset + headDim + qjlRows + 4 > len(kData) { break }
+		if offset+headDim+qjlRows+4 > len(kData) {
+			break
+		}
 		for i := 0; i < headDim; i++ {
 			kData[offset+i] = byte(int8((i % 127))) // Dynamic K
 		}
@@ -66,7 +68,7 @@ func TestMetal_TurboQuant_Fused(t *testing.T) {
 		kData[offset+headDim+qjlRows+2] = 0x80
 		kData[offset+headDim+qjlRows+3] = 0x3F
 	}
-	
+
 	ctx.LoadBuffer(kCache, kData)
 	ctx.LoadBuffer(vCache, kData)
 
@@ -86,11 +88,11 @@ func TestMetal_TurboQuant_Fused(t *testing.T) {
 			break
 		}
 	}
-	
+
 	if !nonZero {
 		t.Error("Attention output is all zeros")
 	}
-	
+
 	// Since we haven't filled the cache with meaningful data yet, it might be zero if initial memory is zero.
 	// But the kernel should have executed.
 	t.Logf("Success: Fused TurboQuant Attention executed. Sample output[0:4]: %v", output[0:4])

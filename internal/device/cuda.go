@@ -1,4 +1,4 @@
-//go:build linux && cuda
+//go:build linux && amd64 && cuda && cgo
 
 package device
 
@@ -41,8 +41,10 @@ extern void cudaSwiGLU(float* gate, float* up, float* output, int size, cudaStre
 
 // Fused kernel exports
 extern void cudaFusedAttention(cudaStream_t stream, const void* q, const void* k, const void* v, void* output, const void* kCache, const void* vCache, int batch, int heads, int seqLen, int kvSeqLen, int headDim, float scale, int useCache, int windowSize);
-extern void cudaFlashFusedAttention(cudaStream_t stream, const void* q, const void* k, const void* v, void* output, int batch, int heads, int seqLen, int kvSeqLen, int headDim, float scale, int windowSize);
 extern void cudaFusedRoPE(cudaStream_t stream, void* tensor, const int* posIds, int batch, int heads, int seqLen, int headDim, float theta);
+extern void cudaPrecomputeRoPE(cudaStream_t stream, float* ropeCos, float* ropeSin, int maxSeqLen, int headDim, int rotaryDim, float theta);
+extern void cudaFusedRoPEPrecomputed(cudaStream_t stream, float* tensor, const int* posIds, const float* ropeCos, const float* ropeSin, int batch, int heads, int seqLen, int headDim, int maxSeqLen);
+extern void cudaFusedQKVRope(cudaStream_t stream, const void* input, const void* qWeight, const void* kWeight, const void* vWeight, void* qOut, void* kOut, void* vOut, const void* ropeCos, const void* ropeSin, const int* posIds, int batch, int dim, int qDim, int kvDim, int headDim, int maxSeqLen, int isF16);
 extern void cudaFusedMLP(cudaStream_t stream, const void* input, const void* gateWeight, const void* upWeight, const void* downWeight, void* output, int batch, int dim, int hiddenDim);
 extern void cudaFusedRMSNormAdd(cudaStream_t stream, const void* input, const void* hidden, const void* weight, void* output, int batch, int dim, float eps);
 extern void cudaStoreKVPagedBatch(cudaStream_t stream, const float* k, const float* v, void* kPool, void* vPool, const int* physicalPositions, int kvDim, int numTokens);
@@ -60,6 +62,18 @@ extern void cudaMatVecDequantQ4_K(cudaStream_t stream, const void* weight, const
 extern void cudaMatVecDequantQ6_K(cudaStream_t stream, const void* weight, const float* x, float* y, int M, int K);
 extern void cudaFlashAttentionPrefill(cudaStream_t stream, const float* q, const float* k, const float* v, float* output, int batch, int heads, int kvHeads, int qSeqLen, int kvSeqLen, int headDim, float scale, int slidingWindow);
 extern void cudaPagedAttentionQuantized(cudaStream_t stream, const float* q, const void* kPool, const void* vPool, const float* kScales, const float* vScales, float* output, const int* tokenPositions, const int* blockTables, const int* tokenToSeq, int maxBlocks, int heads, int kvHeads, int headDim, int blockSize, int numTokens, float scale, int isFP8);
+
+// MOE Kernels
+extern void cudaMOERouterLogits(cudaStream_t stream, const void* input, const void* gate, float* output, int batch, int dim, int num_experts, int isF16);
+extern void cudaMOETopKSelection(cudaStream_t stream, const float* logits, int top_k, float* indices, float* weights, int batch, int num_experts);
+extern void cudaMOEExpertForward(cudaStream_t stream, const void* input, const void* expert_weights, const float* indices, const float* expert_weights_w, void* output, int batch, int dim, int hidden_dim, int num_experts, int top_k, int isF16);
+extern void cudaMOEExpertGateUpSwiGLU(cudaStream_t stream, const void* input, const void* gate_experts, const void* up_experts, const float* indices, const float* weights, void* output, int batch, int dim, int hidden_dim, int num_experts, int top_k, int isF16);
+
+// MLA (Multi-Head Latent Attention) Kernels
+extern void cudaMLADecompressKV(cudaStream_t stream, const void* compressed_kv, const void* w_ukv, void* k_nope, void* v, int num_tokens, int kv_lora_rank, int heads, int qk_nope_dim, int v_head_dim, int isF16);
+extern void cudaMLAProjectQuerySplitRoPE(cudaStream_t stream, const void* q_all, const int* pos_ids, void* q_nope, void* q_rope, int num_tokens, int heads, int qk_nope_dim, int qk_rope_dim, float theta, int isF16);
+extern void cudaMLAAbsorbedQuery(cudaStream_t stream, const void* q_nope, const void* w_uk, void* q_absorbed, int num_tokens, int heads, int qk_nope_dim, int kv_lora_rank, int isF16);
+extern void cudaMLAAbsorbedDecodeAttention(cudaStream_t stream, const void* q_absorbed, const void* q_rope, const void* k_cache, const void* k_rope_cache, const void* w_uv, void* output, int num_tokens, int seq_len, int heads, int kv_lora_rank, int qk_rope_dim, int v_head_dim, float scale, int isF16);
 */
 import "C"
 
@@ -78,6 +92,7 @@ import (
 
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
 	"github.com/23skdu/longbow-quarrel/internal/metrics"
+	"github.com/23skdu/longbow-quarrel/internal/simd"
 )
 
 var globalContext *Context
@@ -86,8 +101,15 @@ type Context struct {
 	Ctx         C.cudaStream_t
 	Cublas      C.cublasHandle_t
 	pool        *tensorPool
-	TQRotation *Tensor
-	TQQJL      *Tensor
+	TQRotation  *Tensor
+	TQQJL       *Tensor
+	ropeCos     *Tensor
+	ropeSin     *Tensor
+	ropeMaxLen  int
+	ropeHeadDim int
+	ropeRotDim  int
+	ropeTheta   float32
+	dPosIds     unsafe.Pointer
 }
 
 func (ctx *Context) DeviceID() int {
@@ -102,6 +124,8 @@ type Tensor struct {
 	ctx       *Context
 	pooled    bool
 	sizeBytes int
+	blockSize int
+	qjlRows   int
 }
 
 type tensorPool struct {
@@ -128,11 +152,24 @@ func NewContext() *Context {
 			free: make(map[int][]*Tensor),
 		},
 	}
+	C.cudaMalloc(&ctx.dPosIds, 4096)
 	globalContext = ctx
 	return ctx
 }
 
 func (ctx *Context) Free() {
+	if ctx.dPosIds != nil {
+		C.cudaFree(ctx.dPosIds)
+		ctx.dPosIds = nil
+	}
+	if ctx.ropeCos != nil {
+		ctx.ropeCos.Free()
+		ctx.ropeCos = nil
+	}
+	if ctx.ropeSin != nil {
+		ctx.ropeSin.Free()
+		ctx.ropeSin = nil
+	}
 	if ctx.Ctx != nil {
 		C.cudaStreamDestroy(ctx.Ctx)
 	}
@@ -216,6 +253,8 @@ func (ctx *Context) NewTurboTensor(rows, cols int, dt DataType, blockSize, qjlRo
 		dataType:  dt,
 		devPtr:    ptr,
 		sizeBytes: sizeBytes,
+		blockSize: blockSize,
+		qjlRows:   qjlRows,
 	}
 }
 
@@ -348,16 +387,205 @@ func (t *Tensor) ToHostFP16() []uint16 {
 }
 
 func (t *Tensor) StoreKV(v *Tensor, kCache, vCache *Tensor, pos, heads, headDim, windowSize int) {
-	// Simple implementation for now: copy head-by-head or batch copy
-	// Each k/v at pos is heads * headDim elements.
+	if kCache == nil || vCache == nil || t == nil || v == nil || windowSize <= 0 {
+		return
+	}
+
+	if kCache.dataType == DataTypeTQ1_0 || kCache.dataType == DataTypeTQ2_0 {
+		bits := 2
+		if kCache.dataType == DataTypeTQ2_0 {
+			bits = 4
+		}
+		blockSize := kCache.blockSize
+		if blockSize == 0 {
+			blockSize = headDim
+		}
+		qjlRows := kCache.qjlRows
+		if qjlRows == 0 {
+			qjlRows = 64
+		}
+		bytesPerBlock := blockSize + qjlRows + 8
+		cacheOff := (pos % windowSize) * heads * bytesPerBlock
+
+		tHost := t.ToHostF32()
+		vHost := v.ToHostF32()
+		rot := t.ctx.TQRotation
+		qjl := t.ctx.TQQJL
+
+		var rotData, qjlData []float32
+		if rot != nil {
+			rotData = rot.ToHostF32()
+		}
+		if qjl != nil {
+			qjlData = qjl.ToHostF32()
+		}
+
+		kRaw := make([]byte, heads*bytesPerBlock)
+		vRaw := make([]byte, heads*bytesPerBlock)
+
+		for h := 0; h < heads; h++ {
+			headStart := h * headDim
+			headData := tHost[headStart : headStart+headDim]
+			blockCacheStart := h * bytesPerBlock
+
+			if rotData != nil {
+				q, s, res := simd.PolarQuantSIMD(headData, rotData, blockSize, bits)
+				var qj []int8
+				var sj float32
+				if qjlData != nil && len(qjlData) >= qjlRows*blockSize {
+					qj, sj = simd.QJLTransformSIMD(res, qjlData, qjlRows, blockSize)
+				}
+				for i, val := range q {
+					kRaw[blockCacheStart+i] = byte(val)
+				}
+				for i, val := range qj {
+					kRaw[blockCacheStart+blockSize+i] = byte(val)
+				}
+				setFloat32(kRaw[blockCacheStart+blockSize+qjlRows:blockCacheStart+blockSize+qjlRows+4], s)
+				setFloat32(kRaw[blockCacheStart+blockSize+qjlRows+4:blockCacheStart+blockSize+qjlRows+8], sj)
+
+				vHeadData := vHost[headStart : headStart+headDim]
+				qv, sv, resv := simd.PolarQuantSIMD(vHeadData, rotData, blockSize, bits)
+				var qjv []int8
+				var sjv float32
+				if qjlData != nil && len(qjlData) >= qjlRows*blockSize {
+					qjv, sjv = simd.QJLTransformSIMD(resv, qjlData, qjlRows, blockSize)
+				}
+				for i, val := range qv {
+					vRaw[blockCacheStart+i] = byte(val)
+				}
+				for i, val := range qjv {
+					vRaw[blockCacheStart+blockSize+i] = byte(val)
+				}
+				setFloat32(vRaw[blockCacheStart+blockSize+qjlRows:blockCacheStart+blockSize+qjlRows+4], sv)
+				setFloat32(vRaw[blockCacheStart+blockSize+qjlRows+4:blockCacheStart+blockSize+qjlRows+8], sjv)
+			}
+		}
+
+		C.cudaMemcpy(unsafe.Pointer(uintptr(kCache.devPtr)+uintptr(cacheOff)), unsafe.Pointer(&kRaw[0]), C.size_t(len(kRaw)), C.cudaMemcpyHostToDevice)
+		C.cudaMemcpy(unsafe.Pointer(uintptr(vCache.devPtr)+uintptr(cacheOff)), unsafe.Pointer(&vRaw[0]), C.size_t(len(vRaw)), C.cudaMemcpyHostToDevice)
+		return
+	}
+
 	count := heads * headDim
-	offset := uintptr(pos) * uintptr(count) * 2
+	if t.dataType == DataTypeF16 {
+		offset := uintptr(pos%windowSize) * uintptr(count) * 2
+		kTarget := unsafe.Pointer(uintptr(kCache.devPtr) + offset)
+		vTarget := unsafe.Pointer(uintptr(vCache.devPtr) + offset)
+		C.cudaMemcpyAsync(kTarget, t.devPtr, C.size_t(count*2), C.cudaMemcpyDeviceToDevice, t.ctx.Ctx)
+		C.cudaMemcpyAsync(vTarget, v.devPtr, C.size_t(count*2), C.cudaMemcpyDeviceToDevice, t.ctx.Ctx)
+	} else {
+		offset := uintptr(pos%windowSize) * uintptr(count) * 4
+		kTarget := unsafe.Pointer(uintptr(kCache.devPtr) + offset)
+		vTarget := unsafe.Pointer(uintptr(vCache.devPtr) + offset)
+		C.cudaMemcpyAsync(kTarget, t.devPtr, C.size_t(count*4), C.cudaMemcpyDeviceToDevice, t.ctx.Ctx)
+		C.cudaMemcpyAsync(vTarget, v.devPtr, C.size_t(count*4), C.cudaMemcpyDeviceToDevice, t.ctx.Ctx)
+	}
+}
 
-	kTarget := unsafe.Pointer(uintptr(kCache.devPtr) + offset)
-	vTarget := unsafe.Pointer(uintptr(vCache.devPtr) + offset)
+// FetchKV retrieves K and V projections from KV cache (FP16, FP32, or TurboQuant) into t and v.
+func (t *Tensor) FetchKV(v *Tensor, kCache, vCache *Tensor, pos, heads, headDim, windowSize int) {
+	if kCache == nil || vCache == nil || t == nil || v == nil || windowSize <= 0 {
+		return
+	}
 
-	C.cudaMemcpyAsync(kTarget, t.devPtr, C.size_t(count*2), C.cudaMemcpyDeviceToDevice, t.ctx.Ctx)
-	C.cudaMemcpyAsync(vTarget, v.devPtr, C.size_t(count*2), C.cudaMemcpyDeviceToDevice, t.ctx.Ctx)
+	if kCache.dataType == DataTypeTQ1_0 || kCache.dataType == DataTypeTQ2_0 {
+		blockSize := kCache.blockSize
+		if blockSize == 0 {
+			blockSize = headDim
+		}
+		qjlRows := kCache.qjlRows
+		if qjlRows == 0 {
+			qjlRows = 64
+		}
+		bytesPerBlock := blockSize + qjlRows + 8
+		cacheOff := (pos % windowSize) * heads * bytesPerBlock
+
+		kRaw := make([]byte, heads*bytesPerBlock)
+		vRaw := make([]byte, heads*bytesPerBlock)
+
+		C.cudaMemcpy(unsafe.Pointer(&kRaw[0]), unsafe.Pointer(uintptr(kCache.devPtr)+uintptr(cacheOff)), C.size_t(len(kRaw)), C.cudaMemcpyDeviceToHost)
+		C.cudaMemcpy(unsafe.Pointer(&vRaw[0]), unsafe.Pointer(uintptr(vCache.devPtr)+uintptr(cacheOff)), C.size_t(len(vRaw)), C.cudaMemcpyDeviceToHost)
+
+		rot := t.ctx.TQRotation
+		qjl := t.ctx.TQQJL
+
+		var rotData, qjlData []float32
+		if rot != nil {
+			rotData = rot.ToHostF32()
+		}
+		if qjl != nil {
+			qjlData = qjl.ToHostF32()
+		}
+
+		tOut := make([]float32, heads*headDim)
+		vOut := make([]float32, heads*headDim)
+
+		for h := 0; h < heads; h++ {
+			blockCacheStart := h * bytesPerBlock
+			kSrc := kRaw[blockCacheStart:]
+			kDest := tOut[h*headDim : (h+1)*headDim]
+			dequantizeBlockCUDA(kSrc, kDest, blockSize, qjlRows, rotData, qjlData)
+
+			vSrc := vRaw[blockCacheStart:]
+			vDest := vOut[h*headDim : (h+1)*headDim]
+			dequantizeBlockCUDA(vSrc, vDest, blockSize, qjlRows, rotData, qjlData)
+		}
+
+		_ = t.LoadFromF32(tOut)
+		_ = v.LoadFromF32(vOut)
+		return
+	}
+
+	count := heads * headDim
+	if t.dataType == DataTypeF16 {
+		offset := uintptr(pos%windowSize) * uintptr(count) * 2
+		C.cudaMemcpyAsync(t.devPtr, unsafe.Pointer(uintptr(kCache.devPtr)+offset), C.size_t(count*2), C.cudaMemcpyDeviceToDevice, t.ctx.Ctx)
+		C.cudaMemcpyAsync(v.devPtr, unsafe.Pointer(uintptr(vCache.devPtr)+offset), C.size_t(count*2), C.cudaMemcpyDeviceToDevice, t.ctx.Ctx)
+	} else {
+		offset := uintptr(pos%windowSize) * uintptr(count) * 4
+		C.cudaMemcpyAsync(t.devPtr, unsafe.Pointer(uintptr(kCache.devPtr)+offset), C.size_t(count*4), C.cudaMemcpyDeviceToDevice, t.ctx.Ctx)
+		C.cudaMemcpyAsync(v.devPtr, unsafe.Pointer(uintptr(vCache.devPtr)+offset), C.size_t(count*4), C.cudaMemcpyDeviceToDevice, t.ctx.Ctx)
+	}
+}
+
+func dequantizeBlockCUDA(src []byte, dst []float32, blockSize, qjlRows int, rotData, qjlData []float32) {
+	q := make([]int8, blockSize)
+	for i := 0; i < blockSize; i++ {
+		q[i] = int8(src[i])
+	}
+	qj := make([]int8, qjlRows)
+	for i := 0; i < qjlRows; i++ {
+		qj[i] = int8(src[blockSize+i])
+	}
+	s := getFloat32(src[blockSize+qjlRows : blockSize+qjlRows+4])
+	sj := getFloat32(src[blockSize+qjlRows+4 : blockSize+qjlRows+8])
+
+	rotatedRes := make([]float32, blockSize)
+	for i := 0; i < blockSize; i++ {
+		rotatedRes[i] = float32(q[i]) * s
+	}
+
+	if rotData != nil && len(rotData) >= blockSize*blockSize {
+		for i := 0; i < blockSize; i++ {
+			var sum float32
+			for j := 0; j < blockSize; j++ {
+				sum += rotData[j*blockSize+i] * rotatedRes[j]
+			}
+			dst[i] = sum
+		}
+	} else {
+		copy(dst, rotatedRes)
+	}
+
+	if sj > 0 && qjlData != nil && len(qjlData) >= qjlRows*blockSize {
+		for i := 0; i < qjlRows; i++ {
+			scale_i := float32(int8(qj[i])) * sj
+			for j := 0; j < blockSize; j++ {
+				dst[j] += scale_i * qjlData[i*blockSize+j]
+			}
+		}
+	}
 }
 
 // Math Kernels
@@ -416,6 +644,119 @@ func (ctx *Context) FusedRoPE(tensor *Tensor, posIds []int, batch, heads, seqLen
 	C.cudaFree(dPosPtr)
 }
 
+func (ctx *Context) EnsureRoPETables(maxSeqLen, headDim, rotaryDim int, theta float32) {
+	if rotaryDim <= 0 {
+		rotaryDim = headDim
+	}
+	if ctx.ropeCos != nil && ctx.ropeMaxLen >= maxSeqLen && ctx.ropeHeadDim == headDim && ctx.ropeRotDim == rotaryDim && ctx.ropeTheta == theta {
+		return
+	}
+	if ctx.ropeCos != nil {
+		ctx.ropeCos.Free()
+		ctx.ropeCos = nil
+	}
+	if ctx.ropeSin != nil {
+		ctx.ropeSin.Free()
+		ctx.ropeSin = nil
+	}
+	if maxSeqLen < 2048 {
+		maxSeqLen = 2048
+	}
+	headDimHalf := headDim / 2
+	ctx.ropeCos = ctx.NewTensorFP32(maxSeqLen, headDimHalf)
+	ctx.ropeSin = ctx.NewTensorFP32(maxSeqLen, headDimHalf)
+	ctx.ropeMaxLen = maxSeqLen
+	ctx.ropeHeadDim = headDim
+	ctx.ropeRotDim = rotaryDim
+	ctx.ropeTheta = theta
+
+	C.cudaPrecomputeRoPE(ctx.Ctx, (*C.float)(ctx.ropeCos.devPtr), (*C.float)(ctx.ropeSin.devPtr),
+		C.int(maxSeqLen), C.int(headDim), C.int(rotaryDim), C.float(theta))
+}
+
+func (ctx *Context) FusedRoPEPrecomputed(tensor *Tensor, posIds []int, batch, heads, seqLen, headDim int) {
+	if len(posIds) > 0 && ctx.dPosIds != nil {
+		copyLen := len(posIds)
+		if copyLen > 1024 {
+			copyLen = 1024
+		}
+		C.cudaMemcpyAsync(ctx.dPosIds, unsafe.Pointer(&posIds[0]), C.size_t(copyLen*4), C.cudaMemcpyHostToDevice, ctx.Ctx)
+	}
+	maxLen := ctx.ropeMaxLen
+	if maxLen <= 0 {
+		maxLen = 2048
+	}
+	C.cudaFusedRoPEPrecomputed(ctx.Ctx, (*C.float)(tensor.devPtr), (*C.int)(ctx.dPosIds),
+		(*C.float)(ctx.ropeCos.devPtr), (*C.float)(ctx.ropeSin.devPtr),
+		C.int(batch), C.int(heads), C.int(seqLen), C.int(headDim), C.int(maxLen))
+}
+
+func (ctx *Context) FusedQKVRope(input, qW, kW, vW *Tensor, posIds []int, batch, dim, heads, kvHeads, headDim, rotaryDim int, theta float32) (q, k, v *Tensor, err error) {
+	if rotaryDim <= 0 {
+		rotaryDim = headDim
+	}
+	qDim := heads * headDim
+	kvDim := kvHeads * headDim
+
+	maxPos := 0
+	for _, p := range posIds {
+		if p > maxPos {
+			maxPos = p
+		}
+	}
+	ctx.EnsureRoPETables(maxPos+1, headDim, rotaryDim, theta)
+
+	isF16 := 0
+	if qW.dataType == DataTypeF16 {
+		isF16 = 1
+	}
+
+	// For small batches (typical decoding / small prefill) with non-quantized weights,
+	// run the single-pass fused GEMV + RoPE kernel.
+	if batch <= 8 && qW.dataType != DataTypeQ4_K && qW.dataType != DataTypeQ8_0 && qW.dataType != DataTypeQ6_K {
+		q = ctx.NewTensorFP32(batch, qDim)
+		k = ctx.NewTensorFP32(batch, kvDim)
+		v = ctx.NewTensorFP32(batch, kvDim)
+
+		if len(posIds) > 0 && ctx.dPosIds != nil {
+			copyLen := len(posIds)
+			if copyLen > 1024 {
+				copyLen = 1024
+			}
+			C.cudaMemcpyAsync(ctx.dPosIds, unsafe.Pointer(&posIds[0]), C.size_t(copyLen*4), C.cudaMemcpyHostToDevice, ctx.Ctx)
+		}
+		C.cudaFusedQKVRope(ctx.Ctx, input.devPtr, qW.devPtr, kW.devPtr, vW.devPtr,
+			q.devPtr, k.devPtr, v.devPtr,
+			ctx.ropeCos.devPtr, ctx.ropeSin.devPtr,
+			(*C.int)(ctx.dPosIds),
+			C.int(batch), C.int(dim), C.int(qDim), C.int(kvDim), C.int(headDim),
+			C.int(ctx.ropeMaxLen), C.int(isF16))
+		return q, k, v, nil
+	}
+
+	// For larger batches or quantized weights: compute Q, K, V via Matmul / Dequant
+	q, err = ctx.MatmulF16(input, qW)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	k, err = ctx.MatmulF16(input, kW)
+	if err != nil {
+		q.ReturnToPool()
+		return nil, nil, nil, err
+	}
+	v, err = ctx.MatmulF16(input, vW)
+	if err != nil {
+		q.ReturnToPool()
+		k.ReturnToPool()
+		return nil, nil, nil, err
+	}
+
+	ctx.FusedRoPEPrecomputed(q, posIds, batch, heads, 1, headDim)
+	ctx.FusedRoPEPrecomputed(k, posIds, batch, kvHeads, 1, headDim)
+
+	return q, k, v, nil
+}
+
 func (ctx *Context) FusedAttention(q, k, v, output, kCache, vCache *Tensor, batch, heads, seqLen, kvSeqLen, headDim int, scale float32, useCache, windowSize int) {
 	C.cudaFusedAttention(ctx.Ctx, q.devPtr, k.devPtr, v.devPtr, output.devPtr, kCache.devPtr, vCache.devPtr, C.int(batch), C.int(heads), C.int(seqLen), C.int(kvSeqLen), C.int(headDim), C.float(scale), C.int(useCache), C.int(windowSize))
 }
@@ -430,6 +771,207 @@ func (ctx *Context) FusedRMSNormAdd(input, hidden, weight, output *Tensor, batch
 
 func (ctx *Context) FusedSwiGLU(gate, up, output *Tensor, rows, size int) {
 	C.cudaSwiGLU((*C.float)(gate.devPtr), (*C.float)(up.devPtr), (*C.float)(output.devPtr), C.int(rows*size), ctx.Ctx)
+}
+
+// ============================================================================
+// MOE (Mixture of Experts) Operations
+// ============================================================================
+
+// MOERouterLogits computes routing logits for MOE layer
+// input: [batch_size, dim]
+// gateWeight: [num_experts, dim]
+// Returns: [batch_size, num_experts] logits (DataTypeF32)
+func (ctx *Context) MOERouterLogits(input, gateWeight *Tensor) *Tensor {
+	batchSize := input.Rows()
+	dim := input.Cols()
+	numExperts := gateWeight.Rows()
+
+	logits := ctx.NewTensorFP32(batchSize, numExperts)
+	isF16 := 0
+	if input.dataType == DataTypeF16 || gateWeight.dataType == DataTypeF16 {
+		isF16 = 1
+	}
+
+	C.cudaMOERouterLogits(ctx.Ctx, input.devPtr, gateWeight.devPtr,
+		(*C.float)(logits.devPtr), C.int(batchSize), C.int(dim), C.int(numExperts), C.int(isF16))
+	return logits
+}
+
+// MOETopKSelection selects top-k experts per token and computes softmax weights
+// logits: [batch_size, num_experts]
+// Returns: expertIndices [batch_size, top_k] (DataTypeF32), expertWeights [batch_size, top_k] (DataTypeF32)
+func (ctx *Context) MOETopKSelection(logits *Tensor, topK int) (*Tensor, *Tensor) {
+	batchSize := logits.Rows()
+	numExperts := logits.Cols()
+
+	expertIndices := ctx.NewTensorFP32(batchSize, topK)
+	expertWeights := ctx.NewTensorFP32(batchSize, topK)
+
+	C.cudaMOETopKSelection(ctx.Ctx, (*C.float)(logits.devPtr), C.int(topK),
+		(*C.float)(expertIndices.devPtr), (*C.float)(expertWeights.devPtr),
+		C.int(batchSize), C.int(numExperts))
+	return expertIndices, expertWeights
+}
+
+// MOEExpertForward applies selected experts to input with weighted mixing
+// input: [batch_size, dim]
+// expertWeight: [hidden_dim * num_experts, dim] (flattened 3D)
+// expertIndices: [batch_size, top_k] (DataTypeF32)
+// expertWeights: [batch_size, top_k] (DataTypeF32)
+// Returns: [batch_size, hiddenDim]
+func (ctx *Context) MOEExpertForward(input, expertWeight, expertIndices, expertWeights *Tensor, hiddenDim int) *Tensor {
+	batchSize := input.Rows()
+	dim := input.Cols()
+	topK := expertIndices.Cols()
+	numExperts := expertWeight.Rows() / hiddenDim
+	if numExperts <= 0 {
+		numExperts = 1
+	}
+
+	isF16 := 0
+	var output *Tensor
+	if input.dataType == DataTypeF16 || expertWeight.dataType == DataTypeF16 {
+		isF16 = 1
+		output = ctx.NewTensorPooled(batchSize, hiddenDim)
+	} else {
+		output = ctx.NewTensorFP32(batchSize, hiddenDim)
+	}
+
+	C.cudaMOEExpertForward(ctx.Ctx, input.devPtr, expertWeight.devPtr,
+		(*C.float)(expertIndices.devPtr), (*C.float)(expertWeights.devPtr),
+		output.devPtr, C.int(batchSize), C.int(dim), C.int(hiddenDim),
+		C.int(numExperts), C.int(topK), C.int(isF16))
+	return output
+}
+
+// MOEExpertGateUpSwiGLU applies fused gate, up and SwiGLU forward pass for multiple experts
+// input: [batch_size, dim]
+// gateWeight: [hidden_dim * num_experts, dim]
+// upWeight: [hidden_dim * num_experts, dim]
+// expertIndices: [batch_size, top_k]
+// expertWeights: [batch_size, top_k]
+// Returns: [batch_size, hiddenDim]
+func (ctx *Context) MOEExpertGateUpSwiGLU(input, gateWeight, upWeight, expertIndices, expertWeights *Tensor, hiddenDim int) *Tensor {
+	batchSize := input.Rows()
+	dim := input.Cols()
+	topK := expertIndices.Cols()
+	numExperts := gateWeight.Rows() / hiddenDim
+	if numExperts <= 0 {
+		numExperts = 1
+	}
+
+	isF16 := 0
+	var output *Tensor
+	if input.dataType == DataTypeF16 || gateWeight.dataType == DataTypeF16 {
+		isF16 = 1
+		output = ctx.NewTensorPooled(batchSize, hiddenDim)
+	} else {
+		output = ctx.NewTensorFP32(batchSize, hiddenDim)
+	}
+
+	C.cudaMOEExpertGateUpSwiGLU(ctx.Ctx, input.devPtr,
+		gateWeight.devPtr, upWeight.devPtr,
+		(*C.float)(expertIndices.devPtr), (*C.float)(expertWeights.devPtr),
+		output.devPtr, C.int(batchSize), C.int(dim), C.int(hiddenDim),
+		C.int(numExperts), C.int(topK), C.int(isF16))
+	return output
+}
+
+// =============================================================================
+// MLA (Multi-Head Latent Attention) Operations
+// =============================================================================
+
+// MLADecompressKV decompresses compressed latent KV cache into separate key (non-rotary) and value tensors
+// compressedKV: [numTokens, kvLoraRank]
+// wUKV: [heads * (qkNopeDim + vHeadDim), kvLoraRank]
+// Returns: kNope [numTokens, heads * qkNopeDim], v [numTokens, heads * vHeadDim]
+func (ctx *Context) MLADecompressKV(compressedKV, wUKV *Tensor, numTokens, kvLoraRank, heads, qkNopeDim, vHeadDim int) (*Tensor, *Tensor) {
+	isF16 := 0
+	var kNope, v *Tensor
+	if compressedKV.dataType == DataTypeF16 || wUKV.dataType == DataTypeF16 {
+		isF16 = 1
+		kNope = ctx.NewTensorPooled(numTokens, heads*qkNopeDim)
+		v = ctx.NewTensorPooled(numTokens, heads*vHeadDim)
+	} else {
+		kNope = ctx.NewTensorFP32(numTokens, heads*qkNopeDim)
+		v = ctx.NewTensorFP32(numTokens, heads*vHeadDim)
+	}
+
+	C.cudaMLADecompressKV(ctx.Ctx, compressedKV.devPtr, wUKV.devPtr,
+		kNope.devPtr, v.devPtr, C.int(numTokens), C.int(kvLoraRank),
+		C.int(heads), C.int(qkNopeDim), C.int(vHeadDim), C.int(isF16))
+	return kNope, v
+}
+
+// MLAProjectQuerySplitRoPE splits query projections into content and rotary parts, applying RoPE to rotary part
+// qAll: [numTokens, heads * (qkNopeDim + qkRopeDim)]
+// posIds: [numTokens] (optional int32 tensor)
+// Returns: qNope [numTokens, heads * qkNopeDim], qRope [numTokens, heads * qkRopeDim]
+func (ctx *Context) MLAProjectQuerySplitRoPE(qAll, posIds *Tensor, numTokens, heads, qkNopeDim, qkRopeDim int, theta float32) (*Tensor, *Tensor) {
+	isF16 := 0
+	var qNope, qRope *Tensor
+	if qAll.dataType == DataTypeF16 {
+		isF16 = 1
+		qNope = ctx.NewTensorPooled(numTokens, heads*qkNopeDim)
+		qRope = ctx.NewTensorPooled(numTokens, heads*qkRopeDim)
+	} else {
+		qNope = ctx.NewTensorFP32(numTokens, heads*qkNopeDim)
+		qRope = ctx.NewTensorFP32(numTokens, heads*qkRopeDim)
+	}
+
+	var dPos unsafe.Pointer
+	if posIds != nil {
+		dPos = posIds.devPtr
+	}
+
+	C.cudaMLAProjectQuerySplitRoPE(ctx.Ctx, qAll.devPtr, (*C.int)(dPos),
+		qNope.devPtr, qRope.devPtr, C.int(numTokens), C.int(heads),
+		C.int(qkNopeDim), C.int(qkRopeDim), C.float(theta), C.int(isF16))
+	return qNope, qRope
+}
+
+// MLAAbsorbedQuery projects content query into latent space per head using W_UK
+// qNope: [numTokens, heads * qkNopeDim]
+// wUK: [heads * qkNopeDim, kvLoraRank]
+// Returns: qAbsorbed [numTokens, heads * kvLoraRank]
+func (ctx *Context) MLAAbsorbedQuery(qNope, wUK *Tensor, numTokens, heads, qkNopeDim, kvLoraRank int) *Tensor {
+	isF16 := 0
+	var qAbsorbed *Tensor
+	if qNope.dataType == DataTypeF16 || wUK.dataType == DataTypeF16 {
+		isF16 = 1
+		qAbsorbed = ctx.NewTensorPooled(numTokens, heads*kvLoraRank)
+	} else {
+		qAbsorbed = ctx.NewTensorFP32(numTokens, heads*kvLoraRank)
+	}
+
+	C.cudaMLAAbsorbedQuery(ctx.Ctx, qNope.devPtr, wUK.devPtr,
+		qAbsorbed.devPtr, C.int(numTokens), C.int(heads),
+		C.int(qkNopeDim), C.int(kvLoraRank), C.int(isF16))
+	return qAbsorbed
+}
+
+// MLAAbsorbedDecodeAttention executes fused decode attention directly over compressed KV cache
+// qAbsorbed: [numTokens, heads * kvLoraRank]
+// qRope: [numTokens, heads * qkRopeDim]
+// kCache: [seqLen, kvLoraRank]
+// kRopeCache: [seqLen, qkRopeDim]
+// wUV: [heads * vHeadDim, kvLoraRank]
+// Returns: output [numTokens, heads * vHeadDim]
+func (ctx *Context) MLAAbsorbedDecodeAttention(qAbsorbed, qRope, kCache, kRopeCache, wUV *Tensor, numTokens, seqLen, heads, kvLoraRank, qkRopeDim, vHeadDim int, scale float32) *Tensor {
+	isF16 := 0
+	var output *Tensor
+	if qAbsorbed.dataType == DataTypeF16 || wUV.dataType == DataTypeF16 {
+		isF16 = 1
+		output = ctx.NewTensorPooled(numTokens, heads*vHeadDim)
+	} else {
+		output = ctx.NewTensorFP32(numTokens, heads*vHeadDim)
+	}
+
+	C.cudaMLAAbsorbedDecodeAttention(ctx.Ctx, qAbsorbed.devPtr, qRope.devPtr,
+		kCache.devPtr, kRopeCache.devPtr, wUV.devPtr, output.devPtr,
+		C.int(numTokens), C.int(seqLen), C.int(heads), C.int(kvLoraRank),
+		C.int(qkRopeDim), C.int(vHeadDim), C.float(scale), C.int(isF16))
+	return output
 }
 
 func (ctx *Context) MatVecDequantQ8_0(weight, x, y *Tensor, M, K int) {
@@ -486,14 +1028,6 @@ func (ctx *Context) Synchronize() {
 	C.cudaStreamSynchronize(ctx.Ctx)
 }
 
-func (ctx *Context) CheckError(tag string) error {
-	ctx.Synchronize()
-	if err := C.cudaGetLastError(); err != 0 {
-		return fmt.Errorf("CUDA error at %s: code %d", tag, int(err))
-	}
-	return nil
-}
-
 // CUDAModel and Weight Loading
 
 type weight struct {
@@ -510,31 +1044,6 @@ type CUDAModel struct {
 	KCache  []*Tensor
 	VCache  []*Tensor
 	mu      sync.RWMutex
-}
-
-// LoadQuantizedRaw loads raw quantized weight bytes directly into GPU VRAM (Zero-Dequant GEMM).
-func (m *CUDAModel) LoadQuantizedRaw(name string, data []byte, qtype DataType, rows, cols int) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	dataBytes := len(data)
-	if dataBytes == 0 {
-		return fmt.Errorf("empty quantized data for %s", name)
-	}
-	var dPtr unsafe.Pointer
-	if errCode := C.cudaMalloc(&dPtr, C.size_t(dataBytes)); errCode != 0 {
-		return fmt.Errorf("cudaMalloc failed for raw quantized tensor %s (%d bytes): cuda error %d", name, dataBytes, errCode)
-	}
-	C.cudaMemcpy(dPtr, unsafe.Pointer(&data[0]), C.size_t(dataBytes), C.cudaMemcpyHostToDevice)
-	m.Weights[name] = &weight{
-		devPtr:   dPtr,
-		rows:     rows,
-		cols:     cols,
-		dataType: qtype,
-		ctx:      m.Ctx,
-	}
-	savedBytes := int64(rows*cols*2 - dataBytes)
-	metrics.RecordCUDAVRAMSaved(name, savedBytes)
-	return nil
 }
 
 func (ctx *Context) NewCUDAModel(f *gguf.GGUFFile, preDequantize bool, kvCacheSize int, numGPULayers ...int) (*CUDAModel, error) {
@@ -569,11 +1078,13 @@ func (ctx *Context) NewCUDAModel(f *gguf.GGUFFile, preDequantize bool, kvCacheSi
 			}
 		}
 
-		rows := int(tensor.Dimensions[0])
-		cols := 1
+		cols := int(tensor.Dimensions[0])
+		rows := 1
 		if len(tensor.Dimensions) > 1 {
-			cols = int(tensor.Dimensions[0])
 			rows = int(tensor.Dimensions[1])
+		}
+		for i := 2; i < len(tensor.Dimensions); i++ {
+			rows *= int(tensor.Dimensions[i])
 		}
 		numElements := rows * cols
 
@@ -830,14 +1341,6 @@ func (m *CUDAModel) GetBatchEmbedding(tokens []int, vocabSize int) (*Tensor, err
 	return out, nil
 }
 
-func (m *CUDAModel) GetTokenEmbdWeight() *Tensor {
-	t, ok := m.GetWeightTensor("token_embd.weight")
-	if !ok {
-		return nil
-	}
-	return t
-}
-
 func (m *CUDAModel) GetKCache(layer int) *Tensor {
 	if layer < 0 || layer >= len(m.KCache) {
 		return nil
@@ -894,10 +1397,6 @@ func (s *LayerScratch) Free() {
 	s.Down.Free()
 }
 
-func (ctx *Context) CopyF16(src, dst *Tensor) {
-	C.cudaMemcpyAsync(dst.devPtr, src.devPtr, C.size_t(src.rows*src.cols*2), C.cudaMemcpyDeviceToDevice, ctx.Ctx)
-}
-
 func Float32SliceToFloat16(data []float32) []uint16 {
 	res := make([]uint16, len(data))
 	for i, v := range data {
@@ -930,39 +1429,6 @@ func GetDeviceMemory(device int) (int64, error) {
 	return int64(prop.totalGlobalMem), nil
 }
 
-// Gather selects rows from src using index tensor and writes them to dst (CPU-mediated).
-// src: [numTokens, dim], index: [1, batchSize] with float32 row indices, dst: [batchSize, dim]
-func (c *Context) Gather(src, index, dst *Tensor, numTokens, batchSize, dim int) {
-	srcHost := src.ToHostF32()
-	var idxHost []int
-	if index.dataType == DataTypeI32 {
-		i32s := make([]int32, batchSize)
-		C.cudaMemcpy(unsafe.Pointer(&i32s[0]), index.devPtr, C.size_t(batchSize*4), C.cudaMemcpyDeviceToHost)
-		idxHost = make([]int, batchSize)
-		for i, v := range i32s {
-			idxHost[i] = int(v)
-		}
-	} else {
-		f32s := index.ToHostF32()
-		idxHost = make([]int, batchSize)
-		for i, v := range f32s {
-			idxHost[i] = int(v)
-		}
-	}
-	dstHost := make([]float32, batchSize*dim)
-	for i := 0; i < batchSize; i++ {
-		row := idxHost[i]
-		if row < 0 {
-			row = 0
-		}
-		if row >= numTokens {
-			row = numTokens - 1
-		}
-		copy(dstHost[i*dim:(i+1)*dim], srcHost[row*dim:(row+1)*dim])
-	}
-	dst.LoadFrom(dstHost)
-}
-
 // Slice extracts one row from source tensor and writes it to dst.
 // src: [batchSize, vocabSize] (logical), rowIdx: which row, dst: [1, vocabSize]
 func (c *Context) Slice(src *Tensor, dst *Tensor, rowIdx, vocabSize int) {
@@ -974,11 +1440,6 @@ func (c *Context) Slice(src *Tensor, dst *Tensor, rowIdx, vocabSize int) {
 // AttentionPagedBatch performs paged attention across a batch of sequences on the GPU.
 func (c *Context) AttentionPagedBatch(q, kCache, vCache, output, tokenPositions, blockTables *Tensor, maxBlocksPerSeq, heads, kvHeads, headDim, blockSize int, tokenToSeq *Tensor, batchSize int) {
 	C.cudaPagedAttentionBatch(c.Ctx, (*C.float)(q.devPtr), kCache.devPtr, vCache.devPtr, (*C.float)(output.devPtr), (*C.int)(tokenPositions.devPtr), (*C.int)(blockTables.devPtr), (*C.int)(tokenToSeq.devPtr), C.int(maxBlocksPerSeq), C.int(heads), C.int(kvHeads), C.int(headDim), C.int(blockSize), C.int(q.rows), C.float(1.0/math.Sqrt(float64(headDim))))
-}
-
-// AttentionPagedTurboQuant performs paged attention on compressed 8-bit KV blocks.
-func (c *Context) AttentionPagedTurboQuant(q, kCache, vCache, output, tokenPositions, blockTables *Tensor, maxBlocksPerSeq, heads, kvHeads, headDim, blockSize, qjlRows int, tokenToSeq *Tensor, batchSize int) {
-	C.cudaPagedAttentionTurboQuant(c.Ctx, (*C.float)(q.devPtr), kCache.devPtr, vCache.devPtr, (*C.float)(output.devPtr), (*C.int)(tokenPositions.devPtr), (*C.int)(blockTables.devPtr), (*C.int)(tokenToSeq.devPtr), C.int(maxBlocksPerSeq), C.int(heads), C.int(kvHeads), C.int(headDim), C.int(blockSize), C.int(q.rows), C.float(1.0/math.Sqrt(float64(headDim))), C.int(qjlRows))
 }
 
 // StoreKVPagedBatch stores K and V projections into their respective physical blocks in the GPU cache pool.

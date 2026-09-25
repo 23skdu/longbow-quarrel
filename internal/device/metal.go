@@ -1736,9 +1736,9 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 			_ = pPos.LoadFrom([]float32{float32(p)})
 			pSeq := t.ctx.NewTensorFP32(1, 1)
 			_ = pSeq.LoadFrom([]float32{0})
-			
+
 			t.ctx.FlashAttention2(qPart.Slice(i, 1), kCache, vCache, attOut.Slice(i, 1), pPos, heads, kvHeads, headDim, blockSize, blockTable, maxBlocks, pSeq, 1)
-			
+
 			pPos.Free()
 			pSeq.Free()
 		} else {
@@ -2801,3 +2801,182 @@ func (ctx *Context) StoreKVPagedBatch(k, v, kCache, vCache, physicalPositions *T
 	C.Metal_StoreKVPagedBatch_F16(ctx.ref, k.buf, C.int(k.Offset), v.buf, C.int(v.Offset), kCache.buf, C.int(kCache.Offset), vCache.buf, C.int(vCache.Offset), physicalPositions.buf, C.int(physicalPositions.Offset), C.int(kvDim), C.int(batchSize))
 }
 
+// MLADecompressKV decompresses compressed latent KV cache into separate key and value tensors
+func (ctx *Context) MLADecompressKV(compressedKV, wUKV *Tensor, numTokens, kvLoraRank, heads, qkNopeDim, vHeadDim int) (*Tensor, *Tensor) {
+	totalKRows := heads * qkNopeDim
+	totalVRows := heads * vHeadDim
+	kNope := ctx.newTensorFP32Internal(numTokens, totalKRows)
+	v := ctx.newTensorFP32Internal(numTokens, totalVRows)
+
+	kvData := compressedKV.ToHost()
+	wData := wUKV.ToHost()
+	kData := make([]float32, numTokens*totalKRows)
+	vData := make([]float32, numTokens*totalVRows)
+
+	for t := 0; t < numTokens; t++ {
+		kvToken := kvData[t*kvLoraRank : (t+1)*kvLoraRank]
+		for r := 0; r < totalKRows; r++ {
+			wRow := wData[r*kvLoraRank : (r+1)*kvLoraRank]
+			var sum float32
+			for j := 0; j < kvLoraRank; j++ {
+				sum += kvToken[j] * wRow[j]
+			}
+			kData[t*totalKRows+r] = sum
+		}
+		for r := 0; r < totalVRows; r++ {
+			wRow := wData[(totalKRows+r)*kvLoraRank : (totalKRows+r+1)*kvLoraRank]
+			var sum float32
+			for j := 0; j < kvLoraRank; j++ {
+				sum += kvToken[j] * wRow[j]
+			}
+			vData[t*totalVRows+r] = sum
+		}
+	}
+
+	_ = kNope.LoadFrom(kData)
+	_ = v.LoadFrom(vData)
+	return kNope, v
+}
+
+// MLAProjectQuerySplitRoPE splits query projections into content and rotary parts, applying RoPE to rotary part
+func (ctx *Context) MLAProjectQuerySplitRoPE(qAll, posIds *Tensor, numTokens, heads, qkNopeDim, qkRopeDim int, theta float32) (*Tensor, *Tensor) {
+	qNope := ctx.newTensorFP32Internal(numTokens, heads*qkNopeDim)
+	qRope := ctx.newTensorFP32Internal(numTokens, heads*qkRopeDim)
+
+	qAllData := qAll.ToHost()
+	var posData []float32
+	if posIds != nil {
+		posData = posIds.ToHost()
+	}
+
+	qNopeData := make([]float32, numTokens*heads*qkNopeDim)
+	qRopeData := make([]float32, numTokens*heads*qkRopeDim)
+	inHeadDim := qkNopeDim + qkRopeDim
+	halfRope := qkRopeDim / 2
+
+	for t := 0; t < numTokens; t++ {
+		pos := t
+		if len(posData) > t {
+			pos = int(posData[t])
+		}
+		for h := 0; h < heads; h++ {
+			baseIn := (t*heads + h) * inHeadDim
+			baseNope := (t*heads + h) * qkNopeDim
+			baseRope := (t*heads + h) * qkRopeDim
+
+			copy(qNopeData[baseNope:baseNope+qkNopeDim], qAllData[baseIn:baseIn+qkNopeDim])
+
+			for i := 0; i < halfRope; i++ {
+				freq := float32(pos) * float32(math.Pow(float64(theta), float64(-2*i)/float64(qkRopeDim)))
+				cosVal := float32(math.Cos(float64(freq)))
+				sinVal := float32(math.Sin(float64(freq)))
+
+				x0 := qAllData[baseIn+qkNopeDim+i]
+				x1 := qAllData[baseIn+qkNopeDim+i+halfRope]
+
+				qRopeData[baseRope+i] = x0*cosVal - x1*sinVal
+				qRopeData[baseRope+i+halfRope] = x0*sinVal + x1*cosVal
+			}
+		}
+	}
+
+	_ = qNope.LoadFrom(qNopeData)
+	_ = qRope.LoadFrom(qRopeData)
+	return qNope, qRope
+}
+
+// MLAAbsorbedQuery projects content query into latent space per head using W_UK
+func (ctx *Context) MLAAbsorbedQuery(qNope, wUK *Tensor, numTokens, heads, qkNopeDim, kvLoraRank int) *Tensor {
+	qAbsorbed := ctx.newTensorFP32Internal(numTokens, heads*kvLoraRank)
+	qData := qNope.ToHost()
+	wData := wUK.ToHost()
+	absData := make([]float32, numTokens*heads*kvLoraRank)
+
+	for t := 0; t < numTokens; t++ {
+		for h := 0; h < heads; h++ {
+			qHead := qData[(t*heads+h)*qkNopeDim : (t*heads+h+1)*qkNopeDim]
+			for j := 0; j < kvLoraRank; j++ {
+				var sum float32
+				for k := 0; k < qkNopeDim; k++ {
+					sum += qHead[k] * wData[(h*qkNopeDim+k)*kvLoraRank+j]
+				}
+				absData[(t*heads+h)*kvLoraRank+j] = sum
+			}
+		}
+	}
+
+	_ = qAbsorbed.LoadFrom(absData)
+	return qAbsorbed
+}
+
+// MLAAbsorbedDecodeAttention executes fused decode attention directly over compressed KV cache
+func (ctx *Context) MLAAbsorbedDecodeAttention(qAbsorbed, qRope, kCache, kRopeCache, wUV *Tensor, numTokens, seqLen, heads, kvLoraRank, qkRopeDim, vHeadDim int, scale float32) *Tensor {
+	output := ctx.newTensorFP32Internal(numTokens, heads*vHeadDim)
+	qAbsData := qAbsorbed.ToHost()
+	qRopeData := qRope.ToHost()
+	kData := kCache.ToHost()
+	kRopeData := kRopeCache.ToHost()
+	wData := wUV.ToHost()
+	outData := make([]float32, numTokens*heads*vHeadDim)
+
+	scores := make([]float32, seqLen)
+	latent := make([]float32, kvLoraRank)
+
+	for t := 0; t < numTokens; t++ {
+		for h := 0; h < heads; h++ {
+			curQAbs := qAbsData[(t*heads+h)*kvLoraRank : (t*heads+h+1)*kvLoraRank]
+			curQRope := qRopeData[(t*heads+h)*qkRopeDim : (t*heads+h+1)*qkRopeDim]
+
+			maxScore := float32(-1e30)
+			for s := 0; s < seqLen; s++ {
+				curK := kData[s*kvLoraRank : (s+1)*kvLoraRank]
+				curKRope := kRopeData[s*qkRopeDim : (s+1)*qkRopeDim]
+
+				var dotC, dotR float32
+				for j := 0; j < kvLoraRank; j++ {
+					dotC += curQAbs[j] * curK[j]
+				}
+				for j := 0; j < qkRopeDim; j++ {
+					dotR += curQRope[j] * curKRope[j]
+				}
+				sc := (dotC + dotR) * scale
+				scores[s] = sc
+				if sc > maxScore {
+					maxScore = sc
+				}
+			}
+
+			var sumExp float32
+			for s := 0; s < seqLen; s++ {
+				expVal := float32(math.Exp(float64(scores[s] - maxScore)))
+				scores[s] = expVal
+				sumExp += expVal
+			}
+			invSum := float32(1.0 / (float64(sumExp) + 1e-9))
+			for s := 0; s < seqLen; s++ {
+				scores[s] *= invSum
+			}
+
+			for j := 0; j < kvLoraRank; j++ {
+				var sumLatent float32
+				for s := 0; s < seqLen; s++ {
+					sumLatent += scores[s] * kData[s*kvLoraRank+j]
+				}
+				latent[j] = sumLatent
+			}
+
+			wHead := wData[(h*vHeadDim)*kvLoraRank : ((h+1)*vHeadDim)*kvLoraRank]
+			for i := 0; i < vHeadDim; i++ {
+				wRow := wHead[i*kvLoraRank : (i+1)*kvLoraRank]
+				var outVal float32
+				for j := 0; j < kvLoraRank; j++ {
+					outVal += latent[j] * wRow[j]
+				}
+				outData[(t*heads+h)*vHeadDim+i] = outVal
+			}
+		}
+	}
+
+	_ = output.LoadFrom(outData)
+	return output
+}

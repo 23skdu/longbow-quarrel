@@ -19,19 +19,25 @@ func TestTurboQuant_NumericalParity_TQ1_0(t *testing.T) {
 	// Identity rotation
 	rotation := ctx.NewTensorFP32(headDim, headDim)
 	rotData := make([]float32, headDim*headDim)
-	for i := 0; i < headDim; i++ { rotData[i*headDim+i] = 1.0 }
+	for i := 0; i < headDim; i++ {
+		rotData[i*headDim+i] = 1.0
+	}
 	rotation.LoadFromF32(rotData)
 	ctx.TQRotation = rotation
 
 	// Identity QJL sub-matrix
 	qjl := ctx.NewTensorFP32(qjlRows, headDim)
 	qjlData := make([]float32, qjlRows*headDim)
-	for i := 0; i < qjlRows; i++ { qjlData[i*headDim+i] = 1.0 }
+	for i := 0; i < qjlRows; i++ {
+		qjlData[i*headDim+i] = 1.0
+	}
 	qjl.LoadFromF32(qjlData)
 	ctx.TQQJL = qjl
 
 	inputK := make([]float32, headDim)
-	for i := range inputK { inputK[i] = float32(i + 1) }
+	for i := range inputK {
+		inputK[i] = float32(i + 1)
+	}
 
 	kT := ctx.NewTensorFP32(1, headDim)
 	kT.LoadFromF32(inputK)

@@ -155,6 +155,7 @@ COVERAGE_PKGS=(
     "./internal/vlm/..."
     "./internal/gguf/..."
     "./internal/api/..."
+    "./internal/vector/..."
 )
 
 COVERAGE_FAILED=0

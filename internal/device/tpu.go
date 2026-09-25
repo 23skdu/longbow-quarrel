@@ -52,14 +52,14 @@ import (
 
 var (
 	tpuInitialized bool
-	tpuMu         sync.Mutex
+	tpuMu          sync.Mutex
 )
 
 type Context struct {
-	Device   int
-	Stream   unsafe.Pointer
-	pool     *tensorPool
-	xlaComp  unsafe.Pointer
+	Device  int
+	Stream  unsafe.Pointer
+	pool    *tensorPool
+	xlaComp unsafe.Pointer
 }
 
 func (ctx *Context) DeviceID() int {
@@ -90,13 +90,13 @@ func ShutdownTPU() {
 }
 
 type Tensor struct {
-	devPtr    unsafe.Pointer
-	rows      int
-	cols      int
+	devPtr   unsafe.Pointer
+	rows     int
+	cols     int
 	dataType DataType
 	ctx      *Context
 	pooled   bool
-	sizeB   int
+	sizeB    int
 }
 
 func NewTPUContext() (*Context, error) {
@@ -120,13 +120,13 @@ func (ctx *Context) NewTensor(rows, cols int) *Tensor {
 	devPtr := C.tpuAllocate(C.size_t(size))
 
 	return &Tensor{
-		devPtr:    devPtr,
+		devPtr:   devPtr,
 		rows:     rows,
 		cols:     cols,
 		dataType: DataTypeF32,
 		ctx:      ctx,
 		pooled:   false,
-		sizeB:   size,
+		sizeB:    size,
 	}
 }
 
@@ -137,13 +137,13 @@ func (ctx *Context) NewQuantizedTensor(rows, cols int, qt QuantizationType) *Ten
 	devPtr := C.tpuAllocate(C.size_t(size))
 
 	return &Tensor{
-		devPtr:    devPtr,
+		devPtr:   devPtr,
 		rows:     rows,
 		cols:     cols,
 		dataType: DataType(qt),
 		ctx:      ctx,
 		pooled:   false,
-		sizeB:   size,
+		sizeB:    size,
 	}
 }
 
@@ -156,7 +156,7 @@ func (t *Tensor) Free() {
 
 func (t *Tensor) Rows() int      { return t.rows }
 func (t *Tensor) Cols() int      { return t.cols }
-func (t *Tensor) DataType() int { return int(t.dataType) }
+func (t *Tensor) DataType() int  { return int(t.dataType) }
 func (t *Tensor) IsDevice() bool { return false }
 func (t *Tensor) SizeBytes() int { return t.sizeB }
 
@@ -216,9 +216,9 @@ func (p *tensorPool) Put(t *Tensor) {
 }
 
 type TPUModel struct {
-	KCache []*Tensor
-	VCache []*Tensor
-	Weights map[string]*Tensor
+	KCache   []*Tensor
+	VCache   []*Tensor
+	Weights  map[string]*Tensor
 	TokenEmb *Tensor
 	Output   *Tensor
 	Dim      int
@@ -229,7 +229,7 @@ type TPUModel struct {
 func (ctx *Context) LoadTPUModel(f *gguf.GGUFFile, lazy bool, kvCacheSize int) (*TPUModel, error) {
 	m := &TPUModel{
 		Weights: make(map[string]*Tensor),
-		Ctx:      ctx,
+		Ctx:     ctx,
 	}
 
 	dim := 0

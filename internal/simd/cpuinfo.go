@@ -8,18 +8,14 @@ import (
 )
 
 var (
-	hasAVX2      bool
-	hasAVX512    bool
-	hasAVXVNNI   bool
-	hasAMXTile   bool
-	hasAMXInt8   bool
-	hasAMXBF16   bool
-	hasFMA       bool
-	hasGFNI      bool
-	hasVAES      bool
-	hasVPCLMULQDQ bool
-	cpuInitDone  bool
-	cpuLevel     int
+	hasAVX2     bool
+	hasAVX512   bool
+	hasAVXVNNI  bool
+	hasAMXTile  bool
+	hasAMXInt8  bool
+	hasAMXBF16  bool
+	cpuInitDone bool
+	cpuLevel    int
 )
 
 const (
@@ -48,10 +44,6 @@ func detectCPU() {
 	hasAMXTile = containsFlag(flags, "amx_tile")
 	hasAMXInt8 = containsFlag(flags, "amx_int8")
 	hasAMXBF16 = containsFlag(flags, "amx_bf16")
-	hasFMA = containsFlag(flags, "fma")
-	hasGFNI = containsFlag(flags, "gfni")
-	hasVAES = containsFlag(flags, "vaes")
-	hasVPCLMULQDQ = containsFlag(flags, "vpclmulqdq")
 
 	if os.Getenv("DISABLE_AVX512") == "1" {
 		hasAVX512 = false

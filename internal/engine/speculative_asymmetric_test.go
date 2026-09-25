@@ -9,8 +9,6 @@ import (
 )
 
 type mockEngineForSpec struct {
-	tokens []int
-	logits []float32
 }
 
 func (m *mockEngineForSpec) Infer(tokens []int, count int, cfg SamplerConfig) ([]int, error) {
@@ -47,13 +45,15 @@ func (m *mockEngineForSpec) InferWithCallbackLogits(tokens []int, count int, cfg
 	return m.InferWithCallback(tokens, count, cfg, tc)
 }
 
-func (m *mockEngineForSpec) Config() config.Config { return config.Config{} }
-func (m *mockEngineForSpec) Close() {}
+func (m *mockEngineForSpec) Config() config.Config                          { return config.Config{} }
+func (m *mockEngineForSpec) Close()                                         {}
 func (m *mockEngineForSpec) SwapModel(path string, cfg config.Config) error { return nil }
-func (m *mockEngineForSpec) LoadAdapter(path, id string) error { return nil }
-func (m *mockEngineForSpec) GetSeqCachePos(seqID string) int { return 0 }
-func (m *mockEngineForSpec) RollbackKV(seqID string, newPos int) error { return nil }
-func (m *mockEngineForSpec) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, error) { return nil, nil }
+func (m *mockEngineForSpec) LoadAdapter(path, id string) error              { return nil }
+func (m *mockEngineForSpec) GetSeqCachePos(seqID string) int                { return 0 }
+func (m *mockEngineForSpec) RollbackKV(seqID string, newPos int) error      { return nil }
+func (m *mockEngineForSpec) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, error) {
+	return nil, nil
+}
 
 func (m *mockEngineForSpec) ForwardDraft(tokens []int) ([][]float32, error) {
 	// Return uniform logits that will accept tokens

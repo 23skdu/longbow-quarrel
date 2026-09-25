@@ -17,12 +17,12 @@ func TestTurboQuantSIMD(t *testing.T) {
 
 	// 1. PolarQuant
 	q, s, res := PolarQuantSIMD(input, rotation, n, bits)
-	
+
 	// Expectations for identity matrix: rotated == input
 	shiftAmount := uint(bits - 1)
 	maxQuantVal := float32((int(1) << shiftAmount) - 1)
 	expectedScale := float32(math.Abs(float64(n-1)/100.0)) / maxQuantVal
-	
+
 	if math.Abs(float64(s-expectedScale)) > 1e-5 {
 		t.Errorf("PolarQuantSIMD: scale got %v, want %v", s, expectedScale)
 	}
@@ -94,7 +94,7 @@ func TestDequantizeTurboQuant(t *testing.T) {
 
 	quantized := make([]int8, n)
 	for i := 0; i < n; i++ {
-		quantized[i] = int8(i % 16 - 8)
+		quantized[i] = int8(i%16 - 8)
 	}
 	scale := float32(0.1)
 

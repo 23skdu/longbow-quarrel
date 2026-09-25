@@ -1,4 +1,4 @@
-//go:build linux && cuda
+//go:build linux && amd64 && cuda && cgo
 
 package integration_test
 

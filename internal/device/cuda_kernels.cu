@@ -96,141 +96,11 @@ __global__ void silu_kernel(float* input, float* output, int size) {
 }
 
 // =============================================================================
-// MOE (Mixture of Experts) Kernels
+// MOE (Mixture of Experts) & MLA (Multi-Head Latent Attention) Kernels
 // =============================================================================
+#include "cuda_moe.cu"
+#include "cuda_mla.cu"
 
-// Top-K selection with softmax
-__global__ void moe_topk_kernel(float* logits, int* indices, float* weights,
-                                  int batch, int num_experts, int top_k) {
-    int token = blockIdx.x;
-    if (token >= batch) return;
-
-    float* logit_row = logits + token * num_experts;
-    int* idx_row = indices + token * top_k;
-    float* weight_row = weights + token * top_k;
-
-    // Find top-k using simple selection
-    for (int k = 0; k < top_k; k++) {
-        float max_val = -FLT_MAX;
-        int max_idx = 0;
-
-        for (int e = 0; e < num_experts; e++) {
-            bool selected = false;
-            for (int prev = 0; prev < k; prev++) {
-                if (idx_row[prev] == e) {
-                    selected = true;
-                    break;
-                }
-            }
-            if (selected) continue;
-
-            if (logit_row[e] > max_val) {
-                max_val = logit_row[e];
-                max_idx = e;
-            }
-        }
-
-        idx_row[k] = max_idx;
-
-        // Compute softmax weight
-        float sum = 0.0f;
-        for (int e = 0; e < num_experts; e++) {
-            bool sel = false;
-            for (int prev = 0; prev <= k; prev++) {
-                if (idx_row[prev] == e) { sel = true; break; }
-            }
-            if (!sel) continue;
-            sum += expf(logit_row[e] - max_val);
-        }
-        weight_row[k] = expf(max_val - max_val) / (sum + 1e-9f);
-    }
-}
-
-// Router logits computation: input @ gate.T
-__global__ void moe_router_logits_kernel(
-    float* input,      // [batch, dim]
-    float* gate,       // [dim, num_experts]
-    float* output,     // [batch, num_experts]
-    int batch, int dim, int num_experts) {
-
-    int b = blockIdx.x;
-    int e = threadIdx.x;
-
-    if (b >= batch || e >= num_experts) return;
-
-    float sum = 0.0f;
-    for (int d = 0; d < dim; d++) {
-        sum += input[b * dim + d] * gate[e * dim + d];
-    }
-    output[b * num_experts + e] = sum;
-}
-
-// Fused Gate + Up + SwiGLU for multiple experts
-__global__ void moe_gate_up_swiglu_kernel(
-    float* input,          // [batch, dim]
-    float* gate_experts,   // [hidden_dim, dim, num_experts]
-    float* up_experts,     // [hidden_dim, dim, num_experts]
-    int* indices,         // [batch, top_k]
-    float* expert_weights, // [batch, top_k]
-    float* output,         // [batch, hidden_dim]
-    int batch, int dim, int hidden_dim, int num_experts, int top_k) {
-
-    int b = blockIdx.x;
-    int h = threadIdx.x;
-
-    if (b >= batch || h >= hidden_dim) return;
-
-    float sum = 0.0f;
-
-    for (int k = 0; k < top_k; k++) {
-        int expert = indices[b * top_k + k];
-        float weight = expert_weights[b * top_k + k];
-
-        // Gate computation
-        float gate_val = 0.0f;
-        for (int d = 0; d < dim; d++) {
-            gate_val += input[b * dim + d] * gate_experts[((size_t)expert * hidden_dim + h) * dim + d];
-        }
-        gate_val = gate_val / (1.0f + expf(-gate_val));
-
-        // Up computation
-        float up_val = 0.0f;
-        for (int d = 0; d < dim; d++) {
-            up_val += input[b * dim + d] * up_experts[((size_t)expert * hidden_dim + h) * dim + d];
-        }
-
-        sum += weight * gate_val * up_val;
-    }
-
-    output[b * hidden_dim + h] = sum;
-}
-
-// Expert forward pass
-__global__ void moe_expert_forward_kernel(
-    float* input,          // [batch, dim]
-    float* expert_weights, // [hidden_dim, dim, num_experts]
-    int* indices,          // [batch, top_k]
-    float* expert_weights_w, // [batch, top_k]
-    float* output,          // [batch, dim]
-    int batch, int dim, int hidden_dim, int num_experts, int top_k) {
-
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = batch * dim;
-
-    for (int idx = tid; idx < total; idx += gridDim.x * blockDim.x) {
-        int b = idx / dim;
-        int d = idx % dim;
-
-        float sum = 0.0f;
-        for (int k = 0; k < top_k; k++) {
-            int expert = indices[b * top_k + k];
-            float weight = expert_weights_w[b * top_k + k];
-            float expert_out = input[b * dim + d];
-            sum += weight * expert_out;
-        }
-            output[idx] = sum;
-    }
-}
 
 // =============================================================================
 // Dequantization Kernels
@@ -532,45 +402,6 @@ extern "C" {
         silu_kernel<<<256, 256, 0, stream>>>((float*)input, (float*)output, size);
     }
     
-    // MOE Exports
-    void cudaMOERouterLogits(cudaStream_t stream, void* input, void* gate, void* output,
-                            int batch, int dim, int num_experts) {
-        dim3 grid(batch);
-        dim3 block(min(num_experts, 256));
-        moe_router_logits_kernel<<<grid, block, 0, stream>>>(
-            (float*)input, (float*)gate, (float*)output, batch, dim, num_experts);
-    }
-    
-    void cudaMOETopKSelection(cudaStream_t stream, void* logits, int top_k,
-                             void* indices, void* weights, int batch, int num_experts) {
-        dim3 grid(batch);
-        moe_topk_kernel<<<grid, 1, 0, stream>>>(
-            (float*)logits, (int*)indices, (float*)weights, batch, num_experts, top_k);
-    }
-    
-    void cudaMOEExpertForward(cudaStream_t stream, void* input, void* expert_weights,
-                             void* indices, void* expert_weights_w, void* output,
-                             int batch, int dim, int hidden_dim, int num_experts, int top_k) {
-        int threads = 256;
-        int blocks = (batch * dim + threads - 1) / threads;
-        moe_expert_forward_kernel<<<blocks, threads, 0, stream>>>(
-            (float*)input, (float*)expert_weights, (int*)indices,
-            (float*)expert_weights_w, (float*)output,
-            batch, dim, hidden_dim, num_experts, top_k);
-    }
-    
-    void cudaMOEExpertGateUpSwiGLU(cudaStream_t stream, void* input,
-                                   void* gate_experts, void* up_experts,
-                                   void* indices, void* weights, void* output,
-                                   int batch, int dim, int hidden_dim,
-                                   int num_experts, int top_k) {
-        dim3 grid(batch);
-        dim3 block(hidden_dim);
-        moe_gate_up_swiglu_kernel<<<grid, block, 0, stream>>>(
-            (float*)input, (float*)gate_experts, (float*)up_experts,
-            (int*)indices, (float*)weights, (float*)output,
-            batch, dim, hidden_dim, num_experts, top_k);
-    }
 
     // Dequantization Exports
     void cudaDequantQ8_0(cudaStream_t stream, void* src, void* dst, int numElements) {
@@ -730,32 +561,75 @@ __global__ void fused_attention_kernel(
 
 __global__ void fused_rope_kernel(
     float* __restrict__ tensor,        // [batch, heads, seqLen, headDim]
-    const float* __restrict__ posIds,  // Position IDs [seqLen]
+    const int* __restrict__ posIds,    // Position IDs [batch * seqLen]
     int batch, int heads, int seqLen, int headDim,
     float theta) {
 
     int idx = (blockIdx.x * blockDim.x + threadIdx.x);
-    int total = batch * heads * seqLen * (headDim / 2);
+    int headDimHalf = headDim / 2;
+    int total = batch * heads * seqLen * headDimHalf;
 
     if (idx >= total) return;
 
     int tmp = idx;
-    int headDimHalf = headDim / 2;
-    int pos = tmp % seqLen;
+    int dim = tmp % headDimHalf;
+    tmp /= headDimHalf;
+    int posInSeq = tmp % seqLen;
     tmp /= seqLen;
     int head = tmp % heads;
     tmp /= heads;
     int batchIdx = tmp;
 
-    float pos_f = (float)posIds[pos];
-    float invFreq = 1.0f / powf(theta, (float)(idx % headDimHalf) / headDimHalf);
+    int tokenIdx = batchIdx * seqLen + posInSeq;
+    float pos_f = (posIds != NULL) ? (float)posIds[tokenIdx] : (float)tokenIdx;
+    float invFreq = 1.0f / powf(theta, (float)(2 * dim) / (float)headDim);
 
-    int offset = ((batchIdx * heads + head) * seqLen + pos) * headDim;
-    int dim = idx % headDimHalf;
+    int offset = ((batchIdx * heads + head) * seqLen + posInSeq) * headDim;
 
     float freq = pos_f * invFreq;
     float cosVal = cosf(freq);
     float sinVal = sinf(freq);
+
+    float x0 = tensor[offset + dim];
+    float x1 = tensor[offset + dim + headDimHalf];
+
+    tensor[offset + dim] = x0 * cosVal - x1 * sinVal;
+    tensor[offset + dim + headDimHalf] = x0 * sinVal + x1 * cosVal;
+}
+
+__global__ void fused_rope_precomputed_kernel(
+    float* __restrict__ tensor,        // [batch, heads, seqLen, headDim]
+    const int* __restrict__ posIds,    // Position IDs [batch * seqLen]
+    const float* __restrict__ ropeCos, // [maxSeqLen, headDim/2]
+    const float* __restrict__ ropeSin, // [maxSeqLen, headDim/2]
+    int batch, int heads, int seqLen, int headDim,
+    int maxSeqLen) {
+
+    int idx = (blockIdx.x * blockDim.x + threadIdx.x);
+    int headDimHalf = headDim / 2;
+    int total = batch * heads * seqLen * headDimHalf;
+
+    if (idx >= total) return;
+
+    int tmp = idx;
+    int dim = tmp % headDimHalf;
+    tmp /= headDimHalf;
+    int posInSeq = tmp % seqLen;
+    tmp /= seqLen;
+    int head = tmp % heads;
+    tmp /= heads;
+    int batchIdx = tmp;
+
+    int tokenIdx = batchIdx * seqLen + posInSeq;
+    int pos = (posIds != NULL) ? posIds[tokenIdx] : tokenIdx;
+    if (pos >= maxSeqLen) pos = maxSeqLen - 1;
+    if (pos < 0) pos = 0;
+
+    int tableOffset = pos * headDimHalf + dim;
+    float cosVal = ropeCos[tableOffset];
+    float sinVal = ropeSin[tableOffset];
+
+    int offset = ((batchIdx * heads + head) * seqLen + posInSeq) * headDim;
 
     float x0 = tensor[offset + dim];
     float x1 = tensor[offset + dim + headDimHalf];
@@ -993,33 +867,164 @@ __global__ void flash_fused_attention_kernel(
 }
 
 // =============================================================================
-// Fused QKV + RoPE Kernel
+// Fused QKV + RoPE Kernels
 // =============================================================================
 
-__global__ void fused_qkv_rope_kernel(
-    float* input, float* qWeight, float* kWeight, float* vWeight,
-    float* qOut, float* kOut, float* vOut,
-    int batch, int dim, int qDim, int kvDim,
-    float* ropeFreqCos, float* ropeFreqSin,
-    int headDim) {
-    
+__device__ __forceinline__ float to_float(float x) { return x; }
+__device__ __forceinline__ float to_float(__half x) { return __half2float(x); }
+
+__global__ void precompute_rope_freqs_kernel(
+    float* __restrict__ ropeCos,
+    float* __restrict__ ropeSin,
+    int maxSeqLen,
+    int headDim,
+    int rotaryDim,
+    float theta) {
+
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int totalElements = batch * dim;
-    
-    for (int i = idx; i < totalElements; i += gridDim.x * blockDim.x) {
-        int batchIdx = i / dim;
-        int dimIdx = i % dim;
-        
-        float val = input[i];
-        
-        if (dimIdx < qDim) {
-            qOut[i] = val;
-        }
-        if (dimIdx < kvDim) {
-            kOut[batchIdx * kvDim + dimIdx] = val;
-        }
-        if (dimIdx < kvDim) {
-            vOut[batchIdx * kvDim + dimIdx] = val;
+    int headDimHalf = headDim / 2;
+    int total = maxSeqLen * headDimHalf;
+    if (idx >= total) return;
+
+    int pos = idx / headDimHalf;
+    int d = idx % headDimHalf;
+    int rotaryDimHalf = (rotaryDim > 0 && rotaryDim <= headDim) ? (rotaryDim / 2) : headDimHalf;
+
+    if (d < rotaryDimHalf) {
+        float freq = (float)pos * powf(theta, -2.0f * (float)d / (float)(rotaryDimHalf * 2));
+        ropeCos[idx] = cosf(freq);
+        ropeSin[idx] = sinf(freq);
+    } else {
+        ropeCos[idx] = 1.0f;
+        ropeSin[idx] = 0.0f;
+    }
+}
+
+template <typename WType>
+__global__ void fused_qkv_rope_gemv_kernel(
+    const float* __restrict__ input,        // [batch, dim]
+    const WType* __restrict__ qWeight,      // [qDim, dim]
+    const WType* __restrict__ kWeight,      // [kvDim, dim]
+    const WType* __restrict__ vWeight,      // [kvDim, dim]
+    float* __restrict__ qOut,               // [batch, qDim]
+    float* __restrict__ kOut,               // [batch, kvDim]
+    float* __restrict__ vOut,               // [batch, kvDim]
+    const float* __restrict__ ropeCos,      // [maxSeqLen, headDim/2]
+    const float* __restrict__ ropeSin,      // [maxSeqLen, headDim/2]
+    const int* __restrict__ posIds,         // [batch] or NULL
+    int batch, int dim, int qDim, int kvDim, int headDim,
+    int maxSeqLen) {
+
+    int headDimHalf = headDim / 2;
+    int qPairs = qDim / 2;
+    int kPairs = kvDim / 2;
+    int vPairs = (kvDim + 1) / 2;
+    int totalPairsPerToken = qPairs + kPairs + vPairs;
+
+    int warpId = (blockIdx.x * blockDim.x + threadIdx.x) / 32;
+    int lane = threadIdx.x % 32;
+    int totalWarps = (gridDim.x * blockDim.x) / 32;
+
+    int totalWork = batch * totalPairsPerToken;
+
+    for (int workIdx = warpId; workIdx < totalWork; workIdx += totalWarps) {
+        int tokenIdx = workIdx / totalPairsPerToken;
+        int pairIdx = workIdx % totalPairsPerToken;
+
+        const float* x = input + (int64_t)tokenIdx * dim;
+        int pos = (posIds != NULL) ? posIds[tokenIdx] : tokenIdx;
+        if (pos >= maxSeqLen) pos = maxSeqLen - 1;
+        if (pos < 0) pos = 0;
+
+        if (pairIdx < qPairs) {
+            // Q pair (r0, r1)
+            int head = pairIdx / headDimHalf;
+            int d = pairIdx % headDimHalf;
+            int r0 = head * headDim + d;
+            int r1 = head * headDim + d + headDimHalf;
+
+            const WType* w0 = qWeight + (int64_t)r0 * dim;
+            const WType* w1 = qWeight + (int64_t)r1 * dim;
+
+            float sum0 = 0.0f;
+            float sum1 = 0.0f;
+            for (int c = lane; c < dim; c += 32) {
+                float xc = x[c];
+                sum0 += xc * to_float(w0[c]);
+                sum1 += xc * to_float(w1[c]);
+            }
+            sum0 = warp_reduce_sum(sum0);
+            sum1 = warp_reduce_sum(sum1);
+
+            if (lane == 0) {
+                float cosVal = ropeCos[pos * headDimHalf + d];
+                float sinVal = ropeSin[pos * headDimHalf + d];
+                float q0_rot = sum0 * cosVal - sum1 * sinVal;
+                float q1_rot = sum0 * sinVal + sum1 * cosVal;
+                qOut[(int64_t)tokenIdx * qDim + r0] = q0_rot;
+                qOut[(int64_t)tokenIdx * qDim + r1] = q1_rot;
+            }
+        } else if (pairIdx < qPairs + kPairs) {
+            // K pair
+            int kPairIdx = pairIdx - qPairs;
+            int head = kPairIdx / headDimHalf;
+            int d = kPairIdx % headDimHalf;
+            int r0 = head * headDim + d;
+            int r1 = head * headDim + d + headDimHalf;
+
+            const WType* w0 = kWeight + (int64_t)r0 * dim;
+            const WType* w1 = kWeight + (int64_t)r1 * dim;
+
+            float sum0 = 0.0f;
+            float sum1 = 0.0f;
+            for (int c = lane; c < dim; c += 32) {
+                float xc = x[c];
+                sum0 += xc * to_float(w0[c]);
+                sum1 += xc * to_float(w1[c]);
+            }
+            sum0 = warp_reduce_sum(sum0);
+            sum1 = warp_reduce_sum(sum1);
+
+            if (lane == 0) {
+                float cosVal = ropeCos[pos * headDimHalf + d];
+                float sinVal = ropeSin[pos * headDimHalf + d];
+                float k0_rot = sum0 * cosVal - sum1 * sinVal;
+                float k1_rot = sum0 * sinVal + sum1 * cosVal;
+                kOut[(int64_t)tokenIdx * kvDim + r0] = k0_rot;
+                kOut[(int64_t)tokenIdx * kvDim + r1] = k1_rot;
+            }
+        } else {
+            // V elements (r0, r1)
+            int vPairIdx = pairIdx - (qPairs + kPairs);
+            int r0 = vPairIdx * 2;
+            int r1 = r0 + 1;
+
+            const WType* w0 = vWeight + (int64_t)r0 * dim;
+            float sum0 = 0.0f;
+            float sum1 = 0.0f;
+
+            if (r1 < kvDim) {
+                const WType* w1 = vWeight + (int64_t)r1 * dim;
+                for (int c = lane; c < dim; c += 32) {
+                    float xc = x[c];
+                    sum0 += xc * to_float(w0[c]);
+                    sum1 += xc * to_float(w1[c]);
+                }
+                sum0 = warp_reduce_sum(sum0);
+                sum1 = warp_reduce_sum(sum1);
+                if (lane == 0) {
+                    vOut[(int64_t)tokenIdx * kvDim + r0] = sum0;
+                    vOut[(int64_t)tokenIdx * kvDim + r1] = sum1;
+                }
+            } else {
+                for (int c = lane; c < dim; c += 32) {
+                    sum0 += x[c] * to_float(w0[c]);
+                }
+                sum0 = warp_reduce_sum(sum0);
+                if (lane == 0) {
+                    vOut[(int64_t)tokenIdx * kvDim + r0] = sum0;
+                }
+            }
         }
     }
 }
@@ -1076,8 +1081,37 @@ extern "C" {
         int gridSize = (total + blockSize - 1) / blockSize;
 
         fused_rope_kernel<<<gridSize, blockSize, 0, stream>>>(
-            (float*)tensor, (const float*)posIds,
+            (float*)tensor, posIds,
             batch, heads, seqLen, headDim, theta);
+    }
+
+    void cudaPrecomputeRoPE(
+        cudaStream_t stream,
+        float* ropeCos, float* ropeSin,
+        int maxSeqLen, int headDim, int rotaryDim, float theta) {
+
+        int headDimHalf = headDim / 2;
+        int total = maxSeqLen * headDimHalf;
+        int blockSize = 256;
+        int gridSize = (total + blockSize - 1) / blockSize;
+
+        precompute_rope_freqs_kernel<<<gridSize, blockSize, 0, stream>>>(
+            ropeCos, ropeSin, maxSeqLen, headDim, rotaryDim, theta);
+    }
+
+    void cudaFusedRoPEPrecomputed(
+        cudaStream_t stream,
+        float* tensor, const int* posIds,
+        const float* ropeCos, const float* ropeSin,
+        int batch, int heads, int seqLen, int headDim, int maxSeqLen) {
+
+        int total = batch * heads * seqLen * (headDim / 2);
+        int blockSize = 256;
+        int gridSize = (total + blockSize - 1) / blockSize;
+
+        fused_rope_precomputed_kernel<<<gridSize, blockSize, 0, stream>>>(
+            tensor, posIds, ropeCos, ropeSin,
+            batch, heads, seqLen, headDim, maxSeqLen);
     }
 
     void cudaFusedSwiGLU(
@@ -1152,19 +1186,34 @@ extern "C" {
         const void* qWeight, const void* kWeight, const void* vWeight,
         void* qOut, void* kOut, void* vOut,
         const void* ropeCos, const void* ropeSin,
+        const int* posIds,
         int batch, int dim, int qDim, int kvDim, int headDim,
-        int seqLen) {
+        int maxSeqLen, int isF16) {
 
-        int total = batch * dim * seqLen;
+        int totalPairsPerToken = (qDim / 2) + (kvDim / 2) + ((kvDim + 1) / 2);
+        int totalWarps = batch * totalPairsPerToken;
         int blockSize = 256;
-        int gridSize = (total + blockSize - 1) / blockSize;
+        int numBlocks = (totalWarps * 32 + blockSize - 1) / blockSize;
+        if (numBlocks > 1024) numBlocks = 1024;
+        if (numBlocks < 1) numBlocks = 1;
 
-        // TODO: Add fused QKV + RoPE kernel with precomputed frequencies
-        // For now, use the simple QKV split kernel
-        fused_qkv_rope_kernel<<<gridSize, blockSize, 0, stream>>>(
-            (float*)input, (float*)qWeight, (float*)kWeight, (float*)vWeight,
-            (float*)qOut, (float*)kOut, (float*)vOut,
-            batch, dim, qDim, kvDim, (float*)ropeCos, (float*)ropeSin, headDim);
+        if (isF16) {
+            fused_qkv_rope_gemv_kernel<__half><<<numBlocks, blockSize, 0, stream>>>(
+                (const float*)input,
+                (const __half*)qWeight, (const __half*)kWeight, (const __half*)vWeight,
+                (float*)qOut, (float*)kOut, (float*)vOut,
+                (const float*)ropeCos, (const float*)ropeSin,
+                posIds,
+                batch, dim, qDim, kvDim, headDim, maxSeqLen);
+        } else {
+            fused_qkv_rope_gemv_kernel<float><<<numBlocks, blockSize, 0, stream>>>(
+                (const float*)input,
+                (const float*)qWeight, (const float*)kWeight, (const float*)vWeight,
+                (float*)qOut, (float*)kOut, (float*)vOut,
+                (const float*)ropeCos, (const float*)ropeSin,
+                posIds,
+                batch, dim, qDim, kvDim, headDim, maxSeqLen);
+        }
     }
 }
 
@@ -1534,8 +1583,8 @@ __global__ void store_turboquant_kv_kernel(
             if (d == blockSize + qjlRows) {
                 // Store scale for polar Quant portion
                 float scale = 1.0f;
-                memcpy(&kCache[kDstOffset], &scale, sizeof(float));
-                memcpy(&vCache[vDstOffset], &scale, sizeof(float));
+                *(float*)&kCache[kDstOffset] = scale;
+                *(float*)&vCache[vDstOffset] = scale;
             }
         }
     }

@@ -11,7 +11,7 @@ func TestGrammar_Basic(t *testing.T) {
 			t.Errorf("expected Active to be true")
 		}
 	})
-	
+
 	t.Run("ApplyMask", func(t *testing.T) {
 		g := NewJSONGrammar([]string{"{", "}", "a"})
 		logits := []float32{0.1, 0.2, 0.3}
@@ -69,4 +69,3 @@ func TestGrammar_Basic(t *testing.T) {
 		}
 	})
 }
-

@@ -3,21 +3,21 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"github.com/23skdu/longbow-quarrel/internal/config"
+	"github.com/23skdu/longbow-quarrel/internal/engine"
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"github.com/23skdu/longbow-quarrel/internal/config"
-	"github.com/23skdu/longbow-quarrel/internal/engine"
 )
 
 func TestPhase3_Integration(t *testing.T) {
 	cfg := config.Config{VocabSize: 100}
 	eng, _ := engine.NewMockEngine("mock", cfg)
 	tok := &mockTokenizer{}
-	
+
 	server := &Server{
-		Engine:    eng,
-		Tokenizer: tok,
+		Engine:     eng,
+		Tokenizer:  tok,
 		UsedMemory: func() int64 { return 0 },
 	}
 
@@ -52,4 +52,3 @@ func TestPhase3_Integration(t *testing.T) {
 		}
 	})
 }
-

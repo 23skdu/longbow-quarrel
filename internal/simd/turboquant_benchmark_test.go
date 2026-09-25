@@ -30,7 +30,7 @@ func BenchmarkEndToEndInferenceStep(b *testing.B) {
 	heads := 8
 	dim := 128
 	totalElements := heads * dim
-	
+
 	input := make([]float32, totalElements)
 	rot := make([]float32, dim*dim)
 	qjl := make([]float32, 64*dim)
@@ -46,7 +46,7 @@ func BenchmarkEndToEndInferenceStep(b *testing.B) {
 			}
 		}
 	}
-	
+
 	throughput := float64(b.N) * float64(layers) / b.Elapsed().Seconds()
 	fmt.Printf("Throughput: %.2f layers/sec (single thread)\n", throughput)
 }

@@ -7,8 +7,6 @@ import (
 	"os"
 )
 
-
-
 // NewActivationLogger creates a new activation logger
 func NewActivationLogger() *ActivationLogger {
 	return &ActivationLogger{
@@ -122,31 +120,6 @@ func (al *ActivationLogger) SaveToFile(filename string) error {
 
 	fmt.Printf("Activation log saved to: %s\n", filename)
 	return nil
-}
-
-// GetSampleFromTensor extracts first N values from tensor data
-func GetSampleFromTensor(data []float32, n int) []float32 {
-	if len(data) < n {
-		n = len(data)
-	}
-	sample := make([]float32, n)
-	copy(sample, data[:n])
-	return sample
-}
-
-// GetMaxFromTensor finds maximum absolute value in tensor
-func GetMaxFromTensor(data []float32) float32 {
-	maxVal := float32(0)
-	for _, v := range data {
-		absV := v
-		if absV < 0 {
-			absV = -absV
-		}
-		if absV > maxVal {
-			maxVal = absV
-		}
-	}
-	return maxVal
 }
 
 // countNaNInf counts NaN and Inf values in a float32 slice

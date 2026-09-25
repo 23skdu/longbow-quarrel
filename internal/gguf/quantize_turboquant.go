@@ -55,7 +55,7 @@ func PolarQuant(input []float32, rotationMatrix []float32, n int, bits int) ([]i
 	quantized := make([]int8, n)
 	shiftAmount := uint(bits - 1)
 	maxQuantVal := float32(int(1<<shiftAmount) - 1)
-	
+
 	scale := maxAbs / maxQuantVal
 	if scale == 0 {
 		scale = 1.0
@@ -139,17 +139,17 @@ func QuantizeTurboQuant(input []float32, rotationMatrix []float32, qjlMatrix []f
 	for b := 0; b < numBlocks; b++ {
 		start := b * blockSize
 		blockData := input[start : start+blockSize]
-		
+
 		q, s, residual, err := PolarQuant(blockData, rotationMatrix, blockSize, bits)
 		if err != nil {
 			return nil, err
 		}
-		
+
 		qj, sj, err := QJLTransform(residual, qjlMatrix, qjlRows, blockSize)
 		if err != nil {
 			return nil, err
 		}
-		
+
 		// Fill the result block
 		off := b * bytesPerBlock
 		for i := 0; i < blockSize; i++ {
@@ -158,7 +158,7 @@ func QuantizeTurboQuant(input []float32, rotationMatrix []float32, qjlMatrix []f
 		for i := 0; i < qjlRows; i++ {
 			result[off+blockSize+i] = byte(qj[i]) // #nosec G115 -- int8 to byte for quantized data
 		}
-		
+
 		setFloat32(result[off+blockSize+qjlRows:off+blockSize+qjlRows+4], s)
 		setFloat32(result[off+blockSize+qjlRows+4:off+blockSize+qjlRows+8], sj)
 	}
@@ -179,7 +179,7 @@ func DequantizeTurboQuant(data []byte, rotationMatrix []float32, qjlMatrix []flo
 		qj := data[off+blockSize : off+blockSize+qjlRows]
 		s := getFloat32(data[off+blockSize+qjlRows : off+blockSize+qjlRows+4])
 		sj := getFloat32(data[off+blockSize+qjlRows+4 : off+blockSize+qjlRows+8])
-		
+
 		for i := 0; i < blockSize; i++ {
 			val := float32(int8(q[i])) * s // #nosec G115 -- byte to int8 for quantized data
 			if i < qjlRows {
@@ -199,7 +199,7 @@ func getFloat32(b []byte) float32 {
 
 func setFloat32(b []byte, f float32) {
 	bits := math.Float32bits(f)
-	b[0] = byte(bits)      // #nosec G115 -- byte extraction from uint32
+	b[0] = byte(bits)       // #nosec G115 -- byte extraction from uint32
 	b[1] = byte(bits >> 8)  // #nosec G115 -- byte extraction from uint32
 	b[2] = byte(bits >> 16) // #nosec G115 -- byte extraction from uint32
 	b[3] = byte(bits >> 24) // #nosec G115 -- byte extraction from uint32

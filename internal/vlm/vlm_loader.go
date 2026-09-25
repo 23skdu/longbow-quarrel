@@ -32,8 +32,8 @@ func NewVLMDecoder(ctx *device.Context, cfg VLMConfig) (VLMDecoder, error) {
 }
 
 type CLIPEncoder struct {
-	ctx          *device.Context
-	config       VLMConfig
+	ctx           *device.Context
+	config        VLMConfig
 	visionEncoder *VisionEncoder
 }
 
@@ -51,8 +51,8 @@ func (e *CLIPEncoder) Decode(imageData []byte) (*device.Tensor, error) {
 }
 
 type MultiModalEncoder struct {
-	ctx          *device.Context
-	config       VLMConfig
+	ctx           *device.Context
+	config        VLMConfig
 	visionEncoder *VisionEncoder
 }
 

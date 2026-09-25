@@ -1,4 +1,4 @@
-//go:build !cuda && !metal
+//go:build (!cuda && !metal && !tpu) || !amd64 || !cgo || (!linux && !darwin)
 
 package device
 
@@ -183,14 +183,6 @@ func NewTensor(name string, data []float32) *Tensor {
 		name:     name,
 		dataType: DataTypeF32,
 	}
-}
-
-func (t *Tensor) Dims() []int {
-	return t.dims
-}
-
-func (t *Tensor) Strides() []int {
-	return t.strides
 }
 
 func (t *Tensor) RawData() []byte {
@@ -388,7 +380,7 @@ func (t *Tensor) LoadFromRaw(data []byte) error {
 	}
 	if t.dataType == DataTypeF32 {
 		// Copy bytes to float32 slice
-		ptr := unsafe.Pointer(&t.data[0]) // #nosec G103 -- intentional unsafe for zero-copy
+		ptr := unsafe.Pointer(&t.data[0])                      // #nosec G103 -- intentional unsafe for zero-copy
 		byteSlice := unsafe.Slice((*byte)(ptr), len(t.data)*4) // #nosec G103 -- intentional unsafe for zero-copy
 		copy(byteSlice, data)
 	} else if t.rawData != nil {
@@ -596,19 +588,6 @@ func (c *Context) TurboQuantDecode(input *Tensor, rotationMatrix *Tensor, qjlMat
 	}
 }
 
-func getFloat32(b []byte) float32 {
-	bits := uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16 | uint32(b[3])<<24
-	return math.Float32frombits(bits) // #nosec G115
-}
-
-func setFloat32(b []byte, f float32) {
-	bits := math.Float32bits(f)
-	b[0] = byte(bits)      // #nosec G115 -- byte extraction from uint32
-	b[1] = byte(bits >> 8)  // #nosec G115 -- byte extraction from uint32
-	b[2] = byte(bits >> 16) // #nosec G115 -- byte extraction from uint32
-	b[3] = byte(bits >> 24) // #nosec G115 -- byte extraction from uint32
-}
-
 func qInt8ToF32(in []int8) []float32 {
 	out := make([]float32, len(in))
 	for i, v := range in {
@@ -634,11 +613,6 @@ var cpuAllocatedBytes int64
 func CPUAllocatedBytes() int64 {
 	return atomic.LoadInt64(&cpuAllocatedBytes)
 }
-
-func RecordMemory(n int64) {
-	atomic.AddInt64(&cpuAllocatedBytes, n)
-}
-
 
 func (c *Context) SetNumThreads(n int) {
 	c.numThreads = n
@@ -830,4 +804,386 @@ func (c *Context) VisionPatchEmbedGemma4(pixels *Tensor, weights *Tensor, bias *
 		}
 	}
 	_ = output.LoadFrom(out)
+}
+
+// ============================================================================
+// MOE (Mixture of Experts) Operations
+// ============================================================================
+
+// MOERouterLogits computes routing logits for MOE layer
+func (c *Context) MOERouterLogits(input, gateWeight *Tensor) *Tensor {
+	batchSize := input.Rows()
+	dim := input.Cols()
+	numExperts := gateWeight.Rows()
+
+	logits := c.NewTensorFP32(batchSize, numExperts)
+	inData := input.ToHost()
+	gateData := gateWeight.ToHost()
+	logitData := make([]float32, batchSize*numExperts)
+
+	for b := 0; b < batchSize; b++ {
+		for e := 0; e < numExperts; e++ {
+			var sum float32
+			for d := 0; d < dim; d++ {
+				sum += inData[b*dim+d] * gateData[e*dim+d]
+			}
+			logitData[b*numExperts+e] = sum
+		}
+	}
+	_ = logits.LoadFrom(logitData)
+	return logits
+}
+
+// MOETopKSelection selects top-k experts per token and computes softmax weights
+func (c *Context) MOETopKSelection(logits *Tensor, topK int) (*Tensor, *Tensor) {
+	batchSize := logits.Rows()
+	numExperts := logits.Cols()
+
+	expertIndices := c.NewTensorFP32(batchSize, topK)
+	expertWeights := c.NewTensorFP32(batchSize, topK)
+	logitData := logits.ToHost()
+
+	indicesData := make([]float32, batchSize*topK)
+	weightsData := make([]float32, batchSize*topK)
+
+	for b := 0; b < batchSize; b++ {
+		row := logitData[b*numExperts : (b+1)*numExperts]
+		selected := make([]int, topK)
+		selectedLogits := make([]float32, topK)
+
+		for k := 0; k < topK; k++ {
+			maxVal := float32(-1e30)
+			maxIdx := -1
+			for e := 0; e < numExperts; e++ {
+				already := false
+				for prev := 0; prev < k; prev++ {
+					if selected[prev] == e {
+						already = true
+						break
+					}
+				}
+				if already {
+					continue
+				}
+				if row[e] > maxVal || (row[e] == maxVal && (maxIdx < 0 || e < maxIdx)) {
+					maxVal = row[e]
+					maxIdx = e
+				}
+			}
+			selected[k] = maxIdx
+			selectedLogits[k] = maxVal
+		}
+
+		maxLogit := float32(-1e30)
+		for k := 0; k < topK; k++ {
+			if selectedLogits[k] > maxLogit {
+				maxLogit = selectedLogits[k]
+			}
+		}
+
+		var sumExp float32
+		expVals := make([]float32, topK)
+		for k := 0; k < topK; k++ {
+			expVals[k] = float32(math.Exp(float64(selectedLogits[k] - maxLogit)))
+			sumExp += expVals[k]
+		}
+		invSum := float32(1.0 / (float64(sumExp) + 1e-9))
+		for k := 0; k < topK; k++ {
+			indicesData[b*topK+k] = float32(selected[k])
+			weightsData[b*topK+k] = expVals[k] * invSum
+		}
+	}
+
+	_ = expertIndices.LoadFrom(indicesData)
+	_ = expertWeights.LoadFrom(weightsData)
+	return expertIndices, expertWeights
+}
+
+// MOEExpertForward applies selected experts to input with weighted mixing
+func (c *Context) MOEExpertForward(input, expertWeight, expertIndices, expertWeights *Tensor, hiddenDim int) *Tensor {
+	batchSize := input.Rows()
+	dim := input.Cols()
+	topK := expertIndices.Cols()
+
+	output := c.NewTensorFP32(batchSize, hiddenDim)
+	inData := input.ToHost()
+	wData := expertWeight.ToHost()
+	idxData := expertIndices.ToHost()
+	weightData := expertWeights.ToHost()
+	outData := make([]float32, batchSize*hiddenDim)
+
+	for b := 0; b < batchSize; b++ {
+		for d := 0; d < hiddenDim; d++ {
+			var sum float32
+			for k := 0; k < topK; k++ {
+				w := weightData[b*topK+k]
+				if w == 0 {
+					continue
+				}
+				expert := int(idxData[b*topK+k])
+				if expert < 0 {
+					continue
+				}
+				expertOffset := (expert*hiddenDim + d) * dim
+				var dot float32
+				for i := 0; i < dim; i++ {
+					dot += inData[b*dim+i] * wData[expertOffset+i]
+				}
+				sum += w * dot
+			}
+			outData[b*hiddenDim+d] = sum
+		}
+	}
+	_ = output.LoadFrom(outData)
+	return output
+}
+
+// MOEExpertGateUpSwiGLU applies fused gate, up and SwiGLU forward pass for multiple experts
+func (c *Context) MOEExpertGateUpSwiGLU(input, gateWeight, upWeight, expertIndices, expertWeights *Tensor, hiddenDim int) *Tensor {
+	batchSize := input.Rows()
+	dim := input.Cols()
+	topK := expertIndices.Cols()
+
+	output := c.NewTensorFP32(batchSize, hiddenDim)
+	inData := input.ToHost()
+	gateData := gateWeight.ToHost()
+	upData := upWeight.ToHost()
+	idxData := expertIndices.ToHost()
+	weightData := expertWeights.ToHost()
+	outData := make([]float32, batchSize*hiddenDim)
+
+	for b := 0; b < batchSize; b++ {
+		for h := 0; h < hiddenDim; h++ {
+			var sumAct float32
+			for k := 0; k < topK; k++ {
+				w := weightData[b*topK+k]
+				if w == 0 {
+					continue
+				}
+				expert := int(idxData[b*topK+k])
+				if expert < 0 {
+					continue
+				}
+				expertRow := expert*hiddenDim + h
+				var gateDot, upDot float32
+				for i := 0; i < dim; i++ {
+					inV := inData[b*dim+i]
+					gateDot += inV * gateData[expertRow*dim+i]
+					upDot += inV * upData[expertRow*dim+i]
+				}
+				gClamped := gateDot
+				if gClamped < -15.0 {
+					gClamped = -15.0
+				} else if gClamped > 15.0 {
+					gClamped = 15.0
+				}
+				siluGate := gateDot / (1.0 + float32(math.Exp(float64(-gClamped))))
+				sumAct += w * (siluGate * upDot)
+			}
+			outData[b*hiddenDim+h] = sumAct
+		}
+	}
+	_ = output.LoadFrom(outData)
+	return output
+}
+
+// =============================================================================
+// MLA (Multi-Head Latent Attention) Operations
+// =============================================================================
+
+// MLADecompressKV decompresses compressed latent KV cache into separate key (non-rotary) and value tensors
+// compressedKV: [numTokens, kvLoraRank]
+// wUKV: [heads * (qkNopeDim + vHeadDim), kvLoraRank]
+// Returns: kNope [numTokens, heads * qkNopeDim], v [numTokens, heads * vHeadDim]
+func (c *Context) MLADecompressKV(compressedKV, wUKV *Tensor, numTokens, kvLoraRank, heads, qkNopeDim, vHeadDim int) (*Tensor, *Tensor) {
+	totalKRows := heads * qkNopeDim
+	totalVRows := heads * vHeadDim
+	kNope := c.NewTensorFP32(numTokens, totalKRows)
+	v := c.NewTensorFP32(numTokens, totalVRows)
+
+	kvData := compressedKV.ToHost()
+	wData := wUKV.ToHost()
+	kData := make([]float32, numTokens*totalKRows)
+	vData := make([]float32, numTokens*totalVRows)
+
+	for t := 0; t < numTokens; t++ {
+		kvToken := kvData[t*kvLoraRank : (t+1)*kvLoraRank]
+		for r := 0; r < totalKRows; r++ {
+			wRow := wData[r*kvLoraRank : (r+1)*kvLoraRank]
+			var sum float32
+			for j := 0; j < kvLoraRank; j++ {
+				sum += kvToken[j] * wRow[j]
+			}
+			kData[t*totalKRows+r] = sum
+		}
+		for r := 0; r < totalVRows; r++ {
+			wRow := wData[(totalKRows+r)*kvLoraRank : (totalKRows+r+1)*kvLoraRank]
+			var sum float32
+			for j := 0; j < kvLoraRank; j++ {
+				sum += kvToken[j] * wRow[j]
+			}
+			vData[t*totalVRows+r] = sum
+		}
+	}
+
+	_ = kNope.LoadFrom(kData)
+	_ = v.LoadFrom(vData)
+	return kNope, v
+}
+
+// MLAProjectQuerySplitRoPE splits query projections into content and rotary parts, applying RoPE to rotary part
+// qAll: [numTokens, heads * (qkNopeDim + qkRopeDim)]
+// posIds: [numTokens] (optional int32 tensor)
+// Returns: qNope [numTokens, heads * qkNopeDim], qRope [numTokens, heads * qkRopeDim]
+func (c *Context) MLAProjectQuerySplitRoPE(qAll, posIds *Tensor, numTokens, heads, qkNopeDim, qkRopeDim int, theta float32) (*Tensor, *Tensor) {
+	qNope := c.NewTensorFP32(numTokens, heads*qkNopeDim)
+	qRope := c.NewTensorFP32(numTokens, heads*qkRopeDim)
+
+	qAllData := qAll.ToHost()
+	var posData []float32
+	if posIds != nil {
+		posData = posIds.ToHost()
+	}
+
+	qNopeData := make([]float32, numTokens*heads*qkNopeDim)
+	qRopeData := make([]float32, numTokens*heads*qkRopeDim)
+	inHeadDim := qkNopeDim + qkRopeDim
+	halfRope := qkRopeDim / 2
+
+	for t := 0; t < numTokens; t++ {
+		pos := t
+		if len(posData) > t {
+			pos = int(posData[t])
+		}
+		for h := 0; h < heads; h++ {
+			baseIn := (t*heads + h) * inHeadDim
+			baseNope := (t*heads + h) * qkNopeDim
+			baseRope := (t*heads + h) * qkRopeDim
+
+			// Copy nope
+			copy(qNopeData[baseNope:baseNope+qkNopeDim], qAllData[baseIn:baseIn+qkNopeDim])
+
+			// Apply RoPE on rotary part
+			for i := 0; i < halfRope; i++ {
+				freq := float32(pos) * float32(math.Pow(float64(theta), float64(-2*i)/float64(qkRopeDim)))
+				cosVal := float32(math.Cos(float64(freq)))
+				sinVal := float32(math.Sin(float64(freq)))
+
+				x0 := qAllData[baseIn+qkNopeDim+i]
+				x1 := qAllData[baseIn+qkNopeDim+i+halfRope]
+
+				qRopeData[baseRope+i] = x0*cosVal - x1*sinVal
+				qRopeData[baseRope+i+halfRope] = x0*sinVal + x1*cosVal
+			}
+		}
+	}
+
+	_ = qNope.LoadFrom(qNopeData)
+	_ = qRope.LoadFrom(qRopeData)
+	return qNope, qRope
+}
+
+// MLAAbsorbedQuery projects content query into latent space per head using W_UK
+// qNope: [numTokens, heads * qkNopeDim]
+// wUK: [heads * qkNopeDim, kvLoraRank]
+// Returns: qAbsorbed [numTokens, heads * kvLoraRank]
+func (c *Context) MLAAbsorbedQuery(qNope, wUK *Tensor, numTokens, heads, qkNopeDim, kvLoraRank int) *Tensor {
+	qAbsorbed := c.NewTensorFP32(numTokens, heads*kvLoraRank)
+	qData := qNope.ToHost()
+	wData := wUK.ToHost()
+	absData := make([]float32, numTokens*heads*kvLoraRank)
+
+	for t := 0; t < numTokens; t++ {
+		for h := 0; h < heads; h++ {
+			qHead := qData[(t*heads+h)*qkNopeDim : (t*heads+h+1)*qkNopeDim]
+			for j := 0; j < kvLoraRank; j++ {
+				var sum float32
+				for k := 0; k < qkNopeDim; k++ {
+					sum += qHead[k] * wData[(h*qkNopeDim+k)*kvLoraRank+j]
+				}
+				absData[(t*heads+h)*kvLoraRank+j] = sum
+			}
+		}
+	}
+
+	_ = qAbsorbed.LoadFrom(absData)
+	return qAbsorbed
+}
+
+// MLAAbsorbedDecodeAttention executes fused decode attention directly over compressed KV cache
+// qAbsorbed: [numTokens, heads * kvLoraRank]
+// qRope: [numTokens, heads * qkRopeDim]
+// kCache: [seqLen, kvLoraRank]
+// kRopeCache: [seqLen, qkRopeDim]
+// wUV: [heads * vHeadDim, kvLoraRank]
+// Returns: output [numTokens, heads * vHeadDim]
+func (c *Context) MLAAbsorbedDecodeAttention(qAbsorbed, qRope, kCache, kRopeCache, wUV *Tensor, numTokens, seqLen, heads, kvLoraRank, qkRopeDim, vHeadDim int, scale float32) *Tensor {
+	output := c.NewTensorFP32(numTokens, heads*vHeadDim)
+	qAbsData := qAbsorbed.ToHost()
+	qRopeData := qRope.ToHost()
+	kData := kCache.ToHost()
+	kRopeData := kRopeCache.ToHost()
+	wData := wUV.ToHost()
+	outData := make([]float32, numTokens*heads*vHeadDim)
+
+	scores := make([]float32, seqLen)
+	latent := make([]float32, kvLoraRank)
+
+	for t := 0; t < numTokens; t++ {
+		for h := 0; h < heads; h++ {
+			curQAbs := qAbsData[(t*heads+h)*kvLoraRank : (t*heads+h+1)*kvLoraRank]
+			curQRope := qRopeData[(t*heads+h)*qkRopeDim : (t*heads+h+1)*qkRopeDim]
+
+			maxScore := float32(-1e30)
+			for s := 0; s < seqLen; s++ {
+				curK := kData[s*kvLoraRank : (s+1)*kvLoraRank]
+				curKRope := kRopeData[s*qkRopeDim : (s+1)*qkRopeDim]
+
+				var dotC, dotR float32
+				for j := 0; j < kvLoraRank; j++ {
+					dotC += curQAbs[j] * curK[j]
+				}
+				for j := 0; j < qkRopeDim; j++ {
+					dotR += curQRope[j] * curKRope[j]
+				}
+				sc := (dotC + dotR) * scale
+				scores[s] = sc
+				if sc > maxScore {
+					maxScore = sc
+				}
+			}
+
+			var sumExp float32
+			for s := 0; s < seqLen; s++ {
+				expVal := float32(math.Exp(float64(scores[s] - maxScore)))
+				scores[s] = expVal
+				sumExp += expVal
+			}
+			invSum := float32(1.0 / (float64(sumExp) + 1e-9))
+			for s := 0; s < seqLen; s++ {
+				scores[s] *= invSum
+			}
+
+			for j := 0; j < kvLoraRank; j++ {
+				var sumLatent float32
+				for s := 0; s < seqLen; s++ {
+					sumLatent += scores[s] * kData[s*kvLoraRank+j]
+				}
+				latent[j] = sumLatent
+			}
+
+			wHead := wData[(h*vHeadDim)*kvLoraRank : ((h+1)*vHeadDim)*kvLoraRank]
+			for i := 0; i < vHeadDim; i++ {
+				wRow := wHead[i*kvLoraRank : (i+1)*kvLoraRank]
+				var outVal float32
+				for j := 0; j < kvLoraRank; j++ {
+					outVal += latent[j] * wRow[j]
+				}
+				outData[(t*heads+h)*vHeadDim+i] = outVal
+			}
+		}
+	}
+
+	_ = output.LoadFrom(outData)
+	return output
 }

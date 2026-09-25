@@ -1,4 +1,5 @@
-//go:build !cuda
+//go:build (!cuda && !metal && !tpu) || !amd64 || !cgo || (!linux && !darwin)
+
 package device
 
 import (
@@ -50,7 +51,7 @@ func TestCPU_TurboQuant_Roundtrip(t *testing.T) {
 	input := ctx.NewTensor(1, blockSize*numBlocks)
 	rotation := ctx.NewTensor(blockSize, blockSize)
 	qjl := ctx.NewTensor(qjlRows, blockSize)
-	
+
 	// Create identity rotation matrix and random QJL
 	for i := 0; i < blockSize; i++ {
 		rotation.Data()[i*blockSize+i] = 1.0
@@ -133,7 +134,7 @@ func TestCPU_StoreKV_TurboQuant(t *testing.T) {
 	// Verify raw data was stored
 	bytesPerBlock := headDim + qjlRows + 8
 	off := (pos % windowSize) * heads * bytesPerBlock
-	
+
 	// Read scale using getFloat32 (need to make it accessible or copy logic)
 	// For the test, we'll just check if something was written to the scale area
 	scaleArea := kCache.RawData()[off+headDim+qjlRows : off+headDim+qjlRows+4]

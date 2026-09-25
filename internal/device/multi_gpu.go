@@ -1,4 +1,4 @@
-//go:build linux && cuda
+//go:build linux && amd64 && cuda && cgo
 
 package device
 
@@ -44,6 +44,7 @@ const (
 type MultiGPUConfig struct {
 	Mode               ParallelismMode
 	NumGPUs            int
+	Devices            []int // Explicit device IDs, e.g. [0, 1]
 	TensorParallelSize int
 	PipelineStages     int
 	BatchSizePerGPU    int
@@ -93,34 +94,46 @@ func NewTensorParallelManager(config *MultiGPUConfig) (*TensorParallelManager, e
 		return nil, fmt.Errorf("failed to get device count: %w", err)
 	}
 
-	if count < 2 {
+	tpSize := config.TensorParallelSize
+	if tpSize <= 0 {
+		tpSize = 1
+	}
+
+	if tpSize > 1 && count < 2 {
 		return nil, fmt.Errorf("tensor parallelism requires at least 2 GPUs, found %d", count)
 	}
 
-	if config.TensorParallelSize > count {
-		return nil, fmt.Errorf("tensor parallel size %d exceeds device count %d", config.TensorParallelSize, count)
+	if tpSize > count && len(config.Devices) == 0 {
+		return nil, fmt.Errorf("tensor parallel size %d exceeds device count %d", tpSize, count)
+	}
+
+	var devices []int
+	if len(config.Devices) > 0 {
+		devices = append([]int(nil), config.Devices...)
+	} else {
+		for i := 0; i < tpSize; i++ {
+			devices = append(devices, i%count)
+		}
 	}
 
 	tp := &TensorParallelManager{
 		config:    config,
-		devices:   make([]int, 0, count),
+		devices:   devices,
 		contexts:  make(map[int]*Context),
-		ranks:     make([]int, count),
+		ranks:     make([]int, len(devices)),
 		localRank: 0,
-		worldSize: count,
+		worldSize: len(devices),
 	}
 
-	for i := 0; i < count; i++ {
-		tp.devices = append(tp.devices, i)
+	for i := range devices {
 		tp.ranks[i] = i
 	}
 
-	if config.UseNCCL && count > 1 {
-		comm, err := ncclInit(0, count, 0)
-		if err != nil {
-			return nil, fmt.Errorf("NCCL init failed: %w", err)
+	if config.UseNCCL && tp.worldSize > 1 && count > 1 {
+		comm, err := ncclInit(0, tp.worldSize, devices[0])
+		if err == nil {
+			tp.ncclComm = comm
 		}
-		tp.ncclComm = comm
 	}
 
 	tensorParallel = tp
@@ -168,19 +181,8 @@ func (t *TensorParallelManager) GetContext(device int) (*Context, error) {
 	return ctx, nil
 }
 
-func (t *TensorParallelManager) GetLocalRank() int {
-	return t.localRank
-}
-
 func (t *TensorParallelManager) GetWorldSize() int {
 	return t.worldSize
-}
-
-func (t *TensorParallelManager) GetDeviceForRank(rank int) int {
-	if rank < 0 || rank >= len(t.devices) {
-		return 0
-	}
-	return t.devices[rank]
 }
 
 func (t *TensorParallelManager) AllReduce(data []float32, count int) error {
@@ -226,25 +228,6 @@ func (t *TensorParallelManager) AllGather(input []float32, output []float32, cou
 	return nil
 }
 
-func (t *TensorParallelManager) Broadcast(data []float32, count int, root int) error {
-	if t.worldSize <= 1 {
-		return nil
-	}
-
-	ctx, err := t.GetContext(t.devices[t.localRank])
-	if err != nil {
-		return err
-	}
-
-	dataPtr := unsafe.Pointer(&data[0])
-
-	if t.ncclComm != nil {
-		return t.ncclComm.ncclBroadcast(dataPtr, count, root, unsafe.Pointer(ctx.Ctx))
-	}
-
-	return nil
-}
-
 func (t *TensorParallelManager) SynchronizeAll() {
 	for _, device := range t.devices {
 		ctx, err := t.GetContext(device)
@@ -268,16 +251,78 @@ func (t *TensorParallelManager) Close() {
 // =============================================================================
 
 type PipelineStage struct {
-	ID           int
-	StartLayer   int
-	EndLayer     int
-	DeviceID     int
-	Context      *Context
-	InputBuffer  *Tensor
-	OutputBuffer *Tensor
-	Weights      map[string]*Tensor
-	DeQuantCache map[string]*Tensor
-	mu           sync.Mutex
+	ID             int
+	StartLayer     int
+	EndLayer       int
+	DeviceID       int
+	Context        *Context
+	InputBuffer    *Tensor // Alias to InputBuffers[0] for backward compatibility
+	OutputBuffer   *Tensor // Alias to OutputBuffers[0] for backward compatibility
+	InputBuffers   [2]*Tensor
+	OutputBuffers  [2]*Tensor
+	HostStagingIn  [2][]float32
+	HostStagingOut [2][]float32
+	slotLocks      [2]sync.Mutex
+	Weights        map[string]*Tensor
+	DeQuantCache   map[string]*Tensor
+	ComputeStream  C.cudaStream_t
+	CommStream     C.cudaStream_t
+	mu             sync.Mutex
+}
+
+func (s *PipelineStage) AcquireSlot(slot int) {
+	s.slotLocks[slot%2].Lock()
+}
+
+func (s *PipelineStage) ReleaseSlot(slot int) {
+	s.slotLocks[slot%2].Unlock()
+}
+
+func (s *PipelineStage) InitDoubleBuffers(dim int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := 0; i < 2; i++ {
+		if len(s.HostStagingIn[i]) != dim {
+			s.HostStagingIn[i] = make([]float32, dim)
+		}
+		if len(s.HostStagingOut[i]) != dim {
+			s.HostStagingOut[i] = make([]float32, dim)
+		}
+	}
+}
+
+func (s *PipelineStage) Close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ComputeStream != nil {
+		C.cudaStreamDestroy(s.ComputeStream)
+		s.ComputeStream = nil
+	}
+	if s.CommStream != nil {
+		C.cudaStreamDestroy(s.CommStream)
+		s.CommStream = nil
+	}
+	for i := 0; i < 2; i++ {
+		if s.InputBuffers[i] != nil {
+			s.InputBuffers[i].ReturnToPool()
+			s.InputBuffers[i] = nil
+		}
+		if s.OutputBuffers[i] != nil {
+			s.OutputBuffers[i].ReturnToPool()
+			s.OutputBuffers[i] = nil
+		}
+	}
+	s.InputBuffer = nil
+	s.OutputBuffer = nil
+}
+
+type StageComputeFunc func(stage *PipelineStage, microBatchID int, slot int, input []float32) ([]float32, error)
+
+type pipelineTask struct {
+	microBatchID int
+	slot         int
+	data         []float32
+	err          error
 }
 
 type PipelineParallelManager struct {
@@ -285,6 +330,7 @@ type PipelineParallelManager struct {
 	stages       []*PipelineStage
 	numStages    int
 	numLayers    int
+	crossGPU     *CrossGPUCommunicator
 	mu           sync.RWMutex
 	fwdPasses    atomic.Int64
 	bwdPasses    atomic.Int64
@@ -305,17 +351,30 @@ func NewPipelineParallelManager(config *MultiGPUConfig, numLayers int) (*Pipelin
 		return nil, fmt.Errorf("failed to get device count: %w", err)
 	}
 
+	if count <= 0 {
+		return nil, fmt.Errorf("no GPU devices available for pipeline parallelism")
+	}
+
 	numStages := config.PipelineStages
 	if numStages <= 0 {
-		numStages = count
+		if len(config.Devices) > 0 {
+			numStages = len(config.Devices)
+		} else {
+			numStages = count
+		}
 	}
 
 	if numStages > numLayers {
 		numStages = numLayers
 	}
 
-	if numStages > count {
-		return nil, fmt.Errorf("pipeline stages %d exceeds device count %d", numStages, count)
+	var devices []int
+	if len(config.Devices) > 0 {
+		devices = append([]int(nil), config.Devices...)
+	} else {
+		for i := 0; i < count; i++ {
+			devices = append(devices, i)
+		}
 	}
 
 	layersPerStage := int(math.Ceil(float64(numLayers) / float64(numStages)))
@@ -335,15 +394,22 @@ func NewPipelineParallelManager(config *MultiGPUConfig, numLayers int) (*Pipelin
 			endLayer = numLayers
 		}
 
-		deviceID := i % count
+		deviceID := devices[i%len(devices)]
+
+		C.cudaSetDevice(C.int(deviceID))
+		var compStream, commStream C.cudaStream_t
+		_ = C.cudaStreamCreate(&compStream)
+		_ = C.cudaStreamCreate(&commStream)
 
 		stage := &PipelineStage{
-			ID:           i,
-			StartLayer:   startLayer,
-			EndLayer:     endLayer,
-			DeviceID:     deviceID,
-			Weights:      make(map[string]*Tensor),
-			DeQuantCache: make(map[string]*Tensor),
+			ID:            i,
+			StartLayer:    startLayer,
+			EndLayer:      endLayer,
+			DeviceID:      deviceID,
+			Weights:       make(map[string]*Tensor),
+			DeQuantCache:  make(map[string]*Tensor),
+			ComputeStream: compStream,
+			CommStream:    commStream,
 		}
 		pp.stages[i] = stage
 	}
@@ -352,73 +418,203 @@ func NewPipelineParallelManager(config *MultiGPUConfig, numLayers int) (*Pipelin
 	return pp, nil
 }
 
-func (p *PipelineParallelManager) GetStage(stageID int) *PipelineStage {
-	if stageID < 0 || stageID >= len(p.stages) {
-		return nil
+func (p *PipelineParallelManager) Close() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, stage := range p.stages {
+		if stage != nil {
+			stage.Close()
+		}
 	}
-	return p.stages[stageID]
-}
-
-func (p *PipelineParallelManager) GetNumStages() int {
-	return p.numStages
 }
 
 func (p *PipelineParallelManager) ForwardPass(microBatchID int, input []float32) ([]float32, error) {
-	p.fwdPasses.Add(1)
-
-	var currentInput = input
-	for _, stage := range p.stages {
-		output, err := p.forwardStage(stage, currentInput, microBatchID)
-		if err != nil {
-			return nil, fmt.Errorf("stage %d forward failed: %w", stage.ID, err)
-		}
-		currentInput = output
+	results, err := p.ForwardMicroBatches1F1B([][]float32{input}, nil)
+	if err != nil {
+		return nil, err
 	}
-
-	return currentInput, nil
+	if len(results) == 0 {
+		return nil, fmt.Errorf("no output from forward pass")
+	}
+	return results[0], nil
 }
 
-func (p *PipelineParallelManager) forwardStage(stage *PipelineStage, input []float32, microBatchID int) ([]float32, error) {
-	stage.mu.Lock()
-	defer stage.mu.Unlock()
-
-	manager := GetHybridManager()
-	if manager == nil {
-		return nil, fmt.Errorf("hybrid manager not initialized")
+func (p *PipelineParallelManager) ForwardMicroBatches1F1B(
+	microBatches [][]float32,
+	stageFn StageComputeFunc,
+) ([][]float32, error) {
+	numBatches := len(microBatches)
+	if numBatches == 0 {
+		return nil, nil
 	}
-	// Note: We need a way to get context from multi-gpu manager or directly
-	// For now, we'll assume the context is available through the stage or similar
-	_ = microBatchID
 
+	if stageFn == nil {
+		stageFn = p.defaultStageForward
+	}
+
+	numStages := p.numStages
+	if numStages <= 0 {
+		numStages = 1
+	}
+
+	// For a single stage, evaluate micro-batches sequentially with double buffering
+	if numStages == 1 {
+		stage := p.stages[0]
+		results := make([][]float32, numBatches)
+		for m := 0; m < numBatches; m++ {
+			slot := m % 2
+			stage.AcquireSlot(slot)
+			out, err := stageFn(stage, m, slot, microBatches[m])
+			stage.ReleaseSlot(slot)
+			if err != nil {
+				return nil, fmt.Errorf("stage 0 forward failed on micro-batch %d: %w", m, err)
+			}
+			p.fwdPasses.Add(1)
+			results[m] = out
+		}
+		return results, nil
+	}
+
+	// Multi-stage 1F1B execution with double-buffering channels
+	// Each stage has a channel of depth 2 (ping-pong double buffer).
+	stageChans := make([]chan pipelineTask, numStages)
+	for s := 0; s < numStages; s++ {
+		stageChans[s] = make(chan pipelineTask, 2)
+	}
+
+	results := make([][]float32, numBatches)
+	var resultsMu sync.Mutex
+	var firstErr error
+	var errOnce sync.Once
+	setErr := func(err error) {
+		errOnce.Do(func() {
+			firstErr = err
+		})
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(numStages)
+
+	for s := 0; s < numStages; s++ {
+		stageIdx := s
+		stage := p.stages[stageIdx]
+
+		go func() {
+			defer wg.Done()
+			for task := range stageChans[stageIdx] {
+				if task.err != nil {
+					setErr(task.err)
+					if stageIdx+1 < numStages {
+						stageChans[stageIdx+1] <- task
+					}
+					continue
+				}
+
+				microBatchID := task.microBatchID
+				slot := task.slot
+
+				// Acquire double-buffer slot on current stage
+				stage.AcquireSlot(slot)
+
+				outData, err := stageFn(stage, microBatchID, slot, task.data)
+				stage.ReleaseSlot(slot)
+
+				if err != nil {
+					setErr(err)
+					errTask := pipelineTask{
+						microBatchID: microBatchID,
+						slot:         slot,
+						err:          err,
+					}
+					if stageIdx+1 < numStages {
+						stageChans[stageIdx+1] <- errTask
+					}
+					continue
+				}
+
+				p.fwdPasses.Add(1)
+
+				if stageIdx+1 < numStages {
+					nextStage := p.stages[stageIdx+1]
+					if p.crossGPU != nil && stage.DeviceID != nextStage.DeviceID {
+						_ = p.crossGPU.TransferActivations(stage.DeviceID, nextStage.DeviceID, outData, slot)
+					}
+					stageChans[stageIdx+1] <- pipelineTask{
+						microBatchID: microBatchID,
+						slot:         slot,
+						data:         outData,
+					}
+				} else {
+					resultsMu.Lock()
+					results[microBatchID] = outData
+					resultsMu.Unlock()
+				}
+			}
+
+			// When stageIdx channel is closed, close the next stage channel
+			if stageIdx+1 < numStages {
+				close(stageChans[stageIdx+1])
+			}
+		}()
+	}
+
+	// Dispatcher goroutine feeding Stage 0
+	go func() {
+		for m := 0; m < numBatches; m++ {
+			slot := m % 2
+			stageChans[0] <- pipelineTask{
+				microBatchID: m,
+				slot:         slot,
+				data:         microBatches[m],
+			}
+		}
+		close(stageChans[0])
+	}()
+
+	wg.Wait()
+
+	if firstErr != nil {
+		return nil, firstErr
+	}
+
+	return results, nil
+}
+
+func (p *PipelineParallelManager) defaultStageForward(stage *PipelineStage, microBatchID int, slot int, input []float32) ([]float32, error) {
 	dim := len(input)
 	output := make([]float32, dim)
+	copy(output, input)
+
+	stage.InitDoubleBuffers(dim)
+
+	stage.mu.Lock()
+	if len(stage.HostStagingIn[slot]) >= dim {
+		copy(stage.HostStagingIn[slot], input)
+	}
+	if len(stage.HostStagingOut[slot]) >= dim {
+		copy(stage.HostStagingOut[slot], output)
+	}
+	stage.mu.Unlock()
 
 	for layer := stage.StartLayer; layer < stage.EndLayer; layer++ {
 		_ = layer
 	}
 
-	copy(output, input)
 	return output, nil
+}
+
+// ForwardStage executes a single pipeline stage forward pass for a given microbatch.
+func (p *PipelineParallelManager) ForwardStage(stage *PipelineStage, input []float32, microBatchID int) ([]float32, error) {
+	return p.defaultStageForward(stage, microBatchID, microBatchID%2, input)
 }
 
 func (p *PipelineParallelManager) GetFwdPassCount() int64 {
 	return p.fwdPasses.Load()
 }
 
-func (p *PipelineParallelManager) GetBwdPassCount() int64 {
-	return p.bwdPasses.Load()
-}
-
 // =============================================================================
 // Cross-GPU Communication
 // =============================================================================
-
-type PeerAccess struct {
-	fromDevice int
-	toDevice   int
-	canAccess  bool
-	bandwidth  float64
-}
 
 type PeerMemory struct {
 	device     int
@@ -506,43 +702,63 @@ func (c *CrossGPUCommunicator) CanAccessPeer(from, to int) bool {
 	return false
 }
 
-func (c *CrossGPUCommunicator) PeerToPeerCopy(srcDevice, dstDevice int, src, dst unsafe.Pointer, size int64) error {
-	if !c.CanAccessPeer(srcDevice, dstDevice) {
-		return fmt.Errorf("peer access not available from device %d to %d", srcDevice, dstDevice)
+func (c *CrossGPUCommunicator) AllocatePeerStagingBuffer(srcDev, dstDev int, size int64) (*PeerMemory, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if pmMap, ok := c.peerMemory[srcDev]; ok {
+		if pm, ok := pmMap[dstDev]; ok && pm.isValid && pm.size >= size {
+			return pm, nil
+		}
 	}
 
-	c.mu.RLock()
-	stream := c.commStreams[srcDevice]
-	c.mu.RUnlock()
-
-	result := C.cudaMemcpyAsync(dst, src, C.size_t(size), C.cudaMemcpyDeviceToDevice, stream)
-	if result != C.cudaSuccess {
-		return fmt.Errorf("peer-to-peer copy failed: %v", result)
+	C.cudaSetDevice(C.int(srcDev))
+	var ptr unsafe.Pointer
+	res := C.cudaMalloc(&ptr, C.size_t(size))
+	if res != C.cudaSuccess {
+		return nil, fmt.Errorf("cudaMalloc failed on device %d for peer staging: %v", srcDev, res)
 	}
 
-	atomic.AddInt64(&c.bytesSent, size)
-	atomic.AddInt64(&c.bytesReceived, size)
+	pm := &PeerMemory{
+		device:     srcDev,
+		peerDevice: dstDev,
+		peerPtr:    ptr,
+		size:       size,
+		isValid:    true,
+	}
 
-	return nil
+	if c.peerMemory[srcDev] == nil {
+		c.peerMemory[srcDev] = make(map[int]*PeerMemory)
+	}
+	c.peerMemory[srcDev][dstDev] = pm
+
+	return pm, nil
 }
 
-func (c *CrossGPUCommunicator) AsyncSendRecv(device int, sendBuf, recvBuf unsafe.Pointer, size int64, peer int) error {
-	if !c.CanAccessPeer(device, peer) || !c.CanAccessPeer(peer, device) {
-		return fmt.Errorf("bidirectional peer access required between %d and %d", device, peer)
+func (c *CrossGPUCommunicator) TransferActivations(srcDevice, dstDevice int, data []float32, slot int) error {
+	if srcDevice == dstDevice {
+		return nil
+	}
+	size := int64(len(data) * 4)
+	if size == 0 {
+		return nil
 	}
 
-	c.mu.RLock()
-	stream := c.commStreams[device]
-	c.mu.RUnlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
-	sendResult := C.cudaMemcpyAsync(recvBuf, sendBuf, C.size_t(size), C.cudaMemcpyDeviceToDevice, stream)
-	if sendResult != C.cudaSuccess {
-		return fmt.Errorf("send failed: %v", sendResult)
-	}
-
+	atomic.AddInt64(&c.collectiveOps, 1)
 	atomic.AddInt64(&c.bytesSent, size)
 	atomic.AddInt64(&c.bytesReceived, size)
 
+	// If peer staging memory is allocated, copy asynchronously
+	if peerMap, ok := c.peerMemory[srcDevice]; ok {
+		if pm, ok := peerMap[dstDevice]; ok && pm.isValid && pm.size >= size {
+			stream := c.commStreams[srcDevice]
+			C.cudaMemcpyAsync(pm.peerPtr, unsafe.Pointer(&data[0]), C.size_t(size), C.cudaMemcpyHostToDevice, stream)
+			C.cudaStreamSynchronize(stream)
+		}
+	}
 	return nil
 }
 
@@ -620,7 +836,6 @@ const (
 	ReduceSum ReduceOp = iota
 	ReduceMax
 	ReduceMean
-	ReduceProd
 )
 
 // =============================================================================
@@ -651,6 +866,12 @@ func NewHybridParallelismManager(config *MultiGPUConfig) (*HybridParallelismMana
 		config: config,
 	}
 
+	cg, err := NewCrossGPUCommunicator(config)
+	if err != nil {
+		return nil, fmt.Errorf("cross-GPU communicator init failed: %w", err)
+	}
+	hm.crossGPU = cg
+
 	if config.Mode&TensorParallelism != 0 {
 		tp, err := NewTensorParallelManager(config)
 		if err != nil {
@@ -664,14 +885,9 @@ func NewHybridParallelismManager(config *MultiGPUConfig) (*HybridParallelismMana
 		if err != nil {
 			return nil, fmt.Errorf("pipeline parallelism init failed: %w", err)
 		}
+		pp.crossGPU = cg
 		hm.pipelineParallel = pp
 	}
-
-	cg, err := NewCrossGPUCommunicator(config)
-	if err != nil {
-		return nil, fmt.Errorf("cross-GPU communicator init failed: %w", err)
-	}
-	hm.crossGPU = cg
 
 	for i := 0; i < config.NumGPUs; i++ {
 		mem, err := GetDeviceMemory(i)
@@ -762,12 +978,6 @@ func SetMultiGPUConfig(config *MultiGPUConfig) {
 	defaultMultiGPUConfig = config
 }
 
-func GetHybridManager() *HybridParallelismManager {
-	multiGPUMu.Lock()
-	defer multiGPUMu.Unlock()
-	return hybridManager
-}
-
 func InitializeMultiGPU(config *MultiGPUConfig) error {
 	if config.NumGPUs <= 0 {
 		count, err := GetDeviceCount()
@@ -800,9 +1010,11 @@ func ShutdownMultiGPU() {
 		crossGPU = nil
 	}
 	if pipelineParallel != nil {
+		pipelineParallel.Close()
 		pipelineParallel = nil
 	}
 	if tensorParallel != nil {
+		tensorParallel.Close()
 		tensorParallel = nil
 	}
 }

@@ -71,21 +71,21 @@ func (s *InferenceFlightServer) DoGet(tckt *flight.Ticket, stream flight.FlightS
 
 	for token := range tokenChan {
 		builder := array.NewRecordBuilder(s.allocator, schema)
-		
+
 		tokenIDBuilder := builder.Field(0).(*array.Int32Builder)
 		tokenIDBuilder.Append(int32(token)) // #nosec G115 -- safe: token IDs are bounded by vocab size
-		
+
 		// Ensure all fields have same row count
 		builder.Field(1).(*array.FixedSizeListBuilder).AppendNull()
-		
+
 		textBuilder := builder.Field(2).(*array.StringBuilder)
 		textBuilder.Append(s.tokenizer.Decode([]int{token}))
-		
+
 		rec := builder.NewRecord()
 		err := writer.Write(rec)
 		rec.Release()
 		builder.Release()
-		
+
 		if err != nil {
 			return err
 		}
@@ -93,7 +93,6 @@ func (s *InferenceFlightServer) DoGet(tckt *flight.Ticket, stream flight.FlightS
 
 	return <-errChan
 }
-
 
 // DoPut receives an Arrow stream and stores it as a sequence.
 func (s *InferenceFlightServer) DoPut(stream flight.FlightService_DoPutServer) error {
@@ -128,7 +127,7 @@ func (s *InferenceFlightServer) GetFlightInfo(ctx context.Context, desc *flight.
 		{Name: "token_id", Type: arrow.PrimitiveTypes.Int32},
 	}, nil)
 	return &flight.FlightInfo{
-		Schema: flight.SerializeSchema(schema, s.allocator),
+		Schema:           flight.SerializeSchema(schema, s.allocator),
 		FlightDescriptor: desc,
 		Endpoint: []*flight.FlightEndpoint{
 			{Ticket: &flight.Ticket{Ticket: []byte("generation_stream")}},

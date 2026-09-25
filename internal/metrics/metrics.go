@@ -149,45 +149,18 @@ var (
 		Help: "Total number of KV cache hits",
 	})
 
-	KVCacheMisses = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "kv_cache_misses_total",
-		Help: "Total number of KV cache misses",
-	})
-
-KVCacheEvictions = promauto.NewCounter(prometheus.CounterOpts{
+	KVCacheEvictions = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "kv_cache_evictions_total",
 		Help: "Total number of KV cache evictions",
 	})
 
 	// Buffer Sizing Audit Metrics
-	BufferScoresSize = promauto.NewHistogram(prometheus.HistogramOpts{
-		Name:    "buffer_scores_size_bytes",
-		Help:    "Scores buffer size in bytes",
-		Buckets: []float64{32768, 65536, 131072, 262144, 524288, 1048576, 2097152},
-	})
-
 	BufferGQARatio = promauto.NewHistogram(prometheus.HistogramOpts{
 		Name:    "buffer_gqa_ratio",
 		Help:    "GQA ratio (heads / kv_heads)",
 		Buckets: []float64{1, 2, 4, 8, 16, 32},
 	})
 
-	BufferAlignment = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "buffer_alignment_total",
-		Help: "Count of properly aligned buffers",
-	})
-
-	BufferInvalid = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "buffer_invalid_total",
-		Help: "Count of invalid buffer configurations",
-	})
-
-	BufferNonOverlap = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "buffer_non_overlap_total",
-		Help: "Count of non-overlapping buffer allocations",
-	})
-
-	// Dequantization Audit Metrics
 	DequantMaxAbsError = promauto.NewHistogram(prometheus.HistogramOpts{
 		Name:    "dequant_max_abs_error",
 		Help:    "Maximum absolute dequantization error",
@@ -200,74 +173,10 @@ KVCacheEvictions = promauto.NewCounter(prometheus.CounterOpts{
 		Buckets: []float64{0, 0.0001, 0.001, 0.01, 0.1, 1.0},
 	})
 
-	DequantPass = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "dequant_pass_total",
-		Help: "Count of passing dequantization accuracy checks",
-	})
-
-	DequantFail = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "dequant_fail_total",
-		Help: "Count of failing dequantization accuracy checks",
-	})
-
-	DequantMismatches = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "dequant_mismatches_total",
-		Help: "Total number of dequantization mismatches",
-	})
-
-	// Weight Alignment Audit Metrics
-	WeightPadding = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "weight_padding_total",
-		Help: "Count of tensors with padding detected",
-	})
-
-	WeightAligned = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "weight_aligned_total",
-		Help: "Count of properly aligned weight tensors",
-	})
-
-	WeightNotAligned = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "weight_not_aligned_total",
-		Help: "Count of misaligned weight tensors",
-	})
-
 	WeightPaddingBytes = promauto.NewHistogram(prometheus.HistogramOpts{
 		Name:    "weight_padding_bytes",
 		Help:    "Number of padding bytes in weight tensors",
 		Buckets: []float64{0, 128, 256, 512, 1024, 4096, 16384},
-	})
-
-	WeightValid = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "weight_valid_total",
-		Help: "Count of valid weight tensors",
-	})
-
-	WeightInvalid = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "weight_invalid_total",
-		Help: "Count of invalid weight tensors",
-	})
-
-	// Softmax Masking Audit Metrics
-	SoftmaxStrictMask = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "softmax_strict_mask_total",
-		Help: "Count of strictly masked softmax operations",
-	})
-
-	SoftmaxNotStrict = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "softmax_not_strict_total",
-		Help: "Count of non-strict softmax masking operations",
-	})
-
-	SoftmaxMaskedCount = promauto.NewHistogram(prometheus.HistogramOpts{
-		Name:    "softmax_masked_count",
-		Help:    "Number of masked positions in softmax",
-		Buckets: []float64{0, 10, 100, 500, 1000, 2000, 4000, 8000},
-	})
-
-	SoftmaxUnmaskedCount = promauto.NewHistogram(prometheus.HistogramOpts{
-		Name:    "softmax_unmasked_count",
-		Help:    "Number of unmasked positions in softmax",
-		Buckets: []float64{0, 10, 100, 500, 1000, 2000, 4000, 8000},
 	})
 
 	SoftmaxMaskValue = promauto.NewHistogram(prometheus.HistogramOpts{
@@ -276,39 +185,12 @@ KVCacheEvictions = promauto.NewCounter(prometheus.CounterOpts{
 		Buckets: []float64{-1000000, -100000, -10000, -1000, -100, 0},
 	})
 
-	SoftmaxOutOfBounds = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "softmax_oob_total",
-		Help: "Count of out-of-bounds positions in softmax",
-	})
-
-	// Head Dimension Audit Metrics
-	HeadDimPowerOf2 = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "head_dim_power_of_2_total",
-		Help: "Count of power-of-2 head dimensions",
-	})
-
-	HeadDimNotPowerOf2 = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "head_dim_not_power_of_2_total",
-		Help: "Count of non-power-of-2 head dimensions",
-	})
-
 	HeadDimThreadgroupSize = promauto.NewHistogram(prometheus.HistogramOpts{
 		Name:    "head_dim_threadgroup_size",
 		Help:    "Threadgroup size for head dimension",
 		Buckets: []float64{32, 64, 128, 256, 512},
 	})
 
-	HeadDimOptimal = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "head_dim_optimal_total",
-		Help: "Count of optimal head dimension configurations",
-	})
-
-	HeadDimNotOptimal = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "head_dim_not_optimal_total",
-		Help: "Count of non-optimal head dimension configurations",
-	})
-
-	// Activation Flow Audit Metrics
 	ActivationHealthy = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "activation_healthy_total",
 		Help: "Count of healthy activation flows",
@@ -429,16 +311,6 @@ KVCacheEvictions = promauto.NewCounter(prometheus.CounterOpts{
 		Buckets: []float64{1, 2, 5, 10, 20, 50, 100},
 	})
 
-	SamplingNaNHandling = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "sampling_nan_handling_total",
-		Help: "Count of NaN/Inf values handled during sampling",
-	})
-
-	SamplingSeedReproducible = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "sampling_seed_reproducible_total",
-		Help: "Count of reproducible seeded sampling operations",
-	})
-
 	SamplingEntropy = promauto.NewHistogram(prometheus.HistogramOpts{
 		Name:    "sampling_entropy",
 		Help:    "Logit entropy as quality metric",
@@ -462,12 +334,6 @@ KVCacheEvictions = promauto.NewCounter(prometheus.CounterOpts{
 		Name:    "tokenizer_vocab_size",
 		Help:    "Vocabulary size of tokenizers",
 		Buckets: []float64{1000, 5000, 10000, 30000, 50000, 100000, 200000},
-	})
-
-	TokenizerMergeCount = promauto.NewHistogram(prometheus.HistogramOpts{
-		Name:    "tokenizer_merge_count",
-		Help:    "Number of BPE merges in tokenizer",
-		Buckets: []float64{0, 100, 500, 1000, 5000, 10000},
 	})
 
 	TokenizerUnknownTokens = promauto.NewCounter(prometheus.CounterOpts{
@@ -1170,6 +1036,18 @@ var (
 		Help: "Number of tokens processed within sliding window mask",
 	})
 
+	// Chunked Prefill & Iteration Scheduling
+	PrefillChunkDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "quarrel_prefill_chunk_latency_seconds",
+		Help:    "Execution latency of chunked prompt prefill operations",
+		Buckets: []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0},
+	})
+
+	ActivePrefillTokens = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "quarrel_active_prefill_tokens",
+		Help: "Current count of active tokens in flight for prefill chunks",
+	})
+
 	// Part 3: Continuous Batching & Iteration Scheduling
 	ContinuousBatchActiveRequests = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "quarrel_continuous_batch_active_requests",
@@ -1239,12 +1117,6 @@ var (
 		Buckets: []float64{0.00001, 0.00005, 0.0001, 0.0005, 0.001},
 	})
 
-	SIMDAMXTilesActive = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "quarrel_simd_amx_tiles_active",
-		Help: "Number of active AMX tile matrix acceleration contexts",
-	})
-
-	// Part 8: FP8 / Q8_0 Quantized Paged KV Cache
 	KVCacheQuantizedPagesTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "quarrel_kv_cache_quantized_pages_total",
 		Help: "Total number of KV cache pages quantized",
@@ -1314,6 +1186,12 @@ func RecordFlashAttentionPrefill(duration time.Duration, slidingWindowTokens int
 	}
 }
 
+// RecordPrefillChunk records chunked prefill latency and token volume
+func RecordPrefillChunk(tokens int, duration time.Duration) {
+	PrefillChunkDuration.Observe(duration.Seconds())
+	ActivePrefillTokens.Set(float64(tokens))
+}
+
 // RecordContinuousBatchIteration records one continuous batching scheduling step
 func RecordContinuousBatchIteration(activeRequests int, duration time.Duration, preempted bool) {
 	ContinuousBatchActiveRequests.Set(float64(activeRequests))
@@ -1379,4 +1257,3 @@ func RecordTTFTLatency(duration time.Duration) {
 func RecordInterTokenLatency(duration time.Duration) {
 	InterTokenLatencyHistogram.Observe(duration.Seconds())
 }
-

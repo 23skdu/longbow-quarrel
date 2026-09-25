@@ -3,8 +3,8 @@
 package device
 
 import (
-	"testing"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"testing"
 )
 
 func TestTensor_GPUMetadata(t *testing.T) {
@@ -21,7 +21,7 @@ func TestTensor_GPUMetadata(t *testing.T) {
 
 	// Verify metadata in the returned array (note: arrow.Array doesn't store field metadata directly,
 	// but the schema construction in Flight uses it. Here we check the logic used in buildFixedSizeList).
-	
+
 	// We verify that the deviceID was used correctly in buildFixedSizeList
 	// In a real environment, we'd check the field returned by the flight server.
 	if ctx.DeviceID() != -1 {

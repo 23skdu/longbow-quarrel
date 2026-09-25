@@ -12,7 +12,7 @@ func TestQualityEvaluator_Exhaustive(t *testing.T) {
 		if res.Perplexity <= 0 {
 			t.Errorf("invalid perplexity: %f", res.Perplexity)
 		}
-		
+
 		// Short case
 		short := qe.CalculatePerplexity([]int{1})
 		if short.Perplexity != 1.0 {
@@ -37,7 +37,7 @@ func TestQualityEvaluator_Exhaustive(t *testing.T) {
 		if score.F1 < 0.99 {
 			t.Errorf("expected perfect ROUGE for match, got %f", score.F1)
 		}
-		
+
 		// Match logic hit
 		_ = qe.CalculateROUGE("a b c", "a d c")
 	})

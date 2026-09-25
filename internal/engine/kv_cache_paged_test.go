@@ -140,4 +140,3 @@ func TestPagedKVCache_FP8_And_Q8(t *testing.T) {
 		t.Errorf("expected 1 block in Q8 block table, got %d", len(cacheQ8.blockTables["seq-q8"]))
 	}
 }
-

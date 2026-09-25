@@ -60,13 +60,17 @@ func TestMultiLoRA_MetadataPropagation(t *testing.T) {
 	if len(desc2.AdapterIDs) != 2 {
 		t.Fatalf("Expected 2 AdapterIDs in decoding step, got %d", len(desc2.AdapterIDs))
 	}
-	
+
 	// IDs might be reordered if they are in a map, but here we expect consistency
 	foundA := false
 	foundB := false
 	for _, id := range desc2.AdapterIDs {
-		if id == "adapter-a" { foundA = true }
-		if id == "adapter-b" { foundB = true }
+		if id == "adapter-a" {
+			foundA = true
+		}
+		if id == "adapter-b" {
+			foundB = true
+		}
 	}
 	if !foundA || !foundB {
 		t.Errorf("One or more adapters lost in decoding step: foundA=%v, foundB=%v", foundA, foundB)

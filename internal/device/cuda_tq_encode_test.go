@@ -1,4 +1,5 @@
-//go:build cuda
+//go:build linux && amd64 && cuda && cgo
+
 package device
 
 import (
@@ -48,5 +49,31 @@ func TestCUDA_TurboQuantEncode(t *testing.T) {
 }
 
 func TestCUDA_StoreKVTurboQuant(t *testing.T) {
-	t.Skip("Requires full KV cache infrastructure")
+	ctx := NewContext()
+	defer ctx.Free()
+
+	heads := 2
+	headDim := 64
+	qjlRows := 16
+	numTokens := 1
+
+	k := ctx.NewTensorFP32(numTokens, heads*headDim)
+	v := ctx.NewTensorFP32(numTokens, heads*headDim)
+	defer k.Free()
+	defer v.Free()
+
+	kCache := ctx.NewTurboTensor(8, heads*headDim, DataTypeTQ1_0, headDim, qjlRows)
+	vCache := ctx.NewTurboTensor(8, heads*headDim, DataTypeTQ1_0, headDim, qjlRows)
+	if kCache == nil || vCache == nil {
+		t.Fatal("Failed to allocate TurboQuant KV cache")
+	}
+	defer kCache.Free()
+	defer vCache.Free()
+
+	physPos := ctx.NewTensorI32(1, numTokens)
+	defer physPos.Free()
+	_ = physPos.LoadFrom([]int32{0})
+
+	ctx.StoreKVTurboQuant(k, v, kCache, vCache, physPos, headDim, qjlRows, heads, numTokens)
+	t.Log("StoreKVTurboQuant executed successfully")
 }

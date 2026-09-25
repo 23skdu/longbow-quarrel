@@ -7,7 +7,6 @@ import (
 
 	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
-	"github.com/23skdu/longbow-quarrel/internal/tokenizer"
 )
 
 func getKV(f *gguf.GGUFFile, keys ...string) (interface{}, bool) {
@@ -222,6 +221,62 @@ func ExtractModelConfig(f *gguf.GGUFFile) config.Config {
 		}
 	}
 
+	// MOE Metadata
+	if val, ok := getKV(f, arch+".expert_count", "llama.expert_count"); ok {
+		cfg.ExpertCount = int(toFloat64(val))
+		cfg.IsMOE = true
+	}
+	if val, ok := getKV(f, arch+".expert_used_count", "llama.expert_used_count"); ok {
+		cfg.ExpertUsedCount = int(toFloat64(val))
+	}
+	if val, ok := getKV(f, arch+".expert_shared_count", "llama.expert_shared_count"); ok {
+		cfg.ExpertSharedCount = int(toFloat64(val))
+	}
+	if val, ok := getKV(f, arch+".expert_feed_forward_length", "llama.expert_feed_forward_length"); ok {
+		cfg.ExpertFeedForwardLength = int(toFloat64(val))
+	}
+	if val, ok := getKV(f, arch+".expert_shared_feed_forward_length", "llama.expert_shared_feed_forward_length"); ok {
+		cfg.ExpertSharedFeedForwardLength = int(toFloat64(val))
+	}
+	if val, ok := getKV(f, arch+".expert_group_count", "llama.expert_group_count"); ok {
+		cfg.ExpertGroupCount = int(toFloat64(val))
+	}
+	if val, ok := getKV(f, arch+".expert_group_used_count", "llama.expert_group_used_count"); ok {
+		cfg.ExpertGroupUsedCount = int(toFloat64(val))
+	}
+	if val, ok := getKV(f, arch+".expert_weights_norm", "llama.expert_weights_norm"); ok {
+		if norm, ok := val.(bool); ok {
+			cfg.ExpertWeightsNorm = norm
+		}
+	}
+	if val, ok := getKV(f, arch+".expert_weights_scale", "llama.expert_weights_scale"); ok {
+		cfg.ExpertWeightsScale = float32(toFloat64(val))
+	}
+	if arch == "nemo" || arch == "nemotron" {
+		cfg.IsMOE = true
+	}
+
+	// MLA (Multi-Head Latent Attention) Metadata (DeepSeek V2 / V3)
+	if val, ok := getKV(f, arch+".attention.kv_lora_rank", "deepseek2.attention.kv_lora_rank", "deepseek.attention.kv_lora_rank"); ok {
+		cfg.KVLoRARank = int(toFloat64(val))
+		cfg.IsMLA = true
+	}
+	if val, ok := getKV(f, arch+".attention.q_lora_rank", "deepseek2.attention.q_lora_rank", "deepseek.attention.q_lora_rank"); ok {
+		cfg.QLoRARank = int(toFloat64(val))
+	}
+	if val, ok := getKV(f, arch+".attention.qk_nope_head_dim", "deepseek2.attention.qk_nope_head_dim", "deepseek.attention.qk_nope_head_dim"); ok {
+		cfg.QKNDim = int(toFloat64(val))
+	}
+	if val, ok := getKV(f, arch+".attention.qk_rope_head_dim", "deepseek2.attention.qk_rope_head_dim", "deepseek.attention.qk_rope_head_dim"); ok {
+		cfg.QKRopeDim = int(toFloat64(val))
+	}
+	if val, ok := getKV(f, arch+".attention.v_head_dim", "deepseek2.attention.v_head_dim", "deepseek.attention.v_head_dim"); ok {
+		cfg.VHeadDim = int(toFloat64(val))
+	}
+	if arch == "deepseek2" || arch == "deepseek" {
+		cfg.IsMLA = true
+	}
+
 	return cfg
 }
 
@@ -313,11 +368,6 @@ func isNeededTensor(name string) bool {
 		}
 	}
 	return false
-}
-
-// NewQualityEvaluator creates a new quality evaluator
-func NewQualityEvaluator(t *tokenizer.Tokenizer) *QualityEvaluator {
-	return &QualityEvaluator{tokenizer: t}
 }
 
 // NewQualityEvaluatorSimple creates a quality evaluator without tokenizer (for basic metrics)

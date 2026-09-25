@@ -213,10 +213,6 @@ func TestGemma4GQA(t *testing.T) {
 	}
 }
 
-func TestGemma4SwiGLU(t *testing.T) {
-	t.Skip("SwiGLU test needs implementation")
-}
-
 func TestGemma4AttnQNorm(t *testing.T) {
 	ctx := NewContext()
 	defer ctx.Free()

@@ -129,6 +129,3 @@ func TestResolveModelPath_OllamaFallback(t *testing.T) {
 		t.Errorf("Ollama resolution failed: %v, got %s", err, resolved)
 	}
 }
-
-
-

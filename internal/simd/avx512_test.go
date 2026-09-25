@@ -145,35 +145,35 @@ func TestSwiGLU_Random(t *testing.T) {
 
 func TestFp16ToFp32(t *testing.T) {
 	tests := []struct {
-		name   string
+		name  string
 		input []uint16
 	}{
 		{
-			name:   "zero",
+			name:  "zero",
 			input: []uint16{0x0000},
 		},
 		{
-			name:   "one",
+			name:  "one",
 			input: []uint16{0x3C00},
 		},
 		{
-			name:   "negative",
+			name:  "negative",
 			input: []uint16{0xBC00},
 		},
 		{
-			name:   "subnormal",
+			name:  "subnormal",
 			input: []uint16{0x0400},
 		},
 		{
-			name:   "infinity",
+			name:  "infinity",
 			input: []uint16{0x7C00},
 		},
 		{
-			name:   "neg infinity",
+			name:  "neg infinity",
 			input: []uint16{0xFC00},
 		},
 		{
-			name:   "random",
+			name:  "random",
 			input: nil,
 		},
 	}
@@ -208,27 +208,27 @@ func TestFp16ToFp32(t *testing.T) {
 
 func TestFp32ToFp16(t *testing.T) {
 	tests := []struct {
-		name   string
+		name  string
 		input []float32
 	}{
 		{
-			name:   "zero",
+			name:  "zero",
 			input: []float32{0.0},
 		},
 		{
-			name:   "one",
+			name:  "one",
 			input: []float32{1.0},
 		},
 		{
-			name:   "negative one",
+			name:  "negative one",
 			input: []float32{-1.0},
 		},
 		{
-			name:   "small pos",
+			name:  "small pos",
 			input: []float32{1e-8},
 		},
 		{
-			name:   "random",
+			name:  "random",
 			input: nil,
 		},
 	}
@@ -260,10 +260,10 @@ func TestFp32ToFp16(t *testing.T) {
 
 func TestRMSNorm(t *testing.T) {
 	tests := []struct {
-		name   string
-		rows   int
-		cols  int
-		eps   float32
+		name string
+		rows int
+		cols int
+		eps  float32
 	}{
 		{
 			name: "simple 4x8",
@@ -333,26 +333,26 @@ func TestGetSIMDLevel(t *testing.T) {
 
 func TestMatmul(t *testing.T) {
 	tests := []struct {
-		name string
+		name    string
 		m, n, k int
 	}{
 		{
 			name: "small",
-			m:   4,
-			n:   8,
-			k:   4,
+			m:    4,
+			n:    8,
+			k:    4,
 		},
 		{
 			name: "medium",
-			m:   16,
-			n:   32,
-			k:   16,
+			m:    16,
+			n:    32,
+			k:    16,
 		},
 		{
 			name: "large",
-			m:   32,
-			n:   64,
-			k:   32,
+			m:    32,
+			n:    64,
+			k:    32,
 		},
 	}
 
@@ -383,27 +383,27 @@ func TestMatmul(t *testing.T) {
 
 func TestFusedAttention(t *testing.T) {
 	tests := []struct {
-		name        string
-		batch      int
-		heads     int
-		seqLen    int
-		headDim   int
-		scale    float32
+		name    string
+		batch   int
+		heads   int
+		seqLen  int
+		headDim int
+		scale   float32
 	}{
 		{
-			name:     "small",
-			batch:    1,
-			heads:    4,
-			seqLen:   8,
-			headDim:  16,
+			name:    "small",
+			batch:   1,
+			heads:   4,
+			seqLen:  8,
+			headDim: 16,
 			scale:   0.25,
 		},
 		{
-			name:     "medium",
-			batch:    2,
-			heads:    8,
+			name:    "medium",
+			batch:   2,
+			heads:   8,
 			seqLen:  32,
-			headDim:  32,
+			headDim: 32,
 			scale:   0.125,
 		},
 	}
@@ -442,20 +442,20 @@ func TestFusedAttention(t *testing.T) {
 func TestFusedMLP(t *testing.T) {
 	tests := []struct {
 		name      string
-		batch    int
-		dim      int
+		batch     int
+		dim       int
 		hiddenDim int
 	}{
 		{
 			name:      "small",
-			batch:    1,
-			dim:      256,
+			batch:     1,
+			dim:       256,
 			hiddenDim: 1024,
 		},
 		{
 			name:      "medium",
-			batch:    2,
-			dim:      512,
+			batch:     2,
+			dim:       512,
 			hiddenDim: 2048,
 		},
 	}
@@ -495,28 +495,28 @@ func TestFusedMLP(t *testing.T) {
 
 func TestRoPE(t *testing.T) {
 	tests := []struct {
-		name     string
+		name    string
 		batch   int
-		heads  int
-		seqLen int
+		heads   int
+		seqLen  int
 		headDim int
-		theta  float32
+		theta   float32
 	}{
 		{
-			name:     "small",
+			name:    "small",
 			batch:   1,
 			heads:   4,
 			seqLen:  8,
 			headDim: 16,
-			theta:  10000,
+			theta:   10000,
 		},
 		{
-			name:     "medium",
+			name:    "medium",
 			batch:   2,
 			heads:   8,
 			seqLen:  32,
 			headDim: 32,
-			theta:  10000,
+			theta:   10000,
 		},
 	}
 

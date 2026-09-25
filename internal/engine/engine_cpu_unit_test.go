@@ -1,10 +1,11 @@
 //go:build !metal && !cuda && !tpu
+
 package engine
 
 import (
-	"testing"
 	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/device"
+	"testing"
 )
 
 func initCPUEngineWeights(e *CPUEngine, dim, layers, heads, kvHeads, headDim, hiddenDim int) {
@@ -39,7 +40,7 @@ func TestCPUEngine_ForwardBatch(t *testing.T) {
 		HeadDim:   headDim,
 		HiddenDim: 256,
 	}
-	
+
 	e := &CPUEngine{
 		ctx:    ctx,
 		config: cfg,
@@ -54,28 +55,28 @@ func TestCPUEngine_ForwardBatch(t *testing.T) {
 	}
 	initCPUEngineWeights(e, cfg.Dim, cfg.Layers, cfg.Heads, cfg.KVHeads, headDim, cfg.HiddenDim)
 	e.cache.Init(ctx, cfg)
-	
+
 	// Create a mock batch descriptor
 	desc := &BatchDescriptor{
 		Sequences: []*Sequence{
 			{ID: 1, MaxTokens: 10},
 			{ID: 2, MaxTokens: 10},
 		},
-		Tokens: []int{1, 2, 3, 4, 5},
-		Offsets: []int{0, 3},
-		TokenToSeq: []int{0, 0, 0, 1, 1},
+		Tokens:      []int{1, 2, 3, 4, 5},
+		Offsets:     []int{0, 3},
+		TokenToSeq:  []int{0, 0, 0, 1, 1},
 		ContextLens: []int{0, 0},
 	}
-	
+
 	// Pre-allocate in cache
 	e.cache.Allocate("seq-1", 10)
 	e.cache.Allocate("seq-2", 10)
-	
+
 	results, err := e.ForwardBatch(desc)
 	if err != nil {
 		t.Errorf("ForwardBatch failed: %v", err)
 	}
-	
+
 	if len(results) != 2 {
 		t.Errorf("Expected 2 results, got %d", len(results))
 	}
@@ -83,16 +84,16 @@ func TestCPUEngine_ForwardBatch(t *testing.T) {
 
 func TestCPUEngine_Sampling(t *testing.T) {
 	logits := []float32{1.0, 2.0, 5.0, 2.0, 1.0}
-	
+
 	// Test applyTemp
 	temp := float64(0.5)
-	res := applyTempCPU(logits, temp)
+	res := ApplyTempCPU(logits, temp)
 	if res[2] != 10.0 {
 		t.Errorf("applyTemp failed, expected 10.0, got %f", res[2])
 	}
-	
+
 	// Test TopK
-	res = applyTopKCPU(logits, 2)
+	res = ApplyTopKCPU(logits, 2)
 	// After TopK=2, only index 2 and (one of 1,3) should be non-zero
 	count := 0
 	for _, v := range res {
@@ -108,7 +109,7 @@ func TestCPUEngine_Sampling(t *testing.T) {
 func TestCPUEngine_Softmax(t *testing.T) {
 	logits := []float32{0, 0, 2.0} // exp(0)=1, exp(2)=7.38
 	res := softmaxCPU(logits)
-	
+
 	sum := float32(0)
 	for _, v := range res {
 		sum += v
@@ -143,10 +144,10 @@ func TestCPUEngine_PrefillAndKVCache(t *testing.T) {
 	}
 
 	e := &CPUEngine{
-		ctx:          ctx,
-		config:       cfg,
-		cache:        &PagedKVCache{},
-		seqKVCaches:  make(map[string]*CPUKVCache),
+		ctx:         ctx,
+		config:      cfg,
+		cache:       &PagedKVCache{},
+		seqKVCaches: make(map[string]*CPUKVCache),
 		weights: &CPUWeights{
 			TokenEmb: make([][]float32, 50),
 		},
@@ -256,7 +257,7 @@ func TestCPUEngine_Forward_MultiToken(t *testing.T) {
 	}
 	initCPUEngineWeights(e, cfg.Dim, cfg.Layers, cfg.Heads, cfg.KVHeads, headDim, cfg.HiddenDim)
 
-	out := e.forward([]int{1, 2, 3})
+	out := e.Forward([]int{1, 2, 3})
 	if len(out) != cfg.Dim {
 		t.Fatalf("expected output length %d, got %d", cfg.Dim, len(out))
 	}
@@ -266,4 +267,3 @@ func TestCPUEngine_Forward_MultiToken(t *testing.T) {
 		}
 	}
 }
-

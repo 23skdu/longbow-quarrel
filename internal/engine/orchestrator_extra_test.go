@@ -1,9 +1,9 @@
 package engine
 
 import (
+	"github.com/23skdu/longbow-quarrel/internal/config"
 	"os"
 	"testing"
-	"github.com/23skdu/longbow-quarrel/internal/config"
 )
 
 func TestActivationLogger_Coverage(t *testing.T) {
@@ -26,8 +26,10 @@ func TestActivationLogger_Coverage(t *testing.T) {
 func TestMockEngine_Coverage(t *testing.T) {
 	cfg := config.Config{VocabSize: 100}
 	e, err := NewMockEngine("mock_path", cfg)
-	if err != nil { t.Errorf("NewMockEngine failed: %v", err) }
-	
+	if err != nil {
+		t.Errorf("NewMockEngine failed: %v", err)
+	}
+
 	e.Config()
 	e.Close()
 	e.SwapModel("new_path", cfg)

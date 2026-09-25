@@ -6,15 +6,14 @@ import (
 )
 
 type BenchmarkResult struct {
-	Name          string
-	NumElements   int
-	NumRuns       int
-	TotalTimeNS   int64
-	TimePerRunNS  int64
-	OpsPerSec     float64
-	MBPerSec      float64
+	Name         string
+	NumElements  int
+	NumRuns      int
+	TotalTimeNS  int64
+	TimePerRunNS int64
+	OpsPerSec    float64
+	MBPerSec     float64
 }
-
 
 func BenchmarkQuantizeQ4K_256(b *testing.B) {
 	src := make([]float32, 256)
@@ -193,7 +192,7 @@ func BenchmarkDequantizeQ4K_4096(b *testing.B) {
 
 func BenchmarkQuantizeQ4K_RoundTrip(b *testing.B) {
 	sizes := []int{256, 512, 1024, 2048, 4096}
-	
+
 	for _, size := range sizes {
 		b.Run(fmt.Sprintf("size_%d", size), func(b *testing.B) {
 			src := make([]float32, size)

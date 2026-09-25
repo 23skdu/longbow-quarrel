@@ -44,14 +44,14 @@ func TestDequantizeQ4_K(t *testing.T) {
 	// Plus scales/mins
 	input := make([]byte, 176) // Correct size for Q4_K block
 	dst := make([]float32, 256)
-	
+
 	// Fill with some pattern
 	for i := range input {
 		input[i] = byte(i)
 	}
 
 	DequantizeBlock(input, dst, GGMLTypeQ4_K)
-	
+
 	// Just verify no panic and non-zero-ish values (since input is non-zero)
 	foundNonZero := false
 	for _, v := range dst {
@@ -68,7 +68,7 @@ func TestDequantizeQ4_K(t *testing.T) {
 func TestDequantizeQ6_K(t *testing.T) {
 	input := make([]byte, 210) // Approx size for Q6_K
 	dst := make([]float32, 256)
-	
+
 	DequantizeBlock(input, dst, GGMLTypeQ6_K)
 	// Verify non-panic
 }
@@ -76,7 +76,7 @@ func TestDequantizeQ6_K(t *testing.T) {
 func TestDequantizeQ8_0(t *testing.T) {
 	input := make([]byte, 34) // 32 weights @ 8bit + 2 byte scale
 	dst := make([]float32, 32)
-	
+
 	DequantizeBlock(input, dst, GGMLTypeQ8_0)
 }
 
@@ -85,7 +85,7 @@ func TestMatVecMulQ8_0(t *testing.T) {
 	rows := 2
 	cols := 64
 	data := make([]byte, rows*(cols/32)*34)
-	
+
 	// Set scale = 1.0 (float16: 0x3C00) for all blocks
 	for b := 0; b < rows*(cols/32); b++ {
 		data[b*34] = 0x00
@@ -273,4 +273,3 @@ func TestDequantizeIQ4_NL(t *testing.T) {
 		t.Errorf("expected out[16] == 13.0, got %f", out[16])
 	}
 }
-

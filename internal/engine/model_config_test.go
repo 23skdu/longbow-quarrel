@@ -10,16 +10,16 @@ func TestExtractModelConfig_Qwen35(t *testing.T) {
 	f := &gguf.GGUFFile{
 		Header: gguf.GGUFHeader{Version: 3},
 		KV: map[string]interface{}{
-			"general.architecture":                   "qwen35",
-			"qwen35.block_count":                     uint32(32),
-			"qwen35.embedding_length":                uint32(2560),
-			"qwen35.attention.head_count":            uint32(16),
-			"qwen35.attention.head_count_kv":         uint32(4),
-			"qwen35.feed_forward_length":             uint32(9216),
-			"qwen35.context_length":                  uint32(262144),
-			"qwen35.rope.freq_base":                  float32(10000000.0),
+			"general.architecture":                    "qwen35",
+			"qwen35.block_count":                      uint32(32),
+			"qwen35.embedding_length":                 uint32(2560),
+			"qwen35.attention.head_count":             uint32(16),
+			"qwen35.attention.head_count_kv":          uint32(4),
+			"qwen35.feed_forward_length":              uint32(9216),
+			"qwen35.context_length":                   uint32(262144),
+			"qwen35.rope.freq_base":                   float32(10000000.0),
 			"qwen35.attention.layer_norm_rms_epsilon": float32(1e-6),
-			"qwen35.vocab_size":                      uint32(248320),
+			"qwen35.vocab_size":                       uint32(248320),
 		},
 	}
 
@@ -55,13 +55,13 @@ func TestExtractModelConfig_LlamaFallback(t *testing.T) {
 	f := &gguf.GGUFFile{
 		Header: gguf.GGUFHeader{Version: 3},
 		KV: map[string]interface{}{
-			"general.architecture":        "llama",
-			"llama.block_count":           uint64(28),
-			"llama.embedding_length":      uint64(3072),
-			"llama.attention.head_count":  uint64(24),
+			"general.architecture":          "llama",
+			"llama.block_count":             uint64(28),
+			"llama.embedding_length":        uint64(3072),
+			"llama.attention.head_count":    uint64(24),
 			"llama.attention.head_count_kv": uint64(8),
-			"llama.feed_forward_length":   uint64(8192),
-			"llama.context_length":        uint64(8192),
+			"llama.feed_forward_length":     uint64(8192),
+			"llama.context_length":          uint64(8192),
 		},
 	}
 

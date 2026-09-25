@@ -1,4 +1,5 @@
 //go:build !metal && !cuda && !tpu
+
 package device
 
 import (
@@ -26,9 +27,11 @@ func TestCPU_TensorLifecycle(t *testing.T) {
 
 	// 3. LoadFromF32 and ToHostF32
 	data := make([]float32, 25)
-	for i := range data { data[i] = float32(i) }
+	for i := range data {
+		data[i] = float32(i)
+	}
 	ten32.LoadFromF32(data)
-	
+
 	back := ten32.ToHostF32()
 	for i := range data {
 		if back[i] != data[i] {
@@ -48,18 +51,20 @@ func TestCPU_TensorLifecycle(t *testing.T) {
 	// 5. CopyToF16 (F32 -> F16 stub for CPU)
 	ten32.LoadFromF32(data)
 	f16Target := ten32.CopyToF16()
-	
+
 	back16 := f16Target.ToHostF32()
 	for i := range data {
 		// FP16 precision check (approx)
-		if math_abs(float64(back16[i] - data[i])) > 1e-2 {
+		if math_abs(float64(back16[i]-data[i])) > 1e-2 {
 			t.Errorf("CopyToF16 deviation at %d: %f -> %f", i, data[i], back16[i])
 		}
 	}
 }
 
 func math_abs(x float64) float64 {
-	if x < 0 { return -x }
+	if x < 0 {
+		return -x
+	}
 	return x
 }
 
@@ -73,7 +78,7 @@ func TestCPU_ContextOps(t *testing.T) {
 }
 
 func TestCPU_AllocatedBytes(t *testing.T) {
-	// For CPU, memory tracking might be disabled or pooled. 
+	// For CPU, memory tracking might be disabled or pooled.
 	// We'll just verify the call doesn't panic.
 	_ = CPUAllocatedBytes()
 }

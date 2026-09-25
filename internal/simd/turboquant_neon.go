@@ -1,4 +1,5 @@
 //go:build arm64 && cgo
+
 package simd
 
 import (
@@ -19,14 +20,23 @@ func PolarQuantSIMD(input []float32, rotationMatrix []float32, n int, bits int) 
 	rotated := make([]float32, n)
 	maxAbs := float32(0.0)
 
-	for i := 0; i < n; i++ {
-		var sum float32
-		for j := 0; j < n; j++ {
-			sum += rotationMatrix[i*n+j] * input[j]
+	if len(rotationMatrix) == 0 {
+		copy(rotated, input)
+		for _, x := range input {
+			if a := float32(math.Abs(float64(x))); a > maxAbs {
+				maxAbs = a
+			}
 		}
-		rotated[i] = sum
-		if a := float32(math.Abs(float64(sum))); a > maxAbs {
-			maxAbs = a
+	} else {
+		for i := 0; i < n; i++ {
+			var sum float32
+			for j := 0; j < n; j++ {
+				sum += rotationMatrix[i*n+j] * input[j]
+			}
+			rotated[i] = sum
+			if a := float32(math.Abs(float64(sum))); a > maxAbs {
+				maxAbs = a
+			}
 		}
 	}
 

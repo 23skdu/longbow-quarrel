@@ -219,8 +219,8 @@ type ChatMessage struct {
 }
 
 type ChatContentPart struct {
-	Type     string         `json:"type"`
-	Text     string         `json:"text,omitempty"`
+	Type     string        `json:"type"`
+	Text     string        `json:"text,omitempty"`
 	ImageURL *ChatImageURL `json:"image_url,omitempty"`
 }
 

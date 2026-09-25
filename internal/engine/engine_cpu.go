@@ -24,9 +24,9 @@ type CPUEngine struct {
 	ctx     *device.Context
 	cache   *PagedKVCache
 
-	PromptCache  *PromptCache
-	seqKVCaches  map[string]*CPUKVCache
-	kvMu         sync.Mutex
+	PromptCache *PromptCache
+	seqKVCaches map[string]*CPUKVCache
+	kvMu        sync.Mutex
 
 	BatchManager *ContinuousBatchManager
 	stopChan     chan struct{}
@@ -234,13 +234,6 @@ func (e *CPUEngine) runBatchLoop() {
 			logits := results[i].ToHostF32()
 			results[i].Free()
 
-			if seq.LogitsCallback != nil {
-				seq.LogitsCallback(logits)
-			}
-
-			sampler := NewSampler(seq.Config)
-			token := sampler.Sample(logits, seq.Tokens)
-
 			// Update Sequence State
 			chunkLen := 1
 			if i < len(desc.Offsets)-1 {
@@ -248,6 +241,19 @@ func (e *CPUEngine) runBatchLoop() {
 			} else {
 				chunkLen = len(desc.Tokens) - desc.Offsets[i]
 			}
+
+			// If this is an intermediate prefill chunk, just advance position and continue
+			if i < len(desc.IsDecode) && !desc.IsDecode[i] && seq.Pos+chunkLen < seq.PromptLen {
+				seq.Pos += chunkLen
+				continue
+			}
+
+			if seq.LogitsCallback != nil {
+				seq.LogitsCallback(logits)
+			}
+
+			sampler := NewSampler(seq.Config)
+			token := sampler.Sample(logits, seq.Tokens)
 
 			seq.Tokens = append(seq.Tokens, token)
 			seq.Pos += chunkLen
@@ -440,7 +446,7 @@ func (e *CPUEngine) SwapModel(modelPath string, cfg config.Config) error {
 	return nil
 }
 
-func (e *CPUEngine) forward(tokens []int) []float32 {
+func (e *CPUEngine) Forward(tokens []int) []float32 {
 	hiddenSize := e.config.Dim
 	if hiddenSize <= 0 {
 		hiddenSize = 576
@@ -500,13 +506,13 @@ func (e *CPUEngine) forward(tokens []int) []float32 {
 	return logits
 }
 
-func rmsNormCPU(input, weight []float32, eps float32) []float32 {
+func RMSNormCPU(input, weight []float32, eps float32) []float32 {
 	result := make([]float32, len(input))
 	simd.RMSNorm(input, weight, result, 1, len(input), eps)
 	return result
 }
 
-func sigmoid(x float32) float32 {
+func Sigmoid(x float32) float32 {
 	if x < -30 {
 		return 0
 	}
@@ -542,7 +548,7 @@ func (e *CPUEngine) Close() {
 	logger.Log.Info("CPU engine closed")
 }
 
-func applyTempCPU(logits []float32, temp float64) []float32 {
+func ApplyTempCPU(logits []float32, temp float64) []float32 {
 	result := make([]float32, len(logits))
 	for i, l := range logits {
 		result[i] = float32(float64(l) / temp)
@@ -550,7 +556,7 @@ func applyTempCPU(logits []float32, temp float64) []float32 {
 	return result
 }
 
-func applyTopKCPU(logits []float32, k int) []float32 {
+func ApplyTopKCPU(logits []float32, k int) []float32 {
 	if k >= len(logits) || k <= 0 {
 		return logits
 	}
@@ -579,9 +585,9 @@ func applyTopKCPU(logits []float32, k int) []float32 {
 	return logits
 }
 
-// applyTopPCPU applies Top-P (nucleus) filtering: sorts tokens by softmax probability,
+// ApplyTopPCPU applies Top-P (nucleus) filtering: sorts tokens by softmax probability,
 // accumulates the CDF, and sets logits[i] = -Inf for all tokens outside the nucleus.
-func applyTopPCPU(logits []float32, p float64) []float32 {
+func ApplyTopPCPU(logits []float32, p float64) []float32 {
 	if p >= 1.0 || len(logits) == 0 {
 		return logits
 	}
@@ -627,7 +633,6 @@ func applyTopPCPU(logits []float32, p float64) []float32 {
 	return result
 }
 
-
 func softmaxCPU(logits []float32) []float32 {
 	probs := make([]float32, len(logits))
 	copy(probs, logits)
@@ -635,7 +640,7 @@ func softmaxCPU(logits []float32) []float32 {
 	return probs
 }
 
-func sampleFromDistCPU(probs []float32, r *rand.Rand) int {
+func SampleFromDistCPU(probs []float32, r *rand.Rand) int {
 	cumSum := float32(0)
 	threshold := float32(r.Float32())
 	for i, p := range probs {
@@ -705,7 +710,6 @@ func (e *CPUEngine) ForwardDraft(tokens []int) ([][]float32, error) {
 	return results, nil
 }
 
-
 func (e *CPUEngine) RollbackKV(seqID string, newPos int) error {
 	var cacheErr error
 	if e.cache != nil {
@@ -763,9 +767,9 @@ func (e *CPUEngine) LoadAdapter(path, id string) error {
 		if !ok {
 			continue
 		}
-		dimIn := int(tA.Dimensions[0])   // #nosec G115
-		rank := int(tA.Dimensions[1])    // #nosec G115
-		dimOut := int(tB.Dimensions[1])  // #nosec G115
+		dimIn := int(tA.Dimensions[0])  // #nosec G115
+		rank := int(tA.Dimensions[1])   // #nosec G115
+		dimOut := int(tB.Dimensions[1]) // #nosec G115
 
 		aData, err2 := decodeTensorData(tA)
 		if err2 != nil || len(aData) != dimIn*rank {
@@ -869,4 +873,3 @@ func (e *CPUEngine) mergeLoRADelta(layer int, key string, delta []float32) {
 		target[i] += delta[i]
 	}
 }
-

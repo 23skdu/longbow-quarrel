@@ -1,4 +1,4 @@
-//go:build !avx512
+//go:build !amd64 || !cgo || !avx512
 
 package simd
 
@@ -13,7 +13,7 @@ func RMSNorm(input, weight, output []float32, rows, cols int, eps float32) {
 			v := input[offset+c]
 			sum += v * v
 		}
-		invNorm := float32(1.0 / math.Sqrt(float64(sum)/float64(cols) + float64(eps)))
+		invNorm := float32(1.0 / math.Sqrt(float64(sum)/float64(cols)+float64(eps)))
 		for c := 0; c < cols; c++ {
 			output[offset+c] = input[offset+c] * invNorm * weight[c]
 		}

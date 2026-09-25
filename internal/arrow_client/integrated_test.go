@@ -31,7 +31,7 @@ func TestArrowIntegration_Suite(t *testing.T) {
 		Tokens: []string{" ", "test"},
 	}
 	server := api.NewInferenceFlightServer(addr, mockEngine, mockTokenizer)
-	
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 

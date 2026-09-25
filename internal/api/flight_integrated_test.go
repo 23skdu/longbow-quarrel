@@ -29,7 +29,7 @@ func TestFlight_Integrated_Coverage(t *testing.T) {
 	mockTok := &tokenizer.Tokenizer{}
 
 	server := NewInferenceFlightServer(addr, mockEngine, mockTok)
-	
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -59,7 +59,7 @@ func TestFlight_Integrated_Coverage(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetSchema failed: %v", err)
 		}
-		
+
 		// Check for GPU metadata
 		if schema != nil && schema.HasMetadata() {
 			meta := schema.Metadata()

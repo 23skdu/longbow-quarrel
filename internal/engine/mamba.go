@@ -1,15 +1,11 @@
 //go:build darwin && metal
 
-
-
 package engine
 
 import (
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
 	"github.com/23skdu/longbow-quarrel/internal/logger"
 )
-
-
 
 // detectMambaLayers determines the Mamba layer pattern from model metadata
 func (e *metalEngine) detectMambaLayers(f *gguf.GGUFFile, log logger.Logger) {
@@ -131,4 +127,3 @@ func (e *metalEngine) IsMambaLayer(layerIdx int) bool {
 
 	return false
 }
-

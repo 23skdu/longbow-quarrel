@@ -49,11 +49,9 @@ func GetMaxMemoryMB() int64 {
 
 // ===== Proactive Memory Governor (v0.4.0 Part 10) =====
 
-const DefaultMemoryPressureThreshold = 0.85
-
 type MemoryGovernor struct {
-	mu             sync.Mutex
-	defragHandlers []func()
+	mu              sync.Mutex
+	defragHandlers  []func()
 	offloadHandlers []func()
 	customRAMUsage  func() (used, total int64, pct float64)
 	customVRAMUsage func() (used, total int64, pct float64)
@@ -189,4 +187,3 @@ func (g *MemoryGovernor) TriggerGovernor(threshold float64) (actionTaken string)
 
 	return actionTaken
 }
-

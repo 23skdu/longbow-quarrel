@@ -1,9 +1,10 @@
-//go:build linux && cuda
+//go:build linux && amd64 && cuda && cgo
 
 package device
 
 import (
 	"fmt"
+	"sync"
 	"testing"
 )
 
@@ -436,10 +437,6 @@ func TestConfigValidation(t *testing.T) {
 	}
 }
 
-func TestCommunicationStats(t *testing.T) {
-	t.Skip("CrossGPUCommunicator requires CGO types - skipping in non-CGO environment")
-}
-
 // Benchmark tests
 func BenchmarkAllReduce(b *testing.B) {
 	tensors := map[int][]float32{
@@ -517,4 +514,244 @@ func ExamplePipelineParallelManager() {
 	//   Stages: 4
 	//   Depth: 4
 	//   Pipeline Bubbles: true
+}
+
+func Test1F1BDoubleBuffering(t *testing.T) {
+	stage := &PipelineStage{
+		ID:         0,
+		StartLayer: 0,
+		EndLayer:   8,
+		DeviceID:   0,
+	}
+
+	dim := 128
+	stage.InitDoubleBuffers(dim)
+
+	if len(stage.HostStagingIn[0]) != dim || len(stage.HostStagingIn[1]) != dim {
+		t.Fatalf("Expected HostStagingIn to be of size %d, got %d and %d",
+			dim, len(stage.HostStagingIn[0]), len(stage.HostStagingIn[1]))
+	}
+
+	// Test slot locking
+	stage.AcquireSlot(0)
+	stage.ReleaseSlot(0)
+
+	stage.AcquireSlot(1)
+	stage.ReleaseSlot(1)
+
+	// Test slot indexing modulo 2
+	stage.AcquireSlot(2)
+	stage.ReleaseSlot(2)
+}
+
+func Test1F1BPipelineExecution(t *testing.T) {
+	ShutdownMultiGPU()
+	defer ShutdownMultiGPU()
+
+	cfg := &MultiGPUConfig{
+		Mode:           PipelineParallelism,
+		NumGPUs:        1,
+		PipelineStages: 2,
+		PipelineDepth:  4,
+	}
+
+	pp, err := NewPipelineParallelManager(cfg, 16)
+	if err != nil {
+		t.Fatalf("Failed to create PipelineParallelManager: %v", err)
+	}
+
+	// 8 micro-batches with dim 4
+	numBatches := 8
+	dim := 4
+	microBatches := make([][]float32, numBatches)
+	for i := 0; i < numBatches; i++ {
+		microBatches[i] = make([]float32, dim)
+		for j := 0; j < dim; j++ {
+			microBatches[i][j] = float32(i*10 + j + 1)
+		}
+	}
+
+	// Track slots used to verify double-buffer alternating pattern
+	var slotHistory sync.Map
+	stageFn := func(stage *PipelineStage, microBatchID int, slot int, input []float32) ([]float32, error) {
+		expectedSlot := microBatchID % 2
+		if slot != expectedSlot {
+			t.Errorf("Microbatch %d: expected slot %d, got %d", microBatchID, expectedSlot, slot)
+		}
+		slotHistory.Store(fmt.Sprintf("%d-%d", stage.ID, microBatchID), slot)
+
+		output := make([]float32, len(input))
+		for k, v := range input {
+			// Stage 0 adds 100, Stage 1 adds 200
+			output[k] = v + float32((stage.ID+1)*100)
+		}
+		return output, nil
+	}
+
+	results, err := pp.ForwardMicroBatches1F1B(microBatches, stageFn)
+	if err != nil {
+		t.Fatalf("ForwardMicroBatches1F1B failed: %v", err)
+	}
+
+	if len(results) != numBatches {
+		t.Fatalf("Expected %d results, got %d", numBatches, len(results))
+	}
+
+	for i := 0; i < numBatches; i++ {
+		for j := 0; j < dim; j++ {
+			// Initial: i*10 + j + 1
+			// Stage 0: + 100
+			// Stage 1: + 200
+			// Total: i*10 + j + 1 + 300
+			expected := float32(i*10 + j + 1 + 300)
+			if results[i][j] != expected {
+				t.Errorf("Batch %d, element %d: expected %f, got %f", i, j, expected, results[i][j])
+			}
+		}
+	}
+
+	// Verify forward pass counts
+	fwdCount := pp.GetFwdPassCount()
+	if fwdCount < int64(numBatches) {
+		t.Errorf("Expected fwdCount >= %d, got %d", numBatches, fwdCount)
+	}
+
+	// Verify direct ForwardStage execution
+	stageOut, err := pp.ForwardStage(pp.stages[0], []float32{1.0, 2.0}, 0)
+	if err != nil {
+		t.Errorf("ForwardStage failed: %v", err)
+	}
+	if len(stageOut) != 2 {
+		t.Errorf("Expected 2 outputs from ForwardStage, got %d", len(stageOut))
+	}
+}
+
+func Test1F1BSingleStageExecution(t *testing.T) {
+	ShutdownMultiGPU()
+	defer ShutdownMultiGPU()
+
+	cfg := &MultiGPUConfig{
+		Mode:           PipelineParallelism,
+		NumGPUs:        1,
+		PipelineStages: 1,
+		PipelineDepth:  2,
+	}
+
+	pp, err := NewPipelineParallelManager(cfg, 8)
+	if err != nil {
+		t.Fatalf("Failed to create PipelineParallelManager: %v", err)
+	}
+
+	input := [][]float32{
+		{1.0, 2.0},
+		{3.0, 4.0},
+		{5.0, 6.0},
+	}
+
+	results, err := pp.ForwardMicroBatches1F1B(input, nil)
+	if err != nil {
+		t.Fatalf("Single stage 1F1B failed: %v", err)
+	}
+
+	if len(results) != 3 {
+		t.Fatalf("Expected 3 results, got %d", len(results))
+	}
+
+	for i := range input {
+		for j := range input[i] {
+			if results[i][j] != input[i][j] {
+				t.Errorf("Mismatch at [%d][%d]: expected %f, got %f", i, j, input[i][j], results[i][j])
+			}
+		}
+	}
+
+	// Also test ForwardPass wrapper
+	singleOut, err := pp.ForwardPass(0, input[0])
+	if err != nil {
+		t.Fatalf("ForwardPass failed: %v", err)
+	}
+	if len(singleOut) != 2 || singleOut[0] != 1.0 {
+		t.Errorf("ForwardPass unexpected output: %v", singleOut)
+	}
+}
+
+func TestCrossGPUStagingFallback(t *testing.T) {
+	ShutdownMultiGPU()
+	defer ShutdownMultiGPU()
+
+	cfg := &MultiGPUConfig{
+		Mode:    PipelineParallelism | TensorParallelism,
+		NumGPUs: 1,
+	}
+
+	cg, err := NewCrossGPUCommunicator(cfg)
+	if err != nil {
+		t.Fatalf("NewCrossGPUCommunicator failed: %v", err)
+	}
+
+	// Test peer buffer allocation on device 0
+	pm, err := cg.AllocatePeerStagingBuffer(0, 0, 1024)
+	if err != nil {
+		t.Fatalf("AllocatePeerStagingBuffer failed: %v", err)
+	}
+	if pm == nil || !pm.isValid || pm.size != 1024 {
+		t.Errorf("Unexpected PeerMemory: %+v", pm)
+	}
+
+	// Test cached allocation returns existing
+	pm2, err := cg.AllocatePeerStagingBuffer(0, 0, 512)
+	if err != nil || pm2 != pm {
+		t.Errorf("Expected cached buffer reuse, got %v", pm2)
+	}
+
+	// Test activation transfer
+	err = cg.TransferActivations(0, 0, []float32{1.0, 2.0, 3.0, 4.0}, 0)
+	if err != nil {
+		t.Errorf("TransferActivations self-device failed: %v", err)
+	}
+
+	ops, sent, recv := cg.GetStats()
+	t.Logf("Stats: ops=%d, sent=%d, recv=%d", ops, sent, recv)
+}
+
+func TestMultiGPUConfigDevices(t *testing.T) {
+	cfg := &MultiGPUConfig{
+		Mode:               TensorParallelism | PipelineParallelism,
+		Devices:            []int{0, 1},
+		TensorParallelSize: 2,
+		PipelineStages:     2,
+	}
+
+	if len(cfg.Devices) != 2 || cfg.Devices[0] != 0 || cfg.Devices[1] != 1 {
+		t.Errorf("Devices not preserved: %v", cfg.Devices)
+	}
+}
+
+func TestTensorParallelSingleGPU(t *testing.T) {
+	ShutdownMultiGPU()
+	defer ShutdownMultiGPU()
+
+	cfg := &MultiGPUConfig{
+		Mode:               TensorParallelism,
+		TensorParallelSize: 1,
+		Devices:            []int{0},
+	}
+
+	tp, err := NewTensorParallelManager(cfg)
+	if err != nil {
+		t.Fatalf("Expected TP=1 on single GPU to succeed, got: %v", err)
+	}
+
+	if tp.GetWorldSize() != 1 {
+		t.Errorf("Expected WorldSize=1, got %d", tp.GetWorldSize())
+	}
+
+	data := []float32{10.0, 20.0, 30.0}
+	err = tp.AllReduce(data, len(data))
+	if err != nil {
+		t.Errorf("AllReduce on WorldSize=1 failed: %v", err)
+	}
+	if data[0] != 10.0 {
+		t.Errorf("Expected data[0]=10.0, got %f", data[0])
+	}
 }

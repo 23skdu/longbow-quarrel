@@ -15,7 +15,7 @@ import (
 func TestRMSNormCPUWrapper(t *testing.T) {
 	input := []float32{1, 2, 3, 4}
 	weight := []float32{1, 1, 1, 1}
-	result := rmsNormCPU(input, weight, 1e-5)
+	result := RMSNormCPU(input, weight, 1e-5)
 	if len(result) != 4 {
 		t.Fatalf("expected 4, got %d", len(result))
 	}
@@ -30,7 +30,7 @@ func TestRMSNormCPUWrapper(t *testing.T) {
 }
 
 func TestRMSNormCPUEmpty(t *testing.T) {
-	result := rmsNormCPU(nil, nil, 1e-5)
+	result := RMSNormCPU(nil, nil, 1e-5)
 	if len(result) != 0 {
 		t.Error("expected empty result")
 	}
@@ -82,7 +82,7 @@ func TestSigmoid(t *testing.T) {
 		{-100, 0},
 	}
 	for _, tc := range tests {
-		got := sigmoid(tc.input)
+		got := Sigmoid(tc.input)
 		if math.Abs(float64(got-tc.expected)) > 1e-5 {
 			t.Errorf("sigmoid(%f) = %f, want %f", tc.input, got, tc.expected)
 		}
@@ -91,7 +91,7 @@ func TestSigmoid(t *testing.T) {
 
 func TestApplyTopPCPU(t *testing.T) {
 	logits := []float32{1.0, 2.0, 3.0, 4.0}
-	result := applyTopPCPU(logits, 0.9)
+	result := ApplyTopPCPU(logits, 0.9)
 	if len(result) != 4 {
 		t.Fatalf("expected 4, got %d", len(result))
 	}
@@ -106,7 +106,7 @@ func TestApplyTopPCPU(t *testing.T) {
 }
 
 func TestApplyTopPCPUEmpty(t *testing.T) {
-	result := applyTopPCPU([]float32{}, 0.9)
+	result := ApplyTopPCPU([]float32{}, 0.9)
 	if len(result) != 0 {
 		t.Error("expected empty")
 	}
@@ -114,7 +114,7 @@ func TestApplyTopPCPUEmpty(t *testing.T) {
 
 func TestApplyTopPCPUSingle(t *testing.T) {
 	logits := []float32{5.0}
-	result := applyTopPCPU(logits, 0.9)
+	result := ApplyTopPCPU(logits, 0.9)
 	if len(result) != 1 {
 		t.Fatalf("expected 1, got %d", len(result))
 	}
@@ -127,7 +127,7 @@ func TestApplyTopPCPUSingle(t *testing.T) {
 func TestSampleFromDistCPU(t *testing.T) {
 	probs := []float32{0.1, 0.2, 0.3, 0.4}
 	rng := rand.New(rand.NewSource(42))
-	idx := sampleFromDistCPU(probs, rng)
+	idx := SampleFromDistCPU(probs, rng)
 	if idx < 0 || idx >= 4 {
 		t.Errorf("sample index %d out of range", idx)
 	}
@@ -136,7 +136,7 @@ func TestSampleFromDistCPU(t *testing.T) {
 func TestSampleFromDistCPUDeterministic(t *testing.T) {
 	probs := []float32{1.0, 0.0, 0.0}
 	rng := rand.New(rand.NewSource(0))
-	idx := sampleFromDistCPU(probs, rng)
+	idx := SampleFromDistCPU(probs, rng)
 	if idx != 0 {
 		t.Errorf("with prob[0]=1.0, expected index 0, got %d", idx)
 	}
@@ -144,7 +144,7 @@ func TestSampleFromDistCPUDeterministic(t *testing.T) {
 
 func TestSampleFromDistCPUEmpty(t *testing.T) {
 	rng := rand.New(rand.NewSource(0))
-	idx := sampleFromDistCPU([]float32{}, rng)
+	idx := SampleFromDistCPU([]float32{}, rng)
 	if idx != -1 {
 		t.Errorf("expected -1 for empty, got %d", idx)
 	}
@@ -201,7 +201,7 @@ func TestContains(t *testing.T) {
 
 func TestApplyTempCPU(t *testing.T) {
 	logits := []float32{1.0, 2.0, 3.0}
-	result := applyTempCPU(logits, 0.5)
+	result := ApplyTempCPU(logits, 0.5)
 	if len(result) != 3 {
 		t.Fatalf("expected 3, got %d", len(result))
 	}
@@ -214,7 +214,7 @@ func TestApplyTopKCPU(t *testing.T) {
 	logits := []float32{1.0, 5.0, 2.0, 4.0, 3.0}
 	orig := make([]float32, len(logits))
 	copy(orig, logits)
-	result := applyTopKCPU(logits, 3)
+	result := ApplyTopKCPU(logits, 3)
 	// Top 3 values: 5.0(idx1), 4.0(idx3), 3.0(idx4)
 	// Bottom 2: 1.0(idx0), 2.0(idx2) should be -Inf
 	expectedInf := []int{0, 2}
@@ -234,7 +234,7 @@ func TestApplyTopKCPU(t *testing.T) {
 
 func TestApplyTopKCPUFull(t *testing.T) {
 	logits := []float32{1, 2, 3}
-	result := applyTopKCPU(logits, 10)
+	result := ApplyTopKCPU(logits, 10)
 	if len(result) != 3 {
 		t.Fatalf("expected 3, got %d", len(result))
 	}
@@ -242,7 +242,7 @@ func TestApplyTopKCPUFull(t *testing.T) {
 
 func TestApplyTopKCPUZero(t *testing.T) {
 	logits := []float32{1, 2, 3}
-	result := applyTopKCPU(logits, 0)
+	result := ApplyTopKCPU(logits, 0)
 	if len(result) != 3 {
 		t.Fatalf("expected 3, got %d", len(result))
 	}
@@ -708,9 +708,7 @@ func attentionCPUScalar(q, k, v []float32, numHeads, kvHeads, headDim int) []flo
 	return result
 }
 
-
-
-	// Verify SSM tensors are loaded for SSM layers
+// Verify SSM tensors are loaded for SSM layers
 
 func TestQwen35ModelStructure(t *testing.T) {
 	modelPath := "/home/rsd/.cache/llmfit/models/Huihui-Qwen3.5-4B-Claude-4.6-Opus-abliterated.Q8_0.gguf"

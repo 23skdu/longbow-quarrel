@@ -58,6 +58,14 @@ type Config struct {
 	IsHybrid                      bool
 	MambaLayerPattern             string
 
+	// DeepSeek MLA (Multi-Head Latent Attention) configuration
+	IsMLA      bool
+	QLoRARank  int // q_lora_rank
+	KVLoRARank int // kv_lora_rank
+	QKNDim     int // qk_nope_head_dim
+	QKRopeDim  int // qk_rope_head_dim
+	VHeadDim   int // v_head_dim
+
 	// Gemma4-specific configuration
 	IsGemma4                bool
 	Gemma4SlidingWindowSize int     // Default 512 for sliding window layers
@@ -88,6 +96,11 @@ type Config struct {
 
 	// Memory limits (0 = no limit)
 	MaxMemoryMB int64 // Soft limit for total process memory in MB; triggers GC+OOM error
+
+	// Multi-GPU / Distributed Parallelism
+	Devices            []int
+	TensorParallelSize int
+	PipelineStages     int
 }
 
 type Gemma4Config struct {
@@ -104,6 +117,12 @@ type Gemma4Config struct {
 }
 
 func (c *Config) Validate() error {
+	if c.TensorParallelSize < 0 {
+		return fmt.Errorf("invalid tensor_parallel_size: %d (must be non-negative)", c.TensorParallelSize)
+	}
+	if c.PipelineStages < 0 {
+		return fmt.Errorf("invalid pipeline_stages: %d (must be non-negative)", c.PipelineStages)
+	}
 	if c.Dim <= 0 {
 		return fmt.Errorf("invalid dim: %d (must be positive)", c.Dim)
 	}
@@ -122,7 +141,7 @@ func (c *Config) Validate() error {
 	if c.HeadDim <= 0 {
 		return fmt.Errorf("invalid head_dim: %d (must be positive)", c.HeadDim)
 	}
-	if !c.IsGemma4 && c.Dim != c.Heads*c.HeadDim {
+	if !c.IsGemma4 && !c.IsMLA && c.Dim != c.Heads*c.HeadDim {
 		return fmt.Errorf("dim mismatch: %d != heads(%d) * head_dim(%d)", c.Dim, c.Heads, c.HeadDim)
 	}
 	if c.VocabSize <= 0 {
@@ -150,6 +169,28 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	if c.IsMLA {
+		if err := c.validateMLA(); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (c *Config) validateMLA() error {
+	if c.KVLoRARank <= 0 {
+		return fmt.Errorf("invalid kv_lora_rank: %d (must be positive for MLA)", c.KVLoRARank)
+	}
+	if c.QKNDim <= 0 {
+		return fmt.Errorf("invalid qk_nope_head_dim: %d (must be positive for MLA)", c.QKNDim)
+	}
+	if c.QKRopeDim <= 0 {
+		return fmt.Errorf("invalid qk_rope_head_dim: %d (must be positive for MLA)", c.QKRopeDim)
+	}
+	if c.VHeadDim <= 0 {
+		return fmt.Errorf("invalid v_head_dim: %d (must be positive for MLA)", c.VHeadDim)
+	}
 	return nil
 }
 

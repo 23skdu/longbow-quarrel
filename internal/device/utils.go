@@ -20,8 +20,8 @@ const (
 	DataTypeQ3K  DataType = 5
 	DataTypeQ8_0 DataType = 6
 
-	DataTypeQ4_K   = DataTypeQ4K
-	DataTypeQ6_K   = DataTypeQ6K
+	DataTypeQ4_K            = DataTypeQ4K
+	DataTypeQ6_K            = DataTypeQ6K
 	DataTypeIQ4_NL DataType = 7
 	DataTypeMXFP4  DataType = 8
 	DataTypeTQ1_0  DataType = 9
@@ -29,10 +29,7 @@ const (
 	DataTypeFP8    DataType = 11
 	DataTypeINT8   DataType = 12
 
-	DataTypeQ5_K DataType = 13
-	DataTypeQ2_K DataType = 14
-	DataTypeQ1_K DataType = 15
-	DataTypeI32   DataType = 16
+	DataTypeI32 DataType = 16
 )
 
 // Reference implementation of Float32 <-> Float16
@@ -224,3 +221,15 @@ func DequantizeBlockQ8_0(src []int8, scale float32, dst []float32) {
 	}
 }
 
+func getFloat32(b []byte) float32 {
+	bits := uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16 | uint32(b[3])<<24
+	return math.Float32frombits(bits) // #nosec G115
+}
+
+func setFloat32(b []byte, f float32) {
+	bits := math.Float32bits(f)
+	b[0] = byte(bits)       // #nosec G115 -- byte extraction from uint32
+	b[1] = byte(bits >> 8)  // #nosec G115 -- byte extraction from uint32
+	b[2] = byte(bits >> 16) // #nosec G115 -- byte extraction from uint32
+	b[3] = byte(bits >> 24) // #nosec G115 -- byte extraction from uint32
+}

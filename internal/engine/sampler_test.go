@@ -130,4 +130,3 @@ func TestSampler_MinP(t *testing.T) {
 		}
 	}
 }
-

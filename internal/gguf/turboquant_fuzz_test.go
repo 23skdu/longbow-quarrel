@@ -19,7 +19,7 @@ func FuzzPolarQuant(f *testing.F) {
 		if err != nil {
 			t.Errorf("PolarQuant error: %v", err)
 		}
-		
+
 		if len(quantized) != n || len(residual) != n {
 			t.Errorf("Output length mismatch")
 		}

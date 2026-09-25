@@ -144,4 +144,3 @@ func TestCoherenceWrapping(t *testing.T) {
 		t.Logf("CachePos reached %d successfully (Context Wrapping Verified)", pos)
 	}
 }
-

@@ -12,34 +12,34 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/23skdu/longbow-quarrel/internal/api"
 	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/device"
 	"github.com/23skdu/longbow-quarrel/internal/engine"
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
 	"github.com/23skdu/longbow-quarrel/internal/logger"
+	"github.com/23skdu/longbow-quarrel/internal/metrics"
 	"github.com/23skdu/longbow-quarrel/internal/ollama"
 	"github.com/23skdu/longbow-quarrel/internal/tokenizer"
-	"github.com/23skdu/longbow-quarrel/internal/metrics"
-	"github.com/23skdu/longbow-quarrel/internal/api"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 var (
-	modelPath   = flag.String("model", "", "Path to GGUF model file")
-	prompt      = flag.String("prompt", "Hello world", "Prompt to generate from")
-	numTokens   = flag.Int("n", 20, "Number of tokens to generate")
-	metricsAddr = flag.String("metrics", ":9090", "Address to serve Prometheus metrics")
-	kvCacheSize = flag.Int("kv-cache-size", 2048, "KV cache max sequence length")
+	modelPath    = flag.String("model", "", "Path to GGUF model file")
+	prompt       = flag.String("prompt", "Hello world", "Prompt to generate from")
+	numTokens    = flag.Int("n", 20, "Number of tokens to generate")
+	metricsAddr  = flag.String("metrics", ":9090", "Address to serve Prometheus metrics")
+	kvCacheSize  = flag.Int("kv-cache-size", 2048, "KV cache max sequence length")
 	maxBatchSize = flag.Int("max-batch-size", 16, "Maximum number of sequences in a batch")
-	blockSize   = flag.Int("block-size", 16, "Paged attention block size")
-	totalBlocks = flag.Int("total-blocks", 256, "Total number of physical blocks in paged cache")
+	blockSize    = flag.Int("block-size", 16, "Paged attention block size")
+	totalBlocks  = flag.Int("total-blocks", 256, "Total number of physical blocks in paged cache")
 
-	temperature = flag.Float64("temp", 0.7, "Temperature for sampling")
-	topK        = flag.Int("topk", 40, "Top-K sampling")
-	topP        = flag.Float64("topp", 0.95, "Top-P sampling")
-	repPenalty = flag.Float64("rep-penalty", 1.1, "Repetition penalty")
+	temperature  = flag.Float64("temp", 0.7, "Temperature for sampling")
+	topK         = flag.Int("topk", 40, "Top-K sampling")
+	topP         = flag.Float64("topp", 0.95, "Top-P sampling")
+	repPenalty   = flag.Float64("rep-penalty", 1.1, "Repetition penalty")
 	streamOutput = flag.Bool("stream", false, "Stream tokens as they are generated")
-	flightAddr  = flag.String("flight", ":50051", "Address to serve Arrow Flight inference")
+	flightAddr   = flag.String("flight", ":50051", "Address to serve Arrow Flight inference")
 )
 
 func main() {
@@ -142,8 +142,8 @@ func main() {
 
 	samplerConfig := engine.SamplerConfig{
 		Temperature: *temperature,
-		TopK:         *topK,
-		TopP:         *topP,
+		TopK:        *topK,
+		TopP:        *topP,
 		RepPenalty:  *repPenalty,
 	}
 

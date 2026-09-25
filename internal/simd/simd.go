@@ -102,7 +102,6 @@ func MatMul(a, b []float32, rowsA, colsA, colsB int) []float32 {
 	return result
 }
 
-
 func MatVecMul(matrix []float32, vector []float32, rows, cols int) []float32 {
 	result := make([]float32, rows)
 	if rows == 0 || cols == 0 || len(vector) < cols || len(matrix) < rows*cols {
@@ -501,4 +500,3 @@ func MatVecMulQ4_K_VNNI(data []byte, vector []float32, rows, cols int) []float32
 	wg.Wait()
 	return result
 }
-

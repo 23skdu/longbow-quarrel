@@ -2,9 +2,9 @@ package api
 
 import (
 	"encoding/json"
-	"net/http"
 	"github.com/23skdu/longbow-quarrel/internal/logger"
 	"github.com/23skdu/longbow-quarrel/internal/telemetry"
+	"net/http"
 )
 
 type LoadAdapterRequest struct {

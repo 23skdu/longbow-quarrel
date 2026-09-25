@@ -14,7 +14,6 @@ func DequantizeQ4K_SIMD(data []byte, numElements int) []float32 {
 
 	numBlocks := numElements / BlockSizeQ4K
 	out := make([]float32, numElements)
-	const blockSizeBytes = 144
 
 	if numBlocks < 16 {
 		dequantizeQ4KBlocks(data, out, 0, numBlocks)
@@ -112,7 +111,6 @@ func DequantizeQ6K_SIMD(data []byte, numElements int) []float32 {
 		panic("DequantizeQ6K_SIMD: numElements must be multiple of 256")
 	}
 
-	const blockSizeBytes = 210
 	numBlocks := numElements / BlockSizeQ6K
 	out := make([]float32, numElements)
 

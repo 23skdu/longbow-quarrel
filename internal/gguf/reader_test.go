@@ -46,7 +46,7 @@ func TestReader_MetadataArrays(t *testing.T) {
 	defer reader.Close()
 
 	meta := reader.KV
-	
+
 	// Verify Array Float32
 	if arr, ok := meta["llama.rope.freq_base_array"].([]interface{}); ok {
 		if len(arr) != 2 {
@@ -280,4 +280,3 @@ func writeStringInTestBytes(buf *bytes.Buffer, s string) {
 	binary.Write(buf, binary.LittleEndian, uint64(len(s)))
 	buf.WriteString(s)
 }
-

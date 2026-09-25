@@ -1,7 +1,5 @@
 //go:build metal
 
-
-
 package engine
 
 import (
@@ -45,7 +43,7 @@ func NewMetalEngine(modelPath string, config config.Config) (Engine, error) {
 	e.TraceTracker = NewActivationTraceTracker(e.config.Layers)
 	e.BatchManager = NewContinuousBatchManager()
 	e.PromptCache = NewPromptCache()
-	
+
 	e.stopChan = make(chan struct{})
 	e.doneChan = make(chan struct{})
 
@@ -122,7 +120,9 @@ func (e *metalEngine) loadModel(path string) error {
 			maxVal := 0
 			for _, v := range arr {
 				iv := int(toFloat64(v))
-				if iv > maxVal { maxVal = iv }
+				if iv > maxVal {
+					maxVal = iv
+				}
 			}
 			e.config.KVHeads = maxVal
 		} else {
@@ -1007,7 +1007,7 @@ func (e *metalEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, err
 
 	// 1.1 Support for Multimodal Injection Tokens (Phase 5)
 	if len(desc.VisionTensors) > 0 {
-		// In a production engine, we would perform a zero-copy "Scatter-Gather" 
+		// In a production engine, we would perform a zero-copy "Scatter-Gather"
 		// to interleave vision features into the hidden state.
 		// For the Phase 5 implementation, we prepended vision features to the prompt.
 		for seqIdx, visionT := range desc.VisionTensors {
@@ -1063,7 +1063,7 @@ func (e *metalEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, err
 	for l := 0; l < e.config.Layers; l++ {
 		// Use positions at the START of this chunk (ContextLens) to get Block Tables
 		view := e.cache.GetBatch(seqIDs, desc.ContextLens, l)
-		
+
 		current.LayerBatch(l,
 			e.weights.AttnNorm[l], e.weights.AttnQ[l], e.weights.AttnK[l], e.weights.AttnV[l], e.weights.AttnO[l],
 			e.weights.FfnNorm[l], e.weights.FfnGate[l], e.weights.FfnUp[l], e.weights.FfnDown[l],
@@ -1082,7 +1082,7 @@ func (e *metalEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, err
 					K     *device.Tensor
 					V     *device.Tensor
 				}, numTokens)
-				
+
 				tokenIdx := 0
 				for i := range desc.Sequences {
 					chunkLen := 1
@@ -1091,7 +1091,7 @@ func (e *metalEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, err
 					} else {
 						chunkLen = numTokens - desc.Offsets[i]
 					}
-					
+
 					for j := 0; j < chunkLen; j++ {
 						updateItems[tokenIdx].SeqID = seqIDs[i]
 						updateItems[tokenIdx].Pos = desc.ContextLens[i] + j
@@ -1128,7 +1128,7 @@ func (e *metalEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, err
 		} else {
 			lastTokenIdx = numTokens - 1
 		}
-		
+
 		// Copy single row to a new tensor
 		row := logitsAll.Slice(lastTokenIdx, 1)
 		rowCopy := e.ctx.NewTensorWithType(1, e.config.VocabSize, device.DataTypeF32)
@@ -1189,7 +1189,7 @@ func (e *metalEngine) applyLoRAtoLayer(adapterID, name string, input, output *de
 	} else {
 		finalInput = input
 	}
-	
+
 	// Slice the rows of input and output that belong to this adapter
 	for _, rowIdx := range tokenIndices {
 		rowIn := finalInput.Slice(rowIdx, 1)
@@ -1248,22 +1248,26 @@ func (e *metalEngine) runBatchLoop() {
 			logits := results[i].ToHostF32()
 			results[i].Free()
 
-			if seq.LogitsCallback != nil {
-				seq.LogitsCallback(logits)
-			}
-
-			sampler := NewSampler(seq.Config)
-			token := sampler.Sample(logits, seq.Tokens)
-
 			// Update Sequence State
-			// Important: If we were prefilling, we consumed multiple tokens.
-			// But Sampling only happens for the LAST token of the chunk.
 			chunkLen := 1
 			if i < len(desc.Offsets)-1 {
 				chunkLen = desc.Offsets[i+1] - desc.Offsets[i]
 			} else {
 				chunkLen = len(desc.Tokens) - desc.Offsets[i]
 			}
+
+			// If this is an intermediate prefill chunk, just advance position and continue
+			if i < len(desc.IsDecode) && !desc.IsDecode[i] && seq.Pos+chunkLen < seq.PromptLen {
+				seq.Pos += chunkLen
+				continue
+			}
+
+			if seq.LogitsCallback != nil {
+				seq.LogitsCallback(logits)
+			}
+
+			sampler := NewSampler(seq.Config)
+			token := sampler.Sample(logits, seq.Tokens)
 
 			seq.Tokens = append(seq.Tokens, token)
 			seq.Pos += chunkLen // Advance by number of tokens processed
@@ -1437,8 +1441,6 @@ func (e *metalEngine) GetEmbedding(token int) ([]float32, error) {
 	return emb.ToHost(), nil
 }
 
-
-
 // GetEmbeddings returns embedding vectors for multiple tokens
 func (e *metalEngine) GetEmbeddings(tokens []int) ([][]float32, error) {
 	embeddings := make([][]float32, len(tokens))
@@ -1580,19 +1582,19 @@ func (e *metalEngine) ForwardDraft(tokens []int) ([][]float32, error) {
 		AdapterIDs:  []string{""},
 		IsDecode:    make([]bool, len(tokens)),
 	}
-	
+
 	results, err := e.ForwardBatch(desc)
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// Convert device tensors to host logits
 	hostResults := make([][]float32, len(results))
 	for i, res := range results {
 		hostResults[i] = res.ToHostF32()
 		res.Free()
 	}
-	
+
 	return hostResults, nil
 }
 

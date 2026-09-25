@@ -4,59 +4,6 @@ import (
 	"math"
 )
 
-// CPU Reference Implementation for GQA attention comparison
-func CPUAttentionGQA(q, k, v []float32, numHeads, kvHeads, headDim int) ([]float32, []float32) {
-	// Compute QK scores
-	scores := make([]float32, numHeads)
-	output := make([]float32, numHeads*headDim)
-
-	// Compute expected QK scores
-	for h := 0; h < numHeads; h++ {
-		kvh := h / (numHeads / kvHeads)
-		score := float32(0.0)
-		for i := 0; i < headDim; i++ {
-			score += q[h*headDim+i] * k[kvh*headDim+i]
-		}
-		scores[h] = score / float32(math.Sqrt(float64(headDim)))
-	}
-
-	// Simple softmax (since seqLen=1)
-	expScores := make([]float32, numHeads)
-	maxScore := scores[0]
-	for i := range scores {
-		if scores[i] > maxScore {
-			maxScore = scores[i]
-		}
-	}
-
-	var expSum float32
-	for i := range scores {
-		expScores[i] = float32(math.Exp(float64(scores[i] - maxScore)))
-		expSum += expScores[i]
-	}
-
-	if expSum == 0 {
-		expSum = 1e-6
-	}
-
-	// Compute attention weights and output
-	attentionWeights := make([]float32, numHeads)
-	for h := 0; h < numHeads; h++ {
-		attentionWeights[h] = expScores[h] / expSum
-	}
-
-	for h := 0; h < numHeads; h++ {
-		kvh := h / (numHeads / kvHeads)
-		weight := attentionWeights[h]
-
-		for i := 0; i < headDim; i++ {
-			output[h*headDim+i] = weight * v[kvh*headDim+i]
-		}
-	}
-
-	return output, scores
-}
-
 // CPU RMSNorm reference implementation
 func CPURMSNorm(input, weight []float32, eps float32) []float32 {
 	dim := len(weight)
@@ -141,32 +88,6 @@ func CPUSwiGLU(gate, up []float32) []float32 {
 		sigmoid := float32(1.0) / (float32(1.0) + float32(math.Exp(-float64(gateVal))))
 		swish := gateVal * sigmoid
 		output[i] = swish * upVal
-	}
-
-	return output
-}
-
-// CPU Q4K MatMul reference implementation (simplified version for testing)
-func CPUQ4KMatMul(input []float32, q4kData []byte, m, n, k int) []float32 {
-	// This is a simplified version - in reality Q4K would need dequantization
-	// For testing purposes, we'll just do a basic matrix multiply with safe bounds
-	output := make([]float32, m*n)
-
-	for i := 0; i < m; i++ {
-		for j := 0; j < n; j++ {
-			sum := float32(0.0)
-			for l := 0; l < k; l++ {
-				// Calculate Q4K data position safely
-				// Q4K uses block quantization, but for testing we'll use simple indexing
-				dataPos := j*k + l
-				if dataPos < len(q4kData) {
-					// Simplified: convert byte to float32 for testing
-					q4kVal := float32(q4kData[dataPos])
-					sum += input[i*k+l] * q4kVal
-				}
-			}
-			output[i*n+j] = sum
-		}
 	}
 
 	return output

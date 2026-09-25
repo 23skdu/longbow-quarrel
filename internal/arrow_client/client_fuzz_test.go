@@ -7,16 +7,16 @@ import (
 	"github.com/23skdu/longbow-quarrel/internal/device"
 )
 
-// FuzzStreamEmbeddings ensures bounds and dimensionality panic safety 
+// FuzzStreamEmbeddings ensures bounds and dimensionality panic safety
 // when streaming unaligned or malicious tensor payload counts.
 func FuzzStreamEmbeddings(f *testing.F) {
 	// Add some seed cases
 	f.Add(uint(1), uint(128))
 	f.Add(uint(10), uint(1024))
-	
+
 	f.Fuzz(func(t *testing.T, numTensors uint, cols uint) {
 		if numTensors > 100 || cols > 4096 {
-			return 
+			return
 		}
 
 		ctx := device.NewContext()

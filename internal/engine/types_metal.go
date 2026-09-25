@@ -3,10 +3,10 @@
 package engine
 
 import (
-	"fmt"
-	"sync"
 	"encoding/json"
+	"fmt"
 	"os"
+	"sync"
 
 	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/device"
@@ -14,15 +14,15 @@ import (
 )
 
 type metalEngine struct {
-	ctx          *device.Context
-	model        *gguf.GGUFFile
-	config       config.Config
-	weights      *LlamaWeights
-	cache        *PagedKVCache
-	BatchManager *ContinuousBatchManager
-	PromptCache  *PromptCache
-	LoRA         *LoRAManager
-	DraftEngine  Engine
+	ctx            *device.Context
+	model          *gguf.GGUFFile
+	config         config.Config
+	weights        *LlamaWeights
+	cache          *PagedKVCache
+	BatchManager   *ContinuousBatchManager
+	PromptCache    *PromptCache
+	LoRA           *LoRAManager
+	DraftEngine    Engine
 	SpeculativeMgr *SpeculativeManager
 
 	// Quality Evaluation

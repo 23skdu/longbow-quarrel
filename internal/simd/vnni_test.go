@@ -11,7 +11,7 @@ import (
 func float32ToFloat16(f float32) uint16 {
 	bits := math.Float32bits(f)
 	sign := uint16((bits >> 16) & 0x8000)
-	exp := int((bits >> 23) & 0xFF) - 127 + 15
+	exp := int((bits>>23)&0xFF) - 127 + 15
 	frac := uint16((bits >> 13) & 0x03FF)
 
 	if exp <= 0 {

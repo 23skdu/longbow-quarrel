@@ -326,7 +326,7 @@ func (c *PagedKVCache) Allocate(seqID string, numTokens int) error {
 		if additional <= 0 {
 			return nil // Already has enough
 		}
-		
+
 		for i := 0; i < additional; i++ {
 			phys, err := c.allocateBlock()
 			if err != nil {
@@ -519,7 +519,7 @@ func (c *PagedKVCache) GetSequenceBlocks(seqID string) []int32 {
 	if table == nil {
 		return nil
 	}
-	
+
 	blocks := make([]int32, len(table))
 	copy(blocks, table)
 	return blocks
@@ -536,8 +536,8 @@ func (c *PagedKVCache) RollbackKV(seqID string, newPos int) error {
 	}
 
 	newLastBlockIdx := newPos / c.blockSize
-	
-	// If the new position is in a block that's already in the table, 
+
+	// If the new position is in a block that's already in the table,
 	// we just prune the table of any blocks BEYOND that logical block index.
 	if newLastBlockIdx < len(table)-1 {
 		// Prune trailing blocks
@@ -903,14 +903,4 @@ func (c *PagedKVCache) GetBlockScales(layer int) (kScales, vScales []float32) {
 		return c.kScales[layer], c.vScales[layer]
 	}
 	return nil, nil
-}
-
-// SetBlockScale updates the scale factors for a specific physical block.
-func (c *PagedKVCache) SetBlockScale(layer int, blockID int32, kScale, vScale float32) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if layer >= 0 && layer < len(c.kScales) && int(blockID) >= 0 && int(blockID) < len(c.kScales[layer]) {
-		c.kScales[layer][blockID] = kScale
-		c.vScales[layer][blockID] = vScale
-	}
 }

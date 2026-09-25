@@ -1,4 +1,5 @@
 //go:build darwin && metal
+
 package device
 
 import (
@@ -21,27 +22,35 @@ func TestFlashAttention2_NumericalParity(t *testing.T) {
 
 	// 2. Tensors
 	q := ctx.NewTensor(numHeads, headDim)
-	kCache := ctx.NewTensor(maxBlocks * blockSize * kvHeads, headDim)
-	vCache := ctx.NewTensor(maxBlocks * blockSize * kvHeads, headDim)
+	kCache := ctx.NewTensor(maxBlocks*blockSize*kvHeads, headDim)
+	vCache := ctx.NewTensor(maxBlocks*blockSize*kvHeads, headDim)
 	output := ctx.NewTensor(numHeads, headDim)
 	blockTable := ctx.NewTensor(batchSize, maxBlocks)
 
 	// 3. Fill Test Data (smaller numbers to avoid exp overflow)
 	qData := make([]float32, numHeads*headDim)
-	for i := range qData { qData[i] = float32(i % headDim) * 0.001 }
+	for i := range qData {
+		qData[i] = float32(i%headDim) * 0.001
+	}
 	q.LoadFrom(qData)
 
 	kData := make([]float32, kCache.Rows()*headDim)
-	for i := range kData { kData[i] = float32(i % headDim) * 0.0005 }
+	for i := range kData {
+		kData[i] = float32(i%headDim) * 0.0005
+	}
 	kCache.LoadFrom(kData)
 
 	vData := make([]float32, vCache.Rows()*headDim)
-	for i := range vData { vData[i] = float32(i % headDim) * 0.0002 }
+	for i := range vData {
+		vData[i] = float32(i%headDim) * 0.0002
+	}
 	vCache.LoadFrom(vData)
 
 	// Logical map: block i -> physical block i
 	btData := make([]float32, maxBlocks)
-	for i := range btData { btData[i] = float32(i) }
+	for i := range btData {
+		btData[i] = float32(i)
+	}
 	blockTable.LoadFrom(btData)
 
 	seqLens := ctx.NewTensorFP32(1, batchSize)
@@ -70,7 +79,7 @@ func TestFlashAttention2_NumericalParity(t *testing.T) {
 			tokenIdx := s % blockSize
 			kvOff := blockIdx*blockSize*kvHeads*headDim +
 				tokenIdx*kvHeads*headDim +
-				(h / (numHeads / kvHeads))*headDim
+				(h/(numHeads/kvHeads))*headDim
 
 			// Compute score S_ij = Q @ K
 			dot := float64(0)

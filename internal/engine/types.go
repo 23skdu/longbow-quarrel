@@ -137,33 +137,30 @@ const (
 )
 
 type Sequence struct {
-	ID        uint64
-	PromptLen int
-	MaxTokens int
-	Pos       int
-	Status    SequenceStatus
-	Tokens    []int
-	Config         SamplerConfig
-	Result         chan []int
-	Err            chan error
-	Priority       int // Scheduling priority (higher = more important)
-	TokenCallback  func(int)
-	LogitsCallback func([]float32)
-	AdapterID      string // Active LoRA adapter for this sequence
-	PrefillCompleted bool // Set when the full prompt has been ingested into KV cache
+	ID               uint64
+	PromptLen        int
+	MaxTokens        int
+	Pos              int
+	Status           SequenceStatus
+	Tokens           []int
+	Config           SamplerConfig
+	Result           chan []int
+	Err              chan error
+	Priority         int // Scheduling priority (higher = more important)
+	TokenCallback    func(int)
+	LogitsCallback   func([]float32)
+	AdapterID        string // Active LoRA adapter for this sequence
+	PrefillCompleted bool   // Set when the full prompt has been ingested into KV cache
 
 	// Speculative Decoding State
 	Speculative bool
 	DraftK      int
 	NumPaths    int
-
-	mu             sync.RWMutex
 }
 
 type SequenceManager struct {
 	sequences map[uint64]*Sequence
 	mu        sync.RWMutex
-	counter   uint64
 }
 
 func NewSequenceManager() *SequenceManager {
@@ -172,41 +169,12 @@ func NewSequenceManager() *SequenceManager {
 	}
 }
 
-func (sm *SequenceManager) NewSequence(promptLen int) *Sequence {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-	sm.counter++
-	seq := &Sequence{
-		ID:        sm.counter,
-		PromptLen: promptLen,
-		Pos:       0,
-		Status:    SequenceStatusRunning,
-	}
-	sm.sequences[sm.counter] = seq
-	return seq
-}
-
 func (sm *SequenceManager) GetSequence(id uint64) (*Sequence, bool) {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 	seq, ok := sm.sequences[id]
 	return seq, ok
 }
-
-func (sm *SequenceManager) FreeSequence(id uint64) {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-	delete(sm.sequences, id)
-}
-
-func (sm *SequenceManager) SetStatus(id uint64, status SequenceStatus) {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-	if seq, ok := sm.sequences[id]; ok {
-		seq.Status = status
-	}
-}
-
 
 type LlamaWeights struct {
 	TokenEmb *device.Tensor // vocab x dim
@@ -371,4 +339,3 @@ func (w *MOELayerWeights) Free() {
 		w.Router.Free()
 	}
 }
-

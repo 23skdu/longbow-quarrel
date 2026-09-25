@@ -38,14 +38,14 @@ func TestSampler_Logic_Full(t *testing.T) {
 func TestSampler_EdgeCases(t *testing.T) {
 	cfg := SamplerConfig{Temperature: 0.0}
 	sampler := NewSampler(cfg)
-	
+
 	logits := []float32{1.0, 10.0, 5.0}
 	// Case temp=0 -> argMax
 	token := sampler.Sample(logits, nil)
 	if token != 1 {
 		t.Errorf("Expected token 1 for temp=0, got %d", token)
 	}
-	
+
 	// Case NaN logits
 	l_nan := []float32{1.0, float32(math.NaN()), 3.0}
 	token = sampler.Sample(l_nan, nil) // Should handle via validateLogits

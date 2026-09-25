@@ -6,13 +6,6 @@ import (
 	"testing"
 )
 
-// TestInferOutputType validates that Infer returns valid integer token slice
-func TestInferOutputType(t *testing.T) {
-	// This test verifies the return type and structure
-	// Actual inference would require a valid GGUF model
-	t.Skip("Requires valid GGUF model file for integration testing")
-}
-
 // TestDecodeOutputType validates that decoded output is a valid string
 func TestDecodeOutputType(t *testing.T) {
 	tests := []struct {
@@ -81,22 +74,6 @@ func TestDecodeOutputType(t *testing.T) {
 			}
 		})
 	}
-}
-
-// TestGenerateIntegration is an integration test for end-to-end generation
-func TestGenerateIntegration(t *testing.T) {
-	// Skip in unit tests - requires full model
-	t.Skip("Integration test - requires valid GGUF model")
-
-	// Integration test structure:
-	// 1. Load small test model
-	// 2. Generate N tokens
-	// 3. Strongly validate:
-	//    - tokens is []int
-	//    - decoded output is string
-	//    - string is non-empty
-	//    - string contains valid UTF-8
-	//    - string does not contain only special tokens
 }
 
 // TestOutputValidation tests that generated output meets quality criteria

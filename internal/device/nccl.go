@@ -1,4 +1,4 @@
-//go:build linux && cuda && nccl
+//go:build linux && amd64 && cuda && cgo && nccl
 
 package device
 

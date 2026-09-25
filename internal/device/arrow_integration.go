@@ -72,13 +72,13 @@ func (t *Tensor) ToArrowArray(allocator memory.Allocator) (*array.FixedSizeList,
 	// Hotpath metric tracking (bytes exposed to Arrow)
 	metrics.RecordArrowBytesHotpath(int64(t.SizeBytes()))
 
-	// Construct the FixedSizeList. 
+	// Construct the FixedSizeList.
 	// The Buffer and Data objects created inside will have their reference counts managed.
 	arr := buildFixedSizeList(arrowBuf, t.Rows(), t.Cols(), arrowType, t.ctx.DeviceID())
-	
+
 	// We release our local handle to the buffer because the array now owns it via Retain() inside NewData
 	arrowBuf.Release()
-	
+
 	return arr, nil
 }
 
@@ -102,7 +102,7 @@ func buildFixedSizeList(buf *memory.Buffer, rows, cols int, arrowType arrow.Data
 	_ = meta // metadata is consumed by Flight server via schema negotiation
 
 	listType := arrow.FixedSizeListOf(int32(cols), arrowType) // #nosec G115 -- safe: cols is bounded by model config
-	
+
 	// 3. Construct the top-level list data
 	listData := array.NewData(
 		listType,
@@ -113,14 +113,13 @@ func buildFixedSizeList(buf *memory.Buffer, rows, cols int, arrowType arrow.Data
 	)
 	defer listData.Release()
 
-	// Wrap in FixedSizeList array and return. 
+	// Wrap in FixedSizeList array and return.
 	// NewFixedSizeListData will Retain the listData.
 	arr := array.NewFixedSizeListData(listData)
-	
+
 	// Inject metadata via the schema-related field if possible
 	// Note: in Arrow Go, the Field metadata is usually managed at the Record/Schema level,
 	// but we store affinity in the Buffer's usage or via the Flight descriptor.
-	
+
 	return arr
 }
-

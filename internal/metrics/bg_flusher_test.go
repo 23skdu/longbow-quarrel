@@ -62,7 +62,7 @@ func FuzzBgFlusher(f *testing.F) {
 		}
 
 		arrowBytesHotpath.Store(0)
-		
+
 		flusher := NewBgFlusher(5 * time.Millisecond)
 		var wg sync.WaitGroup
 

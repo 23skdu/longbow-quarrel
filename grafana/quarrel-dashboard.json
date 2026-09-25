@@ -58,7 +58,9 @@
         "justifyMode": "auto",
         "orientation": "auto",
         "reduceOptions": {
-          "calcs": ["lastNotNull"],
+          "calcs": [
+            "lastNotNull"
+          ],
           "fields": "",
           "values": false
         },
@@ -116,7 +118,9 @@
         "justifyMode": "auto",
         "orientation": "auto",
         "reduceOptions": {
-          "calcs": ["lastNotNull"],
+          "calcs": [
+            "lastNotNull"
+          ],
           "fields": "",
           "values": false
         },
@@ -200,7 +204,9 @@
         "justifyMode": "auto",
         "orientation": "auto",
         "reduceOptions": {
-          "calcs": ["lastNotNull"],
+          "calcs": [
+            "lastNotNull"
+          ],
           "fields": "",
           "values": false
         },
@@ -258,7 +264,9 @@
         "justifyMode": "auto",
         "orientation": "auto",
         "reduceOptions": {
-          "calcs": ["lastNotNull"],
+          "calcs": [
+            "lastNotNull"
+          ],
           "fields": "",
           "values": false
         },
@@ -944,15 +952,6 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "rate(kv_cache_misses_total[5m])",
-          "legendFormat": "Misses",
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "rate(kv_cache_evictions_total[5m])",
           "legendFormat": "Evictions",
           "refId": "C"
@@ -1487,106 +1486,6 @@
       "type": "row"
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "lineWidth": 2
-          },
-          "unit": "short"
-        }
-      },
-      "gridPos": {
-        "h": 6,
-        "w": 12,
-        "x": 0,
-        "y": 15
-      },
-      "id": 14,
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "batch_manager_running_count",
-          "legendFormat": "Running Sequences",
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "batch_manager_queue_depth",
-          "legendFormat": "Queue Depth",
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "batch_manager_prefill_count",
-          "legendFormat": "Prefill Count",
-          "refId": "C"
-        }
-      ],
-      "title": "Batch Manager State",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "unit": "short"
-        }
-      },
-      "gridPos": {
-        "h": 6,
-        "w": 12,
-        "x": 12,
-        "y": 15
-      },
-      "id": 15,
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "histogram_quantile(0.95, rate(batch_manager_batch_size_bucket[5m]))",
-          "legendFormat": "Batch Size (p95)",
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "sum(rate(batch_manager_batch_size_sum[5m])) / sum(rate(batch_manager_batch_size_count[5m]))",
-          "legendFormat": "Avg Batch Size",
-          "refId": "B"
-        }
-      ],
-      "title": "Batch Efficiency",
-      "type": "timeseries"
-    },
-    {
       "collapsed": false,
       "gridPos": {
         "h": 1,
@@ -1628,15 +1527,6 @@
           "expr": "rate(kv_cache_hits_total[5m])",
           "legendFormat": "Hits",
           "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "rate(kv_cache_misses_total[5m])",
-          "legendFormat": "Misses",
-          "refId": "B"
         },
         {
           "datasource": {
@@ -1993,145 +1883,247 @@
     },
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 99 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 99
+      },
       "id": 50,
       "panels": [],
       "title": "PromptCache Performance",
       "type": "row"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "palette-classic" },
-          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10 },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
           "unit": "ops"
         },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 100 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 100
+      },
       "id": 51,
       "targets": [
-        { "expr": "rate(kv_cache_hits_total[5m])", "legendFormat": "Cache Hits", "refId": "A" },
-        { "expr": "rate(kv_cache_misses_total[5m])", "legendFormat": "Cache Misses", "refId": "B" },
-        { "expr": "rate(kv_cache_evictions_total[5m])", "legendFormat": "Evictions", "refId": "C" }
+        {
+          "expr": "rate(kv_cache_hits_total[5m])",
+          "legendFormat": "Cache Hits",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(kv_cache_evictions_total[5m])",
+          "legendFormat": "Evictions",
+          "refId": "C"
+        }
       ],
       "title": "PromptCache Hit/Miss Rate",
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "palette-classic" },
-          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10 },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
           "unit": "bytes"
         },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 100 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 100
+      },
       "id": 52,
       "targets": [
-        { "expr": "kv_cache_used_bytes", "legendFormat": "Used", "refId": "A" },
-        { "expr": "kv_cache_capacity_bytes", "legendFormat": "Capacity", "refId": "B" }
+        {
+          "expr": "kv_cache_used_bytes",
+          "legendFormat": "Used",
+          "refId": "A"
+        },
+        {
+          "expr": "kv_cache_capacity_bytes",
+          "legendFormat": "Capacity",
+          "refId": "B"
+        }
       ],
       "title": "PromptCache Memory",
       "type": "timeseries"
     },
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 108 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 108
+      },
       "id": 53,
       "panels": [],
       "title": "Speculative Decoding",
       "type": "row"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "palette-classic" },
-          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10 },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
           "unit": "ops"
         },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 109 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 109
+      },
       "id": 54,
       "targets": [
-        { "expr": "rate(speculative_tokens_accepted_total[5m])", "legendFormat": "Accepted", "refId": "A" },
-        { "expr": "rate(speculative_tokens_rejected_total[5m])", "legendFormat": "Rejected", "refId": "B" }
+        {
+          "expr": "rate(speculative_tokens_accepted_total[5m])",
+          "legendFormat": "Accepted",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(speculative_tokens_rejected_total[5m])",
+          "legendFormat": "Rejected",
+          "refId": "B"
+        }
       ],
       "title": "Speculative Token Accept/Reject Rate",
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "palette-classic" },
-          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10 },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
           "unit": "percentunit"
         },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 109 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 109
+      },
       "id": 55,
       "targets": [
-        { "expr": "rate(speculative_tokens_accepted_total[5m]) / (rate(speculative_tokens_accepted_total[5m]) + rate(speculative_tokens_rejected_total[5m]))", "legendFormat": "Acceptance Rate", "refId": "A" }
+        {
+          "expr": "rate(speculative_tokens_accepted_total[5m]) / (rate(speculative_tokens_accepted_total[5m]) + rate(speculative_tokens_rejected_total[5m]))",
+          "legendFormat": "Acceptance Rate",
+          "refId": "A"
+        }
       ],
       "title": "Speculative Acceptance Ratio",
       "type": "timeseries"
     },
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 117 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 117
+      },
       "id": 56,
       "panels": [],
       "title": "LoRA & Adapter Dispatch",
       "type": "row"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "fieldConfig": {
-        "defaults": {
-          "color": { "mode": "palette-classic" },
-          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10 },
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 118 },
-      "id": 57,
-      "targets": [
-        { "expr": "histogram_quantile(0.95, rate(lora_dispatch_groups_per_batch_bucket[5m]))", "legendFormat": "p95 Groups/Batch", "refId": "A" },
-        { "expr": "histogram_quantile(0.50, rate(lora_dispatch_groups_per_batch_bucket[5m]))", "legendFormat": "p50 Groups/Batch", "refId": "B" }
-      ],
-      "title": "LoRA Dispatch Groups per Batch",
-      "type": "timeseries"
-    },
-    {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 126 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 126
+      },
       "id": 58,
       "panels": [],
       "title": "Sliding Window KV Cache",
       "type": "row"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "palette-classic" },
-          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10 },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
           "unit": "ops"
         },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 127 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 127
+      },
       "id": 59,
       "targets": [
-        { "expr": "rate(kv_cache_sliding_window_total[5m])", "legendFormat": "Sliding Window Ops", "refId": "A" }
+        {
+          "expr": "rate(kv_cache_sliding_window_total[5m])",
+          "legendFormat": "Sliding Window Ops",
+          "refId": "A"
+        }
       ],
       "title": "Sliding Window KV Cache Operations",
       "type": "timeseries"
@@ -2139,7 +2131,11 @@
   ],
   "refresh": "5s",
   "schemaVersion": 40,
-  "tags": ["quarrel", "llm", "inference"],
+  "tags": [
+    "quarrel",
+    "llm",
+    "inference"
+  ],
   "templating": {
     "list": [
       {

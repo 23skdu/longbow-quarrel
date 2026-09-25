@@ -369,7 +369,7 @@ func (e *RemoteWorkerEngine) ForwardDraft(tokens []int) ([][]float32, error) {
 	}
 
 	meta := map[string]string{
-		"operation": "forward_draft",
+		"operation":  "forward_draft",
 		"num_tokens": fmt.Sprintf("%d", len(tokens)),
 	}
 	t0 := time.Now()

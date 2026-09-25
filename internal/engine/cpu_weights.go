@@ -28,10 +28,10 @@ type CPUWeights struct {
 	FfnNorm    [][]float32
 
 	// Qwen3.5 & hybrid layer support
-	AttnQNorm [][]float32
-	AttnKNorm [][]float32
-	AttnQKV   [][]float32
-	AttnGate  [][]float32
+	AttnQNorm     [][]float32
+	AttnKNorm     [][]float32
+	AttnQKV       [][]float32
+	AttnGate      [][]float32
 	SSMConv1d     [][]float32
 	SSMConv1dBias [][]float32
 	SSMA          [][]float32
@@ -1659,7 +1659,7 @@ func softplusCPU(x float32) float32 {
 	if x < -20 {
 		return 0
 	}
-	return float32(math.Log(float64(1.0+float32(math.Exp(float64(x))))))
+	return float32(math.Log(float64(1.0 + float32(math.Exp(float64(x))))))
 }
 
 func sigmoidCPU(x float32) float32 {
@@ -1782,6 +1782,7 @@ type Gemma4LayerBuf struct {
 
 // NewGemma4LayerBuf creates a buffer struct sized for the given model dimensions.
 func NewGemma4LayerBuf(dim, maxHeadDim, maxHeads, maxHiddenDim, maxContextLen int) *Gemma4LayerBuf {
+	maxKVDim := 2 * maxHeadDim // kvHeads up to 2
 	return &Gemma4LayerBuf{
 		Normed:     make([]float32, dim),
 		QNormed:    make([]float32, maxHeads*maxHeadDim),
@@ -1791,8 +1792,8 @@ func NewGemma4LayerBuf(dim, maxHeadDim, maxHeads, maxHiddenDim, maxContextLen in
 		Act:        make([]float32, maxHiddenDim),
 		NormedDown: make([]float32, dim),
 		Scores:     make([]float32, maxContextLen),
-		KNormed:    make([]float32, maxHeadDim),
-		VNormed:    make([]float32, maxHeadDim),
+		KNormed:    make([]float32, maxKVDim),
+		VNormed:    make([]float32, maxKVDim),
 		PLEGated:   make([]float32, 256),
 		PLEProj:    make([]float32, dim),
 	}
@@ -1905,25 +1906,56 @@ func ApplyGemma4LayerCPU(
 		k := w.MatVec(kWeight, rawK, normedAttn)
 		v := w.MatVec(vWeight, rawV, normedAttn)
 
-		// K-Norm
+		// Derive correct headDim from actual K weight dimensions.
+		// GGUF metadata key_length may not match quantized weight dimensions
+		// (e.g. key_length=512 but actual headDim=256 in quantized model).
+		// K: [hidden, kv_heads * head_dim] → head_dim = len(k) / kv_heads
+		if kvHeads > 0 && len(k) > 0 {
+			derivedHeadDim := len(k) / kvHeads
+			if derivedHeadDim > 0 {
+				headDim = derivedHeadDim
+			}
+		}
+
+		// K-Norm (per-head with AttnKNorm)
 		if layerIdx < len(w.AttnKNorm) && len(w.AttnKNorm[layerIdx]) == headDim {
-			kNormed := buf.KNormed[:headDim]
-			simd.RMSNorm(k, w.AttnKNorm[layerIdx], kNormed, 1, headDim, eps)
+			kLen := kvHeads * headDim
+			if kLen > len(k) {
+				kLen = len(k)
+			}
+			kNormed := buf.KNormed[:kLen]
+			for kh := 0; kh < kvHeads; kh++ {
+				off := kh * headDim
+				if off+headDim > len(k) || off+headDim > len(kNormed) {
+					break
+				}
+				simd.RMSNorm(k[off:off+headDim], w.AttnKNorm[layerIdx], kNormed[off:off+headDim], 1, headDim, eps)
+			}
 			k = kNormed
 		}
 
 		// K RoPE
 		partialRoPECPU(k, []int{pos}, kvHeads, headDim, headDim, ropeTheta)
 
-		// V Unit RMSNorm (weight=1.0, eps=1e-6)
-		vNormed := buf.VNormed[:headDim]
-		var sumSq float32
-		for _, val := range v {
-			sumSq += val * val
+		// V Unit RMSNorm (weight=1.0, eps=1e-6, per-head)
+		vLen := kvHeads * headDim
+		if vLen > len(v) {
+			vLen = len(v)
 		}
-		rms := float32(math.Sqrt(float64(sumSq/float32(headDim) + eps)))
-		for d := 0; d < headDim; d++ {
-			vNormed[d] = v[d] / rms
+		vNormed := buf.VNormed[:vLen]
+		for kh := 0; kh < kvHeads; kh++ {
+			off := kh * headDim
+			if off+headDim > len(v) || off+headDim > len(vNormed) {
+				break
+			}
+			var sumSq float32
+			for d := 0; d < headDim; d++ {
+				sumSq += v[off+d] * v[off+d]
+			}
+			rms := float32(math.Sqrt(float64(sumSq/float32(headDim) + eps)))
+			for d := 0; d < headDim; d++ {
+				vNormed[off+d] = v[off+d] / rms
+			}
 		}
 		v = vNormed
 
@@ -1954,6 +1986,16 @@ func ApplyGemma4LayerCPU(
 		rawQ = w.RawAttnQ[layerIdx]
 	}
 	q := w.MatVec(qWeight, rawQ, normedAttn)
+
+	// Derive correct headDim from actual Q weight dimensions.
+	// This covers shared-KV layers where K is not recomputed.
+	// Q: [hidden, heads * head_dim] → head_dim = len(q) / heads
+	if heads > 0 && len(q) > 0 {
+		derivedHeadDim := len(q) / heads
+		if derivedHeadDim > 0 {
+			headDim = derivedHeadDim
+		}
+	}
 
 	// Q-Norm (per-head with AttnQNorm)
 	if layerIdx < len(w.AttnQNorm) && len(w.AttnQNorm[layerIdx]) == headDim {
@@ -2102,7 +2144,7 @@ func ApplyGemma4LayerCPU(
 
 	// 6. FFN branch
 	normedFFN := buf.NormedFFN[:dim]
-	if layerIdx < len(w.FfnNorm) && len(w.FfnNorm[layerIdx]) > 0 {
+	if layerIdx < len(w.FfnNorm) && len(w.FfnNorm[layerIdx]) == dim {
 		simd.RMSNorm(x, w.FfnNorm[layerIdx], normedFFN, 1, dim, eps)
 	} else {
 		copy(normedFFN, x)
@@ -2200,19 +2242,4 @@ func ApplyGemma4LayerCPU(
 	}
 
 	return x
-}
-
-// ApplyGemma4LayerCPUCompat is the legacy entry point for callers that don't have a buffer.
-// It creates a temporary buffer (less efficient but maintains API compatibility).
-func ApplyGemma4LayerCPUCompat(
-	w *CPUWeights,
-	x []float32,
-	layerIdx int,
-	pos int,
-	kv *CPUKVCache,
-	pleSlice []float32,
-	cfg config.Config,
-) []float32 {
-	buf := NewGemma4LayerBuf(len(x), cfg.Gemma4FullHeadDim, cfg.Heads, cfg.HiddenDim, cfg.KVCacheSize)
-	return ApplyGemma4LayerCPU(w, x, layerIdx, pos, kv, pleSlice, cfg, buf)
 }

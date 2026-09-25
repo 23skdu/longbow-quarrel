@@ -17,8 +17,8 @@ func init() {
 
 type metricsWrapper struct {
 	startTime time.Time
-	kernel   string
-	size     int
+	kernel    string
+	size      int
 }
 
 func (m *metricsWrapper) record() {
@@ -94,4 +94,3 @@ func checkOutputNaNInf(data []float32, kernel string) {
 		metrics.RecordSIMDKernelError(kernel, "output_invalid")
 	}
 }
-

@@ -2,8 +2,8 @@ package engine
 
 import (
 	"context"
-	"testing"
 	"github.com/23skdu/longbow-quarrel/internal/config"
+	"testing"
 )
 
 type specMockEngine struct {
@@ -59,7 +59,7 @@ func TestSpeculativeManager_Coverage(t *testing.T) {
 
 		seq := &Sequence{ID: 3, Tokens: []int{1}}
 		err := sm.GenerateSpeculative(ctx, seq)
-		// Note: Standard orchestrator doesn't check context in the middle yet, 
+		// Note: Standard orchestrator doesn't check context in the middle yet,
 		// but should handle it if passed.
 		_ = err
 	})

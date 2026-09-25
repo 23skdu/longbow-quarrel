@@ -808,8 +808,8 @@ func TestCPU_EdgeCases(t *testing.T) {
 	srcF32 := []float32{
 		float32(math.Inf(1)),
 		float32(math.NaN()),
-		1e10,               // overflow to inf
-		float32(1e-8),      // subnormal in fp16 (exp around 100: newExp <= 0)
+		1e10,          // overflow to inf
+		float32(1e-8), // subnormal in fp16 (exp around 100: newExp <= 0)
 		0.0,
 		2.0,
 	}
@@ -867,4 +867,3 @@ func TestCPU_EdgeCases(t *testing.T) {
 	ctx.LinearF32(oddWeight, oddInput, oddOutput)
 	ctx.RMSNorm(oddInput, oddWeight, oddOutput, 1e-5)
 }
-

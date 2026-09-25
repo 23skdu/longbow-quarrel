@@ -1,4 +1,4 @@
-//go:build linux && cuda
+//go:build linux && amd64 && cuda && cgo
 
 package engine
 
@@ -61,6 +61,7 @@ type cudaEngine struct {
 	lora         *LoRAManager
 	governor     *device.MemoryGovernor
 	seqTTFTStart map[uint64]time.Time
+	ttftMu       sync.Mutex
 }
 
 func NewcudaEngine(modelPath string, cfg config.Config) (Engine, error) {
@@ -129,15 +130,12 @@ func NewcudaEngine(modelPath string, cfg config.Config) (Engine, error) {
 		}
 	}
 
-	layers := cfg.Layers
 	vocabSize := cfg.VocabSize
 	heads := cfg.Heads
 	kvHeads := cfg.KVHeads
 	dim := cfg.Dim
 	headDim := cfg.HeadDim
 	hiddenDim := cfg.HiddenDim
-	ropeTheta := cfg.RopeTheta
-	eps := cfg.Eps
 	seqLen := cfg.SeqLen
 
 	isGemma4 := arch == "gemma4"
@@ -147,24 +145,7 @@ func NewcudaEngine(modelPath string, cfg config.Config) (Engine, error) {
 		cuda:         cudaModel,
 		cpuWeights:   cpuW,
 		numGPULayers: numGPULayers,
-		config: config.Config{
-			Architecture:          arch,
-			Dim:                   dim,
-			HiddenDim:             hiddenDim,
-			Layers:                layers,
-			NumGPULayers:          numGPULayers,
-			Heads:                 heads,
-			KVHeads:               kvHeads,
-			HeadDim:               headDim,
-			VocabSize:             vocabSize,
-			SeqLen:                seqLen,
-			Eps:                   eps,
-			RopeTheta:             float32(ropeTheta),
-			PrecisionMode:         config.PrecisionAuto,
-			KVCacheSize:           cfg.KVCacheSize,
-			IsGemma4:              isGemma4,
-			FinalLogitSoftcapping: modelCfg.FinalLogitSoftcapping,
-		},
+		config:       cfg,
 		tok:          tok,
 		cache:        cache,
 		PromptCache:  NewPromptCache(),
@@ -172,7 +153,7 @@ func NewcudaEngine(modelPath string, cfg config.Config) (Engine, error) {
 		BatchManager: NewContinuousBatchManager(),
 		stopChan:     make(chan struct{}),
 		doneChan:     make(chan struct{}),
-		governor:     device.NewMemoryGovernor(),
+		governor:     device.GetMemoryGovernor(),
 		seqTTFTStart: make(map[uint64]time.Time),
 	}
 
@@ -191,7 +172,7 @@ func NewcudaEngine(modelPath string, cfg config.Config) (Engine, error) {
 	}
 
 	log.Printf("CUDA engine initialized with PagedKVCache: model=%s heads=%d kv_heads=%d", modelPath, heads, kvHeads)
-	
+
 	go e.runBatchLoop()
 
 	return e, nil
@@ -353,6 +334,20 @@ func (e *cudaEngine) runBatchLoop() {
 				}
 			}
 
+			// Update Sequence State
+			chunkLen := 1
+			if i < len(desc.Offsets)-1 {
+				chunkLen = desc.Offsets[i+1] - desc.Offsets[i]
+			} else {
+				chunkLen = len(desc.Tokens) - desc.Offsets[i]
+			}
+
+			// If this is an intermediate prefill chunk, just advance position and continue
+			if i < len(desc.IsDecode) && !desc.IsDecode[i] && seq.Pos+chunkLen < seq.PromptLen {
+				seq.Pos += chunkLen
+				continue
+			}
+
 			if seq.LogitsCallback != nil {
 				seq.LogitsCallback(logits)
 			}
@@ -362,20 +357,17 @@ func (e *cudaEngine) runBatchLoop() {
 
 			// Record TTFT on first generated token
 			if !seq.PrefillCompleted || len(seq.Tokens) == seq.PromptLen {
-				if seq_ttft, ok := e.seqTTFTStart[seq.ID]; ok {
-					metrics.RecordTTFTLatency(time.Since(seq_ttft))
+				e.ttftMu.Lock()
+				seqTTFT, ok := e.seqTTFTStart[seq.ID]
+				if ok {
 					delete(e.seqTTFTStart, seq.ID)
+				}
+				e.ttftMu.Unlock()
+				if ok {
+					metrics.RecordTTFTLatency(time.Since(seqTTFT))
 				}
 			} else {
 				metrics.RecordInterTokenLatency(time.Duration(0))
-			}
-
-			// Update Sequence State
-			chunkLen := 1
-			if i < len(desc.Offsets)-1 {
-				chunkLen = desc.Offsets[i+1] - desc.Offsets[i]
-			} else {
-				chunkLen = len(desc.Tokens) - desc.Offsets[i]
 			}
 
 			seq.Tokens = append(seq.Tokens, token)
@@ -416,7 +408,7 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 	ctx := e.ctx
 	batchSize := len(desc.Sequences)
 	numTokens := len(desc.Tokens)
-	
+
 	// 1. Prepare Metadata Tensors
 	tokenPosTensor := ctx.NewTensorI32(1, numTokens)
 	tokenPositions := make([]int32, numTokens)
@@ -463,7 +455,7 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 			maxBlocks = nt
 		}
 	}
-	
+
 	blockTableTensor := ctx.NewTensorI32(batchSize, maxBlocks)
 	btData := make([]int32, batchSize*maxBlocks)
 	for i, seq := range desc.Sequences {
@@ -516,8 +508,7 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 	gpuLayers := e.numGPULayers
 	for layer := 0; layer < e.config.Layers; layer++ {
 		qW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_q.weight", layer))
-		needsCPU := (layer >= gpuLayers) || (e.cpuWeights != nil && (
-			e.config.IsGemma4 ||
+		needsCPU := (layer >= gpuLayers) || (e.cpuWeights != nil && (e.config.IsGemma4 ||
 			qW == nil ||
 			(layer < len(e.cpuWeights.AttnQNorm) && len(e.cpuWeights.AttnQNorm[layer]) > 0) ||
 			(layer < len(e.cpuWeights.SSMA) && len(e.cpuWeights.SSMA[layer]) > 0) ||
@@ -528,8 +519,7 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 			endLayer := layer + 1
 			for endLayer < e.config.Layers {
 				eqW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_q.weight", endLayer))
-				eNeedsCPU := (endLayer >= gpuLayers) || (
-					e.config.IsGemma4 ||
+				eNeedsCPU := (endLayer >= gpuLayers) || (e.config.IsGemma4 ||
 					eqW == nil ||
 					(endLayer < len(e.cpuWeights.AttnQNorm) && len(e.cpuWeights.AttnQNorm[endLayer]) > 0) ||
 					(endLayer < len(e.cpuWeights.SSMA) && len(e.cpuWeights.SSMA[endLayer]) > 0) ||
@@ -604,18 +594,91 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 		normed := ctx.NewTensorFP32(numTokens, dim)
 		ctx.RMSNorm(hidden, attnNormW, normed, numTokens, dim, eps)
 
-		// Batched Projections
-		kW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_k.weight", layer))
-		vW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_v.weight", layer))
+		var q, k, v *device.Tensor
+		if e.config.IsMLA {
+			qkNopeDim := e.config.QKNDim
+			if qkNopeDim <= 0 {
+				qkNopeDim = headDim
+			}
+			qkRopeDim := e.config.QKRopeDim
+			if qkRopeDim <= 0 {
+				qkRopeDim = headDim
+			}
+			vHeadDim := e.config.VHeadDim
+			if vHeadDim <= 0 {
+				vHeadDim = headDim
+			}
+			kvLoraRank := e.config.KVLoRARank
+			if kvLoraRank <= 0 {
+				kvLoraRank = dim / 2
+			}
 
-		q, _ := ctx.MatmulF16(normed, qW)
-		k, _ := ctx.MatmulF16(normed, kW)
-		v, _ := ctx.MatmulF16(normed, vW)
-		normed.ReturnToPool()
+			qAW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_q_a.weight", layer))
+			qBW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_q_b.weight", layer))
+			var qAll *device.Tensor
+			if qAW != nil && qBW != nil {
+				cQ, _ := ctx.MatmulF16(normed, qAW)
+				qANormW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_q_a_norm.weight", layer))
+				if qANormW != nil {
+					ctx.RMSNorm(cQ, qANormW, cQ, numTokens, cQ.Cols(), eps)
+				}
+				qAll, _ = ctx.MatmulF16(cQ, qBW)
+				cQ.ReturnToPool()
+			} else {
+				qAll, _ = ctx.MatmulF16(normed, qW)
+			}
 
-		// Batched RoPE
-		ctx.FusedRoPE(q, posIds, numTokens, heads, 1, headDim, ropeTheta)
-		ctx.FusedRoPE(k, posIds, numTokens, kvHeads, 1, headDim, ropeTheta)
+			var posTensor *device.Tensor
+			if len(posIds) > 0 {
+				posTensor = ctx.NewTensorI32(1, len(posIds))
+				_ = posTensor.LoadFrom(posIds)
+			}
+			qNope, qRope := ctx.MLAProjectQuerySplitRoPE(qAll, posTensor, numTokens, heads, qkNopeDim, qkRopeDim, ropeTheta)
+			qAll.ReturnToPool()
+			if posTensor != nil {
+				posTensor.ReturnToPool()
+			}
+
+			kvAW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_kv_a_mqa.weight", layer))
+			kvBW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_kv_b.weight", layer))
+			if kvAW != nil && kvBW != nil {
+				kvDown, _ := ctx.MatmulF16(normed, kvAW)
+				kvANormW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_kv_a_norm.weight", layer))
+				if kvANormW != nil {
+					ctx.RMSNorm(kvDown, kvANormW, kvDown, numTokens, kvLoraRank, eps)
+				}
+				kNope, vVal := ctx.MLADecompressKV(kvDown, kvBW, numTokens, kvLoraRank, heads, qkNopeDim, vHeadDim)
+				kvDown.ReturnToPool()
+				q = qNope
+				qRope.ReturnToPool()
+				k = kNope
+				v = vVal
+			} else {
+				q = qNope
+				qRope.ReturnToPool()
+				kW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_k.weight", layer))
+				vW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_v.weight", layer))
+				k, _ = ctx.MatmulF16(normed, kW)
+				v, _ = ctx.MatmulF16(normed, vW)
+			}
+			normed.ReturnToPool()
+		} else {
+			// Batched Projections & RoPE
+			kW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_k.weight", layer))
+			vW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_v.weight", layer))
+
+			rotaryDim := headDim
+			if e.config.IsGemma4 && e.config.Gemma4PartialRoPEFactor > 0 {
+				rotaryDim = int(float32(headDim) * e.config.Gemma4PartialRoPEFactor)
+			}
+
+			var err error
+			q, k, v, err = ctx.FusedQKVRope(normed, qW, kW, vW, posIds, numTokens, dim, heads, kvHeads, headDim, rotaryDim, ropeTheta)
+			normed.ReturnToPool()
+			if err != nil {
+				return nil, err
+			}
+		}
 
 		// Paged Attention (BATCHED)
 		kCache := e.cache.kPools[layer]
@@ -649,6 +712,7 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 		if e.cache != nil && (e.cache.Precision == device.DataTypeFP8 || e.cache.Precision == device.DataTypeQ8_0) {
 			kScales, vScales := e.cache.GetBlockScales(layer)
 			isFP8 := e.cache.Precision == device.DataTypeFP8
+			scale := float32(1.0 / math.Sqrt(float64(headDim)))
 			ctx.PagedAttentionQuantized(q, kCache, vCache, kScales, vScales, attnOut, tokenPosTensor, blockTableTensor, tokenToSeqTensor, maxBlocks, heads, kvHeads, headDim, e.cache.blockSize, batchSize, scale, isFP8)
 		} else {
 			ctx.AttentionPagedBatch(q, kCache, vCache, attnOut, tokenPosTensor, blockTableTensor, maxBlocks, heads, kvHeads, headDim, e.cache.blockSize, tokenToSeqTensor, batchSize)
@@ -690,6 +754,51 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 
 				ctx.Add(hidden, down, hidden, numTokens*dim)
 				down.ReturnToPool()
+			} else if ffnRouterW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.ffn_gate_inp.weight", layer)); ffnRouterW != nil {
+				// MoE Feed-Forward
+				topK := e.config.ExpertUsedCount
+				if topK <= 0 {
+					topK = 2
+				}
+				hiddenDimMoE := e.config.ExpertFeedForwardLength
+				if hiddenDimMoE <= 0 {
+					hiddenDimMoE = e.config.HiddenDim
+				}
+
+				logits := ctx.MOERouterLogits(normedFFN, ffnRouterW)
+				expertIndices, expertWeights := ctx.MOETopKSelection(logits, topK)
+				logits.ReturnToPool()
+
+				ffnGateExps, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.ffn_gate_exps.weight", layer))
+				ffnUpExps, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.ffn_up_exps.weight", layer))
+				ffnDownExps, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.ffn_down_exps.weight", layer))
+
+				if ffnGateExps != nil && ffnUpExps != nil && ffnDownExps != nil {
+					activated := ctx.MOEExpertGateUpSwiGLU(normedFFN, ffnGateExps, ffnUpExps, expertIndices, expertWeights, hiddenDimMoE)
+					down := ctx.MOEExpertForward(activated, ffnDownExps, expertIndices, expertWeights, dim)
+					activated.ReturnToPool()
+
+					// Check for shared expert
+					ffnGateSh, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.ffn_gate_shexp.weight", layer))
+					ffnUpSh, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.ffn_up_shexp.weight", layer))
+					ffnDownSh, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.ffn_down_shexp.weight", layer))
+					if ffnGateSh != nil && ffnUpSh != nil && ffnDownSh != nil {
+						shGate, _ := ctx.MatmulF16(normedFFN, ffnGateSh)
+						shUp, _ := ctx.MatmulF16(normedFFN, ffnUpSh)
+						ctx.FusedSwiGLU(shGate, shUp, shGate, numTokens, shGate.Cols())
+						shUp.ReturnToPool()
+						shDown, _ := ctx.MatmulF16(shGate, ffnDownSh)
+						shGate.ReturnToPool()
+						ctx.Add(down, shDown, down, numTokens*dim)
+						shDown.ReturnToPool()
+					}
+
+					ctx.Add(hidden, down, hidden, numTokens*dim)
+					down.ReturnToPool()
+				}
+				expertIndices.ReturnToPool()
+				expertWeights.ReturnToPool()
+				normedFFN.ReturnToPool()
 			} else {
 				normedFFN.ReturnToPool()
 			}
@@ -747,8 +856,11 @@ func (e *cudaEngine) inferInternal(inputTokens []int, tokensToGenerate int, samp
 		LogitsCallback: logitsCallback,
 	}
 
-	e.BatchManager.Submit(req)
+	e.ttftMu.Lock()
 	e.seqTTFTStart[req.ID] = time.Now()
+	e.ttftMu.Unlock()
+
+	e.BatchManager.Submit(req)
 
 	select {
 	case tokens := <-resChan:
@@ -787,18 +899,85 @@ func (e *cudaEngine) forward(token int, pos int, _ []int) ([]float32, error) {
 		normed := e.scratch.Normed
 		ctx.RMSNorm(hidden, attnNormW, normed, 1, dim, eps)
 
-		// Q, K, V Projections
+		// Q, K, V Projections & RoPE
 		qW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_q.weight", layer))
-		kW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_k.weight", layer))
-		vW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_v.weight", layer))
+		var q, k, v *device.Tensor
+		if e.config.IsMLA {
+			qkNopeDim := e.config.QKNDim
+			if qkNopeDim <= 0 {
+				qkNopeDim = headDim
+			}
+			qkRopeDim := e.config.QKRopeDim
+			if qkRopeDim <= 0 {
+				qkRopeDim = headDim
+			}
+			vHeadDim := e.config.VHeadDim
+			if vHeadDim <= 0 {
+				vHeadDim = headDim
+			}
+			kvLoraRank := e.config.KVLoRARank
+			if kvLoraRank <= 0 {
+				kvLoraRank = dim / 2
+			}
 
-		q, _ := ctx.MatmulF16(normed, qW)
-		k, _ := ctx.MatmulF16(normed, kW)
-		v, _ := ctx.MatmulF16(normed, vW)
+			qAW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_q_a.weight", layer))
+			qBW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_q_b.weight", layer))
+			var qAll *device.Tensor
+			if qAW != nil && qBW != nil {
+				cQ, _ := ctx.MatmulF16(normed, qAW)
+				qANormW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_q_a_norm.weight", layer))
+				if qANormW != nil {
+					ctx.RMSNorm(cQ, qANormW, cQ, 1, cQ.Cols(), eps)
+				}
+				qAll, _ = ctx.MatmulF16(cQ, qBW)
+				cQ.ReturnToPool()
+			} else {
+				qAll, _ = ctx.MatmulF16(normed, qW)
+			}
 
-		// RoPE
-		ctx.FusedRoPE(q, []int{pos}, 1, heads, 1, headDim, ropeTheta)
-		ctx.FusedRoPE(k, []int{pos}, 1, kvHeads, 1, headDim, ropeTheta)
+			posTensor := ctx.NewTensorI32(1, 1)
+			_ = posTensor.LoadFrom([]int32{int32(pos)})
+			qNope, qRope := ctx.MLAProjectQuerySplitRoPE(qAll, posTensor, 1, heads, qkNopeDim, qkRopeDim, ropeTheta)
+			qAll.ReturnToPool()
+			posTensor.ReturnToPool()
+
+			kvAW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_kv_a_mqa.weight", layer))
+			kvBW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_kv_b.weight", layer))
+			if kvAW != nil && kvBW != nil {
+				kvDown, _ := ctx.MatmulF16(normed, kvAW)
+				kvANormW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_kv_a_norm.weight", layer))
+				if kvANormW != nil {
+					ctx.RMSNorm(kvDown, kvANormW, kvDown, 1, kvLoraRank, eps)
+				}
+				kNope, vVal := ctx.MLADecompressKV(kvDown, kvBW, 1, kvLoraRank, heads, qkNopeDim, vHeadDim)
+				kvDown.ReturnToPool()
+				q = qNope
+				qRope.ReturnToPool()
+				k = kNope
+				v = vVal
+			} else {
+				q = qNope
+				qRope.ReturnToPool()
+				kW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_k.weight", layer))
+				vW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_v.weight", layer))
+				k, _ = ctx.MatmulF16(normed, kW)
+				v, _ = ctx.MatmulF16(normed, vW)
+			}
+		} else {
+			kW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_k.weight", layer))
+			vW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_v.weight", layer))
+
+			rotaryDim := headDim
+			if e.config.IsGemma4 && e.config.Gemma4PartialRoPEFactor > 0 {
+				rotaryDim = int(float32(headDim) * e.config.Gemma4PartialRoPEFactor)
+			}
+
+			var err error
+			q, k, v, err = ctx.FusedQKVRope(normed, qW, kW, vW, []int{pos}, 1, dim, heads, kvHeads, headDim, rotaryDim, ropeTheta)
+			if err != nil {
+				return nil, err
+			}
+		}
 
 		// Fused Attention
 		kCache := e.cuda.GetKCache(layer)
@@ -837,16 +1016,59 @@ func (e *cudaEngine) forward(token int, pos int, _ []int) ([]float32, error) {
 		ffnNormW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.ffn_norm.weight", layer))
 		ctx.RMSNorm(hidden, ffnNormW, normed, 1, dim, eps)
 
-		// Fused MLP
+		// Fused MLP or MoE
 		ffnGateW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.ffn_gate.weight", layer))
 		ffnUpW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.ffn_up.weight", layer))
 		ffnDownW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.ffn_down.weight", layer))
-		
-		mlpOut := e.scratch.Down
-		ctx.FusedMLP(normed, ffnGateW, ffnUpW, ffnDownW, mlpOut, 1, dim, hiddenDim)
 
-		// Residual Add
-		ctx.Add(hidden, mlpOut, hidden, dim)
+		if ffnGateW != nil && ffnUpW != nil && ffnDownW != nil {
+			mlpOut := e.scratch.Down
+			ctx.FusedMLP(normed, ffnGateW, ffnUpW, ffnDownW, mlpOut, 1, dim, hiddenDim)
+			ctx.Add(hidden, mlpOut, hidden, dim)
+		} else if ffnRouterW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.ffn_gate_inp.weight", layer)); ffnRouterW != nil {
+			topK := e.config.ExpertUsedCount
+			if topK <= 0 {
+				topK = 2
+			}
+			hiddenDimMoE := e.config.ExpertFeedForwardLength
+			if hiddenDimMoE <= 0 {
+				hiddenDimMoE = hiddenDim
+			}
+
+			logits := ctx.MOERouterLogits(normed, ffnRouterW)
+			expertIndices, expertWeights := ctx.MOETopKSelection(logits, topK)
+			logits.ReturnToPool()
+
+			ffnGateExps, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.ffn_gate_exps.weight", layer))
+			ffnUpExps, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.ffn_up_exps.weight", layer))
+			ffnDownExps, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.ffn_down_exps.weight", layer))
+
+			if ffnGateExps != nil && ffnUpExps != nil && ffnDownExps != nil {
+				activated := ctx.MOEExpertGateUpSwiGLU(normed, ffnGateExps, ffnUpExps, expertIndices, expertWeights, hiddenDimMoE)
+				down := ctx.MOEExpertForward(activated, ffnDownExps, expertIndices, expertWeights, dim)
+				activated.ReturnToPool()
+
+				// Check for shared expert
+				ffnGateSh, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.ffn_gate_shexp.weight", layer))
+				ffnUpSh, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.ffn_up_shexp.weight", layer))
+				ffnDownSh, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.ffn_down_shexp.weight", layer))
+				if ffnGateSh != nil && ffnUpSh != nil && ffnDownSh != nil {
+					shGate, _ := ctx.MatmulF16(normed, ffnGateSh)
+					shUp, _ := ctx.MatmulF16(normed, ffnUpSh)
+					ctx.FusedSwiGLU(shGate, shUp, shGate, 1, shGate.Cols())
+					shUp.ReturnToPool()
+					shDown, _ := ctx.MatmulF16(shGate, ffnDownSh)
+					shGate.ReturnToPool()
+					ctx.Add(down, shDown, down, dim)
+					shDown.ReturnToPool()
+				}
+
+				ctx.Add(hidden, down, hidden, dim)
+				down.ReturnToPool()
+			}
+			expertIndices.ReturnToPool()
+			expertWeights.ReturnToPool()
+		}
 	}
 
 	if gpuLayers < e.config.Layers && e.cpuWeights != nil {
@@ -929,4 +1151,3 @@ func (e *cudaEngine) RollbackKV(seqID string, newPos int) error {
 func init() {
 	RegisterEngine("cuda", NewcudaEngine)
 }
-

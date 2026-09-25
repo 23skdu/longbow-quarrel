@@ -20,8 +20,6 @@ func AllocatedBytes() int64 {
 	return atomic.LoadInt64(&allocatedBytes)
 }
 
-var MaxMemory int64 = 32 * 1024 * 1024 * 1024
-
 type Context struct {
 	mu   sync.Mutex
 	pool map[string][]*Tensor

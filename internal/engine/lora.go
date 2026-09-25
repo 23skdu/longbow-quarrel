@@ -2,10 +2,10 @@ package engine
 
 import (
 	"fmt"
-	"strings"
-	"sync"
 	"github.com/23skdu/longbow-quarrel/internal/device"
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
+	"strings"
+	"sync"
 )
 
 // LoRAWeight holds the rank matrices for a single projection (e.g., blk.0.attn_q).
@@ -83,8 +83,8 @@ func (lm *LoRAManager) LoadAdapter(ctx *device.Context, path string, id string) 
 
 		// Rank is the rows of A (or cols of B)
 		// GGUF Dims: [DimIn, Rank] for A, [Rank, DimOut] for B
-		r := int(tA.Dimensions[1])     // #nosec G115 -- safe: LoRA dimensions are always small
-		dimIn := int(tA.Dimensions[0]) // #nosec G115 -- safe: LoRA dimensions are always small
+		r := int(tA.Dimensions[1])      // #nosec G115 -- safe: LoRA dimensions are always small
+		dimIn := int(tA.Dimensions[0])  // #nosec G115 -- safe: LoRA dimensions are always small
 		dimOut := int(tB.Dimensions[1]) // #nosec G115 -- safe: LoRA dimensions are always small
 
 		weight := &LoRAWeight{
@@ -99,7 +99,7 @@ func (lm *LoRAManager) LoadAdapter(ctx *device.Context, path string, id string) 
 		} else {
 			// Convert F32 to F16 if needed
 			// For now, assume F16
-			_ = weight.A.LoadFrom(tA.Data) 
+			_ = weight.A.LoadFrom(tA.Data)
 		}
 
 		// Upload B

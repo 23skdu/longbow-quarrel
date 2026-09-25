@@ -117,7 +117,7 @@ func (c *SlidingWindowKVCache) Init(ctx *device.Context, cfg config.Config) erro
 		bytesPerElement = 2
 	}
 	totalBytes := int64(c.layers * 2 * c.windowSize * kvDim * bytesPerElement)
-	
+
 	if dt == device.DataTypeTQ1_0 || dt == device.DataTypeTQ2_0 {
 		qjlRows := 64 // Fixed
 		bytesPerBlock := c.headDim + qjlRows + 8

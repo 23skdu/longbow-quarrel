@@ -11,7 +11,8 @@ func TestGemma4Tokens(t *testing.T) {
 	modelPath := "/home/rsd/.cache/llmfit/models/Gemma4_E2B_Abliterated_Opus_Distilled.Q8_0.gguf"
 	f, err := gguf.LoadFile(modelPath)
 	if err != nil {
-		t.Fatalf("failed to load GGUF: %v", err)
+		t.Skipf("Gemma 4 model not found: %v", err)
+		return
 	}
 	defer f.Close()
 

@@ -394,7 +394,7 @@ func (fc *FlightClient) StreamEmbeddings(ctx context.Context, tensors []*device.
 			record.Release()
 			return fmt.Errorf("failed to write record %d: %w", i, err)
 		}
-		
+
 		totalBytes += int64(t.SizeBytes())
 		idOffset += rows
 		record.Release()

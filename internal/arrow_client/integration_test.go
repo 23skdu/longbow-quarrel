@@ -6,11 +6,11 @@ import (
 	"net"
 	"testing"
 
+	"github.com/23skdu/longbow-quarrel/internal/device"
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/flight"
 	"google.golang.org/grpc"
-	"github.com/23skdu/longbow-quarrel/internal/device"
 )
 
 // MockServer implements a basic Flight server for integration testing
@@ -120,7 +120,7 @@ func TestStreamEmbeddingsIntegration(t *testing.T) {
 	// 6. Test F16 Streaming
 	t.Run("F16Streaming", func(t *testing.T) {
 		mockSrv.ReceivedRecords = nil // Reset
-		
+
 		t1_16 := devCtx.NewTensorWithType(1, 4, device.DataTypeF16)
 		defer t1_16.Free()
 

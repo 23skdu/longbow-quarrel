@@ -1,4 +1,4 @@
-//go:build linux && cuda
+//go:build linux && amd64 && cuda && cgo
 
 package main
 
@@ -10,25 +10,26 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/23skdu/longbow-quarrel/internal/api"
 	"github.com/23skdu/longbow-quarrel/internal/device"
 	"github.com/23skdu/longbow-quarrel/internal/engine"
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
 	"github.com/23skdu/longbow-quarrel/internal/logger"
+	"github.com/23skdu/longbow-quarrel/internal/metrics"
 	"github.com/23skdu/longbow-quarrel/internal/models"
 	"github.com/23skdu/longbow-quarrel/internal/tokenizer"
-	"github.com/23skdu/longbow-quarrel/internal/metrics"
-	"github.com/23skdu/longbow-quarrel/internal/api"
 	"github.com/23skdu/longbow-quarrel/internal/vlm"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 var (
-	modelPath   = flag.String("model", "", "Path to GGUF model file")
-	prompt      = flag.String("prompt", "Hello world", "Prompt to generate from")
-	numTokens   = flag.Int("n", 20, "Number of tokens to generate")
+	modelPath    = flag.String("model", "", "Path to GGUF model file")
+	prompt       = flag.String("prompt", "Hello world", "Prompt to generate from")
+	numTokens    = flag.Int("n", 20, "Number of tokens to generate")
 	metricsAddr  = flag.String("metrics", ":9090", "Address to serve Prometheus metrics")
 	kvCacheSize  = flag.Int("kv-cache-size", 2048, "KV cache max sequence length")
 	maxBatchSize = flag.Int("max-batch-size", 16, "Maximum number of sequences in a batch")
@@ -49,6 +50,11 @@ var (
 	gpuLayers        = flag.Int("gpu-layers", -1, "Alias for -ngl")
 	loraPath         = flag.String("lora", "", "Path to LoRA adapter .gguf file (optional)")
 	imagePath        = flag.String("image", "", "Path to image file for VLM inference (optional)")
+
+	// Multi-GPU Flags
+	devicesFlag  = flag.String("devices", "", "Comma-separated list of CUDA device IDs for multi-GPU (e.g. 0,1)")
+	tpSizeFlag   = flag.Int("tp-size", 1, "Tensor parallel degree (default 1)")
+	ppStagesFlag = flag.Int("pp-stages", 1, "Pipeline parallel stages (default 1)")
 )
 
 func main() {
@@ -91,6 +97,60 @@ func main() {
 	}
 	if *numGPULayers >= 0 {
 		engineConfig.NumGPULayers = *numGPULayers
+	}
+	if *maxBatchSize > 0 {
+		engineConfig.MaxBatchSize = *maxBatchSize
+	}
+	if *blockSize > 0 {
+		engineConfig.BlockSize = *blockSize
+	}
+	if *totalBlocks > 0 {
+		engineConfig.TotalBlocks = *totalBlocks
+	}
+
+	var devIDs []int
+	if *devicesFlag != "" {
+		for _, s := range strings.Split(*devicesFlag, ",") {
+			s = strings.TrimSpace(s)
+			if s == "" {
+				continue
+			}
+			var id int
+			if _, err := fmt.Sscanf(s, "%d", &id); err == nil {
+				devIDs = append(devIDs, id)
+			}
+		}
+	}
+
+	engineConfig.Devices = devIDs
+	engineConfig.TensorParallelSize = *tpSizeFlag
+	engineConfig.PipelineStages = *ppStagesFlag
+
+	if len(devIDs) > 0 || *tpSizeFlag > 1 || *ppStagesFlag > 1 {
+		mode := device.TensorParallelism
+		if *ppStagesFlag > 1 {
+			mode |= device.PipelineParallelism
+		}
+		numGPUs := len(devIDs)
+		if numGPUs == 0 {
+			numGPUs = *tpSizeFlag
+		}
+		mgpuCfg := &device.MultiGPUConfig{
+			Mode:               mode,
+			NumGPUs:            numGPUs,
+			Devices:            devIDs,
+			TensorParallelSize: *tpSizeFlag,
+			PipelineStages:     *ppStagesFlag,
+			BatchSizePerGPU:    1,
+			UseNCCL:            true,
+			UsePipelineBubbles: false,
+			PipelineDepth:      4,
+		}
+		if err := device.InitializeMultiGPU(mgpuCfg); err != nil {
+			logger.Log.Warn("Multi-GPU initialization skipped or fallback", "error", err)
+		} else {
+			fmt.Printf("Multi-GPU Topology: devices=%v, tp_size=%d, pp_stages=%d\n", devIDs, *tpSizeFlag, *ppStagesFlag)
+		}
 	}
 
 	fmt.Printf("Layers: %d (GPU: %d)\n", engineConfig.Layers, engineConfig.NumGPULayers)

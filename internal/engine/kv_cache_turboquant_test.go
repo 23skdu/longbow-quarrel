@@ -17,9 +17,9 @@ func TestPagedKVCache_TurboQuant(t *testing.T) {
 
 	cache := &PagedKVCache{}
 	config := conf.Config{
-		KVHeads:     2,
+		KVHeads:    2,
 		HeadDim:    64,
-		Layers:      2,
+		Layers:     2,
 		WindowSize: 512,
 	}
 
@@ -77,7 +77,7 @@ func TestPagedKVCache_TurboQuantEncode(t *testing.T) {
 
 	cache := &PagedKVCache{}
 	cfg := conf.Config{
-		KVHeads:     heads,
+		KVHeads:    heads,
 		HeadDim:    headDim,
 		Layers:     1,
 		WindowSize: 128,

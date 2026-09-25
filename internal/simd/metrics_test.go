@@ -44,8 +44,8 @@ func TestMetricsRecordCalls(t *testing.T) {
 
 	m := &metricsWrapper{
 		startTime: time.Now(),
-		kernel:   "Softmax",
-		size:     256,
+		kernel:    "Softmax",
+		size:      256,
 	}
 	m.record()
 }
@@ -57,8 +57,8 @@ func TestMetricsRecordAllKernels(t *testing.T) {
 	for _, k := range kernels {
 		m := &metricsWrapper{
 			startTime: time.Now(),
-			kernel:   k,
-			size:     1000,
+			kernel:    k,
+			size:      1000,
 		}
 		m.record()
 	}
@@ -69,8 +69,8 @@ func TestMetricsDisabled(t *testing.T) {
 
 	m := &metricsWrapper{
 		startTime: time.Now(),
-		kernel:   "Softmax",
-		size:     256,
+		kernel:    "Softmax",
+		size:      256,
 	}
 	m.record()
 

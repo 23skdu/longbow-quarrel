@@ -39,12 +39,6 @@ var (
 		Name: "speculative_tokens_rejected_total",
 		Help: "Total number of speculative tokens rejected by target model",
 	})
-
-	LoRADispatchGroupsPerBatch = promauto.NewHistogram(prometheus.HistogramOpts{
-		Name:    "lora_dispatch_groups_per_batch",
-		Help:    "Number of unique LoRA adapter groups per batch",
-		Buckets: prometheus.ExponentialBuckets(1, 2, 8),
-	})
 )
 
 // Atomics for hotpath updates

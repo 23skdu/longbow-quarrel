@@ -10,32 +10,32 @@ const (
 type GGMLType uint32
 
 const (
-	GGMLTypeF32      GGMLType = 0
-	GGMLTypeF16      GGMLType = 1
-	GGMLTypeBF16     GGMLType = 30 // BFloat16 used in Gemma3, Mistral Nemo, modern GGUF
-	GGMLTypeQ4_0     GGMLType = 2
-	GGMLTypeQ4_1     GGMLType = 3
-	GGMLTypeQ5_0     GGMLType = 6
-	GGMLTypeQ8_0     GGMLType = 8
-	GGMLTypeQ2_K     GGMLType = 10
-	GGMLTypeQ3_K     GGMLType = 11
-	GGMLTypeQ4_K     GGMLType = 12
-	GGMLTypeQ5_K     GGMLType = 13
-	GGMLTypeQ6_K     GGMLType = 14
-	GGMLTypeQ8_K     GGMLType = 15
-	GGMLTypeIQ2_XXS  GGMLType = 16
-	GGMLTypeIQ2_XS   GGMLType = 17
-	GGMLTypeIQ3_XXS  GGMLType = 18
-	GGMLTypeIQ1_S    GGMLType = 19
-	GGMLTypeIQ4_NL   GGMLType = 20
-	GGMLTypeIQ3_S    GGMLType = 21
-	GGMLTypeIQ2_S    GGMLType = 22
-	GGMLTypeIQ4_XS   GGMLType = 23
-	GGMLTypeIQ1_M    GGMLType = 24
-	GGMLTypeMXFP4    GGMLType = 39 // MXFP4 for Nemotron-3-Nano
-	GGMLTypeTQ1_0    GGMLType = 40 // TurboQuant 4-bit + 1-bit residual
-	GGMLTypeTQ2_0    GGMLType = 41 // TurboQuant 8-bit + 1-bit residual
-	GGMLTypeQ4_K_S   GGMLType = 99 // Deprecated/Unused
+	GGMLTypeF32     GGMLType = 0
+	GGMLTypeF16     GGMLType = 1
+	GGMLTypeBF16    GGMLType = 30 // BFloat16 used in Gemma3, Mistral Nemo, modern GGUF
+	GGMLTypeQ4_0    GGMLType = 2
+	GGMLTypeQ4_1    GGMLType = 3
+	GGMLTypeQ5_0    GGMLType = 6
+	GGMLTypeQ8_0    GGMLType = 8
+	GGMLTypeQ2_K    GGMLType = 10
+	GGMLTypeQ3_K    GGMLType = 11
+	GGMLTypeQ4_K    GGMLType = 12
+	GGMLTypeQ5_K    GGMLType = 13
+	GGMLTypeQ6_K    GGMLType = 14
+	GGMLTypeQ8_K    GGMLType = 15
+	GGMLTypeIQ2_XXS GGMLType = 16
+	GGMLTypeIQ2_XS  GGMLType = 17
+	GGMLTypeIQ3_XXS GGMLType = 18
+	GGMLTypeIQ1_S   GGMLType = 19
+	GGMLTypeIQ4_NL  GGMLType = 20
+	GGMLTypeIQ3_S   GGMLType = 21
+	GGMLTypeIQ2_S   GGMLType = 22
+	GGMLTypeIQ4_XS  GGMLType = 23
+	GGMLTypeIQ1_M   GGMLType = 24
+	GGMLTypeMXFP4   GGMLType = 39 // MXFP4 for Nemotron-3-Nano
+	GGMLTypeTQ1_0   GGMLType = 40 // TurboQuant 4-bit + 1-bit residual
+	GGMLTypeTQ2_0   GGMLType = 41 // TurboQuant 8-bit + 1-bit residual
+	GGMLTypeQ4_K_S  GGMLType = 99 // Deprecated/Unused
 )
 
 type GGUFMetadataValueType uint32

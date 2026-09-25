@@ -1,4 +1,4 @@
-//go:build darwin && metal
+//go:build (darwin && metal) || (linux && amd64 && cuda && cgo)
 
 package main
 

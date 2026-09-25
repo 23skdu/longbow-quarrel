@@ -235,6 +235,3 @@ func TestRecordV040Metrics(t *testing.T) {
 	RecordTTFTLatency(45 * time.Millisecond)
 	RecordInterTokenLatency(12 * time.Millisecond)
 }
-
-
-

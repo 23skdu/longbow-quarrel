@@ -1,5 +1,3 @@
-
-
 package tokenizer
 
 import (
@@ -179,12 +177,12 @@ func TestTokenizer_DynamicEOS(t *testing.T) {
 	// 2. Vocab detection of Qwen / LLaMA / Gemma tokens
 	f2 := &gguf.GGUFFile{KV: map[string]interface{}{
 		"tokenizer.ggml.tokens": []interface{}{
-			"hello",          // 0
-			"<|im_end|>",     // 1
-			"<|endoftext|>",  // 2
-			"<end_of_turn>",  // 3
-			"</s>",           // 4
-			"<|eot_id|>",     // 5
+			"hello",         // 0
+			"<|im_end|>",    // 1
+			"<|endoftext|>", // 2
+			"<end_of_turn>", // 3
+			"</s>",          // 4
+			"<|eot_id|>",    // 5
 		},
 	}}
 	tk2, err := NewFromGGUF(f2)

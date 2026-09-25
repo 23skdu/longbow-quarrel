@@ -6,11 +6,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/23skdu/longbow-quarrel/internal/engine"
+	"github.com/23skdu/longbow-quarrel/internal/tokenizer"
 	"github.com/apache/arrow-go/v18/arrow/flight"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
-	"github.com/23skdu/longbow-quarrel/internal/engine"
-	"github.com/23skdu/longbow-quarrel/internal/tokenizer"
 )
 
 func TestInferenceFlightServer_DoGet(t *testing.T) {
@@ -24,7 +24,7 @@ func TestInferenceFlightServer_DoGet(t *testing.T) {
 	mockEngine := &engine.MockEngine{}
 	mockTok := &tokenizer.Tokenizer{}
 	server := NewInferenceFlightServer(serverAddr, mockEngine, mockTok)
-	
+
 	grpcServer := grpc.NewServer()
 	flight.RegisterFlightServiceServer(grpcServer, server)
 
@@ -44,7 +44,7 @@ func TestInferenceFlightServer_DoGet(t *testing.T) {
 	defer client.Close()
 
 	ticket := &flight.Ticket{Ticket: []byte("test-sequence-id")}
-	
+
 	stream, err := client.DoGet(context.Background(), ticket)
 	if err != nil {
 		t.Fatalf("failed to execute DoGet: %v", err)
@@ -56,7 +56,7 @@ func TestInferenceFlightServer_DoGet(t *testing.T) {
 	}
 	defer reader.Release()
 
-	// We expect the mock to close immediately right now because the loop is empty, 
+	// We expect the mock to close immediately right now because the loop is empty,
 	// but the fundamental gRPC connection and Arrow schema handshake succeed.
 	if reader.Next() {
 		rec := reader.Record()

@@ -133,3 +133,11 @@ func fp32ToFp16Scalar(f float32) uint16 {
 	}
 	return h
 }
+
+func fp16ToFp32(h uint16) float32 {
+	return fp16ToFp32Scalar(h)
+}
+
+func fp32ToFp16(f float32) uint16 {
+	return fp32ToFp16Scalar(f)
+}

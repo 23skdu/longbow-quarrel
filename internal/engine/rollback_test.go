@@ -3,9 +3,9 @@
 package engine
 
 import (
-	"testing"
 	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/device"
+	"testing"
 )
 
 func TestPagedKVCache_Rollback(t *testing.T) {
@@ -13,10 +13,10 @@ func TestPagedKVCache_Rollback(t *testing.T) {
 	defer ctx.Free()
 
 	conf := config.Config{
-		Layers: 1, 
-		KVHeads: 1, 
-		HeadDim: 64, 
-		SeqLen: 128,
+		Layers:     1,
+		KVHeads:    1,
+		HeadDim:    64,
+		SeqLen:     128,
 		WindowSize: 128,
 	}
 
@@ -28,7 +28,7 @@ func TestPagedKVCache_Rollback(t *testing.T) {
 	defer cache.Free()
 
 	seqID := "test-rollback"
-	
+
 	// 1. Fill 2 blocks (BlockSize is 16 by default)
 	// Block 0: 0-15
 	// Block 1: 16-31
@@ -57,7 +57,7 @@ func TestPagedKVCache_Rollback(t *testing.T) {
 	if len(newTable) != 1 {
 		t.Errorf("expected 1 block after rollback, got %d", len(newTable))
 	}
-	
+
 	if cache.blockRefs[initialBlock1] != 0 {
 		t.Errorf("expected Block 1 refcount 0, got %d", cache.blockRefs[initialBlock1])
 	}

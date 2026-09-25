@@ -84,11 +84,11 @@ func NewFromGGUF(f *gguf.GGUFFile) (*Tokenizer, error) {
 
 	// 2. Add common known architecture EOS tokens if present in vocab
 	commonEOSTokens := []string{
-		"<|im_end|>",     // Qwen 2, 2.5, 3.5
-		"<|endoftext|>",  // Qwen, GPT
-		"<end_of_turn>",  // Gemma
-		"</s>",           // Llama 1/2, Mistral
-		"<|eot_id|>",     // Llama 3
+		"<|im_end|>",    // Qwen 2, 2.5, 3.5
+		"<|endoftext|>", // Qwen, GPT
+		"<end_of_turn>", // Gemma
+		"</s>",          // Llama 1/2, Mistral
+		"<|eot_id|>",    // Llama 3
 	}
 	for _, tokStr := range commonEOSTokens {
 		if id, exists := vocab[tokStr]; exists {

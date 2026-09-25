@@ -1,4 +1,5 @@
 //go:build !metal && !cuda && !tpu
+
 package device
 
 import (
@@ -11,11 +12,13 @@ func TestCPU_ReferenceKernels(t *testing.T) {
 	weights := []float32{1.0, 1.0, 1.0}
 	input := []float32{1.0, 2.0, 3.0}
 	output := CPURMSNorm(input, weights, 1e-5)
-	
+
 	sumSquare := float32(0)
-	for _, v := range output { sumSquare += v * v }
+	for _, v := range output {
+		sumSquare += v * v
+	}
 	// mean square should be approx 1.0
-	if math.Abs(float64(sumSquare/3.0 - 1.0)) > 1e-3 {
+	if math.Abs(float64(sumSquare/3.0-1.0)) > 1e-3 {
 		t.Errorf("CPURMSNorm output not normalized: mean square = %f", sumSquare/3.0)
 	}
 
@@ -31,7 +34,7 @@ func TestCPU_ReferenceKernels(t *testing.T) {
 	up := []float32{2.0}
 	output_swiglu := CPUSwiGLU(gate, up)
 	// silu(1.0) * 2.0 = 0.731 * 2.0 = 1.462
-	if math_abs(float64(output_swiglu[0] - 1.4621)) > 1e-3 {
+	if math_abs(float64(output_swiglu[0]-1.4621)) > 1e-3 {
 		t.Errorf("CPUSwiGLU failed: got %f", output_swiglu[0])
 	}
 }
@@ -55,12 +58,12 @@ func TestCPU_Validation(t *testing.T) {
 	if IsValid(data) {
 		t.Error("IsValid failed to detect NaN")
 	}
-	
+
 	infData := []float32{1.0, float32(math.Inf(1)), 3.0}
 	if !HasAnyInf(infData) {
 		t.Error("HasAnyInf failed to detect Inf")
 	}
-	
+
 	if Float32Max([]float32{1.0, 10.0, 5.0}) != 10.0 {
 		t.Error("Float32Max failed")
 	}
@@ -70,7 +73,7 @@ func TestCPU_Conversion(t *testing.T) {
 	val := float32(3.14)
 	f16 := Float32ToFloat16(val)
 	back := Float16ToFloat32(f16)
-	if math_abs(float64(back - val)) > 1e-2 {
+	if math_abs(float64(back-val)) > 1e-2 {
 		t.Errorf("F16 conversion loss too high: %f -> %f", val, back)
 	}
 }

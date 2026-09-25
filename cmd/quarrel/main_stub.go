@@ -1,5 +1,4 @@
-//go:build !cuda && !metal && !tpu
-// +build !cuda,!metal,!tpu
+//go:build (!cuda || !linux || !amd64 || !cgo) && (!metal || !darwin) && (!tpu || !linux)
 
 package main
 
