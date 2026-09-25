@@ -45,8 +45,8 @@ func TestServer_FaultInjection(t *testing.T) {
 		w := &faultyResponseWriter{}
 		r, _ := http.NewRequest("POST", "/v1/completions", bytes.NewBufferString("{invalid json"))
 		s.CompletionsHandler(w, r)
-		if w.status == 0 {
-			// Just a use of w.status to satisfy compiler
+		if w.status != http.StatusBadRequest {
+			t.Errorf("expected status %d for malformed JSON, got %d", http.StatusBadRequest, w.status)
 		}
 	})
 }

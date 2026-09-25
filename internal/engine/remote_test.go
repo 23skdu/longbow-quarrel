@@ -38,7 +38,7 @@ func TestRemoteWorkerEngine_ForwardShardedLayer_ValidInput(t *testing.T) {
 	for i := range inputData {
 		inputData[i] = float32(i)
 	}
-	input.LoadFromF32(inputData)
+	_ = input.LoadFromF32(inputData)
 
 	eng := &RemoteWorkerEngine{
 		client: nil, // Would test with mock client

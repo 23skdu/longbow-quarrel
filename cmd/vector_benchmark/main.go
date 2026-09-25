@@ -90,7 +90,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("Failed to create CPU profile file %s: %v", *cpuProfFlag, err)
 		}
-		defer f.Close()
+		defer func() { _ = f.Close() }()
 		if err := pprof.StartCPUProfile(f); err != nil {
 			log.Fatalf("Failed to start CPU profile: %v", err)
 		}
@@ -427,7 +427,7 @@ func main() {
 		if err != nil {
 			log.Printf("Failed to create memory profile %s: %v", *memProfFlag, err)
 		} else {
-			defer f.Close()
+			defer func() { _ = f.Close() }()
 			runtime.GC()
 			if err := pprof.WriteHeapProfile(f); err != nil {
 				log.Printf("Failed to write heap profile: %v", err)
@@ -474,15 +474,15 @@ func generateMarkdownReport(path string, results []vector.BenchmarkResult, basel
 	sb.WriteString("- **Dimensions**: 128 and 384\n")
 	sb.WriteString("- **Data Types**: `float32`, `turboquant`, `complex128`, `uint8`\n")
 	sb.WriteString("- **Search Topologies**: `flat_dot`, `flat_l2`, `flat_cosine`, `ivf`, `hnsw`\n")
-	sb.WriteString(fmt.Sprintf("- **Memory Audit**: Baseline=%.2f MB, Final=%.2f MB (Net Delta: %.2f MB — No leaks)\n\n", baselineMem, finalMem, finalMem-baselineMem))
+	fmt.Fprintf(&sb, "- **Memory Audit**: Baseline=%.2f MB, Final=%.2f MB (Net Delta: %.2f MB — No leaks)\n\n", baselineMem, finalMem, finalMem-baselineMem)
 
 	sb.WriteString("## 2. Benchmark Results Table\n\n")
 	sb.WriteString("| Vectors (N) | Dim | Data Type | Search Type | QPS | Mean Latency (μs) | P95 Latency (μs) | Index Memory (MB) | Bytes/Vec | Comp. Ratio |\n")
 	sb.WriteString("|---|---|---|---|---|---|---|---|---|---|\n")
 
 	for _, r := range results {
-		sb.WriteString(fmt.Sprintf("| %d | %d | `%s` | `%s` | %.1f | %.2f | %.2f | %.2f | %.1f | %.2fx |\n",
-			r.VectorCount, r.Dimension, r.DataType, r.SearchType, r.QPS, r.LatencyMeanUs, r.LatencyP95Us, r.MemoryAllocMB, r.BytesPerVector, r.CompressionRatio))
+		fmt.Fprintf(&sb, "| %d | %d | `%s` | `%s` | %.1f | %.2f | %.2f | %.2f | %.1f | %.2fx |\n",
+			r.VectorCount, r.Dimension, r.DataType, r.SearchType, r.QPS, r.LatencyMeanUs, r.LatencyP95Us, r.MemoryAllocMB, r.BytesPerVector, r.CompressionRatio)
 	}
 
 	sb.WriteString("\n## 3. Key Performance & Profiling Insights\n\n")

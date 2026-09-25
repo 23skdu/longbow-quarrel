@@ -17,7 +17,7 @@ func generateTestGGUFCPU(path string, seqLen uint32) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMagic))
 	_ = binary.Write(f, binary.LittleEndian, uint32(3))

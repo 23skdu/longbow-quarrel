@@ -54,7 +54,7 @@ func TestCPUEngine_ForwardBatch(t *testing.T) {
 		e.weights.TokenEmb[i] = make([]float32, cfg.Dim)
 	}
 	initCPUEngineWeights(e, cfg.Dim, cfg.Layers, cfg.Heads, cfg.KVHeads, headDim, cfg.HiddenDim)
-	e.cache.Init(ctx, cfg)
+	_ = e.cache.Init(ctx, cfg)
 
 	// Create a mock batch descriptor
 	desc := &BatchDescriptor{
@@ -69,8 +69,8 @@ func TestCPUEngine_ForwardBatch(t *testing.T) {
 	}
 
 	// Pre-allocate in cache
-	e.cache.Allocate("seq-1", 10)
-	e.cache.Allocate("seq-2", 10)
+	_ = e.cache.Allocate("seq-1", 10)
+	_ = e.cache.Allocate("seq-2", 10)
 
 	results, err := e.ForwardBatch(desc)
 	if err != nil {
@@ -122,7 +122,7 @@ func TestCPUEngine_Softmax(t *testing.T) {
 func TestCPUEngine_Lifecycle(t *testing.T) {
 	ctx := device.NewContext()
 	e := &CPUEngine{ctx: ctx, cache: &PagedKVCache{}}
-	e.cache.Init(ctx, config.Config{Layers: 1})
+	_ = e.cache.Init(ctx, config.Config{Layers: 1})
 	e.Close() // Should not panic
 }
 

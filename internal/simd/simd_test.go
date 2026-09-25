@@ -868,7 +868,7 @@ func TestFp32ToFp16_DefaultScalar(t *testing.T) {
 		1e-6,
 		-1e-6,
 		0.0,
-		-0.0,
+		float32(math.Copysign(0, -1)),
 		1.0,
 		-1.0,
 	}

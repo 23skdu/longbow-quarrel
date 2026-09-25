@@ -79,10 +79,6 @@ func (c *PagedKVCache) Init(ctx *device.Context, config config.Config) error {
 
 	// Configurable block size
 	c.blockSize = 16 // Default to 16
-	if config.WindowSize > 0 && config.WindowSize%c.blockSize != 0 {
-		// Adjust if needed, or ensure window fits blocks
-	}
-
 	// Total capacity
 	capacity := config.KVCacheSize
 	if capacity == 0 {

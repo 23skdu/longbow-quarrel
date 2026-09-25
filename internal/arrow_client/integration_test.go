@@ -16,7 +16,7 @@ import (
 // MockServer implements a basic Flight server for integration testing
 type MockServer struct {
 	flight.BaseFlightServer
-	ReceivedRecords []arrow.Record
+	ReceivedRecords []arrow.RecordBatch
 	LastSchema      *arrow.Schema
 }
 
@@ -30,7 +30,7 @@ func (s *MockServer) DoPut(stream flight.FlightService_DoPutServer) error {
 	s.LastSchema = reader.Schema()
 
 	for reader.Next() {
-		record := reader.Record()
+		record := reader.RecordBatch()
 		record.Retain()
 		s.ReceivedRecords = append(s.ReceivedRecords, record)
 	}
@@ -58,7 +58,7 @@ func TestStreamEmbeddingsIntegration(t *testing.T) {
 	// 2. Setup Client
 	host, port, _ := net.SplitHostPort(addr)
 	p := 0
-	fmt.Sscanf(port, "%d", &p)
+	_, _ = fmt.Sscanf(port, "%d", &p)
 	client, err := NewFlightClient(host, p, host, p+1) // Meta port unused here
 	if err != nil {
 		t.Fatalf("failed to create client: %v", err)
@@ -67,7 +67,7 @@ func TestStreamEmbeddingsIntegration(t *testing.T) {
 	if err := client.Connect(ctx); err != nil {
 		t.Fatalf("failed to connect: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	// 3. Prepare Test Data (Device Tensors)
 	devCtx := device.NewContext()

@@ -21,8 +21,7 @@ func TestTelemetry_InitTracer_Stdout(t *testing.T) {
 		t.Fatal("expected non-nil tracer")
 	}
 
-	ctx := context.Background()
-	ctx, span := StartSpan(ctx, "test.operation")
+	_, span := StartSpan(context.Background(), "test.operation")
 	if span == nil {
 		t.Fatal("expected non-nil span")
 	}
@@ -45,8 +44,7 @@ func TestTelemetry_InitTracer_OTLP(t *testing.T) {
 		_ = shutdown(ctxTimeout)
 	}()
 
-	ctx := context.Background()
-	ctx, span := StartRequestSpan(ctx, "req-123", "qwen3.5-0.8b")
+	_, span := StartRequestSpan(context.Background(), "req-123", "qwen3.5-0.8b")
 	if span == nil {
 		t.Fatal("expected non-nil request span")
 	}

@@ -16,6 +16,6 @@ func TestCPUEngine_Extra_Coverage(t *testing.T) {
 
 	e.GetSeqCachePos("seq_1")
 	// Test rollback/forward draft stubs
-	e.ForwardDraft([]int{1})
-	e.RollbackKV("seq_1", 0)
+	_, _ = e.ForwardDraft([]int{1})
+	_ = e.RollbackKV("seq_1", 0)
 }

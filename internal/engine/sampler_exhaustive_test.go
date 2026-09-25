@@ -32,7 +32,7 @@ func TestSampler_Logic_Full(t *testing.T) {
 
 	// 3. Test with extreme distribution (adaptive temp)
 	l_extreme := []float32{100.0, 0.1, 0.1, 0.1, 0.1}
-	token = sampler.SampleAdvanced(l_extreme, history, true)
+	_ = sampler.SampleAdvanced(l_extreme, history, true)
 }
 
 func TestSampler_EdgeCases(t *testing.T) {
@@ -48,5 +48,5 @@ func TestSampler_EdgeCases(t *testing.T) {
 
 	// Case NaN logits
 	l_nan := []float32{1.0, float32(math.NaN()), 3.0}
-	token = sampler.Sample(l_nan, nil) // Should handle via validateLogits
+	_ = sampler.Sample(l_nan, nil) // Should handle via validateLogits
 }

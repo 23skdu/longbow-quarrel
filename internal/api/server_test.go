@@ -24,7 +24,7 @@ func TestServer_Healthz(t *testing.T) {
 	}
 
 	var resp HealthResponse
-	json.NewDecoder(rr.Body).Decode(&resp)
+	_ = json.NewDecoder(rr.Body).Decode(&resp)
 	if resp.LoadPercent != 50 {
 		t.Errorf("expected 50%% load, got %d%%", resp.LoadPercent)
 	}
@@ -51,7 +51,7 @@ func TestServer_Completions(t *testing.T) {
 	}
 
 	var resp CompletionResponse
-	json.NewDecoder(rr.Body).Decode(&resp)
+	_ = json.NewDecoder(rr.Body).Decode(&resp)
 	if len(resp.Choices) == 0 || resp.Choices[0].Text != "test response" {
 		t.Errorf("unexpected response text: %v", resp.Choices)
 	}

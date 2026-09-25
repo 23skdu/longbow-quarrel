@@ -170,7 +170,7 @@ func QuantizeWeightsToQ3K(weights []float32, numElements int) ([]byte, error) {
 			groupStart := g * 32
 			groupEnd := groupStart + 32
 
-			var groupMin, groupMax float32 = blockWeights[groupStart], blockWeights[groupStart]
+			var groupMin, groupMax = blockWeights[groupStart], blockWeights[groupStart]
 			for _, w := range blockWeights[groupStart:groupEnd] {
 				if w < groupMin {
 					groupMin = w

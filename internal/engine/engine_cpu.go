@@ -235,11 +235,9 @@ func (e *CPUEngine) runBatchLoop() {
 			results[i].Free()
 
 			// Update Sequence State
-			chunkLen := 1
+			chunkLen := len(desc.Tokens) - desc.Offsets[i]
 			if i < len(desc.Offsets)-1 {
 				chunkLen = desc.Offsets[i+1] - desc.Offsets[i]
-			} else {
-				chunkLen = len(desc.Tokens) - desc.Offsets[i]
 			}
 
 			// If this is an intermediate prefill chunk, just advance position and continue
@@ -743,7 +741,7 @@ func (e *CPUEngine) LoadAdapter(path, id string) error {
 	if err != nil {
 		return fmt.Errorf("cpu lora: failed to load %s: %w", path, err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	alpha := float32(8.0)
 	if a, ok := f.KV["adapter.lora_alpha"].(float32); ok {
@@ -800,20 +798,20 @@ func (e *CPUEngine) LoadAdapter(path, id string) error {
 		if n, err3 := fmt.Sscanf(base, "blk.%d.", &layer); n == 1 && err3 == nil {
 			// Extract projection name
 			suffix := base[len(fmt.Sprintf("blk.%d.", layer)):]
-			switch {
-			case suffix == "attn_q" || suffix == "self_attn.q_proj":
+			switch suffix {
+			case "attn_q", "self_attn.q_proj":
 				layerKey = "attn_q"
-			case suffix == "attn_k" || suffix == "self_attn.k_proj":
+			case "attn_k", "self_attn.k_proj":
 				layerKey = "attn_k"
-			case suffix == "attn_v" || suffix == "self_attn.v_proj":
+			case "attn_v", "self_attn.v_proj":
 				layerKey = "attn_v"
-			case suffix == "attn_output" || suffix == "self_attn.o_proj":
+			case "attn_output", "self_attn.o_proj":
 				layerKey = "attn_o"
-			case suffix == "ffn_gate" || suffix == "mlp.gate_proj":
+			case "ffn_gate", "mlp.gate_proj":
 				layerKey = "ffn_gate"
-			case suffix == "ffn_up" || suffix == "mlp.up_proj":
+			case "ffn_up", "mlp.up_proj":
 				layerKey = "ffn_up"
-			case suffix == "ffn_down" || suffix == "mlp.down_proj":
+			case "ffn_down", "mlp.down_proj":
 				layerKey = "ffn_down"
 			}
 		}

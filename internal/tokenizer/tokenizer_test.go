@@ -16,22 +16,22 @@ func generateVocabGGUF(path string, vocab []string) error {
 	defer func() { _ = f.Close() }()
 
 	// Magic
-	binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMagic))
+	_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMagic))
 	// Version
-	binary.Write(f, binary.LittleEndian, uint32(3))
+	_ = binary.Write(f, binary.LittleEndian, uint32(3))
 	// Tensor Count (0)
-	binary.Write(f, binary.LittleEndian, uint64(0))
+	_ = binary.Write(f, binary.LittleEndian, uint64(0))
 	// KV Count (1) - just tokens
-	binary.Write(f, binary.LittleEndian, uint64(1))
+	_ = binary.Write(f, binary.LittleEndian, uint64(1))
 
 	// KV Pair: "tokenizer.ggml.tokens"
 	writeString(f, "tokenizer.ggml.tokens")
 	// Type: Array
-	binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeArray))
+	_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeArray))
 	// Array Type: String
-	binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeString))
+	_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeString))
 	// Array Len
-	binary.Write(f, binary.LittleEndian, uint64(len(vocab)))
+	_ = binary.Write(f, binary.LittleEndian, uint64(len(vocab)))
 
 	// Array Elements
 	for _, v := range vocab {
@@ -42,7 +42,7 @@ func generateVocabGGUF(path string, vocab []string) error {
 }
 
 func writeString(f *os.File, s string) {
-	binary.Write(f, binary.LittleEndian, uint64(len(s)))
+	_ = binary.Write(f, binary.LittleEndian, uint64(len(s)))
 	_, _ = f.WriteString(s)
 }
 

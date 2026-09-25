@@ -17,7 +17,7 @@ func TestPagedKVCache_Exhaustive(t *testing.T) {
 		KVHeads:   1,
 	}
 
-	cache.Init(ctx, cfg)
+	_ = cache.Init(ctx, cfg)
 
 	// 1. Double Allocate
 	seqID := "seq_1"
@@ -65,7 +65,7 @@ func TestContinuousBatchManager_Edge_Cases(t *testing.T) {
 	cache := &PagedKVCache{}
 	desc, _ := cm.Step(4, cache, nil)
 	if desc == nil {
-		// Expected if queue is empty or cache lacks capacity
+		t.Log("Step returned nil descriptor for an empty queue (expected)")
 	}
 
 	cm.AbortAll(nil)

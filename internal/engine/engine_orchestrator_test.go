@@ -17,7 +17,7 @@ func (m *MockBackend) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, err
 		// Mock tensor with a single value (42)
 		ctx := device.NewContext() // This might panic on Metal, but for CPU-only run it's fine
 		t := ctx.NewTensorFP32(1, 1)
-		t.LoadFrom([]float32{42.0})
+		_ = t.LoadFrom([]float32{42.0})
 		results[i] = t
 	}
 	return results, nil

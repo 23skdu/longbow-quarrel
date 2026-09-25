@@ -19,8 +19,8 @@ func TestActivationLogger_Coverage(t *testing.T) {
 	logger.LogLogits(data, []int{0})
 
 	tmp, _ := os.CreateTemp("", "act_log.txt")
-	defer os.Remove(tmp.Name())
-	logger.SaveToFile(tmp.Name())
+	defer func() { _ = os.Remove(tmp.Name()) }()
+	_ = logger.SaveToFile(tmp.Name())
 }
 
 func TestMockEngine_Coverage(t *testing.T) {
@@ -32,8 +32,8 @@ func TestMockEngine_Coverage(t *testing.T) {
 
 	e.Config()
 	e.Close()
-	e.SwapModel("new_path", cfg)
+	_ = e.SwapModel("new_path", cfg)
 	e.GetSeqCachePos("seq_1")
-	e.ForwardDraft([]int{1, 2})
-	e.RollbackKV("seq_1", 0)
+	_, _ = e.ForwardDraft([]int{1, 2})
+	_ = e.RollbackKV("seq_1", 0)
 }

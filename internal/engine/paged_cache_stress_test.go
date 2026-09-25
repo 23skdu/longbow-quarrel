@@ -17,7 +17,7 @@ func TestPagedKVCache_AllocationStress(t *testing.T) {
 
 	cache := &PagedKVCache{}
 	// Small cache to force reuse/fragmentation tests
-	cache.Init(ctx, cfg)
+	_ = cache.Init(ctx, cfg)
 
 	// 1. Allocate many sequences
 	for i := 0; i < 20; i++ {
@@ -74,9 +74,9 @@ func TestPagedKVCache_AllocationStress(t *testing.T) {
 func TestPagedKVCache_Free(t *testing.T) {
 	ctx := device.NewContext()
 	cache := &PagedKVCache{}
-	cache.Init(ctx, config.Config{Layers: 1, KVHeads: 1, HeadDim: 1})
+	_ = cache.Init(ctx, config.Config{Layers: 1, KVHeads: 1, HeadDim: 1})
 
-	cache.Allocate("test", 10)
+	_ = cache.Allocate("test", 10)
 	cache.Free()
 
 	if cache.initialized {

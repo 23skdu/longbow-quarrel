@@ -14,7 +14,7 @@ func TestGemma4Tokens(t *testing.T) {
 		t.Skipf("Gemma 4 model not found: %v", err)
 		return
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	tok, err := NewFromGGUF(f)
 	if err != nil {

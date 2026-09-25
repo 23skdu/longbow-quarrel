@@ -74,7 +74,7 @@ func TestContinuousBatchManager_AbortAll(t *testing.T) {
 func TestContinuousBatchManager_Preemption(t *testing.T) {
 	// Dummy for coverage
 	mgr := NewContinuousBatchManager()
-	mgr.Step(0, nil, nil)
+	_, _ = mgr.Step(0, nil, nil)
 }
 
 func TestContinuousBatchManager_ChunkedPrefill(t *testing.T) {
@@ -154,7 +154,7 @@ func TestContinuousBatchManager_ChunkedPrefill(t *testing.T) {
 	}
 	chunkLen3 := len(desc3.Tokens)
 	// On final prefill chunk: seq.Pos+chunkLen3 >= seq.PromptLen, so sample and append
-	if !(!desc3.IsDecode[0] && seq.Pos+chunkLen3 < seq.PromptLen) {
+	if desc3.IsDecode[0] || seq.Pos+chunkLen3 >= seq.PromptLen {
 		seq.Tokens = append(seq.Tokens, 9999) // simulated generated token
 		seq.Pos += chunkLen3
 	}

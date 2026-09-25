@@ -351,7 +351,7 @@ func (fc *FlightClient) StreamEmbeddings(ctx context.Context, tensors []*device.
 
 	writer := flight.NewRecordWriter(stream, ipc.WithSchema(schema))
 	writer.SetFlightDescriptor(desc)
-	defer writer.Close()
+	defer func() { _ = writer.Close() }()
 
 	// 3. Process each tensor as a separate Record Batch
 	idOffset := 0
@@ -389,7 +389,7 @@ func (fc *FlightClient) StreamEmbeddings(ctx context.Context, tensors []*device.
 		defer idArr.Release()
 
 		// Create and write the record
-		record := array.NewRecord(schema, []arrow.Array{idArr, vectorArr}, int64(rows))
+		record := array.NewRecordBatch(schema, []arrow.Array{idArr, vectorArr}, int64(rows))
 		if err := writer.Write(record); err != nil {
 			record.Release()
 			return fmt.Errorf("failed to write record %d: %w", i, err)

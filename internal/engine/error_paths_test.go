@@ -9,9 +9,9 @@ import (
 func TestGGUF_Error_Coverage(t *testing.T) {
 	// 1. Invalid signature
 	tmp, _ := os.CreateTemp("", "bad_sig.gguf")
-	defer os.Remove(tmp.Name())
-	tmp.Write([]byte("NOTGGUF"))
-	tmp.Close()
+	defer func() { _ = os.Remove(tmp.Name()) }()
+	_, _ = tmp.Write([]byte("NOTGGUF"))
+	_ = tmp.Close()
 
 	_, err := gguf.LoadFile(tmp.Name())
 	if err == nil {
@@ -20,9 +20,9 @@ func TestGGUF_Error_Coverage(t *testing.T) {
 
 	// 2. Short file
 	tmp2, _ := os.CreateTemp("", "short.gguf")
-	defer os.Remove(tmp2.Name())
-	tmp2.Write([]byte("GGUF")) // Just the magic
-	tmp2.Close()
+	defer func() { _ = os.Remove(tmp2.Name()) }()
+	_, _ = tmp2.Write([]byte("GGUF")) // Just the magic
+	_ = tmp2.Close()
 	_, err = gguf.LoadFile(tmp2.Name())
 	if err == nil {
 		t.Error("Expected error for short GGUF file")

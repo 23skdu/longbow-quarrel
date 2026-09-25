@@ -61,7 +61,7 @@ func TestFP8_Kernels(t *testing.T) {
 	conf := NewFP8Config(FP8E4M3)
 	bin, _ := conf.MarshalBinary()
 	conf2 := &FP8Config{}
-	conf2.UnmarshalBinary(bin)
+	_ = conf2.UnmarshalBinary(bin)
 }
 
 func TestTurboQuant_Matrices(t *testing.T) {

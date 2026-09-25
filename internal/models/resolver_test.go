@@ -60,7 +60,7 @@ func TestResolveModelPath_TildeAndNotFound(t *testing.T) {
 	if err == nil {
 		tmpInHome := filepath.Join(home, ".test_quarrel_tilde.gguf")
 		if err := os.WriteFile(tmpInHome, []byte("GGUF"), 0644); err == nil {
-			defer os.Remove(tmpInHome)
+			defer func() { _ = os.Remove(tmpInHome) }()
 			res, err := ResolveModelPath("~/.test_quarrel_tilde.gguf")
 			if err != nil || res != tmpInHome {
 				t.Errorf("Tilde resolution failed: %v, got %s", err, res)
@@ -92,7 +92,7 @@ func TestResolveModelPath_SearchDirsDirect(t *testing.T) {
 		_ = os.MkdirAll(testDir, 0755)
 		testFile := filepath.Join(testDir, "test_direct_match.gguf")
 		if err := os.WriteFile(testFile, []byte("GGUF"), 0644); err == nil {
-			defer os.Remove(testFile)
+			defer func() { _ = os.Remove(testFile) }()
 
 			// With .gguf
 			res, err := ResolveModelPath("test_direct_match.gguf")

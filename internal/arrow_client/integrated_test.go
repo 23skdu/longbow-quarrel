@@ -23,7 +23,7 @@ func TestArrowIntegration_Suite(t *testing.T) {
 	addr := lis.Addr().String()
 	host, portStr, _ := net.SplitHostPort(addr)
 	var port int
-	fmt.Sscanf(portStr, "%d", &port)
+	_, _ = fmt.Sscanf(portStr, "%d", &port)
 
 	mockEngine, _ := engine.NewMockEngine("", config.Config{})
 	mockTokenizer := &tokenizer.Tokenizer{
@@ -52,7 +52,7 @@ func TestArrowIntegration_Suite(t *testing.T) {
 	if err := client.Connect(ctx); err != nil {
 		t.Fatalf("failed to connect: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	// 3. Test DoGet
 	t.Run("DoGet", func(t *testing.T) {

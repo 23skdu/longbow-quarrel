@@ -40,7 +40,7 @@ func (lm *LoRAManager) LoadAdapter(ctx *device.Context, path string, id string) 
 	if err != nil {
 		return fmt.Errorf("failed to load lora file: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	lm.mu.Lock()
 	defer lm.mu.Unlock()

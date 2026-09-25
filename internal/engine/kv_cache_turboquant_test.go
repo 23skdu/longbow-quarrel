@@ -59,7 +59,7 @@ func TestPagedKVCache_TurboQuantEncode(t *testing.T) {
 		}
 	}
 	rot := ctx.NewTensorFP32(headDim, headDim)
-	rot.LoadFromF32(rotData)
+	_ = rot.LoadFromF32(rotData)
 
 	qjlData := make([]float32, qjlRows*headDim)
 	for i := range qjlData {
@@ -70,7 +70,7 @@ func TestPagedKVCache_TurboQuantEncode(t *testing.T) {
 		}
 	}
 	qjl := ctx.NewTensorFP32(qjlRows, headDim)
-	qjl.LoadFromF32(qjlData)
+	_ = qjl.LoadFromF32(qjlData)
 
 	ctx.TQRotation = rot
 	ctx.TQQJL = qjl

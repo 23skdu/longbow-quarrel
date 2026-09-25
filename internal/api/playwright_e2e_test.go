@@ -16,7 +16,7 @@ func TestPlaywrightE2E_API(t *testing.T) {
 	if err != nil {
 		t.Skipf("skipping: could not start playwright driver: %v", err)
 	}
-	defer pw.Stop()
+	defer func() { _ = pw.Stop() }()
 
 	// 2. Start a local server with a mock engine
 	l, err := net.Listen("tcp", "127.0.0.1:0")
@@ -41,7 +41,7 @@ func TestPlaywrightE2E_API(t *testing.T) {
 	go func() {
 		_ = httpServer.Serve(l)
 	}()
-	defer httpServer.Close()
+	defer func() { _ = httpServer.Close() }()
 
 	if err := waitServer(baseURL); err != nil {
 		t.Fatalf("server failed to start: %v", err)

@@ -37,11 +37,11 @@ func TestInferenceFlightServer_DoGet(t *testing.T) {
 	defer grpcServer.Stop()
 
 	// Client code to connect and pull tokens
-	client, err := flight.NewFlightClient(serverAddr, nil, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	client, err := flight.NewClientWithMiddleware(serverAddr, nil, nil, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatalf("failed to create flight client: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	ticket := &flight.Ticket{Ticket: []byte("test-sequence-id")}
 
@@ -59,7 +59,7 @@ func TestInferenceFlightServer_DoGet(t *testing.T) {
 	// We expect the mock to close immediately right now because the loop is empty,
 	// but the fundamental gRPC connection and Arrow schema handshake succeed.
 	if reader.Next() {
-		rec := reader.Record()
+		rec := reader.RecordBatch()
 		if rec.NumRows() == 0 {
 			t.Errorf("expected > 0 rows")
 		}

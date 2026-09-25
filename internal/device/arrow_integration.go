@@ -14,10 +14,6 @@ import (
 // ToArrowArray creates an Arrow FixedSizeList array from the raw memory of a Tensor.
 // This implements a true zero-copy path for both F32 and F16 data.
 func (t *Tensor) ToArrowArray(allocator memory.Allocator) (*array.FixedSizeList, error) {
-	if allocator == nil {
-		allocator = memory.DefaultAllocator
-	}
-
 	var arrowType arrow.DataType
 	var arrowBuf *memory.Buffer
 

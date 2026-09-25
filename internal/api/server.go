@@ -97,14 +97,9 @@ func InitServer(maxMemory int64, memCallback func() int64, e engine.Engine, t To
 func (s *Server) runResourceMonitor() {
 	ticker := time.NewTicker(1 * time.Second)
 	for range ticker.C {
-		used := s.getUsedMemory()
-		if s.MaxMemory > 0 {
-			load := float64(used) / float64(s.MaxMemory)
-			if load >= 0.95 {
-				// We don't log here to avoid spamming in high load,
-				// but metrics are updated in the Healthz endpoint.
-			}
-		}
+		// Peak-load logging is intentionally omitted to avoid spamming the
+		// log at high load; live memory metrics are reported by Healthz.
+		_ = s.getUsedMemory()
 	}
 }
 
@@ -281,7 +276,7 @@ func (s *Server) ChatCompletionsHandler(w http.ResponseWriter, r *http.Request) 
 	var imagePayloads [][]byte
 
 	for _, msg := range req.Messages {
-		promptBuilder.WriteString(fmt.Sprintf("<|im_start|>%s\n", msg.Role))
+		fmt.Fprintf(&promptBuilder, "<|im_start|>%s\n", msg.Role)
 		switch c := msg.Content.(type) {
 		case string:
 			promptBuilder.WriteString(c)

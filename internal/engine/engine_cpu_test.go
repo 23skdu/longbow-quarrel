@@ -335,7 +335,7 @@ func TestGetSeqCachePos(t *testing.T) {
 	if err := generateTestGGUF(modelPath); err != nil {
 		t.Fatalf("Failed to generate test GGUF: %v", err)
 	}
-	defer os.Remove(modelPath)
+	defer func() { _ = os.Remove(modelPath) }()
 
 	conf := config.Default()
 	conf.KVCacheSize = 1024
@@ -355,7 +355,7 @@ func TestInferWithLogits(t *testing.T) {
 	if err := generateTestGGUF(modelPath); err != nil {
 		t.Fatalf("Failed to generate test GGUF: %v", err)
 	}
-	defer os.Remove(modelPath)
+	defer func() { _ = os.Remove(modelPath) }()
 
 	conf := config.Default()
 	conf.KVCacheSize = 1024
@@ -385,7 +385,7 @@ func TestInferWithCallback(t *testing.T) {
 	if err := generateTestGGUF(modelPath); err != nil {
 		t.Fatalf("Failed to generate test GGUF: %v", err)
 	}
-	defer os.Remove(modelPath)
+	defer func() { _ = os.Remove(modelPath) }()
 
 	conf := config.Default()
 	conf.KVCacheSize = 1024
@@ -411,7 +411,7 @@ func TestInferWithCallbackLogits(t *testing.T) {
 	if err := generateTestGGUF(modelPath); err != nil {
 		t.Fatalf("Failed to generate test GGUF: %v", err)
 	}
-	defer os.Remove(modelPath)
+	defer func() { _ = os.Remove(modelPath) }()
 
 	conf := config.Default()
 	conf.KVCacheSize = 1024
@@ -579,7 +579,7 @@ func TestForwardDraft(t *testing.T) {
 	if err := generateTestGGUF(modelPath); err != nil {
 		t.Fatalf("Failed to generate test GGUF: %v", err)
 	}
-	defer os.Remove(modelPath)
+	defer func() { _ = os.Remove(modelPath) }()
 
 	conf := config.Default()
 	conf.KVCacheSize = 1024
@@ -600,7 +600,7 @@ func TestForwardDraftEmpty(t *testing.T) {
 	if err := generateTestGGUF(modelPath); err != nil {
 		t.Fatalf("Failed to generate test GGUF: %v", err)
 	}
-	defer os.Remove(modelPath)
+	defer func() { _ = os.Remove(modelPath) }()
 
 	conf := config.Default()
 	conf.KVCacheSize = 1024
@@ -623,7 +623,7 @@ func TestRollbackKV(t *testing.T) {
 	if err := generateTestGGUF(modelPath); err != nil {
 		t.Fatalf("Failed to generate test GGUF: %v", err)
 	}
-	defer os.Remove(modelPath)
+	defer func() { _ = os.Remove(modelPath) }()
 
 	conf := config.Default()
 	conf.KVCacheSize = 1024

@@ -101,7 +101,7 @@ func NewFromGGUF(f *gguf.GGUFFile) (*Tokenizer, error) {
 		eosMap[2] = true
 	}
 
-	var bosTokenID int = -1
+	var bosTokenID = -1
 	if bosVal, ok := f.KV["tokenizer.ggml.bos_token_id"]; ok {
 		switch v := bosVal.(type) {
 		case uint32:

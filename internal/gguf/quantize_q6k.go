@@ -19,20 +19,6 @@ func QuantizeQ6K(data []float32) []byte {
 		blockData := data[b*256 : (b+1)*256]
 		blockOffset := b * 210
 
-		// 1. Find max abs for super-block scale d
-		maxAbs := float32(0.0)
-		for _, v := range blockData {
-			a := float32(math.Abs(float64(v)))
-			if a > maxAbs {
-				maxAbs = a
-			}
-		}
-
-		d := maxAbs / 31.0 // 6-bit quantization (range -32 to 31)
-		if d == 0 {
-			d = 1.0
-		}
-
 		// 2. Quantize 16 sub-blocks of 16 elements each
 		scales := make([]int8, 16)
 		for i := 0; i < 16; i++ {

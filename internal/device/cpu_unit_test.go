@@ -30,7 +30,7 @@ func TestCPU_TensorLifecycle(t *testing.T) {
 	for i := range data {
 		data[i] = float32(i)
 	}
-	ten32.LoadFromF32(data)
+	_ = ten32.LoadFromF32(data)
 
 	back := ten32.ToHostF32()
 	for i := range data {
@@ -49,7 +49,7 @@ func TestCPU_TensorLifecycle(t *testing.T) {
 	}
 
 	// 5. CopyToF16 (F32 -> F16 stub for CPU)
-	ten32.LoadFromF32(data)
+	_ = ten32.LoadFromF32(data)
 	f16Target := ten32.CopyToF16()
 
 	back16 := f16Target.ToHostF32()

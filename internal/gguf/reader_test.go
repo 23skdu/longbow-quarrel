@@ -16,34 +16,34 @@ func TestReader_MetadataArrays(t *testing.T) {
 	}
 
 	// GGUF Header
-	binary.Write(f, binary.LittleEndian, uint32(GGUFMagic))
-	binary.Write(f, binary.LittleEndian, uint32(3)) // Version
-	binary.Write(f, binary.LittleEndian, uint64(0)) // No tensors
-	binary.Write(f, binary.LittleEndian, uint64(2)) // 2 KV pairs
+	_ = binary.Write(f, binary.LittleEndian, uint32(GGUFMagic))
+	_ = binary.Write(f, binary.LittleEndian, uint32(3)) // Version
+	_ = binary.Write(f, binary.LittleEndian, uint64(0)) // No tensors
+	_ = binary.Write(f, binary.LittleEndian, uint64(2)) // 2 KV pairs
 
 	// KV 1: llama.rope.freq_base_array (Array of F32)
 	writeStringInTest(f, "llama.rope.freq_base_array")
-	binary.Write(f, binary.LittleEndian, uint32(GGUFMetadataValueTypeArray))
-	binary.Write(f, binary.LittleEndian, uint32(GGUFMetadataValueTypeFloat32))
-	binary.Write(f, binary.LittleEndian, uint64(2)) // 2 elements
-	binary.Write(f, binary.LittleEndian, float32(10000.0))
-	binary.Write(f, binary.LittleEndian, float32(500000.0))
+	_ = binary.Write(f, binary.LittleEndian, uint32(GGUFMetadataValueTypeArray))
+	_ = binary.Write(f, binary.LittleEndian, uint32(GGUFMetadataValueTypeFloat32))
+	_ = binary.Write(f, binary.LittleEndian, uint64(2)) // 2 elements
+	_ = binary.Write(f, binary.LittleEndian, float32(10000.0))
+	_ = binary.Write(f, binary.LittleEndian, float32(500000.0))
 
 	// KV 2: general.tags (Array of String)
 	writeStringInTest(f, "general.tags")
-	binary.Write(f, binary.LittleEndian, uint32(GGUFMetadataValueTypeArray))
-	binary.Write(f, binary.LittleEndian, uint32(GGUFMetadataValueTypeString))
-	binary.Write(f, binary.LittleEndian, uint64(1)) // 1 element
+	_ = binary.Write(f, binary.LittleEndian, uint32(GGUFMetadataValueTypeArray))
+	_ = binary.Write(f, binary.LittleEndian, uint32(GGUFMetadataValueTypeString))
+	_ = binary.Write(f, binary.LittleEndian, uint64(1)) // 1 element
 	writeStringInTest(f, "test-tag")
 
-	f.Close()
-	defer os.Remove(modelPath)
+	_ = f.Close()
+	defer func() { _ = os.Remove(modelPath) }()
 
 	reader, err := LoadFile(modelPath)
 	if err != nil {
 		t.Fatalf("Failed to create reader: %v", err)
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 
 	meta := reader.KV
 
@@ -70,14 +70,14 @@ func TestReader_MetadataArrays(t *testing.T) {
 }
 
 func writeStringInTest(f *os.File, s string) {
-	binary.Write(f, binary.LittleEndian, uint64(len(s)))
-	f.WriteString(s)
+	_ = binary.Write(f, binary.LittleEndian, uint64(len(s)))
+	_, _ = f.WriteString(s)
 }
 
 func TestReader_InvalidHeader(t *testing.T) {
 	tmpFile := "invalid.gguf"
-	os.WriteFile(tmpFile, []byte("NOT_GGUF"), 0644)
-	defer os.Remove(tmpFile)
+	_ = os.WriteFile(tmpFile, []byte("NOT_GGUF"), 0644)
+	defer func() { _ = os.Remove(tmpFile) }()
 
 	_, err := LoadFile(tmpFile)
 	if err == nil {
@@ -88,13 +88,13 @@ func TestReader_InvalidHeader(t *testing.T) {
 func TestReader_IncompleteFile(t *testing.T) {
 	tmpFile := "short.gguf"
 	var buf bytes.Buffer
-	binary.Write(&buf, binary.LittleEndian, uint32(GGUFMagic))
-	binary.Write(&buf, binary.LittleEndian, uint32(3))
-	binary.Write(&buf, binary.LittleEndian, uint64(0))
-	binary.Write(&buf, binary.LittleEndian, uint64(1)) // 1 KV expected
+	_ = binary.Write(&buf, binary.LittleEndian, uint32(GGUFMagic))
+	_ = binary.Write(&buf, binary.LittleEndian, uint32(3))
+	_ = binary.Write(&buf, binary.LittleEndian, uint64(0))
+	_ = binary.Write(&buf, binary.LittleEndian, uint64(1)) // 1 KV expected
 	// Stop here
-	os.WriteFile(tmpFile, buf.Bytes(), 0644)
-	defer os.Remove(tmpFile)
+	_ = os.WriteFile(tmpFile, buf.Bytes(), 0644)
+	defer func() { _ = os.Remove(tmpFile) }()
 
 	_, err := LoadFile(tmpFile)
 	if err == nil {
@@ -193,8 +193,8 @@ func TestReader_LoadFile_EdgeCases(t *testing.T) {
 
 	// 2. File too small (<24 bytes)
 	tmpTooSmall := "too_small.gguf"
-	os.WriteFile(tmpTooSmall, []byte("short"), 0644)
-	defer os.Remove(tmpTooSmall)
+	_ = os.WriteFile(tmpTooSmall, []byte("short"), 0644)
+	defer func() { _ = os.Remove(tmpTooSmall) }()
 	_, err = LoadFile(tmpTooSmall)
 	if err == nil {
 		t.Errorf("expected error for small file")
@@ -203,12 +203,12 @@ func TestReader_LoadFile_EdgeCases(t *testing.T) {
 	// 3. Unsupported version (version 1)
 	tmpV1 := "v1.gguf"
 	var buf bytes.Buffer
-	binary.Write(&buf, binary.LittleEndian, uint32(GGUFMagic))
-	binary.Write(&buf, binary.LittleEndian, uint32(1)) // Version 1
-	binary.Write(&buf, binary.LittleEndian, uint64(0)) // 0 tensors
-	binary.Write(&buf, binary.LittleEndian, uint64(0)) // 0 KV
-	os.WriteFile(tmpV1, buf.Bytes(), 0644)
-	defer os.Remove(tmpV1)
+	_ = binary.Write(&buf, binary.LittleEndian, uint32(GGUFMagic))
+	_ = binary.Write(&buf, binary.LittleEndian, uint32(1)) // Version 1
+	_ = binary.Write(&buf, binary.LittleEndian, uint64(0)) // 0 tensors
+	_ = binary.Write(&buf, binary.LittleEndian, uint64(0)) // 0 KV
+	_ = os.WriteFile(tmpV1, buf.Bytes(), 0644)
+	defer func() { _ = os.Remove(tmpV1) }()
 	_, err = LoadFile(tmpV1)
 	if err == nil {
 		t.Errorf("expected error for unsupported version 1")
@@ -217,22 +217,22 @@ func TestReader_LoadFile_EdgeCases(t *testing.T) {
 	// 4. Tensor offset out of bounds
 	tmpOutOfBounds := "out_of_bounds.gguf"
 	buf.Reset()
-	binary.Write(&buf, binary.LittleEndian, uint32(GGUFMagic))
-	binary.Write(&buf, binary.LittleEndian, uint32(3)) // Version 3
-	binary.Write(&buf, binary.LittleEndian, uint64(1)) // 1 tensor
-	binary.Write(&buf, binary.LittleEndian, uint64(0)) // 0 KV
+	_ = binary.Write(&buf, binary.LittleEndian, uint32(GGUFMagic))
+	_ = binary.Write(&buf, binary.LittleEndian, uint32(3)) // Version 3
+	_ = binary.Write(&buf, binary.LittleEndian, uint64(1)) // 1 tensor
+	_ = binary.Write(&buf, binary.LittleEndian, uint64(0)) // 0 KV
 	// Tensor info:
 	// name
 	writeStringInTestBytes(&buf, "weight")
 	// dims
-	binary.Write(&buf, binary.LittleEndian, uint32(1))
-	binary.Write(&buf, binary.LittleEndian, uint64(10))
+	_ = binary.Write(&buf, binary.LittleEndian, uint32(1))
+	_ = binary.Write(&buf, binary.LittleEndian, uint64(10))
 	// type
-	binary.Write(&buf, binary.LittleEndian, uint32(GGMLTypeF32))
+	_ = binary.Write(&buf, binary.LittleEndian, uint32(GGMLTypeF32))
 	// offset: huge offset beyond file
-	binary.Write(&buf, binary.LittleEndian, uint64(1000000))
-	os.WriteFile(tmpOutOfBounds, buf.Bytes(), 0644)
-	defer os.Remove(tmpOutOfBounds)
+	_ = binary.Write(&buf, binary.LittleEndian, uint64(1000000))
+	_ = os.WriteFile(tmpOutOfBounds, buf.Bytes(), 0644)
+	defer func() { _ = os.Remove(tmpOutOfBounds) }()
 	_, err = LoadFile(tmpOutOfBounds)
 	if err == nil {
 		t.Errorf("expected error for tensor offset out of bounds")
@@ -241,20 +241,20 @@ func TestReader_LoadFile_EdgeCases(t *testing.T) {
 	// 5. Valid file with a tensor and alignment as uint64
 	tmpValid := "valid_tensor.gguf"
 	buf.Reset()
-	binary.Write(&buf, binary.LittleEndian, uint32(GGUFMagic))
-	binary.Write(&buf, binary.LittleEndian, uint32(3))
-	binary.Write(&buf, binary.LittleEndian, uint64(1)) // 1 tensor
-	binary.Write(&buf, binary.LittleEndian, uint64(1)) // 1 KV
+	_ = binary.Write(&buf, binary.LittleEndian, uint32(GGUFMagic))
+	_ = binary.Write(&buf, binary.LittleEndian, uint32(3))
+	_ = binary.Write(&buf, binary.LittleEndian, uint64(1)) // 1 tensor
+	_ = binary.Write(&buf, binary.LittleEndian, uint64(1)) // 1 KV
 	// KV: general.alignment uint64 = 32
 	writeStringInTestBytes(&buf, "general.alignment")
-	binary.Write(&buf, binary.LittleEndian, uint32(GGUFMetadataValueTypeUint64))
-	binary.Write(&buf, binary.LittleEndian, uint64(32))
+	_ = binary.Write(&buf, binary.LittleEndian, uint32(GGUFMetadataValueTypeUint64))
+	_ = binary.Write(&buf, binary.LittleEndian, uint64(32))
 	// Tensor info:
 	writeStringInTestBytes(&buf, "layer.0.weight")
-	binary.Write(&buf, binary.LittleEndian, uint32(1))
-	binary.Write(&buf, binary.LittleEndian, uint64(4)) // 4 floats = 16 bytes
-	binary.Write(&buf, binary.LittleEndian, uint32(GGMLTypeF32))
-	binary.Write(&buf, binary.LittleEndian, uint64(0)) // offset 0 from data start
+	_ = binary.Write(&buf, binary.LittleEndian, uint32(1))
+	_ = binary.Write(&buf, binary.LittleEndian, uint64(4)) // 4 floats = 16 bytes
+	_ = binary.Write(&buf, binary.LittleEndian, uint32(GGMLTypeF32))
+	_ = binary.Write(&buf, binary.LittleEndian, uint64(0)) // offset 0 from data start
 	// Pad buffer to alignment + tensor data (16 bytes)
 	curLen := buf.Len()
 	pad := 32 - (curLen % 32)
@@ -263,20 +263,20 @@ func TestReader_LoadFile_EdgeCases(t *testing.T) {
 	}
 	// Write tensor data (4 floats: 16 bytes)
 	buf.Write(make([]byte, 16))
-	os.WriteFile(tmpValid, buf.Bytes(), 0644)
-	defer os.Remove(tmpValid)
+	_ = os.WriteFile(tmpValid, buf.Bytes(), 0644)
+	defer func() { _ = os.Remove(tmpValid) }()
 
 	gf, err := LoadFile(tmpValid)
 	if err != nil {
 		t.Fatalf("failed to load valid file: %v", err)
 	}
-	defer gf.Close()
+	defer func() { _ = gf.Close() }()
 	if len(gf.Tensors) != 1 {
 		t.Errorf("expected 1 tensor, got %d", len(gf.Tensors))
 	}
 }
 
 func writeStringInTestBytes(buf *bytes.Buffer, s string) {
-	binary.Write(buf, binary.LittleEndian, uint64(len(s)))
+	_ = binary.Write(buf, binary.LittleEndian, uint64(len(s)))
 	buf.WriteString(s)
 }

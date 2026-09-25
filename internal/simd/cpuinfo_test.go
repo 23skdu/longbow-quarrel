@@ -102,8 +102,8 @@ hw.optional.avx2_0: 0
 }
 
 func TestDisableAVX2Env(t *testing.T) {
-	os.Setenv("DISABLE_AVX2", "1")
-	defer os.Unsetenv("DISABLE_AVX2")
+	_ = os.Setenv("DISABLE_AVX2", "1")
+	defer func() { _ = os.Unsetenv("DISABLE_AVX2") }()
 
 	cpuInitDone = false
 	detectCPU()
@@ -117,8 +117,8 @@ func TestDisableAVX2Env(t *testing.T) {
 }
 
 func TestDisableAVX512Env(t *testing.T) {
-	os.Setenv("DISABLE_AVX512", "1")
-	defer os.Unsetenv("DISABLE_AVX512")
+	_ = os.Setenv("DISABLE_AVX512", "1")
+	defer func() { _ = os.Unsetenv("DISABLE_AVX512") }()
 
 	cpuInitDone = false
 	detectCPU()

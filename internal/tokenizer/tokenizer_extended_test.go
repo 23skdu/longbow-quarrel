@@ -17,7 +17,7 @@ func TestTokenizerEncode(t *testing.T) {
 	if err := generateTestVocabGGUF(tmpFile, vocab); err != nil {
 		t.Fatalf("Failed to generate vocab: %v", err)
 	}
-	defer os.Remove(tmpFile)
+	defer func() { _ = os.Remove(tmpFile) }()
 
 	tk, err := New(tmpFile)
 	if err != nil {
@@ -77,7 +77,7 @@ func TestTokenizerEncodeWithMerges(t *testing.T) {
 	if err := generateVocabWithMergesGGUF(tmpFile, vocab); err != nil {
 		t.Fatalf("Failed to generate vocab: %v", err)
 	}
-	defer os.Remove(tmpFile)
+	defer func() { _ = os.Remove(tmpFile) }()
 
 	tk, err := New(tmpFile)
 	if err != nil {
@@ -157,7 +157,7 @@ func TestTokenizerSpaceHandling(t *testing.T) {
 	if err := generateTestVocabGGUF(tmpFile, vocab); err != nil {
 		t.Fatalf("Failed to generate vocab: %v", err)
 	}
-	defer os.Remove(tmpFile)
+	defer func() { _ = os.Remove(tmpFile) }()
 
 	tk, err := New(tmpFile)
 	if err != nil {
@@ -179,7 +179,7 @@ func TestTokenizerEdgeCases(t *testing.T) {
 	if err := generateTestVocabGGUF(tmpFile, vocab); err != nil {
 		t.Fatalf("Failed to generate vocab: %v", err)
 	}
-	defer os.Remove(tmpFile)
+	defer func() { _ = os.Remove(tmpFile) }()
 
 	tk, err := New(tmpFile)
 	if err != nil {
@@ -226,16 +226,16 @@ func generateTestVocabGGUF(path string, vocab []string) error {
 	// Tensor Count (0)
 	_ = binary.Write(f, binary.LittleEndian, uint64(0))
 	// KV Count (1) - just tokens
-	binary.Write(f, binary.LittleEndian, uint64(1))
+	_ = binary.Write(f, binary.LittleEndian, uint64(1))
 
 	// KV Pair: "tokenizer.ggml.tokens"
 	writeTestString(f, "tokenizer.ggml.tokens")
 	// Type: Array
-	binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeArray))
+	_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeArray))
 	// Array Type: String
-	binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeString))
+	_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeString))
 	// Array Len
-	binary.Write(f, binary.LittleEndian, uint64(len(vocab)))
+	_ = binary.Write(f, binary.LittleEndian, uint64(len(vocab)))
 
 	// Array Elements
 	for _, v := range vocab {
@@ -253,16 +253,16 @@ func generateVocabWithMergesGGUF(path string, vocab []string) error {
 	defer func() { _ = f.Close() }()
 
 	// GGUF Header
-	binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMagic))
-	binary.Write(f, binary.LittleEndian, uint32(3))
-	binary.Write(f, binary.LittleEndian, uint64(0))
-	binary.Write(f, binary.LittleEndian, uint64(2))
+	_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMagic))
+	_ = binary.Write(f, binary.LittleEndian, uint32(3))
+	_ = binary.Write(f, binary.LittleEndian, uint64(0))
+	_ = binary.Write(f, binary.LittleEndian, uint64(2))
 
 	// KV Pair: "tokenizer.ggml.tokens"
 	writeTestString(f, "tokenizer.ggml.tokens")
-	binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeArray))
-	binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeString))
-	binary.Write(f, binary.LittleEndian, uint64(len(vocab)))
+	_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeArray))
+	_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeString))
+	_ = binary.Write(f, binary.LittleEndian, uint64(len(vocab)))
 
 	for _, v := range vocab {
 		writeTestString(f, v)
@@ -271,9 +271,9 @@ func generateVocabWithMergesGGUF(path string, vocab []string) error {
 	// KV Pair: "tokenizer.ggml.merges"
 	merges := []string{"l l", "l o", "He l", "lo o", "ll o", "W o", "Wo r", "o rld", "World"}
 	writeTestString(f, "tokenizer.ggml.merges")
-	binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeArray))
-	binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeString))
-	binary.Write(f, binary.LittleEndian, uint64(len(merges)))
+	_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeArray))
+	_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeString))
+	_ = binary.Write(f, binary.LittleEndian, uint64(len(merges)))
 
 	for _, m := range merges {
 		writeTestString(f, m)
@@ -283,6 +283,6 @@ func generateVocabWithMergesGGUF(path string, vocab []string) error {
 }
 
 func writeTestString(f *os.File, s string) {
-	binary.Write(f, binary.LittleEndian, uint64(len(s)))
+	_ = binary.Write(f, binary.LittleEndian, uint64(len(s)))
 	_, _ = f.WriteString(s)
 }

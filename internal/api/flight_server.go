@@ -55,7 +55,7 @@ func (s *InferenceFlightServer) DoGet(tckt *flight.Ticket, stream flight.FlightS
 	}, &meta)
 
 	writer := flight.NewRecordWriter(stream, ipc.WithSchema(schema))
-	defer writer.Close()
+	defer func() { _ = writer.Close() }()
 
 	// Capture generated tokens into this channel
 	tokenChan := make(chan int, 128)
@@ -81,7 +81,7 @@ func (s *InferenceFlightServer) DoGet(tckt *flight.Ticket, stream flight.FlightS
 		textBuilder := builder.Field(2).(*array.StringBuilder)
 		textBuilder.Append(s.tokenizer.Decode([]int{token}))
 
-		rec := builder.NewRecord()
+		rec := builder.NewRecordBatch()
 		err := writer.Write(rec)
 		rec.Release()
 		builder.Release()

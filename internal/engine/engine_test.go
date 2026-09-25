@@ -17,7 +17,7 @@ func generateTestGGUF(path string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	dim := uint64(128)
 	hiddenDim := uint64(512)
@@ -61,10 +61,10 @@ func generateTestGGUF(path string) error {
 	}
 
 	// Header
-	binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMagic))
-	binary.Write(f, binary.LittleEndian, uint32(3))
-	binary.Write(f, binary.LittleEndian, uint64(len(tensors)))
-	binary.Write(f, binary.LittleEndian, uint64(8))
+	_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMagic))
+	_ = binary.Write(f, binary.LittleEndian, uint32(3))
+	_ = binary.Write(f, binary.LittleEndian, uint64(len(tensors)))
+	_ = binary.Write(f, binary.LittleEndian, uint64(8))
 
 	// KVs
 	writeKVString(f, "general.architecture", "llama")
@@ -81,13 +81,13 @@ func generateTestGGUF(path string) error {
 
 	// Write tensor infos
 	for _, t := range tensors {
-		writeString(f, t.name)
-		binary.Write(f, binary.LittleEndian, uint32(len(t.dims)))
+		_ = writeString(f, t.name)
+		_ = binary.Write(f, binary.LittleEndian, uint32(len(t.dims)))
 		for _, d := range t.dims {
-			binary.Write(f, binary.LittleEndian, uint64(d))
+			_ = binary.Write(f, binary.LittleEndian, uint64(d))
 		}
-		binary.Write(f, binary.LittleEndian, uint32(0)) // F32 type
-		binary.Write(f, binary.LittleEndian, uint64(dataOffset))
+		_ = binary.Write(f, binary.LittleEndian, uint32(0)) // F32 type
+		_ = binary.Write(f, binary.LittleEndian, uint64(dataOffset))
 		dataOffset += uint64(len(t.data))
 	}
 
@@ -95,37 +95,37 @@ func generateTestGGUF(path string) error {
 	pos, _ := f.Seek(0, 1)
 	padding := (32 - pos%32) % 32
 	if padding > 0 {
-		f.Write(make([]byte, padding))
+		_, _ = f.Write(make([]byte, padding))
 	}
 
 	// Write tensor data at the correct position
 	for _, t := range tensors {
-		f.Write(t.data)
+		_, _ = f.Write(t.data)
 	}
 
 	return nil
 }
 
 func writeKVString(f *os.File, key, value string) {
-	writeString(f, key)
-	binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeString))
-	writeString(f, value)
+	_ = writeString(f, key)
+	_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeString))
+	_ = writeString(f, value)
 }
 
 func writeKVStringArray(f *os.File, key string, values []string) {
-	writeString(f, key)
-	binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeArray))
-	binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeString))
-	binary.Write(f, binary.LittleEndian, uint64(len(values)))
+	_ = writeString(f, key)
+	_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeArray))
+	_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeString))
+	_ = binary.Write(f, binary.LittleEndian, uint64(len(values)))
 	for _, v := range values {
-		writeString(f, v)
+		_ = writeString(f, v)
 	}
 }
 
 func writeKVU32(f *os.File, key string, value uint32) {
-	writeString(f, key)
-	binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeUint32))
-	binary.Write(f, binary.LittleEndian, value)
+	_ = writeString(f, key)
+	_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeUint32))
+	_ = binary.Write(f, binary.LittleEndian, value)
 }
 
 func writeString(f *os.File, s string) error {
@@ -142,7 +142,7 @@ func TestEngineLifecycle(t *testing.T) {
 	if err := generateTestGGUF(modelPath); err != nil {
 		t.Fatalf("Failed to generate test GGUF: %v", err)
 	}
-	defer os.Remove(modelPath)
+	defer func() { _ = os.Remove(modelPath) }()
 
 	// We want an Engine that can load a model and run inference
 	// NewEngine(path) -> (*Engine, error)

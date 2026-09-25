@@ -427,9 +427,6 @@ func NewCPUKVCacheWithCapacity(numLayers, expectedTokens int) *CPUKVCache {
 	if numLayers <= 0 {
 		numLayers = 1
 	}
-	if expectedTokens <= 0 {
-		expectedTokens = 256 // reasonable default pre-allocation
-	}
 	return &CPUKVCache{
 		Keys:   make([][]float32, numLayers),
 		Values: make([][]float32, numLayers),

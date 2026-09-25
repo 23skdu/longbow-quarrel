@@ -50,7 +50,7 @@ func TestFlight_Integrated_Coverage(t *testing.T) {
 	if err := client.Connect(ctx); err != nil {
 		t.Fatalf("failed to connect: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	// 3. Exercise API methods
 	t.Run("Discovery", func(t *testing.T) {
