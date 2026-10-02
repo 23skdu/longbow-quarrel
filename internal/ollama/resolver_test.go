@@ -4,8 +4,59 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
+
+// writeModelTree materialises the directory layout Ollama uses on disk:
+//
+//	<root>/manifests/registry.ollama.ai/library/<name>/<tag>
+//	<root>/blobs/sha256-<hash>
+//
+// It returns the absolute path of the blob backing that model. Writing a
+// manifest with no model layer (emptyManifest=true) models a manifest that
+// carries only config/template layers.
+func writeModelTree(t *testing.T, root, name, tag, digest string, emptyManifest bool) string {
+	t.Helper()
+
+	manifest := Manifest{SchemaVersion: 2}
+	if !emptyManifest {
+		manifest.Layers = append(manifest.Layers, Layer{
+			MediaType: "application/vnd.ollama.image.template",
+			Digest:    "sha256:template0000",
+			Size:      512,
+		})
+		// The model layer is intentionally not first, so the resolver has to
+		// scan past a non-model layer rather than taking layers[0].
+		manifest.Layers = append(manifest.Layers, Layer{
+			MediaType: MediaTypeModel,
+			Digest:    digest,
+			Size:      4096,
+		})
+	}
+
+	manifestDir := filepath.Join(root, "manifests", "registry.ollama.ai", "library", name)
+	if err := os.MkdirAll(manifestDir, 0o755); err != nil {
+		t.Fatalf("mkdir manifest dir: %v", err)
+	}
+	data, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(manifestDir, tag), data, 0o644); err != nil { // #nosec G306 -- test fixture
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	blobPath := filepath.Join(root, "blobs", strings.Replace(digest, ":", "-", 1))
+	if err := os.MkdirAll(filepath.Dir(blobPath), 0o755); err != nil {
+		t.Fatalf("mkdir blob dir: %v", err)
+	}
+	if err := os.WriteFile(blobPath, []byte("GGUF"), 0o644); err != nil { // #nosec G306 -- test fixture
+		t.Fatalf("write blob: %v", err)
+	}
+	return blobPath
+}
 
 func TestDefaultTag(t *testing.T) {
 	if DefaultTag != "latest" {
@@ -147,101 +198,178 @@ func TestGetOllamaDirEnvVarEmpty(t *testing.T) {
 	}
 }
 
-func TestResolveModelPathParse(t *testing.T) {
-	tests := []struct {
-		name         string
-		modelName    string
-		expectedName string
-		expectedTag  string
-	}{
-		{"simple name", "llama3", "llama3", "latest"},
-		{"with tag", "llama3:8b", "llama3", "8b"},
-		{"with latest tag", "mistral:latest", "mistral", "latest"},
-		{"with complex tag", "model:v1.0", "model", "v1.0"},
-	}
+// TestResolveModelPath_ResolvesBlob drives the real resolver against an
+// on-disk model tree and asserts it returns the backing blob. It also pins
+// the two behaviours the old tests only re-implemented in test-local
+// helpers: default tag selection and the digest ":" -> "-" blob naming.
+func TestResolveModelPath_ResolvesBlob(t *testing.T) {
+	const digest = "sha256:abcdef0123456789"
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			parts := splitModelName(tt.modelName)
-			if len(parts) == 1 {
-				if parts[0] != tt.expectedName {
-					t.Errorf("expected name %s, got %s", tt.expectedName, parts[0])
-				}
-			} else if len(parts) == 2 {
-				if parts[0] != tt.expectedName {
-					t.Errorf("expected name %s, got %s", tt.expectedName, parts[0])
-				}
-				if parts[1] != tt.expectedTag {
-					t.Errorf("expected tag %s, got %s", tt.expectedTag, parts[1])
-				}
+	for _, tag := range []string{"latest", "8b", "v1.0"} {
+		t.Run("tag="+tag, func(t *testing.T) {
+			root := t.TempDir()
+			t.Setenv("OLLAMA_MODELS", root)
+			want := writeModelTree(t, root, "llama3", tag, digest, false)
+
+			model := "llama3"
+			if tag != DefaultTag {
+				model = "llama3:" + tag
+			}
+
+			got, err := ResolveModelPath(model)
+			if err != nil {
+				t.Fatalf("ResolveModelPath(%q) failed: %v", model, err)
+			}
+			if got != want {
+				t.Errorf("ResolveModelPath(%q) = %q, want %q", model, got, want)
+			}
+			if !filepath.IsAbs(got) {
+				t.Errorf("expected an absolute blob path, got %q", got)
 			}
 		})
 	}
 }
 
-// Helper function that mirrors the parsing logic in ResolveModelPath
-func splitModelName(modelName string) []string {
-	// This is a simple split for testing - actual implementation uses strings.Split
-	result := make([]string, 0)
-	current := ""
-	for _, c := range modelName {
-		if c == ':' {
-			result = append(result, current)
-			current = ""
-		} else {
-			current += string(c)
-		}
+// TestResolveModelPath_PrefersModelLayer guards the layer scan: the manifest
+// lists a template layer before the model layer, so a resolver that took
+// layers[0] would return the template blob instead.
+func TestResolveModelPath_PrefersModelLayer(t *testing.T) {
+	const modelDigest = "sha256:1111111111111111"
+
+	root := t.TempDir()
+	t.Setenv("OLLAMA_MODELS", root)
+	modelBlob := writeModelTree(t, root, "mistral", "latest", modelDigest, false)
+
+	// Materialise the template blob too, so returning it is a real wrong answer.
+	if err := os.WriteFile(
+		filepath.Join(root, "blobs", "sha256-template0000"), []byte("TEMPLATE"), 0o644); err != nil { // #nosec G306 -- test fixture
+		t.Fatalf("write template blob: %v", err)
 	}
-	result = append(result, current)
-	return result
+
+	got, err := ResolveModelPath("mistral")
+	if err != nil {
+		t.Fatalf("ResolveModelPath failed: %v", err)
+	}
+	if got != modelBlob {
+		t.Errorf("got %q, want the model blob %q", got, modelBlob)
+	}
 }
 
-func TestBlobNameConversion(t *testing.T) {
+func TestResolveModelPath_Errors(t *testing.T) {
 	tests := []struct {
-		name         string
-		digest       string
-		expectedName string
+		name    string
+		setup   func(t *testing.T, root string)
+		model   string
+		wantErr string
 	}{
-		{"simple hash", "sha256:abc123", "sha256-abc123"},
-		{"long hash", "sha256:abcdef1234567890", "sha256-abcdef1234567890"},
+		{
+			name:    "manifest absent",
+			setup:   func(*testing.T, string) {},
+			model:   "ghost:latest",
+			wantErr: "model manifest not found",
+		},
+		{
+			name: "tag absent",
+			setup: func(t *testing.T, root string) {
+				writeModelTree(t, root, "llama3", "latest", "sha256:aaaa", false)
+			},
+			model:   "llama3:missing-tag",
+			wantErr: "model manifest not found",
+		},
+		{
+			name: "manifest is not valid json",
+			setup: func(t *testing.T, root string) {
+				dir := filepath.Join(root, "manifests", "registry.ollama.ai", "library", "broken")
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatalf("mkdir: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "latest"), []byte("{not json"), 0o644); err != nil { // #nosec G306 -- test fixture
+					t.Fatalf("write: %v", err)
+				}
+			},
+			model:   "broken",
+			wantErr: "invalid character",
+		},
+		{
+			name: "manifest has no model layer",
+			setup: func(t *testing.T, root string) {
+				writeModelTree(t, root, "empty", "latest", "sha256:bbbb", true)
+			},
+			model:   "empty",
+			wantErr: "no model layer found",
+		},
+		{
+			name: "blob referenced by manifest is missing",
+			setup: func(t *testing.T, root string) {
+				writeModelTree(t, root, "dangling", "latest", "sha256:cccc", false)
+				// Keep the manifest, drop the blob.
+				if err := os.Remove(filepath.Join(root, "blobs", "sha256-cccc")); err != nil {
+					t.Fatalf("remove blob: %v", err)
+				}
+			},
+			model:   "dangling",
+			wantErr: "model blob not found",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			blobName := replaceDigestColon(tt.digest)
-			if blobName != tt.expectedName {
-				t.Errorf("expected %s, got %s", tt.expectedName, blobName)
+			root := t.TempDir()
+			t.Setenv("OLLAMA_MODELS", root)
+			tt.setup(t, root)
+
+			got, err := ResolveModelPath(tt.model)
+			if err == nil {
+				t.Fatalf("ResolveModelPath(%q) = %q, want error containing %q", tt.model, got, tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error = %q, want it to contain %q", err.Error(), tt.wantErr)
+			}
+			if got != "" {
+				t.Errorf("expected empty path on error, got %q", got)
 			}
 		})
 	}
 }
 
-// Helper function that mirrors the conversion logic
-func replaceDigestColon(digest string) string {
-	for i, c := range digest {
-		if c == ':' {
-			return digest[:i] + "-" + digest[i+1:]
-		}
+// TestResolveModelPath_DoesNotEscapeModelRoot checks that a model name
+// carrying path separators cannot walk out of the manifests tree and resolve
+// to an arbitrary file on disk.
+func TestResolveModelPath_DoesNotEscapeModelRoot(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("OLLAMA_MODELS", root)
+
+	decoy := filepath.Join(root, "outside.manifest")
+	if err := os.WriteFile(decoy, []byte(`{"schemaVersion":2,"layers":[]}`), 0o644); err != nil { // #nosec G306 -- test fixture
+		t.Fatalf("write decoy: %v", err)
 	}
-	return digest
+
+	got, err := ResolveModelPath("../outside")
+	if err == nil {
+		t.Fatalf("expected traversal to be rejected, got path %q", got)
+	}
+	if !strings.Contains(err.Error(), "model manifest not found") {
+		t.Errorf("unexpected error for traversal attempt: %v", err)
+	}
 }
 
-func TestResolveModelPathNonExistent(t *testing.T) {
-	// Test with a model that doesn't exist
-	_, err := ResolveModelPath("nonexistentmodel:latest")
-	if err == nil {
-		t.Error("expected error for non-existent model")
+// TestGetOllamaDir_WindowsAndUnixShareLayout documents that both branches of
+// GetOllamaDir currently return the same layout; if the Windows path ever
+// diverges this test will need to branch with runtime.GOOS.
+func TestGetOllamaDir_WindowsAndUnixShareLayout(t *testing.T) {
+	t.Setenv("OLLAMA_MODELS", "")
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skipf("no home directory available: %v", err)
 	}
-}
 
-func TestResolveModelPathNonExistentTag(t *testing.T) {
-	// Clear OLLAMA_MODELS env var to use default
-	_ = os.Unsetenv("OLLAMA_MODELS")
-
-	// Test with a model that exists but tag doesn't
-	_, err := ResolveModelPath("library:nonexistenttag")
-	if err == nil {
-		t.Error("expected error for non-existent tag")
+	dir, err := GetOllamaDir()
+	if err != nil {
+		t.Fatalf("GetOllamaDir() failed: %v", err)
+	}
+	want := filepath.Join(home, ".ollama", "models")
+	if dir != want {
+		t.Errorf("GOOS=%s: GetOllamaDir() = %q, want %q", runtime.GOOS, dir, want)
 	}
 }
 
@@ -259,37 +387,5 @@ func TestManifestEmptyLayers(t *testing.T) {
 
 	if len(m.Layers) != 0 {
 		t.Errorf("expected 0 layers, got %d", len(m.Layers))
-	}
-}
-
-func TestManifestNoModelLayer(t *testing.T) {
-	jsonData := `{
-		"schemaVersion": 2,
-		"layers": [
-			{
-				"mediaType": "application/vnd.ollama.image.config",
-				"digest": "sha256:config123",
-				"size": 100
-			}
-		]
-	}`
-
-	var m Manifest
-	err := json.Unmarshal([]byte(jsonData), &m)
-	if err != nil {
-		t.Fatalf("failed to unmarshal manifest: %v", err)
-	}
-
-	// Find model layer (should not exist)
-	var blobDigest string
-	for _, l := range m.Layers {
-		if l.MediaType == MediaTypeModel {
-			blobDigest = l.Digest
-			break
-		}
-	}
-
-	if blobDigest != "" {
-		t.Errorf("expected no model layer, found digest: %s", blobDigest)
 	}
 }
