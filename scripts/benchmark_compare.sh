@@ -1,12 +1,20 @@
 #!/bin/bash
 
 # Configuration
-LLAMA_BENCH="/opt/homebrew/bin/llama-bench"
-QUARREL="./quarrel"
-MODEL="/Users/rsd/.ollama/models/blobs/sha256-f535f83ec568d040f88ddc04a199fa6da90923bbb41d4dcaed02caa924d6ef57"
+# Override any of these from the environment or with CLI flags below, e.g.
+#   MODEL=/path/to/model.gguf ./scripts/benchmark_compare.sh
+LLAMA_BENCH="${LLAMA_BENCH:-/opt/homebrew/bin/llama-bench}"
+QUARREL="${QUARREL:-./quarrel}"
+MODEL="${MODEL:-}"
 PROMPT="The capital of France is"
 N_TOKENS=32
 PROFILE="false"
+
+if [[ -z "$MODEL" ]]; then
+    echo "error: set MODEL to the GGUF file to benchmark, e.g." >&2
+    echo "  MODEL=/path/to/model.gguf $0" >&2
+    exit 2
+fi
 
 # Parse arguments
 while [[ "$#" -gt 0 ]]; do

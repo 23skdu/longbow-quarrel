@@ -252,7 +252,7 @@ changelog:
 	@echo "- Proactive memory governor & Prometheus telemetry instrumentation" >> $(DIST_DIR)/CHANGELOG.md
 	@echo "" >> $(DIST_DIR)/CHANGELOG.md
 	@echo "## Commits" >> $(DIST_DIR)/CHANGELOG.md
-	@git log -n 50 --pretty=format:"* %s (%h)" >> $(DIST_DIR)/CHANGELOG.md 2>/dev/null || echo "* Initial v0.4.0 commit" >> $(DIST_DIR)/CHANGELOG.md
+	@git log -n 50 --pretty=format:"* %s (%h)" >> $(DIST_DIR)/CHANGELOG.md 2>/dev/null || echo "* $(VERSION) (no git history available)" >> $(DIST_DIR)/CHANGELOG.md
 	@echo "" >> $(DIST_DIR)/CHANGELOG.md
 
 # Package distribution tarballs with SHA256 checksums

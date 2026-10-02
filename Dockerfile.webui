@@ -3,7 +3,7 @@
 # =============================================================================
 # Stage 1: Builder
 # =============================================================================
-FROM --platform=$BUILDPLATFORM golang:1.27.0-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27.1-alpine3.24 AS builder
 
 ARG TARGETOS
 ARG TARGETARCH
@@ -29,7 +29,7 @@ COPY . .
 # NOTE: the CUDA-tagged binary requires the CUDA toolkit; the default
 # alpine builder below produces the CPU-only binary used by `runtime-cpu`.
 # For a CUDA-enabled webui, build with -tags "webui,cuda" in a
-# nvidia/cuda:12.4.0-devel-ubuntu22.04 builder (see Dockerfile.nvidia).
+# nvidia/cuda:12.9.2-devel-ubuntu24.04 builder (see Dockerfile.nvidia).
 RUN cd cmd/webui && CGO_ENABLED=1 GOOS=$TARGETOS GOARCH=$TARGETARCH \
     go build -tags "webui" \
     -ldflags="-s -w" \
@@ -38,7 +38,7 @@ RUN cd cmd/webui && CGO_ENABLED=1 GOOS=$TARGETOS GOARCH=$TARGETARCH \
 # =============================================================================
 # Stage 2: Runtime (CUDA)
 # =============================================================================
-FROM --platform=$TARGETPLATFORM nvidia/cuda:12.4.0-runtime-ubuntu22.04 AS runtime
+FROM --platform=$TARGETPLATFORM nvidia/cuda:12.9.2-runtime-ubuntu24.04 AS runtime
 
 ARG WEBUI_VERSION=dev
 
@@ -100,7 +100,7 @@ CMD ["--port", "8080", "--metrics-port", "9090", "--host", "0.0.0.0"]
 # =============================================================================
 # Stage 3: CPU-only Runtime (alternative)
 # =============================================================================
-FROM --platform=$TARGETPLATFORM alpine:3.19 AS runtime-cpu
+FROM --platform=$TARGETPLATFORM alpine:3.24 AS runtime-cpu
 
 ARG WEBUI_VERSION=dev
 

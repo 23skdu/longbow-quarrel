@@ -23,7 +23,7 @@
 # Build Stage: Metal Compilation (cross-compile from Linux amd64 to darwin arm64)
 # Requires osxcross (o64-clang) + macOS SDK - see note above.
 # -----------------------------------------------------------------------------
-FROM --platform=linux/amd64 golang:1.27.0-alpine AS metal-builder
+FROM --platform=linux/amd64 golang:1.27.1-alpine3.24 AS metal-builder
 
 # Install build dependencies for cross-compilation
 # NOTE: o64-clang/lipo come from osxcross/cctools, not stock alpine.
@@ -51,7 +51,7 @@ RUN if ! command -v o64-clang >/dev/null 2>&1; then echo "ERROR: o64-clang not f
 # Runtime Stage: Artifact carrier (darwin binary cannot execute on Linux)
 # Extract with: docker create --name m longbow-quarrel:metal && docker cp m:/app/quarrel ./quarrel-metal
 # -----------------------------------------------------------------------------
-FROM alpine:3.19
+FROM alpine:3.24
 
 WORKDIR /app
 

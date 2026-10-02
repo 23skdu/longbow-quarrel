@@ -175,13 +175,13 @@ COVERAGE_PKGS=(
 # Packages that are not yet at 80% are held to a ratchet floor instead: coverage
 # may rise freely but may not drop. Floor values are a few points under the
 # measured baseline so environment noise cannot flip the gate red.
-#   measured 2026-09: engine 49.0, device 73.5, config 78.0, arrow_client 63.0, ollama 40.0
+#   measured 2026-09: engine 50.1, device 73.5, config 78.0, arrow_client 78.8, ollama 91.1
 RATCHET_PKGS=(
-    "./internal/engine/...:45.0"
-    "./internal/device/...:68.0"
-    "./internal/config/...:73.0"
-    "./internal/arrow_client/...:55.0"
-    "./internal/ollama/...:35.0"
+    "./internal/engine/...:47.0"
+    "./internal/device/...:70.0"
+    "./internal/config/...:75.0"
+    "./internal/arrow_client/...:75.0"
+    "./internal/ollama/...:87.0"
 )
 
 COVERAGE_FAILED=0
