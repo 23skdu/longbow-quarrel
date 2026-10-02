@@ -1,5 +1,9 @@
 # Longbow-Quarrel Features (v0.3.0)
 
+> **Version scope.** This document describes release **v0.3.0**, the latest
+> git tag. `main` carries additional unreleased work; see
+> [nextsteps.md](nextsteps.md) for what has landed and what is planned.
+
 A high-performance, memory-efficient LLM inference engine written in Go with native GPU acceleration and advanced SIMD vectorization.
 
 ---

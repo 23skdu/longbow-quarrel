@@ -13,9 +13,9 @@ Comprehensive test plan for verifying speed, correctness, and accuracy of Longbo
 - **Storage:** SSD with 50 GB free
 
 ### Software
-- **Quarrel:** v0.3.0 (latest build from `main`)
+- **Quarrel:** build from `main` (latest tag is `0.3.0`)
 - **llama.cpp:** Latest release (b4500+)
-- **OS:** Ubuntu 22.04+ or macOS 14+
+- **OS:** Ubuntu 24.04+ or macOS 14+ (matches the container bases; CUDA 12.9 images are Ubuntu 24.04)
 
 ### Models (Same GGUF Files for Both)
 

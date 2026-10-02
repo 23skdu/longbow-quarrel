@@ -1,12 +1,38 @@
 <img width="2784" height="1536" alt="quarrel_logo" src="https://github.com/user-attachments/assets/e1ab45ae-f4de-4f68-91a5-fe931a720c21" />
 
-# Longbow-Quarrel (v0.2.0)
+# Longbow-Quarrel
+
+**Latest release: v0.3.0** (`git tag 0.3.0`). `main` is ahead of that tag with
+unreleased engine, CI and dependency work — see [docs/nextsteps.md](docs/nextsteps.md)
+for what has landed and what is still planned.
 
 High-performance, memory-efficient LLM inference engine written in Go with native GPU acceleration (Apple Silicon Metal, NVIDIA CUDA) and optimized CPU SIMD vectorization (AVX-512, AVX2, ARM NEON).
 
 ---
 
-## What's New in v0.2.0
+## Requirements
+
+| Component | Version | Notes |
+|---|---|---|
+| Go | 1.27+ | `go.mod` declares `go 1.27.0` |
+| CUDA (NVIDIA path) | 12.9 | Driver ≥ 575.51.03, or ≥ 525.60.13 with minor-version compatibility |
+| cuDNN | 9 | Package name `libcudnn9-cuda-12` tracks the CUDA 12 series |
+| Alpine (CPU/metal images) | 3.24 | |
+| Prometheus (monitoring stack) | 3.15 | |
+| Grafana (monitoring stack) | 13.2 | |
+
+Pinned third-party dependency versions are tracked in one place —
+see [docs/dependencies.md](docs/dependencies.md).
+
+> **Note on `google.golang.org/grpc`:** this module is pinned to the exact
+> commit that fixes [GO-2026-6443](https://pkg.go.dev/vuln/GO-2026-6443)
+> (CVE-2026-84445), a server panic in xDS routing. No tagged release contains
+> the fix yet, so the pseudo-version cannot be replaced with a stable `v1.x.y`
+> without reintroducing the vulnerability. Re-check after the next gRPC tag.
+
+---
+
+## What's New since v0.2.0
 
 - **Zero-Copy Quantized Inference (RAM Exhaustion & OOM Elimination):** Direct matrix-vector dot products over memory-mapped quantized weights (`Q8_0`, `Q4_K`, `Q6_K`) and on-demand token embedding lookups. Slashes CPU heap memory by **99.9%** (from 17.9 GB down to < 20 MB for a 4B parameter model), allowing large models to run smoothly without disk swapping or OOM crashes.
 - **Partial GPU Layer Offloading (`-ngl` / `-gpu-layers`):** Seamlessly split transformer layers across GPU VRAM and CPU host RAM with automatic activation roundtripping. Run models that exceed your GPU's dedicated VRAM.
@@ -15,6 +41,7 @@ High-performance, memory-efficient LLM inference engine written in Go with nativ
 - **Vectorized TurboQuant Kernels:** Full AVX-512, AVX2, and ARM NEON SIMD implementations for PolarQuant and QJL transforms with 16-lane fused multiply-accumulate operations.
 - **SIMD GGUF Dequantization Kernels:** Vectorized batch dequantization and zero-copy matrix-vector multiplication (`MatVecMulQ4_K`, `MatVecMulQ6_K`).
 - **Comprehensive Verification:** Clean `go vet`, 0 `gosec` security vulnerabilities, 0 data races (`go test -race`), and 600,000+ continuous fuzz test executions.
+- **Distributed Inference (Arrow Flight):** Tensor and pipeline parallelism over Apache Arrow Flight RPC. Note: the `DoPutTensor` round trip is currently non-functional — see the caveat in [docs/nextsteps.md](docs/nextsteps.md#known-defects).
 
 ---
 
@@ -79,10 +106,12 @@ No need to pass long file paths:
 go test -bench=BenchmarkDequantize -benchmem ./internal/gguf/...
 
 # Benchmark TurboQuant SIMD kernels (AVX-512 / AVX2 / NEON)
-go test -bench=BenchmarkNeon ./internal/simd/...
+go test -bench=PolarQuant -benchmem ./internal/simd/...
+go test -bench=NEON -benchmem ./internal/simd/...
+go test -bench=AVX512 -benchmem ./internal/simd/...
 
 # End-to-end inference benchmark
-./cmd/benchmark --mode inference --model model.gguf --prompt "Benchmark prompt"
+go run ./cmd/benchmark --mode inference --model model.gguf --prompt "Benchmark prompt"
 ```
 
 ---
@@ -92,6 +121,9 @@ go test -bench=BenchmarkNeon ./internal/simd/...
 ```bash
 # Run all unit tests
 go test ./...
+
+# cmd/webui is a separate Go module with its own go.mod; test it separately
+(cd cmd/webui && go build ./... && go vet ./... && go test ./...)
 
 # Run CUDA tests
 go test -tags cuda ./internal/device/... ./internal/engine/...
@@ -103,7 +135,36 @@ go test -race ./internal/...
 go test -fuzz=FuzzDequantizeQ4K_SIMD -fuzztime=30s ./internal/gguf/
 go test -fuzz=FuzzPolarQuant -fuzztime=30s ./internal/simd/
 go test -fuzz=FuzzApplyLayerCPU -fuzztime=30s ./internal/engine/
+
+# Enforce that every test can actually fail (fails on new vacuous tests)
+go run ./scripts/vacuous_tests
 ```
+
+### Current test coverage
+
+Packages below 80% are pinned to a ratchet floor in CI so coverage may rise
+freely but never regress. The floors live in
+`.github/workflows/ci.yml` and `scripts/run_all_tests.sh` and must be kept in sync.
+
+| Package | Coverage |
+|---|---|
+| `internal/cpu` | 100.0% |
+| `internal/logger` | 100.0% |
+| `internal/metrics` | 98.7% |
+| `internal/telemetry` | 98.1% |
+| `internal/ollama` | 91.1% |
+| `internal/models` | 92.5% |
+| `internal/tokenizer` | 92.2% |
+| `internal/vector` | 91.2% |
+| `internal/vlm` | 85.5% |
+| `internal/simd` | 85.5% |
+| `internal/gguf` | 83.4% |
+| `internal/api` | 82.9% |
+| `internal/sampler` | 80.3% |
+| `internal/arrow_client` | 78.8% |
+| `internal/config` | 78.0% |
+| `internal/device` | 73.5% |
+| `internal/engine` | 50.1% |
 
 ---
 

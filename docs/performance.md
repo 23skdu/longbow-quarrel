@@ -1,5 +1,9 @@
 # Longbow-Quarrel Performance & Benchmark Results (v0.3.0)
 
+> **Version scope.** This document describes release **v0.3.0**, the latest
+> git tag. `main` carries additional unreleased work; see
+> [nextsteps.md](nextsteps.md) for what has landed and what is planned.
+
 ## 1. Executive Summary
 
 Longbow-Quarrel v0.3.0 introduces **zero-copy quantized inference**, **SIMD batch dequantization**, **partial GPU layer offloading**, and **SIMD-accelerated MatMul**, yielding substantial gains in memory efficiency and execution throughput:

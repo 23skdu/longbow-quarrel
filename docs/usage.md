@@ -1,5 +1,9 @@
 # Longbow-Quarrel Usage Guide (v0.3.0)
 
+> **Version scope.** This document describes release **v0.3.0**, the latest
+> git tag. `main` carries additional unreleased work; see
+> [nextsteps.md](nextsteps.md) for what has landed and what is planned.
+
 Comprehensive guide for running inference, configuring GPU layer offloading, loading LoRA adapters, leveraging universal model discovery, and deploying Longbow-Quarrel.
 
 ---

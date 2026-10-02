@@ -1,5 +1,9 @@
 # Metrics Reference (v0.3.0)
 
+> **Version scope.** This document describes release **v0.3.0**, the latest
+> git tag. `main` carries additional unreleased work; see
+> [nextsteps.md](nextsteps.md) for what has landed and what is planned.
+
 Comprehensive Prometheus metrics reference for monitoring inference performance, GPU layer offloading, TurboQuant compression, model behavior, and system health in Longbow-Quarrel.
 
 ---
