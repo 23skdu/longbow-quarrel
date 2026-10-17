@@ -199,6 +199,19 @@ bench-simd:
 bench-simd-all:
 	CGO_ENABLED=1 $(GO) test -bench=. -benchmem ./internal/simd/...
 
+# emlgo math backend (A/B vs stdlib math)
+test-emlgo:
+	$(GO) test -v -tags emlgo ./internal/mathx/...
+
+test-emlfast:
+	$(GO) test -v -tags "emlgo emlfast" ./internal/mathx/...
+
+bench-emlgo:
+	$(GO) test -run '^$' -bench . -benchmem ./internal/mathx/...
+
+bench-emlgo-all:
+	$(GO) test -tags emlgo -run '^$' -bench . -benchmem ./internal/mathx/...
+
 # Go vet
 check:
 	$(GO) vet ./...

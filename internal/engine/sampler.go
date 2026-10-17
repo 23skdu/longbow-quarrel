@@ -3,10 +3,11 @@ package engine
 import (
 	"errors"
 	"log"
-	"math"
 	"math/rand"
 	"sort"
 	"time"
+
+	"github.com/23skdu/longbow-quarrel/internal/mathx"
 )
 
 var ErrModelSwapped = errors.New("inference interrupted: engine model was swapped")
@@ -149,7 +150,7 @@ func (s *Sampler) Sample(logits []float32, history []int) int {
 			}
 		}
 		if selectedProb > 0 {
-			surprise := -math.Log2(selectedProb)
+			surprise := -mathx.Log2(selectedProb)
 			s.mirostatMu -= s.Config.MirostatEta * (surprise - s.Config.MirostatTau)
 			if s.mirostatMu < 0 {
 				s.mirostatMu = 0
@@ -165,7 +166,7 @@ func (s *Sampler) validateLogits(logits []float32) bool {
 		return false
 	}
 	for _, v := range logits {
-		if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
+		if mathx.IsNaN(float64(v)) || mathx.IsInf(float64(v), 0) {
 			return false
 		}
 	}
@@ -174,7 +175,7 @@ func (s *Sampler) validateLogits(logits []float32) bool {
 
 func (s *Sampler) findFirstValidToken(logits []float32) int {
 	for i, v := range logits {
-		if !math.IsNaN(float64(v)) && !math.IsInf(float64(v), 0) {
+		if !mathx.IsNaN(float64(v)) && !mathx.IsInf(float64(v), 0) {
 			return i
 		}
 	}
@@ -220,7 +221,7 @@ func (s *Sampler) applyTemperatureAndSoftmax(logits []float32, temperature float
 		} else if scaled > 60.0 {
 			scaled = 60.0
 		}
-		probs[i] = math.Exp(scaled)
+		probs[i] = mathx.Exp(scaled)
 	}
 
 	sum := 0.0
@@ -228,7 +229,7 @@ func (s *Sampler) applyTemperatureAndSoftmax(logits []float32, temperature float
 		sum += p
 	}
 
-	if sum > 0 && !math.IsNaN(sum) && !math.IsInf(sum, 0) {
+	if sum > 0 && !mathx.IsNaN(sum) && !mathx.IsInf(sum, 0) {
 		invSum := 1.0 / sum
 		for i := range probs {
 			probs[i] *= invSum
@@ -241,7 +242,7 @@ func (s *Sampler) applyTemperatureAndSoftmax(logits []float32, temperature float
 func (s *Sampler) filterValidCandidates(probs []float64) []tokenProb {
 	candidates := make([]tokenProb, 0, len(probs))
 	for i, p := range probs {
-		if p > 1e-10 && !math.IsNaN(p) && !math.IsInf(p, 0) {
+		if p > 1e-10 && !mathx.IsNaN(p) && !mathx.IsInf(p, 0) {
 			candidates = append(candidates, tokenProb{id: i, prob: p})
 		}
 	}
@@ -280,14 +281,14 @@ func (s *Sampler) calculateAdaptiveTemperature(logits []float32) float64 {
 		if v > maxLogit {
 			maxLogit = v
 		}
-		sum += math.Exp(float64(v - maxLogit))
+		sum += mathx.Exp(float64(v - maxLogit))
 	}
 
 	entropy := float64(0)
 	for _, v := range logits {
-		prob := math.Exp(float64(v-maxLogit)) / sum
+		prob := mathx.Exp(float64(v-maxLogit)) / sum
 		if prob > 0 {
-			entropy -= prob * math.Log(prob)
+			entropy -= prob * mathx.Log(prob)
 		}
 	}
 
@@ -295,7 +296,7 @@ func (s *Sampler) calculateAdaptiveTemperature(logits []float32) float64 {
 	if entropy > 2.0 {
 		return baseTemp * 1.5
 	} else if entropy < 0.5 {
-		return math.Max(baseTemp*0.5, 0.1)
+		return mathx.Max(baseTemp*0.5, 0.1)
 	}
 
 	return baseTemp
@@ -321,7 +322,7 @@ func (s *Sampler) applySmartRepetitionPenalty(logits []float32, history []int) {
 
 	for tokenID, freq := range freqMap {
 		if tokenID < len(logits) {
-			penalty := math.Pow(s.Config.RepPenalty, float64(freq))
+			penalty := mathx.Pow(s.Config.RepPenalty, float64(freq))
 			val := logits[tokenID]
 			if val > 0 {
 				logits[tokenID] /= float32(penalty)
@@ -375,9 +376,9 @@ func argMax(logits []float32) int {
 
 	allNaN := true
 	for i, v := range logits {
-		if !math.IsNaN(float64(v)) {
+		if !mathx.IsNaN(float64(v)) {
 			allNaN = false
-			if v > maxVal || math.IsNaN(float64(maxVal)) {
+			if v > maxVal || mathx.IsNaN(float64(maxVal)) {
 				maxVal = v
 				maxIdx = i
 			}

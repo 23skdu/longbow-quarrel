@@ -241,6 +241,52 @@ func TestValidate_EdgeCases(t *testing.T) {
 			c.ExpertUsedCount = 2
 			c.ExpertFeedForwardLength = 0
 		}, true},
+		{"invalid tensor_parallel_size < 0", func(c *Config) { c.TensorParallelSize = -1 }, true},
+		{"invalid pipeline_stages < 0", func(c *Config) { c.PipelineStages = -1 }, true},
+		{"valid gemma4 dim mismatch bypass", func(c *Config) {
+			c.IsGemma4 = true
+			c.Dim = 2048
+		}, false},
+		{"valid mla", func(c *Config) {
+			c.IsMLA = true
+			c.Dim = 2048
+			c.KVLoRARank = 512
+			c.QKNDim = 128
+			c.QKRopeDim = 64
+			c.VHeadDim = 128
+		}, false},
+		{"mla invalid kv_lora_rank", func(c *Config) {
+			c.IsMLA = true
+			c.Dim = 2048
+			c.KVLoRARank = 0
+			c.QKNDim = 128
+			c.QKRopeDim = 64
+			c.VHeadDim = 128
+		}, true},
+		{"mla invalid qk_nope_head_dim", func(c *Config) {
+			c.IsMLA = true
+			c.Dim = 2048
+			c.KVLoRARank = 512
+			c.QKNDim = 0
+			c.QKRopeDim = 64
+			c.VHeadDim = 128
+		}, true},
+		{"mla invalid qk_rope_head_dim", func(c *Config) {
+			c.IsMLA = true
+			c.Dim = 2048
+			c.KVLoRARank = 512
+			c.QKNDim = 128
+			c.QKRopeDim = 0
+			c.VHeadDim = 128
+		}, true},
+		{"mla invalid v_head_dim", func(c *Config) {
+			c.IsMLA = true
+			c.Dim = 2048
+			c.KVLoRARank = 512
+			c.QKNDim = 128
+			c.QKRopeDim = 64
+			c.VHeadDim = 0
+		}, true},
 	}
 
 	for _, tc := range tests {

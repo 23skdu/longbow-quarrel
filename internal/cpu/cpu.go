@@ -1,10 +1,11 @@
 package cpu
 
 import (
-	"math"
 	"runtime"
 	"sync"
 	"sync/atomic"
+
+	"github.com/23skdu/longbow-quarrel/internal/mathx"
 
 	"github.com/23skdu/longbow-quarrel/internal/metrics"
 )
@@ -135,7 +136,7 @@ func Softmax(x []float32) {
 	}
 	sum := float32(0.0)
 	for i := range x {
-		x[i] = float32(math.Exp(float64(x[i] - max)))
+		x[i] = float32(mathx.Exp(float64(x[i] - max)))
 		sum += x[i]
 	}
 	if sum > 0 {
@@ -162,7 +163,7 @@ func (c *Context) SwiGLU(gate, up, out *Tensor) {
 		if val < -10.0 {
 			val = -10.0
 		}
-		sigmoid := float32(1.0) / (float32(1.0) + float32(math.Exp(float64(-val))))
+		sigmoid := float32(1.0) / (float32(1.0) + float32(mathx.Exp(float64(-val))))
 		o[i] = u[i] * val * sigmoid
 	}
 }
@@ -207,7 +208,7 @@ func Fp16ToFp32Func(src []uint16, dst []float32) {
 			newExp := exp - 15 + 127
 			f32 = (sign << 31) | (newExp << 23) | (mant << 13)
 		}
-		dst[i] = math.Float32frombits(f32)
+		dst[i] = mathx.Float32frombits(f32)
 	}
 }
 
@@ -222,7 +223,7 @@ func Fp32ToFp16Func(src []float32, dst []uint16) {
 	}
 	for i := 0; i < n; i++ {
 		f := src[i]
-		bits := math.Float32bits(f)
+		bits := mathx.Float32bits(f)
 		sign := bits >> 31
 		exp := (bits >> 23) & 0xFF
 		mant := bits & 0x7FFFFF
@@ -306,7 +307,7 @@ func (c *Context) RMSNorm(input *Tensor, weight *Tensor, output *Tensor, eps flo
 					v := in[rowOffset+j]
 					sum += v * v
 				}
-				sum = float32(1.0) / float32(math.Sqrt(float64(sum/float32(size))+float64(eps)))
+				sum = float32(1.0) / float32(mathx.Sqrt(float64(sum/float32(size))+float64(eps)))
 				for j := 0; j < size; j++ {
 					out[rowOffset+j] = in[rowOffset+j] * sum * w[j]
 				}
@@ -323,9 +324,9 @@ func (c *Context) Rope(inout *Tensor, pos int, headDim int, theta float32) {
 	for row := 0; row < numRows; row++ {
 		for h := 0; h < headDim; h += 2 {
 			idx := row*seqLen*headDim + pos*headDim + h
-			freq := float32(math.Pow(float64(theta), float64(h)/float64(headDim)))
-			cosVal := float32(math.Cos(float64(freq)))
-			sinVal := float32(math.Sin(float64(freq)))
+			freq := float32(mathx.Pow(float64(theta), float64(h)/float64(headDim)))
+			cosVal := float32(mathx.Cos(float64(freq)))
+			sinVal := float32(mathx.Sin(float64(freq)))
 			x0 := data[idx]
 			x1 := data[idx+1]
 			data[idx] = x0*cosVal - x1*sinVal
@@ -382,7 +383,7 @@ func (c *Context) Silu(input, out *Tensor) {
 	in := input.data.([]float32)
 	o := out.data.([]float32)
 	for i := range in {
-		o[i] = in[i] / (float32(1.0) + float32(math.Exp(float64(-in[i]))))
+		o[i] = in[i] / (float32(1.0) + float32(mathx.Exp(float64(-in[i]))))
 	}
 }
 
@@ -392,7 +393,7 @@ func (c *Context) GeLU(input, out *Tensor) {
 	for i := range in {
 		x := in[i]
 		sqrtArg := x * float32(0.7978845608) * (float32(1.0) + float32(0.044715)*x*x)
-		o[i] = float32(0.5) * x * (float32(1.0) + float32(math.Tanh(float64(sqrtArg))))
+		o[i] = float32(0.5) * x * (float32(1.0) + float32(mathx.Tanh(float64(sqrtArg))))
 	}
 }
 

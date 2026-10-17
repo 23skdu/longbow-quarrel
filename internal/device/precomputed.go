@@ -1,15 +1,15 @@
 package device
 
 import (
-	"math"
+	"github.com/23skdu/longbow-quarrel/internal/mathx"
 )
 
 // GetPrecomputedRotation returns a deterministic orthogonal matrix for the given dimension.
 func GetPrecomputedRotation(dim int) []float32 {
 	// Standard DCT-II orthogonal matrix
 	data := make([]float32, dim*dim)
-	scale0 := float32(math.Sqrt(1.0 / float64(dim)))
-	scaleN := float32(math.Sqrt(2.0 / float64(dim)))
+	scale0 := float32(mathx.Sqrt(1.0 / float64(dim)))
+	scaleN := float32(mathx.Sqrt(2.0 / float64(dim)))
 
 	for i := 0; i < dim; i++ {
 		scale := scaleN
@@ -17,7 +17,7 @@ func GetPrecomputedRotation(dim int) []float32 {
 			scale = scale0
 		}
 		for j := 0; j < dim; j++ {
-			data[i*dim+j] = scale * float32(math.Cos(math.Pi*float64(i)*(float64(j)+0.5)/float64(dim)))
+			data[i*dim+j] = scale * float32(mathx.Cos(mathx.Pi*float64(i)*(float64(j)+0.5)/float64(dim)))
 		}
 	}
 	return data
@@ -28,7 +28,7 @@ func GetPrecomputedQJLSigns(n int) []float32 {
 	data := make([]float32, n)
 	for i := 0; i < n; i++ {
 		// Deterministic "random" signs using a simple oscillation
-		if math.Sin(float64(i)*0.1)*math.Cos(float64(i)*0.7) > 0 {
+		if mathx.Sin(float64(i)*0.1)*mathx.Cos(float64(i)*0.7) > 0 {
 			data[i] = 1.0
 		} else {
 			data[i] = -1.0

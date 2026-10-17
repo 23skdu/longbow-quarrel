@@ -1,7 +1,7 @@
 package device
 
 import (
-	"math"
+	"github.com/23skdu/longbow-quarrel/internal/mathx"
 )
 
 // CPU RMSNorm reference implementation
@@ -16,7 +16,7 @@ func CPURMSNorm(input, weight []float32, eps float32) []float32 {
 			val := input[i*dim+j]
 			sumSquares += val * val
 		}
-		rms := float32(math.Sqrt(float64(sumSquares/float32(dim)) + float64(eps)))
+		rms := float32(mathx.Sqrt(float64(sumSquares/float32(dim)) + float64(eps)))
 
 		// Apply normalization
 		for j := 0; j < dim; j++ {
@@ -58,9 +58,9 @@ func CPURoPE(input []float32, pos, heads, headDim int, theta float32) []float32 
 			idx1 := headOffset + i + halfDim
 
 			// theta_i = pos * theta^(-2*i/headDim)
-			freq := float64(pos) * math.Pow(float64(theta), -2.0*float64(i)/float64(headDim))
-			cosVal := float32(math.Cos(freq))
-			sinVal := float32(math.Sin(freq))
+			freq := float64(pos) * mathx.Pow(float64(theta), -2.0*float64(i)/float64(headDim))
+			cosVal := float32(mathx.Cos(freq))
+			sinVal := float32(mathx.Sin(freq))
 
 			x := output[idx0]
 			y := output[idx1]
@@ -85,7 +85,7 @@ func CPUSwiGLU(gate, up []float32) []float32 {
 		gateVal := gate[i]
 		upVal := up[i]
 		// Swish activation: x * sigmoid(x)
-		sigmoid := float32(1.0) / (float32(1.0) + float32(math.Exp(-float64(gateVal))))
+		sigmoid := float32(1.0) / (float32(1.0) + float32(mathx.Exp(-float64(gateVal))))
 		swish := gateVal * sigmoid
 		output[i] = swish * upVal
 	}

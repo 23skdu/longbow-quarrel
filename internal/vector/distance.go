@@ -1,8 +1,9 @@
 package vector
 
 import (
-	"math"
 	"math/bits"
+
+	"github.com/23skdu/longbow-quarrel/internal/mathx"
 )
 
 // DotFloat32 computes the dot product of two float32 vectors with 8-way loop unrolling.
@@ -73,7 +74,7 @@ func CosineFloat32(a, b []float32) float32 {
 	if normA <= 0 || normB <= 0 {
 		return 0
 	}
-	return dot / float32(math.Sqrt(float64(normA*normB)))
+	return dot / float32(mathx.Sqrt(float64(normA*normB)))
 }
 
 // DotComplex128 computes the real part of the complex Hermitian inner product: Re(<a, b>) = sum(Re(a)*Re(b) + Im(a)*Im(b)).
@@ -137,7 +138,7 @@ func CosineComplex128(a, b []complex128) float64 {
 	if normA <= 0 || normB <= 0 {
 		return 0
 	}
-	return dot / math.Sqrt(normA*normB)
+	return dot / mathx.Sqrt(normA*normB)
 }
 
 // DotUint8 computes the dot product of two Uint8Vectors reconstructed into continuous scale.
@@ -190,7 +191,7 @@ func CosineUint8(a, b *Uint8Vector) float32 {
 	if normA <= 0 || normB <= 0 {
 		return 0
 	}
-	return dot / float32(math.Sqrt(float64(normA*normB)))
+	return dot / float32(mathx.Sqrt(float64(normA*normB)))
 }
 
 // DotTurboQuant computes similarity using polar integer dot product + QJL 1-bit Hamming correlation.

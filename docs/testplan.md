@@ -330,7 +330,64 @@ $LLAMACLI -m "$MODEL" -p "$PROMPT" -n 512 -t 0 2>&1 | grep -E "eval|speed"
 
 ---
 
-## 8. Acceptance Criteria
+## 8. Math Backend (`emlgo`) Parity & A/B Test Plan
+
+See [nextsteps.md](nextsteps.md) Phase 3 for the full plan. The test plan for the
+swap is gated on the module-path prerequisite in
+[dependencies.md](dependencies.md) (a fork of `github.com/23skdu/emlgo` with a
+corrected `module` line).
+
+### 8.1 Parity Tests (`internal/mathx/parity_test.go`)
+
+For every wrapped function, assert bit-exactness against stdlib (or `≤ 1 ULP`
+for `emlfast`) over a deterministic input sweep: edge values, denormals, large
+and small magnitudes, negatives.
+
+| Function | stdlib | emlgo scalar | emlgo fast | Expected |
+|----------|--------|--------------|------------|----------|
+| `Exp` | `math.Exp` | `logexp.Exp` | `fastmath.FastExp` | bit-exact / ≤1 ULP |
+| `Log` | `math.Log` | `logexp.Log` | `fastmath.FastLog` | bit-exact / ≤1 ULP |
+| `Sqrt` | `math.Sqrt` | `arithmetic.Sqrt` | — | bit-exact |
+| `Pow` | `math.Pow` | `arithmetic.Pow` | — | bit-exact |
+| `Sin` / `Cos` | `math.Sin`/`Cos` | `trig.Sin`/`Cos` | `trig.SinFast`/`CosFast` | bit-exact / ≤1 ULP |
+| `Tanh` | `math.Tanh` | `hyper.Tanh` | — | bit-exact |
+| `Abs` | `math.Abs` | `arithmetic.Abs` | `eml.AbsBranchless` | bit-exact |
+
+`IsNaN`, `IsInf`, `NaN`, `Inf`, `*bits`/`frombits`, `Copysign`, `MaxInt`,
+`MaxFloat32/64`, `SmallestNonzeroFloat32`, and `Pi` stay on stdlib (no emlgo
+equivalent).
+
+### 8.2 Golden Regression
+
+Capture sampler logits / generated token IDs on a fixed prompt+seed with the
+stdlib build, then assert the `emlgo` build reproduces them (bit-exact for
+scalar; tolerance for `emlfast`).
+
+### 8.3 Property Tests
+
+`Exp(Log(x))≈x`, `Sqrt(x)²≈x`, `Sin²+Cos²≈1` across the SIMD batch paths.
+
+### 8.4 A/B Performance
+
+```bash
+go test -run '^$' -bench . -benchmem ./internal/mathx/ > stdlib.txt
+go test -tags emlgo -run '^$' -bench . -benchmem ./internal/mathx/ > emlgo.txt
+scripts/bench_gate.sh compare stdlib.txt emlgo.txt
+```
+
+End-to-end: build `quarrel` with and without `-tags emlgo`, run
+`scripts/benchmark_models.sh` / `profile_tokens.sh` on Qwen3.5-4B-Q8_0, record
+TTFT, tok/s, P95/P99, peak RSS. Publish results in
+[performance.md](performance.md) §8.
+
+### 8.5 Existing Gates
+
+The swap must keep every existing gate green: `scripts/run_all_tests.sh` (8
+gates), coverage ≥ 80%, `go vet`, `gosec`, race detector.
+
+---
+
+## 9. Acceptance Criteria
 
 | Category | Criterion | Target |
 |----------|-----------|--------|

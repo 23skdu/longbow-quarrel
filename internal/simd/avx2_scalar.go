@@ -3,8 +3,9 @@
 package simd
 
 import (
-	"math"
 	"unsafe"
+
+	"github.com/23skdu/longbow-quarrel/internal/mathx"
 )
 
 // Scalar fallback implementations
@@ -62,7 +63,7 @@ func fp32ToFp16Scalar(src []float32, dst []uint16) {
 
 // Fast approximate exp for scalar fallback
 func fastExp(x float32) float32 {
-	return float32(math.Exp(float64(x)))
+	return float32(mathx.Exp(float64(x)))
 }
 
 // FP16 to FP32 conversion

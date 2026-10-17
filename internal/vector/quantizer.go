@@ -1,8 +1,9 @@
 package vector
 
 import (
-	"math"
 	"math/rand"
+
+	"github.com/23skdu/longbow-quarrel/internal/mathx"
 
 	"github.com/23skdu/longbow-quarrel/internal/simd"
 )
@@ -35,9 +36,7 @@ func QuantizeUint8(v []float32, id int) Uint8Vector {
 	invScale := 1.0 / scale
 	for i, x := range v {
 		val := (x - minVal) * invScale
-		if val < 0 {
-			val = 0
-		} else if val > 255 {
+		if val > 255 {
 			val = 255
 		}
 		data[i] = uint8(val)
@@ -68,7 +67,7 @@ func QuantizeTurboQuant(v []float32, id int, rotation []float32, qjlMatrix []flo
 		return TurboQuantVector{ID: id}
 	}
 
-	norm := float32(math.Sqrt(float64(DotFloat32(v, v))))
+	norm := float32(mathx.Sqrt(float64(DotFloat32(v, v))))
 	if norm == 0 {
 		norm = 1.0
 	}
@@ -115,7 +114,7 @@ func GenerateRandomFloat32Dataset(n, d int, seed int64) [][]float32 {
 			vec[j] = val
 			sumSq += float64(val * val)
 		}
-		invNorm := float32(1.0 / math.Sqrt(sumSq))
+		invNorm := float32(1.0 / mathx.Sqrt(sumSq))
 		for j := 0; j < d; j++ {
 			vec[j] *= invNorm
 		}

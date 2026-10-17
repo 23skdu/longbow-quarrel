@@ -97,12 +97,13 @@ import "C"
 import (
 	_ "embed"
 	"fmt"
-	"math"
 	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
 	"unsafe"
+
+	"github.com/23skdu/longbow-quarrel/internal/mathx"
 
 	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
@@ -871,7 +872,7 @@ func quantizeQ6K(data []float32) []byte {
 		off := b * 210
 		maxAbs := float32(0)
 		for _, v := range blockData {
-			if a := float32(math.Abs(float64(v))); a > maxAbs {
+			if a := float32(mathx.Abs(float64(v))); a > maxAbs {
 				maxAbs = a
 			}
 		}
@@ -888,8 +889,8 @@ func quantizeQ6K(data []float32) []byte {
 		for i := 0; i < 128; i++ {
 			v0 := blockData[i*2]
 			v1 := blockData[i*2+1]
-			q0 := int(math.Round(float64(v0/d))) + 32
-			q1 := int(math.Round(float64(v1/d))) + 32
+			q0 := int(mathx.Round(float64(v0/d))) + 32
+			q1 := int(mathx.Round(float64(v1/d))) + 32
 			if q0 < 0 {
 				q0 = 0
 			} else if q0 > 63 {
@@ -904,7 +905,7 @@ func quantizeQ6K(data []float32) []byte {
 		}
 		for i := 0; i < 256; i++ {
 			v := blockData[i]
-			q := int(math.Round(float64(v/d))) + 32
+			q := int(mathx.Round(float64(v/d))) + 32
 			if q < 0 {
 				q = 0
 			} else if q > 63 {
@@ -997,11 +998,11 @@ func (t *Tensor) ScanMax(name string) (float32, ActivationStats) {
 	}
 
 	for _, v := range data {
-		if math.IsNaN(float64(v)) {
+		if mathx.IsNaN(float64(v)) {
 			nans++
 			continue
 		}
-		if math.IsInf(float64(v), 0) {
+		if mathx.IsInf(float64(v), 0) {
 			infs++
 			continue
 		}
@@ -1019,7 +1020,7 @@ func (t *Tensor) ScanMax(name string) (float32, ActivationStats) {
 	}
 
 	mean := sum / float32(len(data))
-	rms := float32(math.Sqrt(sumSq / float64(len(data))))
+	rms := float32(mathx.Sqrt(sumSq / float64(len(data))))
 
 	stats := ActivationStats{
 		Max:   maxVal,
@@ -2293,7 +2294,7 @@ func (t *Tensor) attentionTQInternal(kCache, vCache *Tensor, pos, numHeads, kvHe
 	scores := t.ctx.newTensorFP32PooledInternal(1, scoresDim)
 	defer scores.ReturnToPool()
 
-	smScale := 1.0 / float32(math.Sqrt(float64(headDim)))
+	smScale := 1.0 / float32(mathx.Sqrt(float64(headDim)))
 
 	C.Metal_Attention_TQ_Scores_F16(t.ctx.ref,
 		qPrime.buf, C.int(qPrime.Offset),
@@ -2867,9 +2868,9 @@ func (ctx *Context) MLAProjectQuerySplitRoPE(qAll, posIds *Tensor, numTokens, he
 			copy(qNopeData[baseNope:baseNope+qkNopeDim], qAllData[baseIn:baseIn+qkNopeDim])
 
 			for i := 0; i < halfRope; i++ {
-				freq := float32(pos) * float32(math.Pow(float64(theta), float64(-2*i)/float64(qkRopeDim)))
-				cosVal := float32(math.Cos(float64(freq)))
-				sinVal := float32(math.Sin(float64(freq)))
+				freq := float32(pos) * float32(mathx.Pow(float64(theta), float64(-2*i)/float64(qkRopeDim)))
+				cosVal := float32(mathx.Cos(float64(freq)))
+				sinVal := float32(mathx.Sin(float64(freq)))
 
 				x0 := qAllData[baseIn+qkNopeDim+i]
 				x1 := qAllData[baseIn+qkNopeDim+i+halfRope]
@@ -2948,7 +2949,7 @@ func (ctx *Context) MLAAbsorbedDecodeAttention(qAbsorbed, qRope, kCache, kRopeCa
 
 			var sumExp float32
 			for s := 0; s < seqLen; s++ {
-				expVal := float32(math.Exp(float64(scores[s] - maxScore)))
+				expVal := float32(mathx.Exp(float64(scores[s] - maxScore)))
 				scores[s] = expVal
 				sumExp += expVal
 			}

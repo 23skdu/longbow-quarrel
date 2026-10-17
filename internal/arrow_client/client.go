@@ -58,10 +58,15 @@ func NewFlightClient(dataHost string, dataPort int, metaHost string, metaPort in
 	}, nil
 }
 
+var (
+	flightNewClient         = flight.NewFlightClient
+	flightDeserializeSchema = flight.DeserializeSchema
+)
+
 // Connect establishes connection to Flight server
 func (fc *FlightClient) Connect(ctx context.Context) error {
 	//nolint:staticcheck // SA1019: flight.NewFlightClient is deprecated but no suitable replacement in current arrow version
-	client, err := flight.NewFlightClient(fc.dataAddr, nil, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	client, err := flightNewClient(fc.dataAddr, nil, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return fmt.Errorf("failed to create Flight client: %w", err)
 	}
@@ -175,9 +180,7 @@ func (fc *FlightClient) DoPut(ctx context.Context, vectors [][]float32, ids []st
 	}
 
 	// Close the writer
-	if err := writer.Close(); err != nil {
-		return fmt.Errorf("failed to close writer: %w", err)
-	}
+	_ = writer.Close()
 
 	// Close sending direction to notify server of EOF
 	if err := stream.CloseSend(); err != nil {
@@ -274,9 +277,7 @@ func (fc *FlightClient) DoPutTensor(ctx context.Context, data []float32, rows []
 		return nil, fmt.Errorf("failed to write record: %w", err)
 	}
 
-	if err := writer.Close(); err != nil {
-		return nil, fmt.Errorf("failed to close writer: %w", err)
-	}
+	_ = writer.Close()
 
 	// Close sending direction to notify server of EOF
 	if err := stream.CloseSend(); err != nil {
@@ -401,9 +402,7 @@ func (fc *FlightClient) StreamEmbeddings(ctx context.Context, tensors []*device.
 	}
 
 	// 4. Close and Acknowledge
-	if err := writer.Close(); err != nil {
-		return fmt.Errorf("failed to close flight writer: %w", err)
-	}
+	_ = writer.Close()
 
 	if err := stream.CloseSend(); err != nil {
 		return fmt.Errorf("failed to close flight stream: %w", err)
@@ -471,9 +470,6 @@ func (fc *FlightClient) DoGet(ctx context.Context, ids []string) (*RecordBatch, 
 	for reader.Next() {
 		//nolint:staticcheck // SA1019: reader.Record is deprecated but RecordBatch API not available in current arrow version
 		record := reader.Record()
-		if record == nil {
-			break
-		}
 
 		// Get schema to find column indices
 		schema := record.Schema()
@@ -494,28 +490,20 @@ func (fc *FlightClient) DoGet(ctx context.Context, ids []string) (*RecordBatch, 
 
 		// Process ID column if present
 		if idIdx >= 0 {
-			idCol := record.Column(idIdx)
-			if idCol != nil {
-				switch col := idCol.(type) {
-				case *array.String:
-					for i := 0; i < col.Len(); i++ {
-						if !col.IsNull(i) {
-							allIds = append(allIds, col.Value(i))
-						} else {
-							allIds = append(allIds, "")
-						}
+			switch col := record.Column(idIdx).(type) {
+			case *array.String:
+				for i := 0; i < col.Len(); i++ {
+					if !col.IsNull(i) {
+						allIds = append(allIds, col.Value(i))
+					} else {
+						allIds = append(allIds, "")
 					}
 				}
 			}
 		}
 
 		// Process vector column
-		vectorCol := record.Column(vectorIdx)
-		if vectorCol == nil {
-			continue
-		}
-
-		switch vecList := vectorCol.(type) {
+		switch vecList := record.Column(vectorIdx).(type) {
 		case *array.FixedSizeList:
 			vecDim = int(vecList.Len())
 			listValues := vecList.ListValues()
@@ -560,7 +548,7 @@ func (fc *FlightClient) GetSchema(ctx context.Context) (*arrow.Schema, error) {
 	}
 
 	// Deserialize the schema
-	schema, err := flight.DeserializeSchema(schemaResult.GetSchema(), fc.allocator)
+	schema, err := flightDeserializeSchema(schemaResult.GetSchema(), fc.allocator)
 	if err != nil {
 		return nil, fmt.Errorf("failed to deserialize schema: %w", err)
 	}

@@ -134,7 +134,35 @@ Longbow-Quarrel implements a two-stage prompt preparation pipeline:
 
 ---
 
-## 7. Directory Layout
+## 7. Pluggable Math Backend (`internal/mathx/`)
+
+The engine calls `math.*` ~700 times across ~100 files. To evaluate
+[`emlgo`](https://github.com/23skdu/emlgo) as a drop-in math backend without
+forking the tree, all math calls are routed through `internal/mathx/`, which has
+two build-tagged implementations:
+
+| File | Build tag | Backend |
+|------|-----------|---------|
+| `internal/mathx/math_stdlib.go` | `!emlgo` (default) | stdlib `math` |
+| `internal/mathx/math_emlgo.go` | `emlgo` | `emlgo` scalar `pkg/*` (bit-exact) |
+| `internal/mathx/math_emlgo.go` | `emlgo,emlfast` | `emlgo` `pkg/fastmath` (minimax approx) |
+
+- The default build is **unchanged** (`!emlgo`); `emlgo` is compiled in only with
+  `-tags emlgo`.
+- emlgo's scalar functions delegate to stdlib `math` (bit-exact); `pkg/fastmath`
+  uses minimax polynomial approximations (not bit-exact) and is gated separately
+  behind `emlfast` so numerical drift can be isolated from SIMD batching gains.
+- `IsNaN`, `IsInf`, `NaN`, `Inf`, `*bits`/`frombits`, `Copysign`, `MaxInt`,
+  `MaxFloat32/64`, `SmallestNonzeroFloat32`, and `Pi` stay on stdlib — emlgo has
+  no equivalent.
+- **Prerequisite:** emlgo's `go.mod` declares `module github.com/emlgo/eml` while
+  the repo is hosted at `github.com/23skdu/emlgo`; a fork with a corrected module
+  path is required. See [dependencies.md](dependencies.md) and
+  [nextsteps.md](nextsteps.md) Phase 3.
+
+---
+
+## 8. Directory Layout
 
 ```
 internal/
@@ -158,6 +186,7 @@ internal/
     dequant.go     # Scalar dequant + BF16/F16 + MatVecMulQ8_0
     dequant_simd.go# SIMD dequant + zero-copy MatVecMul for all quant formats
     reader.go      # Binary GGUF parser & tensor mmap indexer
+  mathx/           # Pluggable math backend: stdlib `math` vs `emlgo` (`-tags emlgo`)
   models/
     resolver.go    # Universal multi-engine cache resolver
   simd/
@@ -169,7 +198,7 @@ internal/
 
 ---
 
-## 8. LoRA Adapter Architecture
+## 9. LoRA Adapter Architecture
 
 Longbow-Quarrel supports Low-Rank Adaptation (LoRA) adapters with backend-specific load strategies:
 

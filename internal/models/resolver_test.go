@@ -129,3 +129,39 @@ func TestResolveModelPath_OllamaFallback(t *testing.T) {
 		t.Errorf("Ollama resolution failed: %v, got %s", err, resolved)
 	}
 }
+
+func TestResolveModelPath_SubstringScan(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	modelsDir := filepath.Join(tmpHome, ".cache", "quarrel", "models")
+	if err := os.MkdirAll(modelsDir, 0755); err != nil {
+		t.Fatalf("failed to create modelsDir: %v", err)
+	}
+
+	// 1. Directory entry inside searchDir to hit entry.IsDir() continue
+	if err := os.MkdirAll(filepath.Join(modelsDir, "00-nested-dir"), 0755); err != nil {
+		t.Fatalf("failed to create 00-nested-dir: %v", err)
+	}
+
+	// 2. Non-GGUF file to hit !strings.HasSuffix continue
+	if err := os.WriteFile(filepath.Join(modelsDir, "00-notes.txt"), []byte("text"), 0644); err != nil {
+		t.Fatalf("failed to create 00-notes.txt: %v", err)
+	}
+
+	// 3. Target GGUF file
+	target := filepath.Join(modelsDir, "deepseek-coder-v2-lite.gguf")
+	if err := os.WriteFile(target, []byte("GGUF"), 0644); err != nil {
+		t.Fatalf("failed to create target: %v", err)
+	}
+
+	// Query by substring without full filename
+	resolved, err := ResolveModelPath("deepseek-coder")
+	if err != nil {
+		t.Fatalf("expected resolution by substring to succeed, got %v", err)
+	}
+	if resolved != target {
+		t.Errorf("expected %s, got %s", target, resolved)
+	}
+}
+

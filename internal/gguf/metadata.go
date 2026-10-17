@@ -2,7 +2,8 @@ package gguf
 
 import (
 	"fmt"
-	"math"
+
+	"github.com/23skdu/longbow-quarrel/internal/mathx"
 )
 
 type MetadataAnalyzer struct {
@@ -261,10 +262,10 @@ func (a *MetadataAnalyzer) ComputeStats(tensorName string) (*TensorStats, error)
 			stats.MaxValue = float64(data[0])
 			sum := float64(0)
 			for _, v := range data {
-				if math.IsNaN(float64(v)) {
+				if mathx.IsNaN(float64(v)) {
 					stats.HasNaN = true
 				}
-				if math.IsInf(float64(v), 0) {
+				if mathx.IsInf(float64(v), 0) {
 					stats.HasInf = true
 				}
 				if float64(v) < stats.MinValue {
@@ -305,7 +306,7 @@ func castToFloat32(data []byte) []float32 {
 	for i := 0; i < n; i++ {
 		bits := uint32(data[i*4]) | uint32(data[i*4+1])<<8 |
 			uint32(data[i*4+2])<<16 | uint32(data[i*4+3])<<24
-		result[i] = math.Float32frombits(bits)
+		result[i] = mathx.Float32frombits(bits)
 	}
 	return result
 }

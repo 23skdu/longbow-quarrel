@@ -30,7 +30,103 @@ Longbow-Quarrel is a high-performance, multi-backend inference engine in Go, CGo
 
 ---
 
-### Phase 3: Production Serving, WebUI & Parity Validation (target v1.0.0) — Priority: P1
+### Phase 3: Pluggable Math Backend — `emlgo` A/B Evaluation (target v0.9.0) — Priority: P0
+
+#### Part 7: Swap stdlib `math` for `emlgo` behind a build flag
+
+- **Objective**: Replace the Go standard library `math` package in inference hot paths with [`emlgo`](https://github.com/23skdu/emlgo) (the EML — Exp-Minus-Log — operator library), gated behind a build flag so both backends can be A/B benchmarked from a single tree.
+- **Why**: `math.*` appears **~700 times across ~100 files**, concentrated in the sampler (softmax, entropy, repetition penalty), RoPE, RMSNorm / SwiGLU / GELU activations, dequantization, and vector distance. emlgo ships SIMD batch equivalents (AVX-512 / AVX2+FMA / NEON / SVE / WASM SIMD128) that could vectorize these per-token scalar loops. This is an **evaluation**: adopt only if parity holds and a measurable win is demonstrated.
+
+##### Step 7.1 — Resolve the module-path blocker first (P0, prerequisite)
+
+`emlgo` **cannot be required as-is**. Its `go.mod` declares `module github.com/emlgo/eml`, but the repository is hosted at `github.com/23skdu/emlgo` and every internal import uses the `github.com/emlgo/eml/...` path. Requesting it under the host path fails:
+
+```
+$ go get github.com/23skdu/emlgo@0.5
+go: github.com/23skdu/emlgo@0.5 (v0.0.0-20261003213601-b3d1a425cdd5) requires ...:
+	module declares its path as: github.com/emlgo/eml
+	        but was required as: github.com/23skdu/emlgo
+```
+
+There is **no `v0.5.0` semver tag** — the tag is `0.5`, which Go does not treat as semver — so the version is the pseudo-version **`v0.0.0-20261003213601-b3d1a425cdd5`** (commit `b3d1a425cdd5e8956b45593ce98bb96f06075507`, tag `0.5`, "latest 0.5").
+
+**Do this before any code lands:**
+
+1. Fork `github.com/23skdu/emlgo` at tag `0.5` and correct the module path: `module github.com/emlgo/eml` → `module github.com/23skdu/emlgo` in `go.mod`, then rewrite every `github.com/emlgo/eml/...` import to `github.com/23skdu/emlgo/...` (mechanical). Tag the fork `v0.5.0`.
+2. In the root `go.mod`, add `require github.com/23skdu/emlgo v0.5.0` (or pin the pseudo-version until the fork tags `v0.5.0`).
+3. `go mod tidy` and confirm `go build ./...` is green against the fork.
+
+> **Alternative if a fork is undesirable:** `go mod vendor` the dependency and rewrite the import paths under `vendor/`. This pins the code but forfeits upstream updates; the fork is preferred.
+
+##### Step 7.2 — Compatibility & accuracy audit
+
+emlgo is **not** a drop-in `math` replacement. It is a set of packages (`pkg/arithmetic`, `pkg/trig`, `pkg/hyper`, `pkg/logexp`, `pkg/fastmath`, `pkg/quant`, `internal/eml`, …) with different names and signatures. Two accuracy classes:
+
+- **Scalar `pkg/*` functions delegate to stdlib `math`** → bit-exact, safe to swap 1:1.
+- **`pkg/fastmath` uses minimax polynomial approximations** (`FastExp`, `FastLog`, `FastEml`, …) → **not** bit-exact; ULP differences will shift logits and therefore sampling. These must be opt-in behind a separate tag.
+
+Map every stdlib symbol the repo uses to its emlgo equivalent and record the expected ULP delta:
+
+| stdlib | emlgo scalar (bit-exact) | emlgo fast (approx) |
+|---|---|---|
+| `math.Exp` | `logexp.Exp` / `arithmetic.Exp` | `fastmath.FastExp` |
+| `math.Log` | `logexp.Log` / `arithmetic.Log` | `fastmath.FastLog` |
+| `math.Log2` | `arithmetic.Log2` | — |
+| `math.Sqrt` | `arithmetic.Sqrt` / `fastmath.Sqrt` | — |
+| `math.Pow` | `arithmetic.Pow` | — |
+| `math.Sin` / `math.Cos` | `trig.Sin` / `trig.Cos` | `trig.SinFast` / `trig.CosFast` |
+| `math.Tanh` | `hyper.Tanh` | — |
+| `math.Abs` | `arithmetic.Abs` | `eml.AbsBranchless` |
+| `math.Max` / `math.Min` | `arithmetic.Max` / `arithmetic.Min` | — |
+| `math.Floor` / `Ceil` / `Round` / `Trunc` | `arithmetic.Floor` / `Ceil` / `Round` / `Trunc` | — |
+| `math.IsNaN` / `IsInf` / `NaN` / `Inf` | — no equivalent; **keep stdlib** | — |
+| `math.Float32bits` / `frombits`, `Float64bits` / `frombits` | — no equivalent; **keep stdlib** | — |
+| `math.Copysign`, `MaxInt`, `MaxFloat32/64`, `SmallestNonzeroFloat32`, `Pi` | — no equivalent; **keep stdlib** | — |
+
+**Keep stdlib for** `IsNaN`, `IsInf`, `NaN`, `Inf`, the `*bits`/`frombits` conversions, `Copysign`, `MaxInt`, `MaxFloat32/64`, `SmallestNonzeroFloat32`, and `Pi` — emlgo has no equivalent and these are control-flow / bit-twiddling, not compute.
+
+##### Step 7.3 — Abstraction layer (the only files that import a math package)
+
+Introduce `internal/mathx/` with two build-tagged files so the rest of the tree never imports `math` or `emlgo` directly:
+
+- `internal/mathx/math_stdlib.go` — `//go:build !emlgo` — thin wrappers over stdlib `math`.
+- `internal/mathx/math_emlgo.go` — `//go:build emlgo` — wrappers over emlgo (scalar `pkg/*` for bit-exactness; `pkg/fastmath` only behind a second `emlfast` tag).
+
+Expose one API matching the subset the repo uses (`Exp`, `Log`, `Log2`, `Sqrt`, `Pow`, `Sin`, `Cos`, `Tanh`, `Abs`, `Max`, `Min`, `Floor`, `Ceil`, `Round`, `Trunc`, plus the kept-stdlib helpers). Repoint all ~700 call sites from `math.Exp` → `mathx.Exp`, etc.
+
+##### Step 7.4 — Build-flag gating
+
+- Tag name: **`emlgo`** — matches the lowercase convention of `cuda`, `metal`, `tpu`, `webui`, `avx512`, `nccl`.
+- Default build (`make cpu`, `make test`) → stdlib (`!emlgo`); **no behavior change**.
+- A/B build → `go test -tags emlgo ./...`, `go build -tags emlgo`.
+- Optional second tag **`emlfast`** for the non-bit-exact `fastmath` paths, so polynomial-approximation drift can be isolated from SIMD batching gains.
+- Add Makefile targets `test-emlgo`, `bench-emlgo`, `bench-emlgo-all` mirroring `test-simd` / `bench-simd`.
+
+##### Step 7.5 — Unit tests & accuracy parity
+
+- **Parity tests** (`internal/mathx/parity_test.go`): for every wrapped function assert `mathx.X(x) == math.X(x)` (or `≤ 1 ULP` for `emlfast`) over a deterministic input sweep (edge values, denormals, large/small magnitudes, negatives). These fail loudly if emlgo drifts.
+- **Golden regression**: capture sampler logits / generated token IDs on a fixed prompt+seed with stdlib, then assert the `emlgo` build reproduces them (bit-exact for scalar; tolerance for `emlfast`).
+- **Property tests**: `Exp(Log(x))≈x`, `Sqrt(x)²≈x`, `Sin²+Cos²≈1` across the SIMD batch paths.
+- **Existing gates must stay green**: `scripts/run_all_tests.sh` (8 gates), coverage ≥ 80%, `go vet`, `gosec`, race detector.
+
+##### Step 7.6 — A/B performance benchmarking
+
+- Add `internal/mathx/bench_test.go` with `Benchmark*` funcs for each hot op (`Exp`, `Log`, `Sqrt`, `Pow`, `Sin`, `Cos`, `Tanh`, softmax) in scalar and batch (`[]float64`) form.
+- Run both backends and publish a table:
+  ```bash
+  go test -run '^$' -bench . -benchmem ./internal/mathx/ > stdlib.txt
+  go test -tags emlgo -run '^$' -bench . -benchmem ./internal/mathx/ > emlgo.txt
+  scripts/bench_gate.sh compare stdlib.txt emlgo.txt
+  ```
+- **End-to-end inference A/B**: build `quarrel` with and without `-tags emlgo`, run `scripts/benchmark_models.sh` / `profile_tokens.sh` on a fixed model (Qwen3.5-4B-Q8_0), and record TTFT, tok/s, P95/P99, and peak RSS per backend.
+- **Decision gate**: adopt emlgo only if (a) parity tests pass, (b) no regression in the existing `bench_gate.sh` 1.5× gate, and (c) a measurable win on the target hardware. Otherwise keep stdlib and document the negative result.
+
+- **Files**: `go.mod` / `go.sum`, `internal/mathx/`, `internal/engine/sampler.go`, `internal/device/cpu*.go`, `internal/gguf/dequant*.go`, `internal/vector/*.go`, `internal/tokenizer/tokenizer.go`, `internal/simd/*.go`, `Makefile`, `scripts/run_all_tests.sh`, `docs/dependencies.md`, `docs/performance.md`, `docs/testplan.md`, `docs/architecture.md`.
+- **Acceptance Criteria**: `go test -tags emlgo ./...` passes with parity tests green; an A/B benchmark table is published showing per-op and end-to-end tok/s for stdlib vs emlgo; a decision (adopt or reject) is recorded with data.
+
+---
+
+### Phase 4: Production Serving, WebUI & Parity Validation (target v1.0.0) — Priority: P1
 
 #### Part 4: Modern Embedded WebUI
 - **Objective**: Deliver a modern, dynamic web interface based on `docs/webui_plan.md`.

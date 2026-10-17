@@ -22,6 +22,7 @@ A high-performance, memory-efficient LLM inference engine written in Go with nat
 - **PromptCache (Radix-Tree Prefix Caching)** — Shared prompt prefix caching across requests for reduced TTFT. Populated after sequence completion in CPU, CUDA, and Metal engines.
 - **Speculative Decoding** — Multi-token draft forward pass with real logit output (not stubs). Acceptance ratio computed by SpeculativeManager.
 - **LoRA Adapter Loading** — CPU merge-on-load strategy fusing A×B×α/r delta weights into CPUWeights at load time. Supports .gguf sidecar format. Also supported on Metal and CUDA.
+- **Pluggable Math Backend** — All `math.*` calls route through `internal/mathx/`, switchable between stdlib `math` (default) and [`emlgo`](https://github.com/23skdu/emlgo) (SIMD batch) via `-tags emlgo`, with `pkg/fastmath` approximations behind `-tags emlfast`. Enables A/B performance testing from a single tree. See [nextsteps.md](nextsteps.md) Phase 3.
 
 ---
 

@@ -2,8 +2,9 @@ package engine
 
 import (
 	"fmt"
-	"math"
 	"strings"
+
+	"github.com/23skdu/longbow-quarrel/internal/mathx"
 
 	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
@@ -399,7 +400,7 @@ func (qe *QualityEvaluator) CalculatePerplexity(tokens []int) PerplexityResult {
 	}
 
 	avgLogProb := totalLogProb / float64(validTokens)
-	perplexity := math.Exp(-avgLogProb)
+	perplexity := mathx.Exp(-avgLogProb)
 
 	return PerplexityResult{
 		Perplexity:  perplexity,
@@ -453,14 +454,14 @@ func (qe *QualityEvaluator) CalculateBLEU(candidate, reference string) BLEUScore
 
 	// Calculate BLEU scores (simplified geometric mean)
 	bleu1 := precisions[0]
-	bleu2 := math.Sqrt(precisions[0] * precisions[1])
-	bleu3 := math.Pow(precisions[0]*precisions[1]*precisions[2], 1.0/3.0)
-	bleu4 := math.Pow(precisions[0]*precisions[1]*precisions[2]*precisions[3], 1.0/4.0)
+	bleu2 := mathx.Sqrt(precisions[0] * precisions[1])
+	bleu3 := mathx.Pow(precisions[0]*precisions[1]*precisions[2], 1.0/3.0)
+	bleu4 := mathx.Pow(precisions[0]*precisions[1]*precisions[2]*precisions[3], 1.0/4.0)
 
 	// Apply brevity penalty (simplified)
 	bp := 1.0
 	if len(candTokens) < len(refTokens) {
-		bp = math.Exp(1.0 - float64(len(refTokens))/float64(len(candTokens)))
+		bp = mathx.Exp(1.0 - float64(len(refTokens))/float64(len(candTokens)))
 	}
 
 	return BLEUScore{
@@ -514,7 +515,7 @@ func (qe *QualityEvaluator) CalculateROUGE(candidate, reference string) ROUGESco
 	recall := float64(unigramMatches) / float64(len(refTokens))
 	f1 := 2.0 * precision * recall / (precision + recall)
 
-	if math.IsNaN(f1) {
+	if mathx.IsNaN(f1) {
 		f1 = 0.0
 	}
 
@@ -568,14 +569,14 @@ func (qe *QualityEvaluator) calculateBLEUSimple(candidate, reference string) BLE
 
 	// Calculate BLEU scores
 	bleu1 := precisions[0]
-	bleu2 := math.Sqrt(precisions[0] * precisions[1])
-	bleu3 := math.Pow(precisions[0]*precisions[1]*precisions[2], 1.0/3.0)
-	bleu4 := math.Pow(precisions[0]*precisions[1]*precisions[2]*precisions[3], 1.0/4.0)
+	bleu2 := mathx.Sqrt(precisions[0] * precisions[1])
+	bleu3 := mathx.Pow(precisions[0]*precisions[1]*precisions[2], 1.0/3.0)
+	bleu4 := mathx.Pow(precisions[0]*precisions[1]*precisions[2]*precisions[3], 1.0/4.0)
 
 	// Brevity penalty
 	bp := 1.0
 	if len(candidate) < len(reference) {
-		bp = math.Exp(1.0 - float64(len(reference))/float64(len(candidate)))
+		bp = mathx.Exp(1.0 - float64(len(reference))/float64(len(candidate)))
 	}
 
 	return BLEUScore{
@@ -632,7 +633,7 @@ func (qe *QualityEvaluator) calculateROUGESimple(candidate, reference string) RO
 	recall := float64(unigramMatches) / float64(len(refChars))
 	f1 := 2.0 * precision * recall / (precision + recall)
 
-	if math.IsNaN(f1) {
+	if mathx.IsNaN(f1) {
 		f1 = 0.0
 	}
 

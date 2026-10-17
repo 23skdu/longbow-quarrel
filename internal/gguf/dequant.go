@@ -3,9 +3,10 @@ package gguf
 import (
 	"encoding/binary"
 	"fmt"
-	"math"
 	"runtime"
 	"sync"
+
+	"github.com/23skdu/longbow-quarrel/internal/mathx"
 )
 
 const (
@@ -444,25 +445,25 @@ func Float16ToFloat32(b uint16) float32 {
 	switch exp {
 	case 0:
 		if frac == 0 {
-			return math.Float32frombits(sign)
+			return mathx.Float32frombits(sign)
 		}
 		// subnormal: value = (-1)^sign * 2^(-14) * (frac/2^10)
-		f := float64(frac) * math.Pow(2, -23)
+		f := float64(frac) * mathx.Pow(2, -23)
 		if sign != 0 {
 			f = -f
 		}
-		return float32(f * math.Pow(2, -14))
+		return float32(f * mathx.Pow(2, -14))
 	case 0x1F:
 		if frac == 0 {
 			if sign != 0 {
-				return float32(math.Inf(-1))
+				return float32(mathx.Inf(-1))
 			}
-			return float32(math.Inf(1))
+			return float32(mathx.Inf(1))
 		}
-		return float32(math.NaN())
+		return float32(mathx.NaN())
 	default:
 		// Normal: rebase exponent from bias-15 to bias-127 → +112
-		return math.Float32frombits(sign | ((exp + 112) << 23) | frac)
+		return mathx.Float32frombits(sign | ((exp + 112) << 23) | frac)
 	}
 }
 
@@ -470,7 +471,7 @@ func Float16ToFloat32(b uint16) float32 {
 // BF16 is simply the top 16 bits of an IEEE 754 float32; restoring it
 // is a zero-cost bit-shift into the upper 16 bits of a uint32.
 func BF16ToFloat32(b uint16) float32 {
-	return math.Float32frombits(uint32(b) << 16)
+	return mathx.Float32frombits(uint32(b) << 16)
 }
 
 // DequantizeBF16 converts BFloat16 data to Float32.
@@ -704,7 +705,7 @@ func DequantizeBlock(data []byte, dst []float32, dataType GGMLType) {
 	case GGMLTypeF32:
 		for i := 0; i < len(dst); i++ {
 			if (i+1)*4 <= len(data) {
-				dst[i] = math.Float32frombits(binary.LittleEndian.Uint32(data[i*4 : (i+1)*4]))
+				dst[i] = mathx.Float32frombits(binary.LittleEndian.Uint32(data[i*4 : (i+1)*4]))
 			}
 		}
 	case GGMLTypeF16:

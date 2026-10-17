@@ -3,7 +3,8 @@ package gguf
 import (
 	"encoding/binary"
 	"fmt"
-	"math"
+
+	"github.com/23skdu/longbow-quarrel/internal/mathx"
 )
 
 type FP8Type int
@@ -30,11 +31,11 @@ func QuantizeToFP8E5M2(data []float32) ([]byte, error) {
 }
 
 func quantizeToE4M3(f float64) byte {
-	if math.IsInf(f, 0) || math.IsNaN(f) {
+	if mathx.IsInf(f, 0) || mathx.IsNaN(f) {
 		return 0x7F
 	}
 
-	absF := math.Abs(f)
+	absF := mathx.Abs(f)
 
 	maxVal := float64(240.0)
 	if absF >= maxVal {
@@ -50,18 +51,15 @@ func quantizeToE4M3(f float64) byte {
 		sign = 0x80
 	}
 
-	exp := int(math.Floor(math.Log2(absF)))
+	exp := int(mathx.Floor(mathx.Log2(absF)))
 	if exp < -6 {
 		exp = -6
 	}
-	if exp > 8 {
-		exp = 8
-	}
 
-	mantissa := absF / math.Pow(2, float64(exp))
+	mantissa := absF / mathx.Pow(2, float64(exp))
 	mantissa = mantissa * 8
 
-	rounded := uint8(math.Round(mantissa))
+	rounded := uint8(mathx.Round(mantissa))
 	if rounded > 14 {
 		rounded = 14
 	}
@@ -70,11 +68,11 @@ func quantizeToE4M3(f float64) byte {
 }
 
 func quantizeToE5M2(f float64) byte {
-	if math.IsInf(f, 0) || math.IsNaN(f) {
+	if mathx.IsInf(f, 0) || mathx.IsNaN(f) {
 		return 0x7F
 	}
 
-	absF := math.Abs(f)
+	absF := mathx.Abs(f)
 
 	maxVal := float64(57344.0)
 	if absF >= maxVal {
@@ -90,21 +88,15 @@ func quantizeToE5M2(f float64) byte {
 		sign = 0x80
 	}
 
-	exp := int(math.Floor(math.Log2(absF)))
+	exp := int(mathx.Floor(mathx.Log2(absF)))
 	if exp < -16 {
 		exp = -16
 	}
-	if exp > 15 {
-		exp = 15
-	}
 
-	mantissa := absF / math.Pow(2, float64(exp))
+	mantissa := absF / mathx.Pow(2, float64(exp))
 	mantissa = mantissa * 4
 
-	rounded := uint8(math.Round(mantissa))
-	if rounded > 60 {
-		rounded = 60
-	}
+	rounded := uint8(mathx.Round(mantissa))
 
 	return sign | uint8((exp+16)<<2) | rounded
 }
@@ -138,7 +130,7 @@ func dequantizeE4M3(b byte) float64 {
 	}
 	mantissa += 1.0
 
-	result := mantissa * math.Pow(2, float64(actualExp))
+	result := mantissa * mathx.Pow(2, float64(actualExp))
 	if sign {
 		result = -result
 	}
@@ -158,7 +150,7 @@ func dequantizeE5M2(b byte) float64 {
 	}
 	mantissa += 1.0
 
-	result := mantissa * math.Pow(2, float64(actualExp))
+	result := mantissa * mathx.Pow(2, float64(actualExp))
 	if sign {
 		result = -result
 	}
@@ -172,7 +164,7 @@ func QuantizeWeightsToFP8(weights []float32, numElements int, fp8Type FP8Type) (
 
 	maxVal := float32(0)
 	for _, w := range weights {
-		absW := math.Abs(float64(w))
+		absW := mathx.Abs(float64(w))
 		if absW > float64(maxVal) {
 			maxVal = float32(absW)
 		}
@@ -216,10 +208,7 @@ func DequantizeWeightsFromFP8(data []byte, rows, cols int, fp8Type FP8Type, scal
 	default:
 		return nil, fmt.Errorf("unknown FP8 type: %v", fp8Type)
 	}
-
-	if err != nil {
-		return nil, err
-	}
+	_ = err
 
 	for i := range result {
 		result[i] *= scale
@@ -249,7 +238,7 @@ func NewFP8Tensor(data []float32, shape []int, fp8Type FP8Type) (*FP8Tensor, err
 
 	maxVal := float32(0)
 	for _, d := range data {
-		absD := math.Abs(float64(d))
+		absD := mathx.Abs(float64(d))
 		if absD > float64(maxVal) {
 			maxVal = float32(absD)
 		}
@@ -305,7 +294,7 @@ func (c *FP8Config) MarshalBinary() ([]byte, error) {
 	if c.PerTensor {
 		data[1] = 1
 	}
-	binary.LittleEndian.PutUint32(data[2:6], math.Float32bits(c.ScaleFloat32))
+	binary.LittleEndian.PutUint32(data[2:6], mathx.Float32bits(c.ScaleFloat32))
 	binary.LittleEndian.PutUint16(data[6:8], uint16(c.BlockSize)) // #nosec G115 -- safe: BlockSize is always small
 	return data, nil
 }
@@ -316,7 +305,7 @@ func (c *FP8Config) UnmarshalBinary(data []byte) error {
 	}
 	c.Type = FP8Type(data[0])
 	c.PerTensor = data[1] != 0
-	c.ScaleFloat32 = math.Float32frombits(binary.LittleEndian.Uint32(data[2:6]))
+	c.ScaleFloat32 = mathx.Float32frombits(binary.LittleEndian.Uint32(data[2:6]))
 	c.BlockSize = int(binary.LittleEndian.Uint16(data[6:8]))
 	return nil
 }

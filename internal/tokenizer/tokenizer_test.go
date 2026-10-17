@@ -245,3 +245,99 @@ func TestTokenizer_DynamicEOS(t *testing.T) {
 		}
 	}
 }
+
+func TestTokenizer_BOS_ByteBPE_Decode(t *testing.T) {
+	// 1. Test numeric types for bos_token_id and add_bos_token
+	bosTypes := []interface{}{
+		uint32(1), int32(1), uint64(1), int64(1), int(1),
+	}
+	for _, bosVal := range bosTypes {
+		f := &gguf.GGUFFile{KV: map[string]interface{}{
+			"tokenizer.ggml.tokens":        []interface{}{"<unk>", "<s>", "hello"},
+			"tokenizer.ggml.bos_token_id":  bosVal,
+			"tokenizer.ggml.add_bos_token": true,
+		}}
+		tk, err := NewFromGGUF(f)
+		if err != nil {
+			t.Fatalf("NewFromGGUF failed: %v", err)
+		}
+		if tk.BOSTokenID != 1 || !tk.AddBOSToken {
+			t.Errorf("expected BOSTokenID=1, AddBOSToken=true for %T", bosVal)
+		}
+
+		// Test Encode with AddBOSToken
+		encoded := tk.Encode("hello")
+		if len(encoded) == 0 || encoded[0] != 1 {
+			t.Errorf("expected BOS token prepended, got %v", encoded)
+		}
+	}
+
+	// 2. Model type gemma4 / llama disables useByteBPE even if Ġ is present
+	fGemma := &gguf.GGUFFile{KV: map[string]interface{}{
+		"tokenizer.ggml.tokens": []interface{}{"<unk>", "Ġ", "hello"},
+		"tokenizer.ggml.model":  "gemma4",
+	}}
+	tkGemma, err := NewFromGGUF(fGemma)
+	if err != nil {
+		t.Fatalf("NewFromGGUF failed: %v", err)
+	}
+	if tkGemma.UseByteBPE {
+		t.Error("expected UseByteBPE false for gemma4")
+	}
+
+	fLlama := &gguf.GGUFFile{KV: map[string]interface{}{
+		"tokenizer.ggml.tokens": []interface{}{"<unk>", "Ġ", "hello"},
+		"tokenizer.ggml.model":  "llama",
+	}}
+	tkLlama, err := NewFromGGUF(fLlama)
+	if err != nil {
+		t.Fatalf("NewFromGGUF failed: %v", err)
+	}
+	if tkLlama.UseByteBPE {
+		t.Error("expected UseByteBPE false for llama")
+	}
+
+	// Test non-ByteBPE Decode with invalid IDs and special token (<|...|>)
+	fNonBPE := &gguf.GGUFFile{KV: map[string]interface{}{
+		"tokenizer.ggml.tokens": []interface{}{"<unk>", "<|im_start|>", "hello"},
+		"tokenizer.ggml.model":  "llama",
+	}}
+	tkNonBPE, err := NewFromGGUF(fNonBPE)
+	if err != nil {
+		t.Fatalf("NewFromGGUF failed: %v", err)
+	}
+	decodedNonBPE := tkNonBPE.Decode([]int{-1, 1, 2, 999})
+	if decodedNonBPE != "hello" {
+		t.Errorf("expected 'hello', got %q", decodedNonBPE)
+	}
+
+	// 3. Vocab with Ġ enables UseByteBPE
+	fGPT := &gguf.GGUFFile{KV: map[string]interface{}{
+		"tokenizer.ggml.tokens": []interface{}{"<unk>", "Ġ", "hello", "<|end|>", "€"},
+	}}
+	tkGPT, err := NewFromGGUF(fGPT)
+	if err != nil {
+		t.Fatalf("NewFromGGUF failed: %v", err)
+	}
+	if !tkGPT.UseByteBPE {
+		t.Error("expected UseByteBPE true when Ġ is in vocab")
+	}
+
+	// Test ByteBPE Encode
+	encodedGPT := tkGPT.Encode("hello")
+	if len(encodedGPT) == 0 {
+		t.Error("expected non-empty encoding with ByteBPE")
+	}
+
+	// Test ByteBPE Decode with:
+	// - out-of-bounds IDs (< 0 and >= len)
+	// - special token (<|...|>)
+	// - standard unicodeToByteMap rune
+	// - \u2581 rune
+	// - unmapped unicode rune (e.g. €)
+	decoded := tkGPT.Decode([]int{-1, 3, 2, 4, 999})
+	if decoded == "" {
+		t.Error("expected non-empty decoded string")
+	}
+}
+

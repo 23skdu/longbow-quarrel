@@ -80,7 +80,6 @@ import "C"
 import (
 	"encoding/binary"
 	"fmt"
-	"math"
 	"os"
 	"runtime"
 	"runtime/debug"
@@ -89,6 +88,8 @@ import (
 	"sync"
 	"time"
 	"unsafe"
+
+	"github.com/23skdu/longbow-quarrel/internal/mathx"
 
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
 	"github.com/23skdu/longbow-quarrel/internal/metrics"
@@ -1103,7 +1104,7 @@ func (ctx *Context) NewCUDAModel(f *gguf.GGUFFile, preDequantize bool, kvCacheSi
 			switch tensor.Type {
 			case gguf.GGMLTypeF32:
 				for i := 0; i < numElements; i++ {
-					f32Scratch[i] = math.Float32frombits(binary.LittleEndian.Uint32(tensor.Data[i*4:]))
+					f32Scratch[i] = mathx.Float32frombits(binary.LittleEndian.Uint32(tensor.Data[i*4:]))
 				}
 			default:
 				gguf.DequantizeBlock(tensor.Data, f32Scratch, tensor.Type)
@@ -1167,7 +1168,7 @@ func (ctx *Context) NewCUDAModel(f *gguf.GGUFFile, preDequantize bool, kvCacheSi
 		switch tensor.Type {
 		case gguf.GGMLTypeF32:
 			for i := 0; i < numElements; i++ {
-				f32Scratch[i] = math.Float32frombits(binary.LittleEndian.Uint32(tensor.Data[i*4:]))
+				f32Scratch[i] = mathx.Float32frombits(binary.LittleEndian.Uint32(tensor.Data[i*4:]))
 			}
 		case gguf.GGMLTypeF16:
 			f32Scratch = gguf.DequantizeF16(tensor.Data, numElements)
@@ -1439,7 +1440,7 @@ func (c *Context) Slice(src *Tensor, dst *Tensor, rowIdx, vocabSize int) {
 
 // AttentionPagedBatch performs paged attention across a batch of sequences on the GPU.
 func (c *Context) AttentionPagedBatch(q, kCache, vCache, output, tokenPositions, blockTables *Tensor, maxBlocksPerSeq, heads, kvHeads, headDim, blockSize int, tokenToSeq *Tensor, batchSize int) {
-	C.cudaPagedAttentionBatch(c.Ctx, (*C.float)(q.devPtr), kCache.devPtr, vCache.devPtr, (*C.float)(output.devPtr), (*C.int)(tokenPositions.devPtr), (*C.int)(blockTables.devPtr), (*C.int)(tokenToSeq.devPtr), C.int(maxBlocksPerSeq), C.int(heads), C.int(kvHeads), C.int(headDim), C.int(blockSize), C.int(q.rows), C.float(1.0/math.Sqrt(float64(headDim))))
+	C.cudaPagedAttentionBatch(c.Ctx, (*C.float)(q.devPtr), kCache.devPtr, vCache.devPtr, (*C.float)(output.devPtr), (*C.int)(tokenPositions.devPtr), (*C.int)(blockTables.devPtr), (*C.int)(tokenToSeq.devPtr), C.int(maxBlocksPerSeq), C.int(heads), C.int(kvHeads), C.int(headDim), C.int(blockSize), C.int(q.rows), C.float(1.0/mathx.Sqrt(float64(headDim))))
 }
 
 // StoreKVPagedBatch stores K and V projections into their respective physical blocks in the GPU cache pool.

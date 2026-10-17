@@ -3,9 +3,10 @@ package vector
 import (
 	"container/heap"
 	"fmt"
-	"math"
 	"math/rand"
 	"sync"
+
+	"github.com/23skdu/longbow-quarrel/internal/mathx"
 )
 
 // IVFIndex implements Inverted File indexing with multi-probe search.
@@ -84,7 +85,7 @@ func (idx *IVFIndex) Build(floatVectors [][]float32) error {
 			vIdx := (s * 31) % n
 			v := floatVectors[vIdx]
 			bestC := 0
-			bestDist := float32(math.MaxFloat32)
+			bestDist := float32(mathx.MaxFloat32)
 			for c := 0; c < numCentroids; c++ {
 				d := L2Float32(v, idx.Centroids[c])
 				if d < bestDist {
@@ -135,7 +136,7 @@ func (idx *IVFIndex) Build(floatVectors [][]float32) error {
 			for i := s; i < e; i++ {
 				v := floatVectors[i]
 				bestC := 0
-				bestDist := float32(math.MaxFloat32)
+				bestDist := float32(mathx.MaxFloat32)
 				for c := 0; c < numCentroids; c++ {
 					d := L2Float32(v, idx.Centroids[c])
 					if d < bestDist {

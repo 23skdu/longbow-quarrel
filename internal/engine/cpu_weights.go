@@ -3,9 +3,10 @@ package engine
 import (
 	"encoding/binary"
 	"fmt"
-	"math"
 	"strings"
 	"sync"
+
+	"github.com/23skdu/longbow-quarrel/internal/mathx"
 
 	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
@@ -372,7 +373,7 @@ func decodeTensorData(t *gguf.TensorInfo) ([]float32, error) {
 		for i := uint32(0); i < numElements; i++ {
 			offset := uint64(i) * 4
 			bits := uint32(t.Data[offset]) | uint32(t.Data[offset+1])<<8 | uint32(t.Data[offset+2])<<16 | uint32(t.Data[offset+3])<<24
-			data[i] = math.Float32frombits(bits)
+			data[i] = mathx.Float32frombits(bits)
 		}
 		return data, nil
 	case gguf.GGMLTypeF16:
@@ -739,7 +740,7 @@ func attentionCPUKV(q, k, v []float32, layerIdx, pos int, kv *CPUKVCache, numHea
 		return make([]float32, len(q))
 	}
 
-	scale := float32(1.0 / math.Sqrt(float64(headDim)))
+	scale := float32(1.0 / mathx.Sqrt(float64(headDim)))
 	result := make([]float32, numHeads*headDim)
 	scores := make([]float32, numCached)
 
@@ -755,7 +756,7 @@ func attentionCPUKV(q, k, v []float32, layerIdx, pos int, kv *CPUKVCache, numHea
 			kh = kvHeads - 1
 		}
 
-		var maxScore float32 = -math.MaxFloat32
+		var maxScore float32 = -mathx.MaxFloat32
 		for j := 0; j < numCached; j++ {
 			kOffset := j*kvDim + kh*headDim
 			kVec := cachedK[kOffset : kOffset+headDim]
@@ -768,7 +769,7 @@ func attentionCPUKV(q, k, v []float32, layerIdx, pos int, kv *CPUKVCache, numHea
 
 		var sumExp float32
 		for j := 0; j < numCached; j++ {
-			w := float32(math.Exp(float64(scores[j] - maxScore)))
+			w := float32(mathx.Exp(float64(scores[j] - maxScore)))
 			scores[j] = w
 			sumExp += w
 		}
@@ -802,7 +803,7 @@ func attentionCPU(q, k, v []float32, numHeads, kvHeads, headDim int) []float32 {
 		kvHeads = numHeads
 	}
 
-	scale := float32(1.0 / math.Sqrt(float64(headDim)))
+	scale := float32(1.0 / mathx.Sqrt(float64(headDim)))
 	result := make([]float32, len(q))
 	kvStride := headDim * seqLen
 	totalKHeads := len(k) / kvStride
@@ -835,7 +836,7 @@ func attentionCPU(q, k, v []float32, numHeads, kvHeads, headDim int) []float32 {
 		for i := 0; i < seqLen; i++ {
 			qVec := qHead[i*headDim : (i+1)*headDim]
 
-			var maxScore float32 = -math.MaxFloat32
+			var maxScore float32 = -mathx.MaxFloat32
 			for j := 0; j <= i; j++ {
 				kVec := kHead[j*headDim : (j+1)*headDim]
 				score := vecDot(qVec, kVec) * scale
@@ -847,7 +848,7 @@ func attentionCPU(q, k, v []float32, numHeads, kvHeads, headDim int) []float32 {
 
 			var sumExp float32
 			for j := 0; j <= i; j++ {
-				w := float32(math.Exp(float64(scores[j] - maxScore)))
+				w := float32(mathx.Exp(float64(scores[j] - maxScore)))
 				scores[j] = w
 				sumExp += w
 			}
@@ -1013,7 +1014,7 @@ func dequantizeRow(t *gguf.TensorInfo, rowIdx int, rowElements int) []float32 {
 		out := make([]float32, rowElements)
 		for i := 0; i < rowElements; i++ {
 			bits := binary.LittleEndian.Uint32(slice[i*4:])
-			out[i] = math.Float32frombits(bits)
+			out[i] = mathx.Float32frombits(bits)
 		}
 		return out
 	case gguf.GGMLTypeF16:
@@ -1228,7 +1229,7 @@ func (w *CPUWeights) mamba2Forward(qkv []float32, layerIdx int, kv *CPUKVCache, 
 			if i < len(A) {
 				aVal = A[i]
 			}
-			expADt := float32(math.Exp(float64(aVal * dt[i])))
+			expADt := float32(mathx.Exp(float64(aVal * dt[i])))
 			xDt := x[i] * dt[i]
 			for j := 0; j < dState; j++ {
 				idx := i*dState + j
@@ -1408,8 +1409,8 @@ func (w *CPUWeights) gatedDeltaNetForward(qkv []float32, normed []float32, layer
 		for d := 0; d < headKDim; d++ {
 			sumQ += qRaw[qOff+d] * qRaw[qOff+d]
 		}
-		normQ := float32(math.Sqrt(float64(sumQ)))
-		scaleQ := float32(1.0) / float32(math.Max(1e-6, float64(normQ)))
+		normQ := float32(mathx.Sqrt(float64(sumQ)))
+		scaleQ := float32(1.0) / float32(mathx.Max(1e-6, float64(normQ)))
 		for d := 0; d < headKDim; d++ {
 			qRaw[qOff+d] *= scaleQ
 		}
@@ -1419,8 +1420,8 @@ func (w *CPUWeights) gatedDeltaNetForward(qkv []float32, normed []float32, layer
 		for d := 0; d < headKDim; d++ {
 			sumK += kRaw[kOff+d] * kRaw[kOff+d]
 		}
-		normK := float32(math.Sqrt(float64(sumK)))
-		scaleK := float32(1.0) / float32(math.Max(1e-6, float64(normK)))
+		normK := float32(mathx.Sqrt(float64(sumK)))
+		scaleK := float32(1.0) / float32(mathx.Max(1e-6, float64(normK)))
 		for d := 0; d < headKDim; d++ {
 			kRaw[kOff+d] *= scaleK
 		}
@@ -1458,7 +1459,7 @@ func (w *CPUWeights) gatedDeltaNetForward(qkv []float32, normed []float32, layer
 			aLog = A[h]
 		}
 		decayGate := aLog * softplusCPU(alphaRaw[h]+dtBias[h])
-		gates[h] = float32(math.Exp(float64(decayGate)))
+		gates[h] = float32(mathx.Exp(float64(decayGate)))
 		betas[h] = sigmoidCPU(betaRaw[h])
 	}
 
@@ -1507,7 +1508,7 @@ func (w *CPUWeights) gatedDeltaNetForward(qkv []float32, normed []float32, layer
 	y := make([]float32, dInner)
 	if kv != nil {
 		ssmState := kv.SSMState[layerIdx]
-		scale := float32(1.0 / math.Sqrt(float64(headKDim)))
+		scale := float32(1.0 / mathx.Sqrt(float64(headKDim)))
 		for h := 0; h < numVHeads; h++ {
 			g := gates[h]
 			beta := betas[h]
@@ -1609,7 +1610,7 @@ func (w *CPUWeights) gatedDeltaNetForward(qkv []float32, normed []float32, layer
 		for d := 0; d < normSize; d++ {
 			rms += y[off+d] * y[off+d]
 		}
-		rms = float32(math.Sqrt(float64(rms)/float64(normSize) + 1e-6))
+		rms = float32(mathx.Sqrt(float64(rms)/float64(normSize) + 1e-6))
 		for d := 0; d < normSize; d++ {
 			wVal := float32(1)
 			if d < len(ssmNormWeight) {
@@ -1646,7 +1647,7 @@ func siluCPU(x float32) float32 {
 	if x > 20 {
 		return x
 	}
-	return x / (1.0 + float32(math.Exp(-float64(x))))
+	return x / (1.0 + float32(mathx.Exp(-float64(x))))
 }
 
 func softplusCPU(x float32) float32 {
@@ -1656,7 +1657,7 @@ func softplusCPU(x float32) float32 {
 	if x < -20 {
 		return 0
 	}
-	return float32(math.Log(float64(1.0 + float32(math.Exp(float64(x))))))
+	return float32(mathx.Log(float64(1.0 + float32(mathx.Exp(float64(x))))))
 }
 
 func sigmoidCPU(x float32) float32 {
@@ -1666,7 +1667,7 @@ func sigmoidCPU(x float32) float32 {
 	if x < -20 {
 		return 0.0
 	}
-	return 1.0 / (1.0 + float32(math.Exp(float64(-x))))
+	return 1.0 / (1.0 + float32(mathx.Exp(float64(-x))))
 }
 
 func partialRoPECPU(tensor []float32, positions []int, heads, headDim, rotaryDim int, theta float32) {
@@ -1681,9 +1682,9 @@ func partialRoPECPU(tensor []float32, positions []int, heads, headDim, rotaryDim
 		}
 		for d := 0; d < half; d++ {
 			offset := h*headDim + d
-			freq := float32(pos) / float32(math.Pow(float64(theta), float64(2*d)/float64(rotaryDim)))
-			cos := float32(math.Cos(float64(freq)))
-			sin := float32(math.Sin(float64(freq)))
+			freq := float32(pos) / float32(mathx.Pow(float64(theta), float64(2*d)/float64(rotaryDim)))
+			cos := float32(mathx.Cos(float64(freq)))
+			sin := float32(mathx.Sin(float64(freq)))
 			ei := offset
 			oi := offset + half
 			ev := tensor[ei]
@@ -1697,7 +1698,7 @@ func partialRoPECPU(tensor []float32, positions []int, heads, headDim, rotaryDim
 func geluCPU(x float32) float32 {
 	const sqrt2OverPi = float32(0.7978845608)
 	const coeff = float32(0.044715)
-	return 0.5 * x * (1.0 + float32(math.Tanh(float64(sqrt2OverPi*(x+coeff*x*x*x)))))
+	return 0.5 * x * (1.0 + float32(mathx.Tanh(float64(sqrt2OverPi*(x+coeff*x*x*x)))))
 }
 
 // ComputeGemma4PLE computes the per-layer embedding slices for each layer of Gemma 4.
@@ -1732,13 +1733,13 @@ func (w *CPUWeights) ComputeGemma4PLE(tok int, hidden []float32, numLayers int) 
 	if len(projPLE) < totalPLEElements {
 		projPLE = make([]float32, totalPLEElements)
 	}
-	scaleProj := float32(1.0 / math.Sqrt(float64(len(hidden))))
+	scaleProj := float32(1.0 / mathx.Sqrt(float64(len(hidden))))
 	for j := range projPLE {
 		projPLE[j] *= scaleProj
 	}
 
 	// 3. For each layer i: combine normalized projSlice and tokenSlice, then scale by 1/sqrt(2)
-	invSqrt2 := float32(1.0 / math.Sqrt(2.0))
+	invSqrt2 := float32(1.0 / mathx.Sqrt(2.0))
 	for i := 0; i < numLayers; i++ {
 		sliceStart := i * pleDim
 		sliceEnd := sliceStart + pleDim
@@ -1949,7 +1950,7 @@ func ApplyGemma4LayerCPU(
 			for d := 0; d < headDim; d++ {
 				sumSq += v[off+d] * v[off+d]
 			}
-			rms := float32(math.Sqrt(float64(sumSq/float32(headDim) + eps)))
+			rms := float32(mathx.Sqrt(float64(sumSq/float32(headDim) + eps)))
 			for d := 0; d < headDim; d++ {
 				vNormed[off+d] = v[off+d] / rms
 			}
@@ -2075,7 +2076,7 @@ func ApplyGemma4LayerCPU(
 					kh = kvHeads - 1
 				}
 
-				var maxScore float32 = -math.MaxFloat32
+				var maxScore float32 = -mathx.MaxFloat32
 				for p := 0; p < attendLen; p++ {
 					cachePos := windowStart + p
 					kOffset := cachePos*kvDim + kh*headDim
@@ -2092,7 +2093,7 @@ func ApplyGemma4LayerCPU(
 
 				var sumExp float32
 				for p := 0; p < attendLen; p++ {
-					exp := float32(math.Exp(float64(scores[p] - maxScore)))
+					exp := float32(mathx.Exp(float64(scores[p] - maxScore)))
 					scores[p] = exp
 					sumExp += exp
 				}

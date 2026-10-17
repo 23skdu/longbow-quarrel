@@ -87,3 +87,61 @@ Tested on NVIDIA GeForce GPU (8 GB VRAM) with a 32-layer 7B model:
 1. **Memory Budgeting**: For models with $> 4\text{B}$ parameters on consumer hardware, prefer `Q8_0` or `Q4_K` formats to leverage zero-copy SIMD arithmetic.
 2. **GPU Layer Splitting**: Use `-ngl <N>` to allocate up to 80-90% of available GPU VRAM, allowing the CPU SIMD engine to process remaining layers seamlessly.
 3. **KV Cache Compression**: Enable TurboQuant (`KVCacheTQ1_0`) for long contexts ($> 8\text{k}$ tokens) to reduce KV memory by ~8x.
+
+---
+
+## 8. Math Backend A/B Evaluation (stdlib `math` vs `emlgo`)
+
+> **Status: planned, no results yet.** This section is the template the
+> `emlgo` swap is measured against. See [nextsteps.md](nextsteps.md) Phase 3
+> for the plan and [dependencies.md](dependencies.md) for the module-path
+> prerequisite. Do not fill in numbers here until the A/B harness in Step 7.6
+> has been run on the target hardware.
+
+The engine calls `math.*` ~700 times across ~100 files, concentrated in the
+sampler (softmax, entropy, repetition penalty), RoPE, RMSNorm / SwiGLU / GELU,
+dequantization, and vector distance. `emlgo` provides SIMD batch equivalents
+(AVX-512 / AVX2+FMA / NEON / SVE / WASM) that could vectorize these per-token
+scalar loops.
+
+### 8.1 Per-operation microbenchmark (to be measured)
+
+Run both backends and record `ns/op` and `allocs/op`:
+
+```bash
+go test -run '^$' -bench . -benchmem ./internal/mathx/ > stdlib.txt
+go test -tags emlgo -run '^$' -bench . -benchmem ./internal/mathx/ > emlgo.txt
+scripts/bench_gate.sh compare stdlib.txt emlgo.txt
+```
+
+| Operation | stdlib `math` ns/op | `emlgo` scalar ns/op | `emlgo` batch ns/op | Speedup | Allocs/op |
+|-----------|--------------------:|---------------------:|--------------------:|--------:|----------:|
+| `Exp` | — | — | — | — | — |
+| `Log` | — | — | — | — | — |
+| `Sqrt` | — | — | — | — | — |
+| `Pow` | — | — | — | — | — |
+| `Sin` / `Cos` | — | — | — | — | — |
+| `Tanh` | — | — | — | — | — |
+| Softmax (row) | — | — | — | — | — |
+
+### 8.2 End-to-end inference A/B (to be measured)
+
+Build `quarrel` with and without `-tags emlgo` and run
+`scripts/benchmark_models.sh` / `profile_tokens.sh` on a fixed model
+(Qwen3.5-4B-Q8_0):
+
+| Backend | TTFT (ms) | tok/s | P95 (ms) | P99 (ms) | Peak RSS (MB) |
+|---------|----------:|------:|---------:|---------:|--------------:|
+| stdlib `math` (`!emlgo`) | — | — | — | — | — |
+| `emlgo` scalar (`emlgo`) | — | — | — | — | — |
+| `emlgo` fast (`emlgo,emlfast`) | — | — | — | — | — |
+
+### 8.3 Decision gate
+
+Adopt `emlgo` only if **all** hold:
+
+1. Parity tests pass (`mathx.X(x) == math.X(x)`, or `≤ 1 ULP` for `emlfast`).
+2. No regression in the existing `bench_gate.sh` 1.5× regression gate.
+3. A measurable win on the target hardware.
+
+Otherwise keep stdlib `math` and record the negative result here.

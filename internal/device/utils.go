@@ -5,8 +5,9 @@ package device
 // build tags, CGO references, or dependencies on Metal/CUDA-specific headers.
 
 import (
-	"math"
 	"unsafe"
+
+	"github.com/23skdu/longbow-quarrel/internal/mathx"
 )
 
 type DataType int
@@ -39,7 +40,7 @@ const (
 
 // Fast approximation for prototype
 func Float32ToFloat16(f float32) uint16 {
-	bits := math.Float32bits(f)
+	bits := mathx.Float32bits(f)
 	sign := (bits >> 31) & 0x1
 	exp := (bits >> 23) & 0xff
 	mant := bits & 0x7fffff
@@ -69,7 +70,7 @@ func Float16ToFloat32(f uint16) float32 {
 	switch exp {
 	case 0:
 		if mant == 0 {
-			return math.Float32frombits(sign << 31)
+			return mathx.Float32frombits(sign << 31)
 		}
 		// Subnormal: value = (-1)^sign * 2^-14 * (mant / 1024)
 		// In FP32: need to normalize it
@@ -83,16 +84,16 @@ func Float16ToFloat32(f uint16) float32 {
 		// Now temp has implicit 1 in bit 10
 		mant = (temp & 0x3ff) << 13 // Keep only fractional part, shift to FP32 position
 		exp = 127 - 14 - shift      // FP32 bias - FP16 subnormal exp - normalization shift
-		return math.Float32frombits((sign << 31) | (exp << 23) | mant)
+		return mathx.Float32frombits((sign << 31) | (exp << 23) | mant)
 	case 31:
 		if mant == 0 {
-			return math.Float32frombits((sign << 31) | 0x7f800000)
+			return mathx.Float32frombits((sign << 31) | 0x7f800000)
 		}
-		return math.Float32frombits((sign << 31) | 0x7f800000 | (mant << 13))
+		return mathx.Float32frombits((sign << 31) | 0x7f800000 | (mant << 13))
 	}
 
 	newExp := exp - 15 + 127
-	return math.Float32frombits((sign << 31) | (newExp << 23) | (mant << 13))
+	return mathx.Float32frombits((sign << 31) | (newExp << 23) | (mant << 13))
 }
 
 func Float32SliceToBytes(s []float32) []byte {
@@ -104,7 +105,7 @@ func Float32SliceToBytes(s []float32) []byte {
 
 // Float32ToFP8E4M3 converts a float32 into an 8-bit float (1 sign, 4 exponent, 3 mantissa).
 func Float32ToFP8E4M3(f float32) uint8 {
-	bits := math.Float32bits(f)
+	bits := mathx.Float32bits(f)
 	sign := uint8((bits >> 31) & 0x1)
 	exp := int((bits>>23)&0xff) - 127 + 7 // bias 7
 	mant := (bits >> 20) & 0x7            // 3 mantissa bits
@@ -127,22 +128,22 @@ func FP8E4M3ToFloat32(b uint8) float32 {
 
 	if exp == 0 {
 		if mant == 0 {
-			return math.Float32frombits(sign << 31)
+			return mathx.Float32frombits(sign << 31)
 		}
 		// Subnormal
-		return math.Float32frombits((sign << 31) | ((127 - 7) << 23) | (mant << 20))
+		return mathx.Float32frombits((sign << 31) | ((127 - 7) << 23) | (mant << 20))
 	}
 	if exp == 15 && mant == 0x7 {
-		return math.Float32frombits((sign << 31) | 0x7fc00000) // NaN
+		return mathx.Float32frombits((sign << 31) | 0x7fc00000) // NaN
 	}
 
 	newExp := exp - 7 + 127
-	return math.Float32frombits((sign << 31) | (newExp << 23) | (mant << 20))
+	return mathx.Float32frombits((sign << 31) | (newExp << 23) | (mant << 20))
 }
 
 // Float32ToFP8E5M2 converts a float32 into an 8-bit float (1 sign, 5 exponent, 2 mantissa).
 func Float32ToFP8E5M2(f float32) uint8 {
-	bits := math.Float32bits(f)
+	bits := mathx.Float32bits(f)
 	sign := uint8((bits >> 31) & 0x1)
 	exp := int((bits>>23)&0xff) - 127 + 15 // bias 15
 	mant := (bits >> 21) & 0x3             // 2 mantissa bits
@@ -164,17 +165,17 @@ func FP8E5M2ToFloat32(b uint8) float32 {
 
 	if exp == 0 {
 		if mant == 0 {
-			return math.Float32frombits(sign << 31)
+			return mathx.Float32frombits(sign << 31)
 		}
 		// Subnormal
-		return math.Float32frombits((sign << 31) | ((127 - 15) << 23) | (mant << 21))
+		return mathx.Float32frombits((sign << 31) | ((127 - 15) << 23) | (mant << 21))
 	}
 	if exp == 31 {
-		return math.Float32frombits((sign << 31) | 0x7f800000 | (mant << 21))
+		return mathx.Float32frombits((sign << 31) | 0x7f800000 | (mant << 21))
 	}
 
 	newExp := exp - 15 + 127
-	return math.Float32frombits((sign << 31) | (newExp << 23) | (mant << 21))
+	return mathx.Float32frombits((sign << 31) | (newExp << 23) | (mant << 21))
 }
 
 // QuantizeBlockQ8_0 quantizes a slice of float32 into signed 8-bit integers with scale.
@@ -184,7 +185,7 @@ func QuantizeBlockQ8_0(src []float32, dst []int8) float32 {
 	}
 	var amax float32
 	for _, v := range src {
-		abs := float32(math.Abs(float64(v)))
+		abs := float32(mathx.Abs(float64(v)))
 		if abs > amax {
 			amax = abs
 		}
@@ -199,7 +200,7 @@ func QuantizeBlockQ8_0(src []float32, dst []int8) float32 {
 	scale := amax / 127.0
 	invScale := 127.0 / amax
 	for i, v := range src {
-		q := int(math.Round(float64(v * invScale)))
+		q := int(mathx.Round(float64(v * invScale)))
 		if q > 127 {
 			q = 127
 		} else if q < -127 {
@@ -223,11 +224,11 @@ func DequantizeBlockQ8_0(src []int8, scale float32, dst []float32) {
 
 func getFloat32(b []byte) float32 {
 	bits := uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16 | uint32(b[3])<<24
-	return math.Float32frombits(bits) // #nosec G115
+	return mathx.Float32frombits(bits) // #nosec G115
 }
 
 func setFloat32(b []byte, f float32) {
-	bits := math.Float32bits(f)
+	bits := mathx.Float32bits(f)
 	b[0] = byte(bits)       // #nosec G115 -- byte extraction from uint32
 	b[1] = byte(bits >> 8)  // #nosec G115 -- byte extraction from uint32
 	b[2] = byte(bits >> 16) // #nosec G115 -- byte extraction from uint32

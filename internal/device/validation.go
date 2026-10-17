@@ -7,7 +7,8 @@ package device
 import (
 	"errors"
 	"fmt"
-	"math"
+
+	"github.com/23skdu/longbow-quarrel/internal/mathx"
 )
 
 type ModelConfig struct {
@@ -102,10 +103,10 @@ func (n *NaNInfo) IsValid() bool {
 
 func CheckNumericalStability(data []float32, name string) (nanCount, infCount int) {
 	for _, v := range data {
-		if math.IsNaN(float64(v)) {
+		if mathx.IsNaN(float64(v)) {
 			nanCount++
 		}
-		if math.IsInf(float64(v), 0) {
+		if mathx.IsInf(float64(v), 0) {
 			infCount++
 		}
 	}
@@ -115,14 +116,14 @@ func CheckNumericalStability(data []float32, name string) (nanCount, infCount in
 func DetectNaN(data []float32, maxPositions int) *NaNInfo {
 	info := &NaNInfo{}
 	for i, v := range data {
-		if math.IsNaN(float64(v)) {
+		if mathx.IsNaN(float64(v)) {
 			info.Count++
 			if len(info.Positions) < maxPositions {
 				info.Positions = append(info.Positions, i)
 				info.Values = append(info.Values, v)
 			}
 		}
-		if math.IsInf(float64(v), 0) {
+		if mathx.IsInf(float64(v), 0) {
 			info.HasInf = true
 			info.InfCount++
 		}
@@ -132,7 +133,7 @@ func DetectNaN(data []float32, maxPositions int) *NaNInfo {
 
 func HasAnyNaN(data []float32) bool {
 	for _, v := range data {
-		if math.IsNaN(float64(v)) {
+		if mathx.IsNaN(float64(v)) {
 			return true
 		}
 	}
@@ -141,7 +142,7 @@ func HasAnyNaN(data []float32) bool {
 
 func HasAnyInf(data []float32) bool {
 	for _, v := range data {
-		if math.IsInf(float64(v), 0) {
+		if mathx.IsInf(float64(v), 0) {
 			return true
 		}
 	}

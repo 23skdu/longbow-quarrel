@@ -5,17 +5,22 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"math"
 	"os"
 	"path/filepath"
 	"sort"
 	"syscall"
 	"unsafe"
 
+	"github.com/23skdu/longbow-quarrel/internal/mathx"
+
 	"github.com/23skdu/longbow-quarrel/internal/logger"
 )
 
 // LoadFile maps a GGUF file into memory and parses headers/metadata.
+var fStatHook = func(f *os.File) (os.FileInfo, error) {
+	return f.Stat()
+}
+
 func LoadFile(path string) (*GGUFFile, error) {
 	// Secure path handling to prevent G304 path traversal
 	cleanPath := filepath.Clean(path)
@@ -27,7 +32,7 @@ func LoadFile(path string) (*GGUFFile, error) {
 		_ = f.Close() // Ignore close error in reader function
 	}()
 
-	info, err := f.Stat()
+	info, err := fStatHook(f)
 	if err != nil {
 		return nil, err
 	}
@@ -67,12 +72,11 @@ func LoadFile(path string) (*GGUFFile, error) {
 
 	file.Header.TensorCount = binary.LittleEndian.Uint64(data[offset:])
 	offset += 8
-	fmt.Fprintf(os.Stderr, "HEADERS %d %d\n", file.Header.TensorCount, file.Header.KVCount)
-	if file.Header.KVCount > 1000000 {
-		panic("invalid KVCount")
-	}
 	file.Header.KVCount = binary.LittleEndian.Uint64(data[offset:])
 	offset += 8
+	if file.Header.KVCount > 1000000 {
+		return nil, fmt.Errorf("invalid KVCount: %d", file.Header.KVCount)
+	}
 
 	fmt.Fprintf(os.Stderr, "GGUF: Version=%d, Tensors=%d, KV=%d (checking path)\n", file.Header.Version, file.Header.TensorCount, file.Header.KVCount)
 
@@ -95,7 +99,7 @@ func LoadFile(path string) (*GGUFFile, error) {
 				// Keys are prefixed with length (uint64)
 				keyStart := uint64(0)
 				for i := int(pos - 8); i >= 0 && i > int(pos-200); i-- {
-					if data[i] == 0 && i+8 < len(data) {
+					if i+8 <= len(data) {
 						// Check if this could be a string length prefix
 						strLen := binary.LittleEndian.Uint64(data[i:])
 						if strLen > 0 && strLen < 100 && i+8+int(strLen) < int(pos) { // #nosec G115
@@ -111,16 +115,11 @@ func LoadFile(path string) (*GGUFFile, error) {
 
 				// Read the key
 				keyLen := binary.LittleEndian.Uint64(data[keyStart-8:])
-				if keyStart+keyLen >= pos {
-					break
-				}
-
 				key := string(data[keyStart : keyStart+keyLen])
-				keyOff := keyStart - 8
 
 				// Read value type
-				valType := GGUFMetadataValueType(binary.LittleEndian.Uint32(data[keyOff+keyLen:]))
-				valOff := keyOff + keyLen + 4
+				valType := GGUFMetadataValueType(binary.LittleEndian.Uint32(data[keyStart+keyLen:]))
+				valOff := keyStart + keyLen + 4
 
 				// Read value
 				val, _, err := readValue(data, valOff, valType)
@@ -132,7 +131,7 @@ func LoadFile(path string) (*GGUFFile, error) {
 				logger.Log.Debug("loaded KV", "key", key)
 
 				// Move back to find more keys
-				pos = keyOff - 8
+				pos = keyStart - 8
 
 				// Stop if we've gone too far back
 				if pos < 100 {
@@ -302,7 +301,7 @@ func readValue(data []byte, offset uint64, typ GGUFMetadataValueType) (interface
 	case GGUFMetadataValueTypeInt64:
 		return int64(binary.LittleEndian.Uint64(data[offset:])), 8, nil // #nosec G115
 	case GGUFMetadataValueTypeFloat64:
-		return math.Float64frombits(binary.LittleEndian.Uint64(data[offset:])), 8, nil
+		return mathx.Float64frombits(binary.LittleEndian.Uint64(data[offset:])), 8, nil
 	default:
 		return nil, 0, fmt.Errorf("unsupported metadata type: %d", typ)
 	}

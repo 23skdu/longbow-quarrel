@@ -193,3 +193,16 @@ All implementations for the roadmap blockers must adhere to:
 2. **Coverage Gate**: Statement coverage on `internal/vector` must remain strictly $\ge 80\%$ (currently **91.1%**).
 3. **Leak Gate**: Zero memory leak threshold ($< 5.0$ MB delta after 100k+ vector iterations with OS memory release).
 4. **CUDA & CPU Parity**: Numerical parity between CPU and CUDA implementations within tolerance $\epsilon \le 10^{-4}$.
+
+---
+
+## 5. Cross-Cutting: Math Backend Evaluation
+
+The vector-engine blockers above are tracked separately from a cross-cutting
+infrastructure effort: evaluating [`emlgo`](https://github.com/23skdu/emlgo) as a
+replacement for the stdlib `math` package in inference hot paths, gated behind
+`-tags emlgo` for A/B performance testing. This is planned in
+[nextsteps.md](nextsteps.md) Phase 3 and is **not** a vector-engine P0 blocker;
+it is listed here so the roadmap remains a complete index of active engineering
+work. It requires a fork of emlgo (module-path correction) as a prerequisite —
+see [dependencies.md](dependencies.md).

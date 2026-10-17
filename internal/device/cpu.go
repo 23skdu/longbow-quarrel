@@ -5,10 +5,11 @@ package device
 import (
 	"errors"
 	"fmt"
-	"math"
 	"runtime"
 	"sync/atomic"
 	"unsafe"
+
+	"github.com/23skdu/longbow-quarrel/internal/mathx"
 
 	"github.com/23skdu/longbow-quarrel/internal/simd"
 )
@@ -186,7 +187,7 @@ func NewTensor(name string, data []float32) *Tensor {
 }
 
 func (t *Tensor) RawData() []byte {
-	if t.data != nil {
+	if len(t.data) > 0 {
 		return unsafe.Slice((*byte)(unsafe.Pointer(&t.data[0])), len(t.data)*4) // #nosec G103
 	}
 	return t.rawData
@@ -577,7 +578,7 @@ func (c *Context) TurboQuantDecode(input *Tensor, rotationMatrix *Tensor, qjlMat
 			// Random sign matrix reconstruction factor
 			// Residual ≈ (sj / sqrt(blockSize)) * (1/rows) * SignMatrix^T * qj
 			// But since sj was computed as RMS(Projected), it already has sqrt(blockSize) bias.
-			normFactor := sj / (float32(qjlRows) * float32(math.Sqrt(float64(blockSize))))
+			normFactor := sj / (float32(qjlRows) * float32(mathx.Sqrt(float64(blockSize))))
 			for i := 0; i < qjlRows; i++ {
 				scale_i := float32(int8(qj[i])) * normFactor
 				for j := 0; j < blockSize; j++ {
@@ -631,7 +632,7 @@ func (c *Context) AttentionPagedBatch(q, kCache, vCache, output, tokenPositions,
 	// This is a naive implementation for numerical verification.
 
 	// Assuming F32 for CPU reference
-	scale := float32(1.0 / math.Sqrt(float64(headDim)))
+	scale := float32(1.0 / mathx.Sqrt(float64(headDim)))
 
 	for b := 0; b < batchSize; b++ {
 		// Get current token position and block assignments
@@ -884,7 +885,7 @@ func (c *Context) MOETopKSelection(logits *Tensor, topK int) (*Tensor, *Tensor) 
 		var sumExp float32
 		expVals := make([]float32, topK)
 		for k := 0; k < topK; k++ {
-			expVals[k] = float32(math.Exp(float64(selectedLogits[k] - maxLogit)))
+			expVals[k] = float32(mathx.Exp(float64(selectedLogits[k] - maxLogit)))
 			sumExp += expVals[k]
 		}
 		invSum := float32(1.0 / (float64(sumExp) + 1e-9))
@@ -977,7 +978,7 @@ func (c *Context) MOEExpertGateUpSwiGLU(input, gateWeight, upWeight, expertIndic
 				} else if gClamped > 15.0 {
 					gClamped = 15.0
 				}
-				siluGate := gateDot / (1.0 + float32(math.Exp(float64(-gClamped))))
+				siluGate := gateDot / (1.0 + float32(mathx.Exp(float64(-gClamped))))
 				sumAct += w * (siluGate * upDot)
 			}
 			outData[b*hiddenDim+h] = sumAct
@@ -1065,9 +1066,9 @@ func (c *Context) MLAProjectQuerySplitRoPE(qAll, posIds *Tensor, numTokens, head
 
 			// Apply RoPE on rotary part
 			for i := 0; i < halfRope; i++ {
-				freq := float32(pos) * float32(math.Pow(float64(theta), float64(-2*i)/float64(qkRopeDim)))
-				cosVal := float32(math.Cos(float64(freq)))
-				sinVal := float32(math.Sin(float64(freq)))
+				freq := float32(pos) * float32(mathx.Pow(float64(theta), float64(-2*i)/float64(qkRopeDim)))
+				cosVal := float32(mathx.Cos(float64(freq)))
+				sinVal := float32(mathx.Sin(float64(freq)))
 
 				x0 := qAllData[baseIn+qkNopeDim+i]
 				x1 := qAllData[baseIn+qkNopeDim+i+halfRope]
@@ -1155,7 +1156,7 @@ func (c *Context) MLAAbsorbedDecodeAttention(qAbsorbed, qRope, kCache, kRopeCach
 
 			var sumExp float32
 			for s := 0; s < seqLen; s++ {
-				expVal := float32(math.Exp(float64(scores[s] - maxScore)))
+				expVal := float32(mathx.Exp(float64(scores[s] - maxScore)))
 				scores[s] = expVal
 				sumExp += expVal
 			}

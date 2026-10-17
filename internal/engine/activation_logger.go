@@ -3,8 +3,9 @@ package engine
 import (
 	"encoding/json"
 	"fmt"
-	"math"
 	"os"
+
+	"github.com/23skdu/longbow-quarrel/internal/mathx"
 )
 
 // NewActivationLogger creates a new activation logger
@@ -125,9 +126,9 @@ func (al *ActivationLogger) SaveToFile(filename string) error {
 // countNaNInf counts NaN and Inf values in a float32 slice
 func countNaNInf(data []float32) (nanCount, infCount int) {
 	for _, v := range data {
-		if math.IsNaN(float64(v)) {
+		if mathx.IsNaN(float64(v)) {
 			nanCount++
-		} else if math.IsInf(float64(v), 0) {
+		} else if mathx.IsInf(float64(v), 0) {
 			infCount++
 		}
 	}

@@ -3,8 +3,9 @@ package vector
 import (
 	"container/heap"
 	"fmt"
-	"math"
 	"math/rand"
+
+	"github.com/23skdu/longbow-quarrel/internal/mathx"
 )
 
 // HNSWNode represents a node in the HNSW graph.
@@ -47,7 +48,7 @@ func NewHNSWIndex(dim, m, efSearch int, dtype DataType) *HNSWIndex {
 		M0:        2 * m,
 		EfSearch:  efSearch,
 		EfConst:   40,
-		Ml:        1.0 / math.Log(float64(m)),
+		Ml:        1.0 / mathx.Log(float64(m)),
 		MaxLayer:  -1,
 		EnterNode: -1,
 		DataType:  dtype,
@@ -100,7 +101,7 @@ func (h *HNSWIndex) Build(vectors [][]float32) error {
 		layer := 0
 		r := rng.Float64()
 		if r > 0 {
-			layer = int(-math.Log(r) * h.Ml)
+			layer = int(-mathx.Log(r) * h.Ml)
 		}
 		if layer > 16 {
 			layer = 16
@@ -143,7 +144,7 @@ func (h *HNSWIndex) Build(vectors [][]float32) error {
 		}
 
 		// 2. Connect in layers up to insertion layer
-		for l := int(math.Min(float64(layer), float64(topL))); l >= 0; l-- {
+		for l := int(mathx.Min(float64(layer), float64(topL))); l >= 0; l-- {
 			maxConn := h.M
 			if l == 0 {
 				maxConn = h.M0

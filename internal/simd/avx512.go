@@ -52,9 +52,10 @@ void dot_q4_k_vnni(const uint8_t* data, const float* vector, int n, float* resul
 */
 import "C"
 import (
-	"math"
 	"runtime"
 	"unsafe"
+
+	"github.com/23skdu/longbow-quarrel/internal/mathx"
 )
 
 var (
@@ -472,7 +473,7 @@ func rmsnormScalar(input, weight, output []float32, rows, cols int, eps float32)
 			v := input[offset+c]
 			sum += v * v
 		}
-		sum = float32(1.0 / math.Sqrt(float64(sum)/float64(cols)+float64(eps)))
+		sum = float32(1.0 / mathx.Sqrt(float64(sum)/float64(cols)+float64(eps)))
 
 		// Normalize and scale
 		for c := 0; c < cols; c++ {
@@ -504,8 +505,8 @@ func ropeScalar(tensor []float32, positions []int, batch, heads, seqLen, headDim
 				for d := 0; d < headDim/2; d++ {
 					offset := b*heads*seqLen*headDim + h*seqLen*headDim + s*headDim
 					freq := float32(pos) / fastPow(theta, float32(2*d)/float32(headDim))
-					cos := float32(math.Cos(float64(freq)))
-					sin := float32(math.Sin(float64(freq)))
+					cos := float32(mathx.Cos(float64(freq)))
+					sin := float32(mathx.Sin(float64(freq)))
 
 					evenIdx := offset + d
 					oddIdx := offset + d + headDim/2
@@ -594,11 +595,11 @@ func fusedMLPScalar(_, gateW, upW, downW, output []float32, batch, dim, hiddenDi
 
 // Helper functions
 func fastExp(x float32) float32 {
-	return float32(math.Exp(float64(x)))
+	return float32(mathx.Exp(float64(x)))
 }
 
 func fastPow(x, y float32) float32 {
-	return float32(math.Pow(float64(x), float64(y)))
+	return float32(mathx.Pow(float64(x), float64(y)))
 }
 
 func fp16ToFp32(h uint16) float32 {

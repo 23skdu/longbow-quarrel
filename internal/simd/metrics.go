@@ -3,8 +3,9 @@
 package simd
 
 import (
-	"math"
 	"time"
+
+	"github.com/23skdu/longbow-quarrel/internal/mathx"
 
 	"github.com/23skdu/longbow-quarrel/internal/metrics"
 )
@@ -75,10 +76,10 @@ func checkOutputNaNInf(data []float32, kernel string) {
 	infCount := 0
 
 	for _, v := range data {
-		if math.IsNaN(float64(v)) {
+		if mathx.IsNaN(float64(v)) {
 			nanCount++
 		}
-		if math.IsInf(float64(v), 0) {
+		if mathx.IsInf(float64(v), 0) {
 			infCount++
 		}
 	}

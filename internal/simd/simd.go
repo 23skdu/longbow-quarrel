@@ -2,10 +2,11 @@ package simd
 
 import (
 	"encoding/binary"
-	"math"
 	"runtime"
 	"sync"
 	"time"
+
+	"github.com/23skdu/longbow-quarrel/internal/mathx"
 
 	"github.com/23skdu/longbow-quarrel/internal/metrics"
 )
@@ -30,7 +31,7 @@ func SoftmaxF32(x []float32) {
 
 	sum := float32(0.0)
 	for i := range x {
-		x[i] = float32(math.Exp(float64(x[i] - max)))
+		x[i] = float32(mathx.Exp(float64(x[i] - max)))
 		sum += x[i]
 	}
 
@@ -143,7 +144,7 @@ func MatVecMul(matrix []float32, vector []float32, rows, cols int) []float32 {
 }
 
 func AttentionF32(q, k, v []float32, seqLen, numHeads, headDim int) []float32 {
-	scale := 1.0 / math.Sqrt(float64(headDim))
+	scale := 1.0 / mathx.Sqrt(float64(headDim))
 	result := make([]float32, seqLen*headDim)
 
 	if seqLen <= 1 || headDim <= 0 {
@@ -160,7 +161,7 @@ func AttentionF32(q, k, v []float32, seqLen, numHeads, headDim int) []float32 {
 		for i := 0; i < seqLen; i++ {
 			for j := 0; j < seqLen; j++ {
 				if j > i {
-					attnScores[i*seqLen+j] = float32(-math.Inf(1))
+					attnScores[i*seqLen+j] = float32(-mathx.Inf(1))
 					continue
 				}
 				var dot float64
@@ -186,19 +187,16 @@ func AttentionF32(q, k, v []float32, seqLen, numHeads, headDim int) []float32 {
 		for i := 0; i < seqLen; i++ {
 			var expSum float64
 			for j := 0; j <= i; j++ {
-				expSum += math.Exp(float64(attnScores[i*seqLen+j]) - float64(maxScores[i]))
+				expSum += mathx.Exp(float64(attnScores[i*seqLen+j]) - float64(maxScores[i]))
 			}
 			expSums[i] = float32(expSum)
 		}
 
 		for i := 0; i < seqLen; i++ {
-			if expSums[i] == 0 {
-				continue
-			}
 			for d := 0; d < headDim; d++ {
 				var attnSum float64
 				for j := 0; j <= i; j++ {
-					weight := math.Exp(float64(attnScores[i*seqLen+j]) - float64(maxScores[i]))
+					weight := mathx.Exp(float64(attnScores[i*seqLen+j]) - float64(maxScores[i]))
 					attnSum += weight * float64(vHead[j*headDim+d])
 				}
 				outHead[i*headDim+d] = float32(attnSum / float64(expSums[i]))
@@ -265,23 +263,23 @@ func Float16ToFloat32(b uint16) float32 {
 	switch exp {
 	case 0:
 		if frac == 0 {
-			return math.Float32frombits(sign)
+			return mathx.Float32frombits(sign)
 		}
-		f := float64(frac) * math.Pow(2, -23)
+		f := float64(frac) * mathx.Pow(2, -23)
 		if sign != 0 {
 			f = -f
 		}
-		return float32(f * math.Pow(2, -14))
+		return float32(f * mathx.Pow(2, -14))
 	case 0x1F:
 		if frac == 0 {
 			if sign != 0 {
-				return float32(math.Inf(-1))
+				return float32(mathx.Inf(-1))
 			}
-			return float32(math.Inf(1))
+			return float32(mathx.Inf(1))
 		}
-		return float32(math.NaN())
+		return float32(mathx.NaN())
 	default:
-		return math.Float32frombits(sign | ((exp + 112) << 23) | frac)
+		return mathx.Float32frombits(sign | ((exp + 112) << 23) | frac)
 	}
 }
 

@@ -92,9 +92,6 @@ func (idx *FlatIndex) Search(query interface{}, k int, metric DistanceMetric) ([
 	if workers > n {
 		workers = n
 	}
-	if workers <= 0 {
-		workers = 1
-	}
 
 	chunkSize := (n + workers - 1) / workers
 	workerHeaps := make([]resultHeap, workers)

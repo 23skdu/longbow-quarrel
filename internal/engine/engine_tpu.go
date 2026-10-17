@@ -6,9 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"math"
 	"sync"
 	"time"
+
+	"github.com/23skdu/longbow-quarrel/internal/mathx"
 
 	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/device"
@@ -423,7 +424,7 @@ func (e *tpuEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, error
 	kvHeads := e.config.KVHeads
 	headDim := e.config.HeadDim
 	ropeTheta := e.config.RopeTheta
-	scale := float32(1.0 / math.Sqrt(float64(headDim)))
+	scale := float32(1.0 / mathx.Sqrt(float64(headDim)))
 
 	for layer := 0; layer < e.config.Layers; layer++ {
 		attnNormW, _ := e.ctx.GetWeightTensor(fmt.Sprintf("blk.%d.attn_norm.weight", layer))
@@ -577,7 +578,7 @@ func (e *tpuEngine) forward(token int, pos int, allTokens []int) ([]float32, err
 		vCache := e.tpu.VCache[layer]
 		attnOut := ctx.NewTensor(1, dim)
 
-		scale := float32(1.0 / math.Sqrt(float64(headDim)))
+		scale := float32(1.0 / mathx.Sqrt(float64(headDim)))
 		ctx.FusedAttention(q, k, v, attnOut, kCache, vCache, 1, heads, 1, pos+1, headDim, scale, 0)
 
 		q.ReturnToPool()

@@ -393,3 +393,251 @@ func TestHNSWIndex(t *testing.T) {
 		t.Errorf("HNSW TurboQuant Search failed: %v", err)
 	}
 }
+
+func TestVector_CoverageEdgeCases(t *testing.T) {
+	// 1. Min-length guard when len(b) < len(a) across all distance functions
+	f1 := []float32{1.0, 2.0}
+	f2 := []float32{1.0}
+	_ = DotFloat32(f1, f2)
+	_ = L2Float32(f1, f2)
+
+	c1 := []complex128{complex(1, 0), complex(2, 0)}
+	c2 := []complex128{complex(1, 0)}
+	_ = DotComplex128(c1, c2)
+	_ = L2Complex128(c1, c2)
+
+	u1 := &Uint8Vector{Data: []uint8{1, 2}, Scale: 1}
+	u2 := &Uint8Vector{Data: []uint8{1}, Scale: 1}
+	_ = DotUint8(u1, u2)
+	_ = L2Uint8(u1, u2)
+
+	tq1 := &TurboQuantVector{Codes: []int8{1, 2}, Scale: 1}
+	tq2 := &TurboQuantVector{Codes: []int8{1}, Scale: 1}
+	_ = DotTurboQuant(tq1, tq2)
+
+	// 2. BenchmarkResult.String()
+	br := BenchmarkResult{
+		VectorCount: 100, Dimension: 64, DataType: TypeFloat32, SearchType: SearchFlatCosine,
+		QPS: 500.0, LatencyMeanUs: 2.0, LatencyP95Us: 3.5, MemoryAllocMB: 1.2, BytesPerVector: 256.0,
+	}
+	if s := br.String(); s == "" {
+		t.Error("expected non-empty BenchmarkResult string")
+	}
+
+	// 3. Quantizer edge cases
+	// All elements equal -> diff == 0 -> diff = 1.0
+	uEq := QuantizeUint8([]float32{3.0, 3.0, 3.0}, 1)
+	if uEq.Scale <= 0 {
+		t.Errorf("expected positive scale for equal values, got %f", uEq.Scale)
+	}
+
+	// All zeros -> norm == 0 -> norm = 1.0
+	rot := CreateIdentityMatrix(2)
+	tqZero := QuantizeTurboQuant([]float32{0.0, 0.0}, 2, rot, nil, 0)
+	if tqZero.ID != 2 {
+		t.Errorf("expected ID=2, got %d", tqZero.ID)
+	}
+	// Empty vector
+	tqEmpty := QuantizeTurboQuant(nil, 3, rot, nil, 0)
+	if tqEmpty.ID != 3 {
+		t.Errorf("expected ID=3, got %d", tqEmpty.ID)
+	}
+
+	// 4. HNSW edge cases
+	hnswDefault := NewHNSWIndex(8, 0, 0, TypeFloat32)
+	if hnswDefault.M != 16 || hnswDefault.EfSearch != 32 {
+		t.Errorf("expected default M=16, EfSearch=32, got M=%d, EfSearch=%d", hnswDefault.M, hnswDefault.EfSearch)
+	}
+	if err := hnswDefault.Build(nil); err == nil {
+		t.Error("expected error building HNSW with 0 vectors")
+	}
+	// computeDistance with unknown DataType
+	hnswUnknown := NewHNSWIndex(4, 16, 32, DataType("unknown"))
+	hnswUnknown.Float32 = [][]float32{{1, 2, 3, 4}}
+	dUnknown := hnswUnknown.computeDistance(0, []float32{1, 2, 3, 4})
+	if dUnknown != 0 {
+		t.Errorf("expected distance 0, got %f", dUnknown)
+	}
+	// computeDistanceNodes with out of range
+	if hnswUnknown.computeDistanceNodes(10, 20) != 0 {
+		t.Error("expected 0 for out of bounds computeDistanceNodes")
+	}
+	// HNSW with high Ml to trigger layer > 16 clamp
+	hnswHighMl := NewHNSWIndex(4, 16, 32, TypeFloat32)
+	hnswHighMl.Ml = 1000.0
+	if err := hnswHighMl.Build([][]float32{{1, 2, 3, 4}, {5, 6, 7, 8}}); err != nil {
+		t.Errorf("expected HNSW high Ml build to succeed: %v", err)
+	}
+
+	// 5. IVF edge cases
+	ivfDefaults := NewIVFIndex(8, 0, 0, TypeFloat32)
+	if ivfDefaults.NumCentroids != 64 || ivfDefaults.NumProbes != 8 {
+		t.Errorf("expected default NumCentroids=64, NumProbes=8, got %d, %d", ivfDefaults.NumCentroids, ivfDefaults.NumProbes)
+	}
+	ivfProbeClamped := NewIVFIndex(8, 4, 10, TypeFloat32)
+	if ivfProbeClamped.NumProbes != 4 {
+		t.Errorf("expected NumProbes clamped to 4, got %d", ivfProbeClamped.NumProbes)
+	}
+	if err := ivfDefaults.Build(nil); err == nil {
+		t.Error("expected error building IVF with 0 vectors")
+	}
+	// numCentroids > n
+	ivfSmall := NewIVFIndex(4, 10, 2, TypeFloat32)
+	smallDataset := [][]float32{
+		{1, 0, 0, 0},
+		{0, 1, 0, 0},
+		{0, 0, 1, 0},
+	}
+	if err := ivfSmall.Build(smallDataset); err != nil {
+		t.Fatalf("IVF small build failed: %v", err)
+	}
+	// Search with numProbes > centroids
+	ivfSmall.NumProbes = 100
+	if res, err := ivfSmall.Search(smallDataset[0], 2); err != nil || len(res) == 0 {
+		t.Errorf("IVF search with large numProbes failed: %v", err)
+	}
+	// Large dataset > 5000 vectors to trigger sampleCount > 5000 clamp
+	largeDataset := make([][]float32, 5005)
+	for i := range largeDataset {
+		largeDataset[i] = []float32{float32(i)}
+	}
+	ivfLarge := NewIVFIndex(1, 2, 1, TypeFloat32)
+	if err := ivfLarge.Build(largeDataset); err != nil {
+		t.Fatalf("IVF large build failed: %v", err)
+	}
+
+	// 6. FlatIndex edge cases
+	flatUnknown := &FlatIndex{DataType: DataType("unknown")}
+	if flatUnknown.Count() != 0 {
+		t.Errorf("expected Count()=0 for unknown DataType, got %d", flatUnknown.Count())
+	}
+
+	// Search k <= 0 or n == 0
+	if res, err := flatUnknown.Search([]float32{1, 2}, 0, MetricDot); res != nil || err != nil {
+		t.Errorf("expected nil, nil for k=0")
+	}
+
+	// Flat Float32 with k > n, workers > n, and heap replacements
+	flatF := &FlatIndex{
+		DataType: TypeFloat32,
+		Float32: [][]float32{
+			{1.0, 0.0},
+			{0.0, 1.0},
+			{0.5, 0.5},
+			{0.9, 0.9},
+			{1.0, 1.0},
+		},
+	}
+	// k=2 so top 2 are selected and heap replacements occur
+	resF, err := flatF.Search([]float32{1.0, 1.0}, 2, DistanceMetric("custom"))
+	if err != nil || len(resF) != 2 {
+		t.Fatalf("expected 2 results from Flat Search, got %v, err %v", resF, err)
+	}
+	// Search with MetricCosine and MetricL2
+	if _, err := flatF.Search([]float32{1.0, 1.0}, 2, MetricCosine); err != nil {
+		t.Errorf("MetricCosine search failed: %v", err)
+	}
+	if _, err := flatF.Search([]float32{1.0, 1.0}, 2, MetricL2); err != nil {
+		t.Errorf("MetricL2 search failed: %v", err)
+	}
+	// k > n clamp
+	resLargeK, err := flatF.Search([]float32{1.0, 1.0}, 100, MetricDot)
+	if err != nil || len(resLargeK) != 5 {
+		t.Errorf("expected 5 results for k > n, got %v", resLargeK)
+	}
+	// Type mismatch on query
+	if _, err := flatF.Search("wrong query type", 2, MetricDot); err == nil {
+		t.Error("expected error on query type mismatch")
+	}
+
+	// 50 vectors with increasing values searched with k=1 to trigger heap replacements in all data types
+	incrFloat := make([][]float32, 50)
+	incrU8 := make([]Uint8Vector, 50)
+	incrC := make([][]complex128, 50)
+	incrTQ := make([]TurboQuantVector, 50)
+	for i := 0; i < 50; i++ {
+		v := []float32{0.0, float32(i + 1)}
+		incrFloat[i] = v
+		incrU8[i] = QuantizeUint8(v, i)
+		incrC[i] = Float32ToComplex128(v)
+		incrTQ[i] = QuantizeTurboQuant(v, i, rot, nil, 0)
+	}
+	flatIncrF := &FlatIndex{DataType: TypeFloat32, Float32: incrFloat}
+	flatIncrU := &FlatIndex{DataType: TypeUint8, Uint8: incrU8}
+	flatIncrC := &FlatIndex{DataType: TypeComplex128, Complex: incrC}
+	flatIncrTQ := &FlatIndex{DataType: TypeTurboQuant, Turbo: incrTQ}
+
+	_, _ = flatIncrF.Search([]float32{0.0, 10.0}, 1, MetricDot)
+	qU_incr := QuantizeUint8([]float32{0.0, 10.0}, -1)
+	_, _ = flatIncrU.Search(&qU_incr, 1, MetricDot)
+	qC_incr := Float32ToComplex128([]float32{0.0, 10.0})
+	_, _ = flatIncrC.Search(qC_incr, 1, MetricDot)
+	qTQ_incr := QuantizeTurboQuant([]float32{0.0, 10.0}, -1, rot, nil, 0)
+	_, _ = flatIncrTQ.Search(&qTQ_incr, 1, MetricDot)
+
+	// Flat Uint8 with all metrics and type mismatch
+	flatU := &FlatIndex{
+		DataType: TypeUint8,
+		Uint8: []Uint8Vector{
+			QuantizeUint8([]float32{1, 0}, 0),
+			QuantizeUint8([]float32{0, 1}, 1),
+			QuantizeUint8([]float32{1, 1}, 2),
+		},
+	}
+	qU := QuantizeUint8([]float32{1, 1}, -1)
+	for _, m := range []DistanceMetric{MetricDot, MetricCosine, MetricL2, DistanceMetric("custom")} {
+		if _, err := flatU.Search(&qU, 1, m); err != nil {
+			t.Errorf("Uint8 Flat search failed for metric %v: %v", m, err)
+		}
+	}
+	if _, err := flatU.Search("invalid", 1, MetricDot); err == nil {
+		t.Error("expected error on Uint8 query type mismatch")
+	}
+
+	// Flat Complex128 with all metrics and type mismatch
+	flatC := &FlatIndex{
+		DataType: TypeComplex128,
+		Complex: [][]complex128{
+			{complex(1, 0), complex(0, 0)},
+			{complex(0, 0), complex(1, 0)},
+			{complex(1, 0), complex(1, 0)},
+		},
+	}
+	qC := []complex128{complex(1, 0), complex(1, 0)}
+	for _, m := range []DistanceMetric{MetricDot, MetricCosine, MetricL2, DistanceMetric("custom")} {
+		if _, err := flatC.Search(qC, 1, m); err != nil {
+			t.Errorf("Complex128 Flat search failed for metric %v: %v", m, err)
+		}
+	}
+	if _, err := flatC.Search("invalid", 1, MetricDot); err == nil {
+		t.Error("expected error on Complex128 query type mismatch")
+	}
+
+	// Flat TurboQuant with all metrics and type mismatch
+	tqR := CreateIdentityMatrix(2)
+	tqQ := CreateRandomQJLMatrix(8, 2, 1)
+	flatTQ := &FlatIndex{
+		DataType: TypeTurboQuant,
+		Turbo: []TurboQuantVector{
+			QuantizeTurboQuant([]float32{1, 0}, 0, tqR, tqQ, 8),
+			QuantizeTurboQuant([]float32{0, 1}, 1, tqR, tqQ, 8),
+			QuantizeTurboQuant([]float32{1, 1}, 2, tqR, tqQ, 8),
+		},
+	}
+	qTQ := QuantizeTurboQuant([]float32{1, 1}, -1, tqR, tqQ, 8)
+	for _, m := range []DistanceMetric{MetricDot, MetricCosine, MetricL2, DistanceMetric("custom")} {
+		if _, err := flatTQ.Search(&qTQ, 1, m); err != nil {
+			t.Errorf("TurboQuant Flat search failed for metric %v: %v", m, err)
+		}
+	}
+	if _, err := flatTQ.Search("invalid", 1, MetricDot); err == nil {
+		t.Error("expected error on TurboQuant query type mismatch")
+	}
+
+	// Flat with unsupported DataType
+	flatBadType := &FlatIndex{
+		DataType: DataType("unknown"),
+	}
+	_ = flatBadType
+}
+

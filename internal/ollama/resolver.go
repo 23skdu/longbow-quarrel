@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 )
 
@@ -37,10 +36,6 @@ func GetOllamaDir() (string, error) {
 	}
 
 	// Default: ~/.ollama/models
-	if runtime.GOOS == "windows" {
-		// Not supporting windows specific logic detailed check right now
-		return filepath.Join(home, ".ollama", "models"), nil
-	}
 	return filepath.Join(home, ".ollama", "models"), nil
 }
 

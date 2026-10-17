@@ -2,8 +2,9 @@ package tokenizer
 
 import (
 	"fmt"
-	"math"
 	"strings"
+
+	"github.com/23skdu/longbow-quarrel/internal/mathx"
 
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
 )
@@ -66,16 +67,16 @@ func NewFromGGUF(f *gguf.GGUFFile) (*Tokenizer, error) {
 		case int32:
 			eosMap[int(v)] = true
 		case uint64:
-			if v <= math.MaxInt {
-				eosMap[int(v)] = true // #nosec G115 -- safe: bounded by math.MaxInt
+			if v <= mathx.MaxInt {
+				eosMap[int(v)] = true // #nosec G115 -- safe: bounded by mathx.MaxInt
 			}
 		case int64:
-			if v >= 0 && v <= math.MaxInt {
-				eosMap[int(v)] = true // #nosec G115 -- safe: bounded by math.MaxInt
+			if v >= 0 && v <= mathx.MaxInt {
+				eosMap[int(v)] = true // #nosec G115 -- safe: bounded by mathx.MaxInt
 			}
 		case float64:
-			if v >= 0 && v <= float64(math.MaxInt) {
-				eosMap[int(v)] = true // #nosec G115 -- safe: bounded by math.MaxInt
+			if v >= 0 && v <= float64(mathx.MaxInt) {
+				eosMap[int(v)] = true // #nosec G115 -- safe: bounded by mathx.MaxInt
 			}
 		case int:
 			eosMap[v] = true
@@ -109,11 +110,11 @@ func NewFromGGUF(f *gguf.GGUFFile) (*Tokenizer, error) {
 		case int32:
 			bosTokenID = int(v)
 		case uint64:
-			if v <= math.MaxInt {
+			if v <= mathx.MaxInt {
 				bosTokenID = int(v) // #nosec G115
 			}
 		case int64:
-			if v >= 0 && v <= math.MaxInt {
+			if v >= 0 && v <= mathx.MaxInt {
 				bosTokenID = int(v) // #nosec G115
 			}
 		case int:

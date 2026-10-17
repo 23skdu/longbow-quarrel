@@ -446,3 +446,16 @@ func TestRecordV040Metrics(t *testing.T) {
 	promtest.RequireValue(t, "quarrel_cuda_vram_saved_bytes", CUDAVRAMSavedBytesTotal.WithLabelValues("gemma-4"),
 		1024*1024*1024)
 }
+
+func TestPrefillChunkAndSIMDDispatch(t *testing.T) {
+	chunkBefore := promtest.Value(t, "quarrel_prefill_chunk_duration_seconds", PrefillChunkDuration)
+	dispatchBefore := promtest.Value(t, "simd_dispatch_total", SIMDDispatchTotal.WithLabelValues("test_kernel"))
+
+	RecordPrefillChunk(128, 10*time.Millisecond)
+	RecordSIMDDispatch("test_kernel")
+
+	promtest.RequireDelta(t, "quarrel_prefill_chunk_duration_seconds", PrefillChunkDuration, chunkBefore, 1)
+	promtest.RequireValue(t, "quarrel_active_prefill_tokens", ActivePrefillTokens, 128)
+	promtest.RequireDelta(t, "simd_dispatch_total", SIMDDispatchTotal.WithLabelValues("test_kernel"), dispatchBefore, 1)
+}
+

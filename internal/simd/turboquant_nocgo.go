@@ -3,7 +3,7 @@
 package simd
 
 import (
-	"math"
+	"github.com/23skdu/longbow-quarrel/internal/mathx"
 )
 
 // TurboQuantType represents the bit depth for TurboQuant encoding
@@ -35,7 +35,7 @@ func PolarQuantSIMD(input []float32, rotationMatrix []float32, n int, bits int) 
 	if len(rotationMatrix) == 0 {
 		copy(rotated, input)
 		for _, x := range input {
-			if a := float32(math.Abs(float64(x))); a > maxAbs {
+			if a := float32(mathx.Abs(float64(x))); a > maxAbs {
 				maxAbs = a
 			}
 		}
@@ -46,7 +46,7 @@ func PolarQuantSIMD(input []float32, rotationMatrix []float32, n int, bits int) 
 				sum += rotationMatrix[i*n+j] * input[j]
 			}
 			rotated[i] = sum
-			if a := float32(math.Abs(float64(sum))); a > maxAbs {
+			if a := float32(mathx.Abs(float64(sum))); a > maxAbs {
 				maxAbs = a
 			}
 		}
@@ -65,7 +65,7 @@ func PolarQuantSIMD(input []float32, rotationMatrix []float32, n int, bits int) 
 	resRotated := make([]float32, n)
 
 	for i := 0; i < n; i++ {
-		q := float32(math.Round(float64(rotated[i] * inverseScale)))
+		q := float32(mathx.Round(float64(rotated[i] * inverseScale)))
 		if q > maxQuantVal {
 			q = maxQuantVal
 		} else if q < -maxQuantVal {
@@ -127,7 +127,7 @@ func QJLTransformSIMD(residual []float32, signMatrix []float32, rows, cols int) 
 		normSq += sum * sum
 	}
 
-	scale := float32(math.Sqrt(float64(normSq / float32(rows))))
+	scale := float32(mathx.Sqrt(float64(normSq / float32(rows))))
 	quantized := make([]int8, rows)
 	for i := 0; i < rows; i++ {
 		if projected[i] >= 0 {

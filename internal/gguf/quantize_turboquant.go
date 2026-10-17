@@ -2,7 +2,8 @@ package gguf
 
 import (
 	"errors"
-	"math"
+
+	"github.com/23skdu/longbow-quarrel/internal/mathx"
 )
 
 // GenerateRandomOrthogonalMatrix generates a random orthogonal matrix of size n x n
@@ -46,7 +47,7 @@ func PolarQuant(input []float32, rotationMatrix []float32, n int, bits int) ([]i
 			sum += rotationMatrix[i*n+j] * input[j]
 		}
 		rotated[i] = sum
-		if abs := float32(math.Abs(float64(sum))); abs > maxAbs {
+		if abs := float32(mathx.Abs(float64(sum))); abs > maxAbs {
 			maxAbs = abs
 		}
 	}
@@ -65,12 +66,7 @@ func PolarQuant(input []float32, rotationMatrix []float32, n int, bits int) ([]i
 	residual := make([]float32, n)
 
 	for i := 0; i < n; i++ {
-		q := float32(math.Round(float64(rotated[i] * inverseScale)))
-		if q > maxQuantVal {
-			q = maxQuantVal
-		} else if q < -maxQuantVal {
-			q = -maxQuantVal
-		}
+		q := float32(mathx.Round(float64(rotated[i] * inverseScale)))
 		quantized[i] = int8(q)
 
 		// Calculate residual in rotated space
@@ -111,7 +107,7 @@ func QJLTransform(residual []float32, signMatrix []float32, rows, cols int) ([]i
 	}
 
 	// Scale factor to preserve norm
-	scale := float32(math.Sqrt(float64(normSq / float32(rows))))
+	scale := float32(mathx.Sqrt(float64(normSq / float32(rows))))
 
 	quantized := make([]int8, rows)
 	for i := 0; i < rows; i++ {
@@ -194,11 +190,11 @@ func DequantizeTurboQuant(data []byte, rotationMatrix []float32, qjlMatrix []flo
 
 func getFloat32(b []byte) float32 {
 	bits := uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16 | uint32(b[3])<<24
-	return math.Float32frombits(bits)
+	return mathx.Float32frombits(bits)
 }
 
 func setFloat32(b []byte, f float32) {
-	bits := math.Float32bits(f)
+	bits := mathx.Float32bits(f)
 	b[0] = byte(bits)       // #nosec G115 -- byte extraction from uint32
 	b[1] = byte(bits >> 8)  // #nosec G115 -- byte extraction from uint32
 	b[2] = byte(bits >> 16) // #nosec G115 -- byte extraction from uint32

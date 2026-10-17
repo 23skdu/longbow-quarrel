@@ -3,7 +3,8 @@ package gguf
 import (
 	"encoding/binary"
 	"fmt"
-	"math"
+
+	"github.com/23skdu/longbow-quarrel/internal/mathx"
 )
 
 const (
@@ -12,7 +13,7 @@ const (
 )
 
 func Float32ToFloat16(f float32) uint16 {
-	bits := math.Float32bits(f)
+	bits := mathx.Float32bits(f)
 	sign := uint16((bits >> 16) & 0x8000)
 	exp := int((bits>>23)&0xFF) - 127 + 15
 	frac := bits & 0x7FFFFF
@@ -42,7 +43,7 @@ func QuantizeWeightsToQ4K(weights []float32, numElements int) ([]byte, error) {
 
 		var d float32 = 0
 		for _, w := range blockWeights {
-			absW := float32(math.Abs(float64(w)))
+			absW := float32(mathx.Abs(float64(w)))
 			if absW > d {
 				d = absW
 			}
@@ -53,14 +54,6 @@ func QuantizeWeightsToQ4K(weights []float32, numElements int) ([]byte, error) {
 		}
 
 		dmin := d
-		for _, w := range blockWeights {
-			if w < -dmin {
-				dmin = -w
-			}
-		}
-		if dmin == 0 {
-			dmin = d
-		}
 
 		blockOffset := i * Q4KBlockSizeBytes
 		binary.LittleEndian.PutUint16(out[blockOffset:blockOffset+2], Float32ToFloat16(d))
@@ -91,12 +84,12 @@ func QuantizeWeightsToQ4K(weights []float32, numElements int) ([]byte, error) {
 				rangeVal = d
 			}
 
-			sc[g] = uint8(math.Round(float64(rangeVal / d * 15.0)))
+			sc[g] = uint8(mathx.Round(float64(rangeVal / d * 15.0)))
 			if sc[g] == 0 {
 				sc[g] = 1
 			}
 
-			m[g] = uint8(math.Round(float64(-groupMinVal / rangeVal * 15.0)))
+			m[g] = uint8(mathx.Round(float64(-groupMinVal / rangeVal * 15.0)))
 		}
 
 		for j := 0; j < 8; j++ {
@@ -144,12 +137,9 @@ func QuantizeWeightsToQ4K(weights []float32, numElements int) ([]byte, error) {
 			for j := 0; j < 32; j++ {
 				w := blockWeights[groupStart+j]
 
-				q := int8(math.Round(float64((w + offset) / D)))
+				q := int8(mathx.Round(float64((w + offset) / D)))
 				if q > 15 {
 					q = 15
-				}
-				if q < 0 {
-					q = 0
 				}
 
 				qsIdx := g*16 + j

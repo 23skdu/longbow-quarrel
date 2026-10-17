@@ -3,10 +3,11 @@ package engine
 import (
 	"context"
 	"fmt"
-	"math"
 	"math/rand"
 	"sync"
 	"time"
+
+	"github.com/23skdu/longbow-quarrel/internal/mathx"
 
 	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/device"
@@ -301,7 +302,7 @@ func rejectSample(targetLogits []float32, draftToken int, _ SamplerConfig, rng *
 		return false, 0
 	}
 
-	draftProb := math.Exp(float64(targetLogits[draftToken]))
+	draftProb := mathx.Exp(float64(targetLogits[draftToken]))
 	maxLogit := targetLogits[0]
 	for _, l := range targetLogits {
 		if l > maxLogit {
@@ -312,7 +313,7 @@ func rejectSample(targetLogits []float32, draftToken int, _ SamplerConfig, rng *
 	sum := 0.0
 	probs := make([]float64, len(targetLogits))
 	for i, l := range targetLogits {
-		probs[i] = math.Exp(float64(l - maxLogit))
+		probs[i] = mathx.Exp(float64(l - maxLogit))
 		sum += probs[i]
 	}
 	for i := range probs {

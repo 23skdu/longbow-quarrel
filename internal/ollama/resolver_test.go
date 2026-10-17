@@ -389,3 +389,35 @@ func TestManifestEmptyLayers(t *testing.T) {
 		t.Errorf("expected 0 layers, got %d", len(m.Layers))
 	}
 }
+
+func TestGetOllamaDir_NoHome(t *testing.T) {
+	t.Setenv("OLLAMA_MODELS", "")
+	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "")
+
+	_, err := GetOllamaDir()
+	if err == nil {
+		t.Skip("os.UserHomeDir succeeded even with empty HOME/USERPROFILE")
+	}
+
+	_, err = ResolveModelPath("testmodel")
+	if err == nil {
+		t.Fatal("expected ResolveModelPath to fail when GetOllamaDir fails")
+	}
+}
+
+func TestResolveModelPath_UnreadableManifest(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("OLLAMA_MODELS", root)
+
+	manifestPath := filepath.Join(root, "manifests", "registry.ollama.ai", "library", "baddir", "latest")
+	if err := os.MkdirAll(manifestPath, 0755); err != nil {
+		t.Fatalf("failed to create directory at manifest path: %v", err)
+	}
+
+	_, err := ResolveModelPath("baddir:latest")
+	if err == nil {
+		t.Fatal("expected error reading directory as file")
+	}
+}
+

@@ -2,11 +2,12 @@ package engine
 
 import (
 	"fmt"
-	"math"
 	"math/rand"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/23skdu/longbow-quarrel/internal/mathx"
 
 	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/device"
@@ -346,7 +347,7 @@ func (e *CPUEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, error
 				hidden := e.weights.GetTokenEmbedding(tok, hiddenSize)
 
 				if e.config.IsGemma4 {
-					scaleEmb := float32(math.Sqrt(float64(hiddenSize)))
+					scaleEmb := float32(mathx.Sqrt(float64(hiddenSize)))
 					for j := range hidden {
 						hidden[j] *= scaleEmb
 					}
@@ -377,7 +378,7 @@ func (e *CPUEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, error
 					if e.config.FinalLogitSoftcapping > 0 {
 						capVal := e.config.FinalLogitSoftcapping
 						for j := range logits {
-							logits[j] = capVal * float32(math.Tanh(float64(logits[j]/capVal)))
+							logits[j] = capVal * float32(mathx.Tanh(float64(logits[j]/capVal)))
 						}
 					}
 				}
@@ -466,7 +467,7 @@ func (e *CPUEngine) Forward(tokens []int) []float32 {
 	for pos, tok := range tokens {
 		hidden = e.weights.GetTokenEmbedding(tok, hiddenSize)
 		if e.config.IsGemma4 {
-			scaleEmb := float32(math.Sqrt(float64(hiddenSize)))
+			scaleEmb := float32(mathx.Sqrt(float64(hiddenSize)))
 			for j := range hidden {
 				hidden[j] *= scaleEmb
 			}
@@ -497,7 +498,7 @@ func (e *CPUEngine) Forward(tokens []int) []float32 {
 	if e.config.FinalLogitSoftcapping > 0 {
 		capVal := e.config.FinalLogitSoftcapping
 		for j := range logits {
-			logits[j] = capVal * float32(math.Tanh(float64(logits[j]/capVal)))
+			logits[j] = capVal * float32(mathx.Tanh(float64(logits[j]/capVal)))
 		}
 	}
 
@@ -517,7 +518,7 @@ func Sigmoid(x float32) float32 {
 	if x > 30 {
 		return 1
 	}
-	return float32(1.0 / (1.0 + math.Exp(-float64(x))))
+	return float32(1.0 / (1.0 + mathx.Exp(-float64(x))))
 }
 
 func (e *CPUEngine) Close() {
@@ -577,7 +578,7 @@ func ApplyTopKCPU(logits []float32, k int) []float32 {
 	}
 
 	for i := k; i < len(logits); i++ {
-		logits[indices[i]] = float32(-math.Inf(1))
+		logits[indices[i]] = float32(-mathx.Inf(1))
 	}
 
 	return logits
@@ -625,7 +626,7 @@ func ApplyTopPCPU(logits []float32, p float64) []float32 {
 	copy(result, logits)
 	for i := range result {
 		if !inNucleus[i] {
-			result[i] = float32(math.Inf(-1))
+			result[i] = float32(mathx.Inf(-1))
 		}
 	}
 	return result

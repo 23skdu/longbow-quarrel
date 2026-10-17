@@ -7,9 +7,10 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"math"
 	"strings"
 	"time"
+
+	"github.com/23skdu/longbow-quarrel/internal/mathx"
 
 	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/device"
@@ -1503,7 +1504,7 @@ func LoadWeightFromGGUF(e *metalEngine, name string) []float32 {
 		out := make([]float32, numElements)
 		for i := 0; i < numElements; i++ {
 			bits := binary.LittleEndian.Uint32(t.Data[i*4 : (i+1)*4])
-			out[i] = math.Float32frombits(bits)
+			out[i] = mathx.Float32frombits(bits)
 		}
 		return out
 	case gguf.GGMLTypeF16:

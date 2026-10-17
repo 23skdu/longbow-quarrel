@@ -2,7 +2,7 @@
 
 package simd
 
-import "math"
+import "github.com/23skdu/longbow-quarrel/internal/mathx"
 
 // SoftmaxAVX2 computes softmax (scalar fallback when CGO disabled)
 func SoftmaxAVX2(x []float32) {
@@ -19,7 +19,7 @@ func SoftmaxAVX2(x []float32) {
 
 	sum := float32(0.0)
 	for i := range x {
-		x[i] = float32(math.Exp(float64(x[i] - max)))
+		x[i] = float32(mathx.Exp(float64(x[i] - max)))
 		sum += x[i]
 	}
 
@@ -46,7 +46,7 @@ func SwiGLUAVX2(gate, up, out []float32) {
 		if g < -10.0 {
 			g = -10.0
 		}
-		sigmoid := float32(1.0) / (float32(1.0) + float32(math.Exp(float64(-g))))
+		sigmoid := float32(1.0) / (float32(1.0) + float32(mathx.Exp(float64(-g))))
 		out[i] = up[i] * g * sigmoid
 	}
 }
@@ -105,11 +105,11 @@ func fp16ToFp32Scalar(h uint16) float32 {
 		newExp := exp - 15 + 127
 		f32 = (sign << 31) | (newExp << 23) | (mant << 13)
 	}
-	return math.Float32frombits(f32)
+	return mathx.Float32frombits(f32)
 }
 
 func fp32ToFp16Scalar(f float32) uint16 {
-	bits := math.Float32bits(f)
+	bits := mathx.Float32bits(f)
 	sign := bits >> 31
 	exp := (bits >> 23) & 0xFF
 	mant := bits & 0x7FFFFF

@@ -23,10 +23,11 @@ typedef struct {
 import "C"
 import (
 	"fmt"
-	"math"
 	"sync"
 	"sync/atomic"
 	"unsafe"
+
+	"github.com/23skdu/longbow-quarrel/internal/mathx"
 )
 
 // =============================================================================
@@ -377,7 +378,7 @@ func NewPipelineParallelManager(config *MultiGPUConfig, numLayers int) (*Pipelin
 		}
 	}
 
-	layersPerStage := int(math.Ceil(float64(numLayers) / float64(numStages)))
+	layersPerStage := int(mathx.Ceil(float64(numLayers) / float64(numStages)))
 
 	pp := &PipelineParallelManager{
 		config:       config,
@@ -800,7 +801,7 @@ func AllReduceDistributed(tensors map[int][]float32, op ReduceOp) error {
 	case ReduceMax:
 		maxes := make([]float32, len(tensors[0]))
 		for i := range maxes {
-			maxes[i] = -math.MaxFloat32
+			maxes[i] = -mathx.MaxFloat32
 		}
 		for _, t := range tensors {
 			for i := range maxes {
@@ -905,7 +906,7 @@ func NewHybridParallelismManager(config *MultiGPUConfig) (*HybridParallelismMana
 func (h *HybridParallelismManager) DistributeLayers(numLayers int) []int {
 	if h.pipelineParallel != nil {
 		stages := h.pipelineParallel.numStages
-		layersPerStage := int(math.Ceil(float64(numLayers) / float64(stages)))
+		layersPerStage := int(mathx.Ceil(float64(numLayers) / float64(stages)))
 		distribution := make([]int, stages)
 		for i := 0; i < stages; i++ {
 			distribution[i] = layersPerStage

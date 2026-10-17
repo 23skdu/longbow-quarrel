@@ -71,7 +71,11 @@ func (t *Tensor) ToArrowArray(allocator memory.Allocator) (*array.FixedSizeList,
 
 	// Construct the FixedSizeList.
 	// The Buffer and Data objects created inside will have their reference counts managed.
-	arr := buildFixedSizeList(arrowBuf, t.Rows(), t.Cols(), arrowType, t.ctx.DeviceID())
+	deviceID := 0
+	if t.ctx != nil {
+		deviceID = t.ctx.DeviceID()
+	}
+	arr := buildFixedSizeList(arrowBuf, t.Rows(), t.Cols(), arrowType, deviceID)
 
 	// We release our local handle to the buffer because the array now owns it via Retain() inside NewData
 	arrowBuf.Release()

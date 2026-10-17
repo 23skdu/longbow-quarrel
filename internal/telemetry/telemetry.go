@@ -24,10 +24,12 @@ var (
 	tracerName = "github.com/23skdu/longbow-quarrel"
 )
 
+var newResource = resource.New
+
 func InitTracer() func(context.Context) error {
 	ctx := context.Background()
 
-	res, err := resource.New(ctx,
+	res, err := newResource(ctx,
 		resource.WithAttributes(
 			semconv.ServiceNameKey.String("longbow-quarrel"),
 		),

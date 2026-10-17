@@ -5,6 +5,8 @@ import (
 	"os"
 	"testing"
 	"time"
+
+	"go.opentelemetry.io/otel/sdk/resource"
 )
 
 func TestTelemetry_InitTracer_Stdout(t *testing.T) {
@@ -71,3 +73,16 @@ func TestTelemetry_NilSafety(t *testing.T) {
 	RecordKVPageAlloc(nil, 1, 10)
 	RecordMemoryPressure(nil, 0.5, 0.5, "none")
 }
+
+func TestTelemetry_InitTracer_ResourceError(t *testing.T) {
+	old := newResource
+	defer func() { newResource = old }()
+	newResource = func(ctx context.Context, opts ...resource.Option) (*resource.Resource, error) {
+		return nil, os.ErrInvalid
+	}
+	fn := InitTracer()
+	if fn != nil {
+		t.Fatal("expected nil return when resource creation fails")
+	}
+}
+

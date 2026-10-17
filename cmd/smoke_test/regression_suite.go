@@ -6,12 +6,13 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"math"
 	"os"
 	"path/filepath"
 	"runtime"
 	"time"
 	"unicode"
+
+	"github.com/23skdu/longbow-quarrel/internal/mathx"
 
 	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/device"
@@ -34,7 +35,7 @@ type BaselineFile struct {
 }
 
 func calculatePerplexity(logits []float32, targetToken int) float64 {
-	var maxLogit float32 = -math.MaxFloat32
+	var maxLogit float32 = -mathx.MaxFloat32
 	for _, l := range logits {
 		if l > maxLogit {
 			maxLogit = l
@@ -43,17 +44,17 @@ func calculatePerplexity(logits []float32, targetToken int) float64 {
 
 	var sumExp float64
 	for _, l := range logits {
-		sumExp += math.Exp(float64(l - maxLogit))
+		sumExp += mathx.Exp(float64(l - maxLogit))
 	}
 
-	logSumExp := float64(maxLogit) + math.Log(sumExp)
+	logSumExp := float64(maxLogit) + mathx.Log(sumExp)
 	logProb := float64(logits[targetToken]) - logSumExp
 	return -logProb
 }
 
 func calculateMSE(a, b []float32) float64 {
 	if len(a) != len(b) {
-		return math.MaxFloat64
+		return mathx.MaxFloat64
 	}
 	var sum float64
 	for i := range a {
@@ -301,14 +302,14 @@ func runModelTest(modelPath, baselinePath string, generate bool, threshold, pplT
 		if generate {
 			sanitizedLogits := make([]float32, len(logits))
 			for i, v := range logits {
-				if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
+				if mathx.IsNaN(float64(v)) || mathx.IsInf(float64(v), 0) {
 					sanitizedLogits[i] = 0
 				} else {
 					sanitizedLogits[i] = v
 				}
 			}
 			ppl := calculatePerplexity(logits, tokens[0])
-			if math.IsNaN(ppl) || math.IsInf(ppl, 0) {
+			if mathx.IsNaN(ppl) || mathx.IsInf(ppl, 0) {
 				ppl = 0
 			}
 			baseline.Entries[p] = BaselineEntry{
@@ -327,7 +328,7 @@ func runModelTest(modelPath, baselinePath string, generate bool, threshold, pplT
 
 			mse := calculateMSE(logits, entry.Logits)
 			ppl := calculatePerplexity(logits, tokens[0])
-			pplDiff := math.Abs(ppl - entry.Perplexity)
+			pplDiff := mathx.Abs(ppl - entry.Perplexity)
 
 			fmt.Printf("  Logit MSE: %e\n", mse)
 			fmt.Printf("  Perplexity: %.4f (diff: %.4f)\n", ppl, pplDiff)

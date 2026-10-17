@@ -7,11 +7,12 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"math"
 	"os"
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/23skdu/longbow-quarrel/internal/mathx"
 
 	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/engine"
@@ -231,6 +232,6 @@ func printSummary(results []TestResult) {
 		qlen += len(r.QuarrelText)
 		olen += len(r.OllamaText)
 	}
-	avgLenDiff := math.Abs(float64(qlen) - float64(olen))
+	avgLenDiff := mathx.Abs(float64(qlen) - float64(olen))
 	fmt.Printf("Avg length diff: %.0f chars\n", avgLenDiff/float64(len(results)))
 }

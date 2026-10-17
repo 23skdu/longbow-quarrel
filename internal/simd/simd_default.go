@@ -2,7 +2,7 @@
 
 package simd
 
-import "math"
+import "github.com/23skdu/longbow-quarrel/internal/mathx"
 
 // RMSNorm scalar fallback
 func RMSNorm(input, weight, output []float32, rows, cols int, eps float32) {
@@ -13,7 +13,7 @@ func RMSNorm(input, weight, output []float32, rows, cols int, eps float32) {
 			v := input[offset+c]
 			sum += v * v
 		}
-		invNorm := float32(1.0 / math.Sqrt(float64(sum)/float64(cols)+float64(eps)))
+		invNorm := float32(1.0 / mathx.Sqrt(float64(sum)/float64(cols)+float64(eps)))
 		for c := 0; c < cols; c++ {
 			output[offset+c] = input[offset+c] * invNorm * weight[c]
 		}
@@ -45,9 +45,9 @@ func RoPE(tensor []float32, positions []int, batch, heads, seqLen, headDim int, 
 				half := headDim / 2
 				for d := 0; d < half; d++ {
 					offset := b*heads*seqLen*headDim + h*seqLen*headDim + s*headDim
-					freq := float32(pos) / float32(math.Pow(float64(theta), float64(2*d)/float64(headDim)))
-					cos := float32(math.Cos(float64(freq)))
-					sin := float32(math.Sin(float64(freq)))
+					freq := float32(pos) / float32(mathx.Pow(float64(theta), float64(2*d)/float64(headDim)))
+					cos := float32(mathx.Cos(float64(freq)))
+					sin := float32(mathx.Sin(float64(freq)))
 					ei := offset + d
 					oi := offset + d + half
 					ev := tensor[ei]
@@ -66,7 +66,7 @@ func FusedAttention(q, k, v, output []float32, batch, heads, seqLen, kvSeqLen, h
 		for h := 0; h < heads; h++ {
 			for s := 0; s < seqLen; s++ {
 				offset := b*heads*seqLen*headDim + h*seqLen*headDim + s*headDim
-				maxVal := float32(-math.MaxFloat32)
+				maxVal := float32(-mathx.MaxFloat32)
 				for kv := 0; kv < kvSeqLen; kv++ {
 					kvOff := b*heads*kvSeqLen*headDim + h*kvSeqLen*headDim + kv*headDim
 					dot := float32(0.0)
@@ -85,7 +85,7 @@ func FusedAttention(q, k, v, output []float32, batch, heads, seqLen, kvSeqLen, h
 					for d := 0; d < headDim; d++ {
 						dot += q[offset+d] * k[kvOff+d]
 					}
-					expSum += float32(math.Exp(float64(dot*scale - maxVal)))
+					expSum += float32(mathx.Exp(float64(dot*scale - maxVal)))
 				}
 				if expSum > 0 {
 					for d := 0; d < headDim; d++ {
@@ -96,7 +96,7 @@ func FusedAttention(q, k, v, output []float32, batch, heads, seqLen, kvSeqLen, h
 							for dd := 0; dd < headDim; dd++ {
 								dot += q[offset+dd] * k[kvOff+dd]
 							}
-							weight := float32(math.Exp(float64(dot*scale-maxVal))) / expSum
+							weight := float32(mathx.Exp(float64(dot*scale-maxVal))) / expSum
 							sum += weight * v[kvOff+d]
 						}
 						output[offset+d] = sum
@@ -121,7 +121,7 @@ func FusedMLP(input, gateW, upW, downW, output []float32, batch, dim, hiddenDim 
 				if g < -10.0 {
 					g = -10.0
 				}
-				sig := float32(1.0) / (float32(1.0) + float32(math.Exp(float64(-g))))
+				sig := float32(1.0) / (float32(1.0) + float32(mathx.Exp(float64(-g))))
 				val := upW[h] * g * sig
 				sum += val * downW[h*dim+d]
 			}
@@ -144,7 +144,7 @@ func Softmax(x []float64) {
 
 	sum := 0.0
 	for i := range x {
-		x[i] = math.Exp(x[i] - max)
+		x[i] = mathx.Exp(x[i] - max)
 		sum += x[i]
 	}
 
@@ -170,7 +170,7 @@ func SwiGLU(gate, up, out []float32) {
 		if g < -10.0 {
 			g = -10.0
 		}
-		sigmoid := float32(1.0) / (float32(1.0) + float32(math.Exp(float64(-g))))
+		sigmoid := float32(1.0) / (float32(1.0) + float32(mathx.Exp(float64(-g))))
 		out[i] = up[i] * g * sigmoid
 	}
 }
@@ -213,7 +213,7 @@ func Fp16ToFp32(src []uint16, dst []float32) {
 			newExp := exp - 15 + 127
 			f32 = (sign << 31) | (newExp << 23) | (mant << 13)
 		}
-		dst[i] = math.Float32frombits(f32)
+		dst[i] = mathx.Float32frombits(f32)
 	}
 }
 
@@ -225,7 +225,7 @@ func Fp32ToFp16(src []float32, dst []uint16) {
 
 	for i := 0; i < n; i++ {
 		f := src[i]
-		bits := math.Float32bits(f)
+		bits := mathx.Float32bits(f)
 		sign := bits >> 31
 		exp := (bits >> 23) & 0xFF
 		mant := bits & 0x7FFFFF
@@ -237,7 +237,7 @@ func Fp32ToFp16(src []float32, dst []uint16) {
 		case 255:
 			h = uint16(sign<<15) | 0x7C00 | uint16(mant>>9)
 		default:
-			newExp := exp - 127 + 15
+			newExp := int(exp) - 127 + 15
 			if newExp >= 31 {
 				h = uint16(sign<<15) | 0x7C00
 			} else if newExp <= 0 {

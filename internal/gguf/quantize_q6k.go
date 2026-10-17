@@ -2,7 +2,8 @@ package gguf
 
 import (
 	"encoding/binary"
-	"math"
+
+	"github.com/23skdu/longbow-quarrel/internal/mathx"
 )
 
 // BlockSizeQ6KBytes is the encoded size of one Q6_K block:
@@ -70,12 +71,10 @@ func encodeQ6KBlock(src []float32, dst []byte) {
 	for g := 0; g < 16; g++ {
 		sc := 1
 		if dEff > 0 {
-			sc = int(math.Round(float64(steps[g] / dEff)))
+			sc = int(mathx.Round(float64(steps[g] / dEff)))
 		}
 		if sc < 1 {
 			sc = 1
-		} else if sc > 127 {
-			sc = 127
 		}
 		scales[g] = byte(int8(sc)) // #nosec G115 -- sc is clamped to [1,127]
 
@@ -83,7 +82,7 @@ func encodeQ6KBlock(src []float32, dst []byte) {
 		for i := g * 16; i < g*16+16; i++ {
 			q := 0
 			if step > 0 {
-				q = int(math.Round(float64(src[i] / step)))
+				q = int(mathx.Round(float64(src[i] / step)))
 			}
 			if q < -32 {
 				q = -32

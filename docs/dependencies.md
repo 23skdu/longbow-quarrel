@@ -28,6 +28,7 @@ Toolchain: `go 1.27.0`
 | `go.opentelemetry.io/otel` (+ exporters, sdk, trace, metric) | v1.46.0 | v1.47.0-rc.1 | held: RC only |
 | `golang.org/x/image` | v0.46.0 | no | current |
 | `google.golang.org/grpc` | v1.85.0-dev.0.20260825072537-93e31b48545e | yes, but see note | security pin, see below |
+| `github.com/23skdu/emlgo` | v0.5.0 (fork of tag `0.5`) | no | math backend, see below; **optional, `-tags emlgo`** |
 
 ### Why `grpc` is pinned to a pseudo-version
 
@@ -80,6 +81,35 @@ v2.9.0 adds a `go.mongodb.org/mongo-driver` requirement to its `go.mod`.
 Adopting it would pull a MongoDB driver into the build graph of an inference
 engine for no functional gain. Held at v2.8.0; revisit only if upstream
 restructures its test dependencies.
+
+### Why `emlgo` requires a fork (module-path mismatch)
+
+`emlgo` is consumed as an **optional** math backend (see
+[nextsteps.md](nextsteps.md) Phase 3) and is **not** a drop-in `math`
+replacement. Two things must be understood before adding it:
+
+1. **Module path mismatch.** The repository is hosted at
+   `github.com/23skdu/emlgo`, but its `go.mod` declares
+   `module github.com/emlgo/eml` and every internal import uses the
+   `github.com/emlgo/eml/...` path. Requesting it under the host path fails:
+
+   ```
+   $ go get github.com/23skdu/emlgo@0.5
+   module declares its path as: github.com/emlgo/eml
+           but was required as: github.com/23skdu/emlgo
+   ```
+
+   A fork with a corrected `module` line (and rewritten internal imports) is
+   therefore required. The pin above refers to that fork.
+2. **No semver tag.** The latest 0.5 release is tagged `0.5`, which Go does
+   not treat as semver. The version is the pseudo-version
+   `v0.0.0-20261003213601-b3d1a425cdd5` (commit
+   `b3d1a425cdd5e8956b45593ce98bb96f06075507`). The fork should tag this `v0.5.0`.
+
+`emlgo` is only compiled in with `-tags emlgo`; the default build is
+unaffected. Its scalar `pkg/*` functions delegate to stdlib `math` (bit-exact);
+`pkg/fastmath` uses minimax polynomial approximations (not bit-exact) and is
+gated separately behind `-tags emlfast`.
 
 ---
 

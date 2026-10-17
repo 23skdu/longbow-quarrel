@@ -5,7 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -16,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/23skdu/longbow-quarrel/internal/mathx"
 
 	"github.com/23skdu/longbow-quarrel/internal/vector"
 )
@@ -266,7 +267,7 @@ func main() {
 						}
 
 					} else if stype == vector.SearchIVF {
-						numCentroids := int(math.Sqrt(float64(n)))
+						numCentroids := int(mathx.Sqrt(float64(n)))
 						if numCentroids < 16 {
 							numCentroids = 16
 						}

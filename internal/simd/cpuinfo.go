@@ -60,8 +60,22 @@ func detectCPU() {
 	}
 }
 
+var (
+	cpuInfoOS          = runtime.GOOS
+	cpuInfoPath        = "/proc/cpuinfo"
+	execSysctl         = exec.Command
+	readCPUFlagsCustom func() string
+)
+
+func resetCPUInitForTesting() {
+	cpuInitDone = false
+}
+
 func readCPUFlags() string {
-	switch runtime.GOOS {
+	if readCPUFlagsCustom != nil {
+		return readCPUFlagsCustom()
+	}
+	switch cpuInfoOS {
 	case "linux":
 		return readCPUFlagsLinux()
 	case "darwin":
@@ -72,7 +86,7 @@ func readCPUFlags() string {
 }
 
 func readCPUFlagsLinux() string {
-	data, err := os.ReadFile("/proc/cpuinfo")
+	data, err := os.ReadFile(cpuInfoPath)
 	if err != nil {
 		return ""
 	}
@@ -88,10 +102,10 @@ func readCPUFlagsLinux() string {
 }
 
 func readCPUFlagsDarwin() string {
-	cmd := exec.Command("sysctl", "-a")
+	cmd := execSysctl("sysctl", "-a")
 	out, err := cmd.Output()
 	if err != nil {
-		cmd = exec.Command("sysctl", "hw.optional")
+		cmd = execSysctl("sysctl", "hw.optional")
 		out, err = cmd.Output()
 		if err != nil {
 			return ""

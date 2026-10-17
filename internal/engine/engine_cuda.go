@@ -5,11 +5,12 @@ package engine
 import (
 	"fmt"
 	"log"
-	"math"
 	"runtime"
 	"runtime/debug"
 	"sync"
 	"time"
+
+	"github.com/23skdu/longbow-quarrel/internal/mathx"
 
 	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/device"
@@ -330,7 +331,7 @@ func (e *cudaEngine) runBatchLoop() {
 			if e.config.FinalLogitSoftcapping > 0 {
 				capVal := e.config.FinalLogitSoftcapping
 				for j := range logits {
-					logits[j] = capVal * float32(math.Tanh(float64(logits[j]/capVal)))
+					logits[j] = capVal * float32(mathx.Tanh(float64(logits[j]/capVal)))
 				}
 			}
 
@@ -481,7 +482,7 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 	}
 	if e.config.IsGemma4 {
 		hiddenHost := hidden.ToHostF32()
-		scaleEmb := float32(math.Sqrt(float64(dim)))
+		scaleEmb := float32(mathx.Sqrt(float64(dim)))
 		for j := range hiddenHost {
 			hiddenHost[j] *= scaleEmb
 		}
@@ -712,7 +713,7 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 		if e.cache != nil && (e.cache.Precision == device.DataTypeFP8 || e.cache.Precision == device.DataTypeQ8_0) {
 			kScales, vScales := e.cache.GetBlockScales(layer)
 			isFP8 := e.cache.Precision == device.DataTypeFP8
-			scale := float32(1.0 / math.Sqrt(float64(headDim)))
+			scale := float32(1.0 / mathx.Sqrt(float64(headDim)))
 			ctx.PagedAttentionQuantized(q, kCache, vCache, kScales, vScales, attnOut, tokenPosTensor, blockTableTensor, tokenToSeqTensor, maxBlocks, heads, kvHeads, headDim, e.cache.blockSize, batchSize, scale, isFP8)
 		} else {
 			ctx.AttentionPagedBatch(q, kCache, vCache, attnOut, tokenPosTensor, blockTableTensor, maxBlocks, heads, kvHeads, headDim, e.cache.blockSize, tokenToSeqTensor, batchSize)
@@ -991,7 +992,7 @@ func (e *cudaEngine) forward(token int, pos int, _ []int) ([]float32, error) {
 			windowSize = e.config.WindowSize
 		}
 
-		scale := float32(1.0 / math.Sqrt(float64(headDim)))
+		scale := float32(1.0 / mathx.Sqrt(float64(headDim)))
 		if q.Rows() > 1 {
 			ctx.FlashAttentionPrefill(q, k, v, attnOut, 1, heads, kvHeads, q.Rows(), pos+q.Rows(), headDim, scale, windowSize)
 		} else {

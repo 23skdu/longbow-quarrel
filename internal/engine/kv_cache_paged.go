@@ -3,9 +3,10 @@ package engine
 import (
 	"encoding/binary"
 	"fmt"
-	"math"
 	"sync"
 	"time"
+
+	"github.com/23skdu/longbow-quarrel/internal/mathx"
 
 	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/device"
@@ -283,8 +284,8 @@ func (c *PagedKVCache) encodeKVTurboQuant(k, v, kCache, vCache *device.Tensor, p
 			for i, val := range qjK {
 				kDst[blockSize+i] = byte(val) // #nosec G115 -- int8 to byte for quantized data
 			}
-			binary.LittleEndian.PutUint32(kDst[blockSize+qjlRows:blockSize+qjlRows+4], math.Float32bits(sK))
-			binary.LittleEndian.PutUint32(kDst[blockSize+qjlRows+4:blockSize+qjlRows+8], math.Float32bits(sjK))
+			binary.LittleEndian.PutUint32(kDst[blockSize+qjlRows:blockSize+qjlRows+4], mathx.Float32bits(sK))
+			binary.LittleEndian.PutUint32(kDst[blockSize+qjlRows+4:blockSize+qjlRows+8], mathx.Float32bits(sjK))
 
 			// PolarQuant + QJL for V
 			qV, sV, resV := simd.PolarQuantSIMD(vHead, rotData, blockSize, bits)
@@ -297,8 +298,8 @@ func (c *PagedKVCache) encodeKVTurboQuant(k, v, kCache, vCache *device.Tensor, p
 			for i, val := range qjV {
 				vDst[blockSize+i] = byte(val) // #nosec G115 -- int8 to byte for quantized data
 			}
-			binary.LittleEndian.PutUint32(vDst[blockSize+qjlRows:blockSize+qjlRows+4], math.Float32bits(sV))
-			binary.LittleEndian.PutUint32(vDst[blockSize+qjlRows+4:blockSize+qjlRows+8], math.Float32bits(sjV))
+			binary.LittleEndian.PutUint32(vDst[blockSize+qjlRows:blockSize+qjlRows+4], mathx.Float32bits(sV))
+			binary.LittleEndian.PutUint32(vDst[blockSize+qjlRows+4:blockSize+qjlRows+8], mathx.Float32bits(sjV))
 		}
 	}
 

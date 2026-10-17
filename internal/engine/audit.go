@@ -4,7 +4,8 @@ package engine
 
 import (
 	"fmt"
-	"math"
+
+	"github.com/23skdu/longbow-quarrel/internal/mathx"
 
 	"github.com/23skdu/longbow-quarrel/internal/device"
 )
@@ -33,12 +34,12 @@ func AuditLogitRange(logits []float32) LogitRangeAuditResult {
 	}
 
 	var sum, sumSq float64
-	var minVal, maxVal float32 = math.MaxFloat32, -math.MaxFloat32
+	var minVal, maxVal float32 = mathx.MaxFloat32, -mathx.MaxFloat32
 	zeros := 0
 
 	for _, v := range logits {
 		// Check for NaN
-		if math.IsNaN(float64(v)) {
+		if mathx.IsNaN(float64(v)) {
 			audit.HasNaN = true
 			audit.HasExtremeValues = true // NaN is also an extreme value
 			audit.NumNaNs++
@@ -46,7 +47,7 @@ func AuditLogitRange(logits []float32) LogitRangeAuditResult {
 		}
 
 		// Check for Inf
-		if math.IsInf(float64(v), 0) {
+		if mathx.IsInf(float64(v), 0) {
 			audit.HasInf = true
 			audit.HasExtremeValues = true
 			audit.NumInfs++
@@ -73,10 +74,10 @@ func AuditLogitRange(logits []float32) LogitRangeAuditResult {
 	audit.Max = maxVal
 	audit.Min = minVal
 	audit.Mean = float32(sum / float64(len(logits)))
-	audit.RMS = float32(math.Sqrt(sumSq / float64(len(logits))))
+	audit.RMS = float32(mathx.Sqrt(sumSq / float64(len(logits))))
 
 	// Check for extreme values
-	if math.Abs(float64(audit.Max)) > 1e20 || math.Abs(float64(audit.Min)) > 1e20 {
+	if mathx.Abs(float64(audit.Max)) > 1e20 || mathx.Abs(float64(audit.Min)) > 1e20 {
 		audit.HasExtremeValues = true
 	}
 
@@ -86,9 +87,9 @@ func AuditLogitRange(logits []float32) LogitRangeAuditResult {
 	if audit.Mean != 0 {
 		variance := audit.RMS*audit.RMS - audit.Mean*audit.Mean
 		// Variance near zero indicates flat distribution
-		audit.IsFlat = math.Abs(float64(variance)) < 0.01
+		audit.IsFlat = mathx.Abs(float64(variance)) < 0.01
 		// Also compute flatness ratio for reference
-		audit.FlatnessRatio = audit.RMS / float32(math.Abs(float64(audit.Mean)))
+		audit.FlatnessRatio = audit.RMS / float32(mathx.Abs(float64(audit.Mean)))
 	} else if audit.RMS < 1e-3 { // Near-zero RMS indicates flat distribution centered at 0
 		audit.IsFlat = true
 		audit.FlatnessRatio = 0
@@ -500,7 +501,7 @@ func AuditActivationFlow(traces []device.ActivationStats, numLayers int) Activat
 		if i > 0 {
 			prev := traces[i-1]
 			delta := trace.Max - prev.Max
-			if math.Abs(float64(delta)) > 10.0 {
+			if mathx.Abs(float64(delta)) > 10.0 {
 				audit.HasJumps = true
 				audit.JumpDetails = append(audit.JumpDetails,
 					fmt.Sprintf("Layer %d: delta=%.2f (prev=%.2f, curr=%.2f)",
@@ -536,7 +537,7 @@ func AuditNaNPropagation(traces []device.ActivationStats) NaNPropagationAuditRes
 	totalNaN := 0
 
 	for i, trace := range traces {
-		if trace.NaNs > 0 || (math.IsNaN(float64(trace.Max)) && math.IsNaN(float64(trace.Min))) {
+		if trace.NaNs > 0 || (mathx.IsNaN(float64(trace.Max)) && mathx.IsNaN(float64(trace.Min))) {
 			audit.HasNaN = true
 			totalNaN += trace.NaNs
 			if firstNaN == -1 {
