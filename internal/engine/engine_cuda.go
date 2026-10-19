@@ -534,10 +534,13 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 			startCPU := time.Now()
 			hiddenHost := hidden.ToHostF32()
 
-			// Pre-allocate Gemma4 layer buffers for this CPU offload batch
+			// Pre-allocate Gemma4 layer buffers or standard CPU layer scratch for this CPU offload batch
 			var gemma4Buf *Gemma4LayerBuf
+			var layerScratch *CPULayerScratch
 			if e.config.IsGemma4 {
 				gemma4Buf = NewGemma4LayerBuf(dim, e.config.Gemma4FullHeadDim, heads, e.config.HiddenDim, e.config.KVCacheSize)
+			} else {
+				layerScratch = NewCPULayerScratch(dim, heads, headDim)
 			}
 
 			for sIdx, seq := range desc.Sequences {
@@ -577,7 +580,7 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 						}
 					} else {
 						for l := layer; l < endLayer; l++ {
-							tokenHidden = ApplyLayerCPUKV(e.cpuWeights, tokenHidden, l, pos, kvCache, e.config)
+							tokenHidden = ApplyLayerCPUKVWithScratch(e.cpuWeights, tokenHidden, l, pos, kvCache, e.config, layerScratch)
 						}
 					}
 					copy(hiddenHost[tokOffset:tokOffset+dim], tokenHidden)

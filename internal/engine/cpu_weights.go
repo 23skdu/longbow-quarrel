@@ -464,12 +464,52 @@ func ApplyLayerCPU(w *CPUWeights, input []float32, layerIdx int, cfg config.Conf
 	return ApplyLayerCPUKV(w, input, layerIdx, 0, nil, cfg)
 }
 
+// CPULayerScratch provides pre-allocated reusable scratch slices for transformer
+// layers on CPU, eliminating per-token heap allocations during inference.
+type CPULayerScratch struct {
+	Normed    []float32
+	NormedFFN []float32
+	QNormed   []float32
+	KNormed   []float32
+	Ping      []float32
+	Pong      []float32
+}
+
+// NewCPULayerScratch creates a buffer struct sized for the given model dimensions.
+func NewCPULayerScratch(dim, heads, headDim int) *CPULayerScratch {
+	if dim <= 0 {
+		dim = 4096
+	}
+	attnDim := heads * headDim
+	if attnDim <= 0 {
+		attnDim = dim
+	}
+	return &CPULayerScratch{
+		Normed:    make([]float32, dim),
+		NormedFFN: make([]float32, dim),
+		QNormed:   make([]float32, attnDim),
+		KNormed:   make([]float32, attnDim),
+		Ping:      make([]float32, dim),
+		Pong:      make([]float32, dim),
+	}
+}
+
 // ApplyLayerCPUKV executes a single transformer layer on CPU with rotary embeddings and KV cache.
 func ApplyLayerCPUKV(w *CPUWeights, input []float32, layerIdx int, pos int, kv *CPUKVCache, cfg config.Config) []float32 {
+	return ApplyLayerCPUKVWithScratch(w, input, layerIdx, pos, kv, cfg, nil)
+}
+
+// ApplyLayerCPUKVWithScratch executes a single transformer layer on CPU using pre-allocated scratchpad buffers.
+func ApplyLayerCPUKVWithScratch(w *CPUWeights, input []float32, layerIdx int, pos int, kv *CPUKVCache, cfg config.Config, scratch *CPULayerScratch) []float32 {
 	if layerIdx < 0 || w == nil || len(input) == 0 {
 		return input
 	}
-	normed := make([]float32, len(input))
+	var normed []float32
+	if scratch != nil && len(scratch.Normed) >= len(input) {
+		normed = scratch.Normed[:len(input)]
+	} else {
+		normed = make([]float32, len(input))
+	}
 	if layerIdx < len(w.AttnNorm) && len(w.AttnNorm[layerIdx]) > 0 {
 		simd.RMSNorm(input, w.AttnNorm[layerIdx], normed, 1, len(input), cfg.Eps)
 	} else {
@@ -550,7 +590,12 @@ func ApplyLayerCPUKV(w *CPUWeights, input []float32, layerIdx int, pos int, kv *
 		if layerIdx < len(w.AttnQNorm) && len(w.AttnQNorm[layerIdx]) > 0 && attnHeadDim > 0 {
 			normWeight := w.AttnQNorm[layerIdx]
 			if len(normWeight) == attnHeadDim {
-				qNormed := make([]float32, len(query))
+				var qNormed []float32
+				if scratch != nil && len(scratch.QNormed) >= len(query) {
+					qNormed = scratch.QNormed[:len(query)]
+				} else {
+					qNormed = make([]float32, len(query))
+				}
 				for h := 0; h < attnHeads; h++ {
 					off := h * attnHeadDim
 					simd.RMSNorm(query[off:off+attnHeadDim], normWeight, qNormed[off:off+attnHeadDim], 1, attnHeadDim, cfg.Eps)
@@ -565,7 +610,12 @@ func ApplyLayerCPUKV(w *CPUWeights, input []float32, layerIdx int, pos int, kv *
 				kvHeads = cfg.Heads
 			}
 			if len(normWeight) == attnHeadDim && len(k) == kvHeads*attnHeadDim {
-				kNormed := make([]float32, len(k))
+				var kNormed []float32
+				if scratch != nil && len(scratch.KNormed) >= len(k) {
+					kNormed = scratch.KNormed[:len(k)]
+				} else {
+					kNormed = make([]float32, len(k))
+				}
 				for h := 0; h < kvHeads; h++ {
 					off := h * attnHeadDim
 					simd.RMSNorm(k[off:off+attnHeadDim], normWeight, kNormed[off:off+attnHeadDim], 1, attnHeadDim, cfg.Eps)
@@ -625,7 +675,16 @@ func ApplyLayerCPUKV(w *CPUWeights, input []float32, layerIdx int, pos int, kv *
 		}
 	}
 
-	residual := make([]float32, len(input))
+	var residual []float32
+	if scratch != nil && len(scratch.Ping) >= len(input) && len(scratch.Pong) >= len(input) {
+		if layerIdx%2 == 0 {
+			residual = scratch.Ping[:len(input)]
+		} else {
+			residual = scratch.Pong[:len(input)]
+		}
+	} else {
+		residual = make([]float32, len(input))
+	}
 	if len(out) == len(input) {
 		for i := range residual {
 			residual[i] = input[i] + out[i]
@@ -636,7 +695,12 @@ func ApplyLayerCPUKV(w *CPUWeights, input []float32, layerIdx int, pos int, kv *
 
 	// FFN Sublayer
 	if w.HasFFN(layerIdx) {
-		normedFFN := make([]float32, len(residual))
+		var normedFFN []float32
+		if scratch != nil && len(scratch.NormedFFN) >= len(residual) {
+			normedFFN = scratch.NormedFFN[:len(residual)]
+		} else {
+			normedFFN = make([]float32, len(residual))
+		}
 		simd.RMSNorm(residual, w.FfnNorm[layerIdx], normedFFN, 1, len(residual), cfg.Eps)
 
 		var gateWeight, upWeight, downWeight []float32

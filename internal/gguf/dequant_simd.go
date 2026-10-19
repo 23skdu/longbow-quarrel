@@ -2,8 +2,8 @@ package gguf
 
 import (
 	"encoding/binary"
-	"runtime"
-	"sync"
+
+	"github.com/23skdu/longbow-quarrel/internal/simd"
 )
 
 // DequantizeQ4K_SIMD dequantizes Q4_K data with optimized unrolling and parallel workers.
@@ -20,32 +20,9 @@ func DequantizeQ4K_SIMD(data []byte, numElements int) []float32 {
 		return out
 	}
 
-	workers := runtime.GOMAXPROCS(0)
-	if workers > numBlocks {
-		workers = numBlocks
-	}
-
-	blocksPerWorker := (numBlocks + workers - 1) / workers
-	var wg sync.WaitGroup
-
-	for w := 0; w < workers; w++ {
-		startBlock := w * blocksPerWorker
-		endBlock := startBlock + blocksPerWorker
-		if startBlock >= numBlocks {
-			break
-		}
-		if endBlock > numBlocks {
-			endBlock = numBlocks
-		}
-
-		wg.Add(1)
-		go func(start, end int) {
-			defer wg.Done()
-			dequantizeQ4KBlocks(data, out, start, end)
-		}(startBlock, endBlock)
-	}
-
-	wg.Wait()
+	simd.ParallelFor(numBlocks, func(start, end int) {
+		dequantizeQ4KBlocks(data, out, start, end)
+	})
 	return out
 }
 
@@ -119,32 +96,9 @@ func DequantizeQ6K_SIMD(data []byte, numElements int) []float32 {
 		return out
 	}
 
-	workers := runtime.GOMAXPROCS(0)
-	if workers > numBlocks {
-		workers = numBlocks
-	}
-
-	blocksPerWorker := (numBlocks + workers - 1) / workers
-	var wg sync.WaitGroup
-
-	for w := 0; w < workers; w++ {
-		startBlock := w * blocksPerWorker
-		endBlock := startBlock + blocksPerWorker
-		if startBlock >= numBlocks {
-			break
-		}
-		if endBlock > numBlocks {
-			endBlock = numBlocks
-		}
-
-		wg.Add(1)
-		go func(start, end int) {
-			defer wg.Done()
-			dequantizeQ6KBlocks(data, out, start, end)
-		}(startBlock, endBlock)
-	}
-
-	wg.Wait()
+	simd.ParallelFor(numBlocks, func(start, end int) {
+		dequantizeQ6KBlocks(data, out, start, end)
+	})
 	return out
 }
 
@@ -172,55 +126,30 @@ func MatVecMulQ4_K(data []byte, vector []float32, rows, cols int) []float32 {
 
 	result := make([]float32, rows)
 
-	workers := runtime.GOMAXPROCS(0)
-	if workers > rows {
-		workers = rows
-	}
-	if workers < 1 {
-		workers = 1
-	}
-
-	rowsPerWorker := (rows + workers - 1) / workers
-	var wg sync.WaitGroup
-
-	for w := 0; w < workers; w++ {
-		startRow := w * rowsPerWorker
-		endRow := startRow + rowsPerWorker
-		if startRow >= rows {
-			break
-		}
-		if endRow > rows {
-			endRow = rows
-		}
-
-		wg.Add(1)
-		go func(rStart, rEnd int) {
-			defer wg.Done()
-			var blockDeq [blockSize]float32
-			for r := rStart; r < rEnd; r++ {
-				rowOffset := r * rowBytes
-				if rowOffset+rowBytes > len(data) {
-					break
-				}
-				rowSlice := data[rowOffset : rowOffset+rowBytes]
-
-				var sum float32
-				for b := 0; b < blocksPerRow; b++ {
-					bOffset := b * blockSizeBytes
-					bData := rowSlice[bOffset : bOffset+blockSizeBytes]
-					dequantizeQ4KBlocks(bData, blockDeq[:], 0, 1)
-
-					vOffset := b * blockSize
-					for k := 0; k < blockSize; k++ {
-						sum += blockDeq[k] * vector[vOffset+k]
-					}
-				}
-				result[r] = sum
+	simd.ParallelFor(rows, func(rStart, rEnd int) {
+		var blockDeq [blockSize]float32
+		for r := rStart; r < rEnd; r++ {
+			rowOffset := r * rowBytes
+			if rowOffset+rowBytes > len(data) {
+				break
 			}
-		}(startRow, endRow)
-	}
+			rowSlice := data[rowOffset : rowOffset+rowBytes]
 
-	wg.Wait()
+			var sum float32
+			for b := 0; b < blocksPerRow; b++ {
+				bOffset := b * blockSizeBytes
+				bData := rowSlice[bOffset : bOffset+blockSizeBytes]
+				dequantizeQ4KBlocks(bData, blockDeq[:], 0, 1)
+
+				vOffset := b * blockSize
+				for k := 0; k < blockSize; k++ {
+					sum += blockDeq[k] * vector[vOffset+k]
+				}
+			}
+			result[r] = sum
+		}
+	})
+
 	return result
 }
 
@@ -233,55 +162,30 @@ func MatVecMulQ6_K(data []byte, vector []float32, rows, cols int) []float32 {
 
 	result := make([]float32, rows)
 
-	workers := runtime.GOMAXPROCS(0)
-	if workers > rows {
-		workers = rows
-	}
-	if workers < 1 {
-		workers = 1
-	}
-
-	rowsPerWorker := (rows + workers - 1) / workers
-	var wg sync.WaitGroup
-
-	for w := 0; w < workers; w++ {
-		startRow := w * rowsPerWorker
-		endRow := startRow + rowsPerWorker
-		if startRow >= rows {
-			break
-		}
-		if endRow > rows {
-			endRow = rows
-		}
-
-		wg.Add(1)
-		go func(rStart, rEnd int) {
-			defer wg.Done()
-			var blockDeq [blockSize]float32
-			for r := rStart; r < rEnd; r++ {
-				rowOffset := r * rowBytes
-				if rowOffset+rowBytes > len(data) {
-					break
-				}
-				rowSlice := data[rowOffset : rowOffset+rowBytes]
-
-				var sum float32
-				for b := 0; b < blocksPerRow; b++ {
-					bOffset := b * blockSizeBytes
-					bData := rowSlice[bOffset : bOffset+blockSizeBytes]
-					dequantizeQ6KBlocks(bData, blockDeq[:], 0, 1)
-
-					vOffset := b * blockSize
-					for k := 0; k < blockSize; k++ {
-						sum += blockDeq[k] * vector[vOffset+k]
-					}
-				}
-				result[r] = sum
+	simd.ParallelFor(rows, func(rStart, rEnd int) {
+		var blockDeq [blockSize]float32
+		for r := rStart; r < rEnd; r++ {
+			rowOffset := r * rowBytes
+			if rowOffset+rowBytes > len(data) {
+				break
 			}
-		}(startRow, endRow)
-	}
+			rowSlice := data[rowOffset : rowOffset+rowBytes]
 
-	wg.Wait()
+			var sum float32
+			for b := 0; b < blocksPerRow; b++ {
+				bOffset := b * blockSizeBytes
+				bData := rowSlice[bOffset : bOffset+blockSizeBytes]
+				dequantizeQ6KBlocks(bData, blockDeq[:], 0, 1)
+
+				vOffset := b * blockSize
+				for k := 0; k < blockSize; k++ {
+					sum += blockDeq[k] * vector[vOffset+k]
+				}
+			}
+			result[r] = sum
+		}
+	})
+
 	return result
 }
 
@@ -301,45 +205,24 @@ func matVecMulGeneric(data []byte, vector []float32, rows, cols int,
 		return result
 	}
 
-	workers := runtime.GOMAXPROCS(0)
-	if workers > rows {
-		workers = rows
-	}
-	if workers < 1 {
-		workers = 1
-	}
-	rowsPerWorker := (rows + workers - 1) / workers
-	var wg sync.WaitGroup
-	for w := 0; w < workers; w++ {
-		rStart := w * rowsPerWorker
-		rEnd := rStart + rowsPerWorker
-		if rStart >= rows {
-			break
-		}
-		if rEnd > rows {
-			rEnd = rows
-		}
-		wg.Add(1)
-		go func(rStart, rEnd int) {
-			defer wg.Done()
-			blockDeq := make([]float32, blockSize)
-			for r := rStart; r < rEnd; r++ {
-				rowOffset := r * rowBytes
-				rowSlice := data[rowOffset : rowOffset+rowBytes]
-				var sum float32
-				for b := 0; b < blocksPerRow; b++ {
-					bOffset := b * blockSizeBytes
-					dequantFn(rowSlice[bOffset:bOffset+blockSizeBytes], blockDeq)
-					vOffset := b * blockSize
-					for k := 0; k < blockSize; k++ {
-						sum += blockDeq[k] * vector[vOffset+k]
-					}
+	simd.ParallelFor(rows, func(rStart, rEnd int) {
+		blockDeq := make([]float32, blockSize)
+		for r := rStart; r < rEnd; r++ {
+			rowOffset := r * rowBytes
+			rowSlice := data[rowOffset : rowOffset+rowBytes]
+			var sum float32
+			for b := 0; b < blocksPerRow; b++ {
+				bOffset := b * blockSizeBytes
+				dequantFn(rowSlice[bOffset:bOffset+blockSizeBytes], blockDeq)
+				vOffset := b * blockSize
+				for k := 0; k < blockSize; k++ {
+					sum += blockDeq[k] * vector[vOffset+k]
 				}
-				result[r] = sum
 			}
-		}(rStart, rEnd)
-	}
-	wg.Wait()
+			result[r] = sum
+		}
+	})
+
 	return result
 }
 

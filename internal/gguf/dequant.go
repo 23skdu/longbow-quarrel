@@ -3,10 +3,9 @@ package gguf
 import (
 	"encoding/binary"
 	"fmt"
-	"runtime"
-	"sync"
 
 	"github.com/23skdu/longbow-quarrel/internal/mathx"
+	"github.com/23skdu/longbow-quarrel/internal/simd"
 )
 
 const (
@@ -500,37 +499,17 @@ func MatVecMulBF16(data []byte, vector []float32, rows, cols int) []float32 {
 		return result
 	}
 
-	parallelism := runtime.NumCPU()
-	if parallelism <= 0 || rows < 32 {
-		parallelism = 1
-	}
-	chunkSize := (rows + parallelism - 1) / parallelism
-
-	var wg sync.WaitGroup
-	for c := 0; c < parallelism; c++ {
-		startRow := c * chunkSize
-		if startRow >= rows {
-			break
-		}
-		endRow := startRow + chunkSize
-		if endRow > rows {
-			endRow = rows
-		}
-		wg.Add(1)
-		go func(rStart, rEnd int) {
-			defer wg.Done()
-			for r := rStart; r < rEnd; r++ {
-				offset := r * rowBytes
-				var sum float32
-				for k := 0; k < cols; k++ {
-					w := BF16ToFloat32(binary.LittleEndian.Uint16(data[offset+k*2 : offset+k*2+2]))
-					sum += w * vector[k]
-				}
-				result[r] = sum
+	simd.ParallelFor(rows, func(rStart, rEnd int) {
+		for r := rStart; r < rEnd; r++ {
+			offset := r * rowBytes
+			var sum float32
+			for k := 0; k < cols; k++ {
+				w := BF16ToFloat32(binary.LittleEndian.Uint16(data[offset+k*2 : offset+k*2+2]))
+				sum += w * vector[k]
 			}
-		}(startRow, endRow)
-	}
-	wg.Wait()
+			result[r] = sum
+		}
+	})
 	return result
 }
 
@@ -580,46 +559,26 @@ func MatVecMulQ8_0(data []byte, vector []float32, rows, cols int) []float32 {
 	blocksPerRow := cols / blockSize
 	rowBytes := blocksPerRow * blockSizeBytes
 
-	parallelism := runtime.NumCPU()
-	if parallelism <= 0 || rows < 32 {
-		parallelism = 1
-	}
-	chunkSize := (rows + parallelism - 1) / parallelism
-
-	var wg sync.WaitGroup
-	for c := 0; c < parallelism; c++ {
-		startRow := c * chunkSize
-		if startRow >= rows {
-			break
-		}
-		endRow := startRow + chunkSize
-		if endRow > rows {
-			endRow = rows
-		}
-		wg.Add(1)
-		go func(rStart, rEnd int) {
-			defer wg.Done()
-			for i := rStart; i < rEnd; i++ {
-				rowOffset := i * rowBytes
-				if rowOffset+rowBytes > len(data) {
-					break
-				}
-				var rowSum float32
-				for b := 0; b < blocksPerRow; b++ {
-					bOffset := rowOffset + b*blockSizeBytes
-					d := Float16ToFloat32(binary.LittleEndian.Uint16(data[bOffset : bOffset+2]))
-					vBase := b * blockSize
-					var blockSum float32
-					for j := 0; j < 32; j++ {
-						blockSum += float32(int8(data[bOffset+2+j])) * vector[vBase+j] // #nosec G115
-					}
-					rowSum += d * blockSum
-				}
-				result[i] = rowSum
+	simd.ParallelFor(rows, func(rStart, rEnd int) {
+		for i := rStart; i < rEnd; i++ {
+			rowOffset := i * rowBytes
+			if rowOffset+rowBytes > len(data) {
+				break
 			}
-		}(startRow, endRow)
-	}
-	wg.Wait()
+			var rowSum float32
+			for b := 0; b < blocksPerRow; b++ {
+				bOffset := rowOffset + b*blockSizeBytes
+				d := Float16ToFloat32(binary.LittleEndian.Uint16(data[bOffset : bOffset+2]))
+				vBase := b * blockSize
+				var blockSum float32
+				for j := 0; j < 32; j++ {
+					blockSum += float32(int8(data[bOffset+2+j])) * vector[vBase+j] // #nosec G115
+				}
+				rowSum += d * blockSum
+			}
+			result[i] = rowSum
+		}
+	})
 	return result
 }
 

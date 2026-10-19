@@ -335,10 +335,13 @@ func (e *CPUEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, error
 				hiddenSize = 576
 			}
 
-			// Pre-allocate Gemma4 layer buffers once per sequence
+			// Pre-allocate Gemma4 layer buffers or standard CPU layer scratch once per sequence
 			var gemma4Buf *Gemma4LayerBuf
+			var layerScratch *CPULayerScratch
 			if e.config.IsGemma4 {
 				gemma4Buf = NewGemma4LayerBuf(hiddenSize, e.config.Gemma4FullHeadDim, e.config.Heads, e.config.HiddenDim, e.config.KVCacheSize)
+			} else {
+				layerScratch = NewCPULayerScratch(hiddenSize, e.config.Heads, e.config.HeadDim)
 			}
 
 			var logits []float32
@@ -357,7 +360,7 @@ func (e *CPUEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, error
 					}
 				} else {
 					for layerIdx := 0; layerIdx < e.config.Layers; layerIdx++ {
-						hidden = ApplyLayerCPUKV(e.weights, hidden, layerIdx, pos, kvCache, e.config)
+						hidden = ApplyLayerCPUKVWithScratch(e.weights, hidden, layerIdx, pos, kvCache, e.config, layerScratch)
 					}
 				}
 
@@ -458,10 +461,13 @@ func (e *CPUEngine) Forward(tokens []int) []float32 {
 	kvCache := NewCPUKVCache(e.config.Layers)
 	var hidden []float32
 
-	// Pre-allocate Gemma4 layer buffers
+	// Pre-allocate Gemma4 layer buffers or standard CPU layer scratch
 	var gemma4Buf *Gemma4LayerBuf
+	var layerScratch *CPULayerScratch
 	if e.config.IsGemma4 {
 		gemma4Buf = NewGemma4LayerBuf(hiddenSize, e.config.Gemma4FullHeadDim, e.config.Heads, e.config.HiddenDim, e.config.KVCacheSize)
+	} else {
+		layerScratch = NewCPULayerScratch(hiddenSize, e.config.Heads, e.config.HeadDim)
 	}
 
 	for pos, tok := range tokens {
@@ -477,7 +483,7 @@ func (e *CPUEngine) Forward(tokens []int) []float32 {
 			}
 		} else {
 			for layerIdx := 0; layerIdx < e.config.Layers; layerIdx++ {
-				hidden = ApplyLayerCPUKV(e.weights, hidden, layerIdx, pos, kvCache, e.config)
+				hidden = ApplyLayerCPUKVWithScratch(e.weights, hidden, layerIdx, pos, kvCache, e.config, layerScratch)
 			}
 		}
 	}
