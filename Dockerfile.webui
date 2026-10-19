@@ -3,7 +3,7 @@
 # =============================================================================
 # Stage 1: Builder
 # =============================================================================
-FROM --platform=$BUILDPLATFORM golang:1.27.1-alpine3.24 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27.2-alpine3.24 AS builder
 
 ARG TARGETOS
 ARG TARGETARCH
@@ -31,7 +31,7 @@ COPY . .
 # For a CUDA-enabled webui, build with -tags "webui,cuda" in a
 # nvidia/cuda:12.9.2-devel-ubuntu24.04 builder (see Dockerfile.nvidia).
 RUN cd cmd/webui && CGO_ENABLED=1 GOOS=$TARGETOS GOARCH=$TARGETARCH \
-    go build -tags "webui" \
+    go build -trimpath -tags "webui" \
     -ldflags="-s -w" \
     -o /out/webui .
 

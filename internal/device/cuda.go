@@ -66,6 +66,15 @@ extern void cudaPerHeadRMSNorm(cudaStream_t stream, float* tensor, const float* 
 extern void cudaQKNormRMSNorm(cudaStream_t stream, float* q, float* k, const float* qWeight, const float* kWeight, int numTokens, int numQHeads, int numKHeads, int headDim, float eps);
 extern void cudaPagedAttentionSplitK(cudaStream_t stream, const float* q, const void* kPool, const void* vPool, float* output, float* partialOut, float* partialMax, float* partialSum, const int* tokenPositions, const int* blockTables, const int* tokenToSeq, int maxBlocks, int heads, int kvHeads, int headDim, int blockSize, int numTokens, float scale, int splitK);
 
+// CUDA Graph Functions
+extern int cudaGraphBeginCaptureWrapper(cudaStream_t stream);
+extern int cudaGraphEndCaptureWrapper(cudaStream_t stream, cudaGraph_t* pGraph);
+extern int cudaGraphInstantiateWrapper(cudaGraphExec_t* pGraphExec, cudaGraph_t graph);
+extern int cudaGraphLaunchWrapper(cudaGraphExec_t graphExec, cudaStream_t stream);
+extern int cudaGraphExecDestroyWrapper(cudaGraphExec_t graphExec);
+extern int cudaGraphDestroyWrapper(cudaGraph_t graph);
+
+
 // MOE Kernels
 extern void cudaMOERouterLogits(cudaStream_t stream, const void* input, const void* gate, float* output, int batch, int dim, int num_experts, int isF16);
 extern void cudaMOETopKSelection(cudaStream_t stream, const float* logits, int top_k, float* indices, float* weights, int batch, int num_experts);

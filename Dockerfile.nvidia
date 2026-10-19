@@ -1,15 +1,16 @@
+# syntax=docker/dockerfile:1.4
 # =============================================================================
-# Longbow-Quarrel - NVIDIA CUDA Build
+# Longbow-Quarrel - Hardened NVIDIA CUDA Build (Compute Capability 8.0 - 9.0+)
 # =============================================================================
-# This Dockerfile builds Quarrel with CUDA + NCCL acceleration for NVIDIA GPUs.
-# Requires NVIDIA Container Toolkit for GPU access.
-#
-# Build:    docker build -f Dockerfile.nvidia -t longbow-quarrel:nvidia .
-# Run:      docker run --gpus all -it longbow-quarrel:nvidia --model /data/model.gguf
+# DevSecOps Standards:
+# - Multi-stage build isolating CUDA developer toolkit from runtime container
+# - Go 1.27.2 with deterministic compilation (-trimpath, -ldflags="-s -w")
+# - Unprivileged non-root service account (UID 10001)
+# - Minimal attack surface with vetted CUDA 12.9 + cuDNN 9 + NCCL runtimes
 # =============================================================================
 
 # -----------------------------------------------------------------------------
-# Build Stage: CUDA + NCCL Compilation
+# Stage 1: CUDA + CGo Compiler Environment
 # -----------------------------------------------------------------------------
 FROM nvidia/cuda:12.9.2-devel-ubuntu24.04 AS cuda-builder
 
@@ -19,88 +20,90 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     pkg-config \
     wget \
+    ca-certificates \
     libcudnn9-dev-cuda-12 \
     libnccl2-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Go
-RUN wget -q https://go.dev/dl/go1.27.1.linux-amd64.tar.gz && \
+# Install Go 1.27.2
+ENV GO_VERSION=1.27.2
+RUN wget -q https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz && \
     rm -rf /usr/local/go && \
-    tar -C /usr/local -xzf go1.27.1.linux-amd64.tar.gz && \
-    rm go1.27.1.linux-amd64.tar.gz
+    tar -C /usr/local -xzf go${GO_VERSION}.linux-amd64.tar.gz && \
+    rm go${GO_VERSION}.linux-amd64.tar.gz
 
-ENV PATH=/usr/local/go/bin:$PATH
+ENV PATH=/usr/local/go/bin:/usr/local/cuda/bin:$PATH \
+    CUDA_PATH=/usr/local/cuda \
+    GO111MODULE=on \
+    CGO_ENABLED=1 \
+    GOOS=linux \
+    GOARCH=amd64 \
+    CGO_LDFLAGS="-L/usr/local/cuda/lib64 -L/usr/lib/x86_64-linux-gnu -lcudart -lcublas -lcudnn -lnccl" \
+    CGO_CFLAGS="-I/usr/local/cuda/include -O3 -fstack-protector-strong"
 
-# Set environment variables for CUDA
-ENV CUDA_PATH=/usr/local/cuda \
-    PATH=/usr/local/cuda/bin:$PATH \
-    GO111MODULE=on
+WORKDIR /src
 
-# CGO flags: CUDA + cuBLAS + cuDNN + NCCL
-ENV CGO_LDFLAGS="-L/usr/local/cuda/lib64 -L/usr/lib/x86_64-linux-gnu -lcudart -lcublas -lcudnn -lnccl" \
-    CGO_CFLAGS="-I/usr/local/cuda/include"
-
-WORKDIR /app
-
-# Copy go mod files
+# Cache dependencies
 COPY go.mod go.sum ./
-RUN go mod download
+RUN go mod download && go mod verify
 
 # Copy source code
 COPY . .
 
-# Compile CUDA kernels to static lib (matches Makefile target
-# internal/device/libcuda_kernels.a; required by #cgo -lcuda_kernels)
+# Compile CUDA kernels to static library archive
 RUN nvcc -c -O3 -Xcompiler -fPIC internal/device/cuda_kernels.cu -o internal/device/cuda_kernels.o && \
     ar rcs internal/device/libcuda_kernels.a internal/device/cuda_kernels.o && \
     rm -f internal/device/cuda_kernels.o
 
-# Build with CUDA + NCCL support
-RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -tags "cuda,nccl" \
-    -o quarrel-nvidia ./cmd/quarrel
+# Build binary with CUDA and NCCL features
+RUN go build -trimpath -tags "cuda,nccl" \
+    -ldflags="-s -w -X main.version=1.0.0-dev" \
+    -o /out/quarrel ./cmd/quarrel
 
 # -----------------------------------------------------------------------------
-# Runtime Stage: Minimal CUDA Runtime
+# Stage 2: Hardened CUDA Minimal Runtime
 # -----------------------------------------------------------------------------
-FROM nvidia/cuda:12.9.2-runtime-ubuntu24.04
+FROM nvidia/cuda:12.9.2-runtime-ubuntu24.04 AS runtime
 
-# Install cuDNN + NCCL runtime
+LABEL org.opencontainers.image.title="Longbow-Quarrel (NVIDIA CUDA)" \
+      org.opencontainers.image.description="Accelerated LLM inference engine with CUDA, FlashDecoding, and NCCL" \
+      org.opencontainers.image.vendor="Longbow-Quarrel Project" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.base.name="nvidia/cuda:12.9.2-runtime-ubuntu24.04"
+
+# Install only necessary runtime shared libraries
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
     libcudnn9-cuda-12 \
     libnccl2 \
     && rm -rf /var/lib/apt/lists/*
 
+# Create unprivileged service user and group
+RUN groupadd -g 10001 quarrel && \
+    useradd -u 10001 -g quarrel -m -s /sbin/nologin quarrel
+
 WORKDIR /app
 
-# Copy CUDA runtime libs for linking
+# Copy CUDA runtime libraries and binary from builder
 COPY --from=cuda-builder /usr/local/cuda/lib64/libcudart.so* /usr/local/cuda/lib64/
-
-# Copy NCCL library
 COPY --from=cuda-builder /usr/lib/x86_64-linux-gnu/libnccl.so* /usr/lib/x86_64-linux-gnu/
-
-# Copy the binary and statically-linked kernel archive (for reference/debugging)
-COPY --from=cuda-builder /app/quarrel-nvidia ./quarrel
+COPY --from=cuda-builder --chown=10001:10001 /out/quarrel /app/quarrel
 COPY --from=cuda-builder /app/internal/device/libcuda_kernels.a /usr/local/lib/libcuda_kernels.a
 
 # Set library path
-ENV LD_LIBRARY_PATH=/usr/local/lib:/usr/local/cuda/lib64:/usr/lib/x86_64-linux-gnu
+ENV LD_LIBRARY_PATH=/usr/local/lib:/usr/local/cuda/lib64:/usr/lib/x86_64-linux-gnu \
+    PATH=/app:$PATH
 
-# Set default command
-CMD ["./quarrel", "--help"]
+# Create models and cache directories with appropriate permissions
+RUN mkdir -p /data/models /data/cache && \
+    chown -R 10001:10001 /data /app
 
-# =============================================================================
-# GPU Requirements
-# =============================================================================
-# - NVIDIA Driver: 575.51.03+ (bundled driver for CUDA 12.9 GA).
-#   Older drivers work under CUDA minor-version compatibility, which needs
-#   >= 525.60.13; see https://docs.nvidia.com/deploy/cuda-compatibility/
-# - NVIDIA Container Toolkit: v1.20.1+
-# - Supported GPUs: Volta, Turing, Ampere, Ada Lovelace, Hopper
-#   (Maxwell/Pascal/Volta offline compilation is deprecated in CUDA 12.x and
-#   will be dropped in the next major toolkit release.)
-#
-# Run with GPU access:
-#   docker run --gpus all -v /path/to/models:/data longbow-quarrel:nvidia \
-#       --model /data/smollm2.gguf --prompt "Hello"
-#
-# =============================================================================
+# Switch to non-root user
+USER 10001:10001
+
+# Healthcheck
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD ["/app/quarrel", "--help"]
+
+ENTRYPOINT ["/app/quarrel"]
+CMD ["--help"]

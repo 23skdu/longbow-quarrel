@@ -23,7 +23,8 @@ static inline __m512 fast_exp_avx512(__m512 x) {
     result = _mm512_add_ps(result, _mm512_mul_ps(frac2, c2));
     __m512 frac3 = _mm512_mul_ps(frac2, frac);
     result = _mm512_add_ps(result, _mm512_mul_ps(frac3, c3));
-    __m512i exp_offset = _mm512_slli_epi32(int_part, 23);
+    __m512i exp_offset = _mm512_add_epi32(int_part, _mm512_set1_epi32(127));
+    exp_offset = _mm512_slli_epi32(exp_offset, 23);
     result = _mm512_mul_ps(result, _mm512_castsi512_ps(exp_offset));
     return result;
 }
@@ -310,7 +311,7 @@ void fp32_to_fp16_avx512(const float* src, uint16_t* dst, int n) {
 
 // Q8_0 VNNI dot product: 32 elements per block, 34 bytes (2B scale + 32B int8)
 // Uses vpdpbusd to compute int8 dot product with unsigned byte accumulation
-void dot_q8_0_vnni(const uint8_t* data, const float* vector, int n, float* result) {
+float dot_q8_0_vnni(const uint8_t* data, const float* vector, int n) {
     float sum = 0.0f;
     int numBlocks = n / 32;
     for (int b = 0; b < numBlocks; b++) {
@@ -343,12 +344,12 @@ void dot_q8_0_vnni(const uint8_t* data, const float* vector, int n, float* resul
         sum128 = _mm_add_epi32(sum128, _mm_shuffle_epi32(sum128, _MM_SHUFFLE(1,0,3,2)));
         sum += scale * (float)_mm_cvtsi128_si32(sum128);
     }
-    *result = sum;
+    return sum;
 }
 
 // Q4_K VNNI dot product: 256 elements per block, 144 bytes
 // Decomposes 4-bit values to int8 pairs, uses vpdpbusd on each half
-void dot_q4_k_vnni(const uint8_t* data, const float* vector, int n, float* result) {
+float dot_q4_k_vnni(const uint8_t* data, const float* vector, int n) {
     float sum = 0.0f;
     int numBlocks = n / 256;
     for (int b = 0; b < numBlocks; b++) {
@@ -400,5 +401,5 @@ void dot_q4_k_vnni(const uint8_t* data, const float* vector, int n, float* resul
         }
         sum += blockSum;
     }
-    *result = sum;
+    return sum;
 }

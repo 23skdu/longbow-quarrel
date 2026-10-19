@@ -107,3 +107,47 @@ func TestWorkerPool_GlobalParallelFor(t *testing.T) {
 		t.Fatalf("expected sum %d, got %d", expected, sum)
 	}
 }
+
+func BenchmarkWorkerPool_ParallelFor(b *testing.B) {
+	n := 1024
+	data := make([]int, n)
+	pool := GetWorkerPool()
+	b.ReportAllocs()
+	for b.Loop() {
+		pool.ParallelFor(n, func(start, end int) {
+			for j := start; j < end; j++ {
+				data[j] = j * 2
+			}
+		})
+	}
+}
+
+func BenchmarkWorkerPool_RawGoroutines(b *testing.B) {
+	n := 1024
+	data := make([]int, n)
+	workers := 8
+	chunkSize := (n + workers - 1) / workers
+	b.ReportAllocs()
+	for b.Loop() {
+		var wg sync.WaitGroup
+		for w := 0; w < workers; w++ {
+			start := w * chunkSize
+			end := start + chunkSize
+			if end > n {
+				end = n
+			}
+			if start >= end {
+				continue
+			}
+			wg.Add(1)
+			go func(s, e int) {
+				defer wg.Done()
+				for j := s; j < e; j++ {
+					data[j] = j * 2
+				}
+			}(start, end)
+		}
+		wg.Wait()
+	}
+}
+

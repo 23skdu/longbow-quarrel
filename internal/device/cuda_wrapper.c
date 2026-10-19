@@ -36,3 +36,29 @@ void cudaAdd(float* a, float* b, float* out, int size, cudaStream_t stream) {
 void cudaSiLU(float* input, float* output, int size, cudaStream_t stream) {
     cudaSiLUF16(stream, input, output, size);
 }
+
+// CUDA Graph wrappers
+int cudaGraphBeginCaptureWrapper(cudaStream_t stream) {
+    return (int)cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
+}
+
+int cudaGraphEndCaptureWrapper(cudaStream_t stream, cudaGraph_t* pGraph) {
+    return (int)cudaStreamEndCapture(stream, pGraph);
+}
+
+int cudaGraphInstantiateWrapper(cudaGraphExec_t* pGraphExec, cudaGraph_t graph) {
+    return (int)cudaGraphInstantiate(pGraphExec, graph, 0);
+}
+
+int cudaGraphLaunchWrapper(cudaGraphExec_t graphExec, cudaStream_t stream) {
+    return (int)cudaGraphLaunch(graphExec, stream);
+}
+
+int cudaGraphExecDestroyWrapper(cudaGraphExec_t graphExec) {
+    return (int)cudaGraphExecDestroy(graphExec);
+}
+
+int cudaGraphDestroyWrapper(cudaGraph_t graph) {
+    return (int)cudaGraphDestroy(graph);
+}
+

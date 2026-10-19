@@ -3,9 +3,9 @@
 package mathx
 
 import (
-	"github.com/23skdu/emlgo/pkg/arithmetic"
-	"github.com/23skdu/emlgo/pkg/fastmath"
-	"github.com/23skdu/emlgo/pkg/hyper"
+	"github.com/emlgo/eml/pkg/arithmetic"
+	"github.com/emlgo/eml/pkg/fastmath"
+	"github.com/emlgo/eml/pkg/hyper"
 )
 
 // This file is the emlgo fastmath backend. It swaps in emlgo's minimax

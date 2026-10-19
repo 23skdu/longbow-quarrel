@@ -1,56 +1,75 @@
+# syntax=docker/dockerfile:1.4
 # =============================================================================
-# Longbow-Quarrel - CPU Build (with SIMD)
+# Longbow-Quarrel - Hardened CPU Build (SIMD: AVX2/FMA/VNNI)
 # =============================================================================
-# This Dockerfile builds Quarrel for CPU with SIMD optimizations (AVX2/AVX-512/NEON).
-# Uses CGO for SIMD kernel compilation.
-#
-# Build:    docker build -f Dockerfile.cpu -t longbow-quarrel:cpu .
-# Run:      docker run -v $(pwd)/models:/data longbow-quarrel:cpu --model /data/model.gguf
+# DevSecOps Standards:
+# - Minimal attack surface (multi-stage build, Alpine 3.24)
+# - Deterministic compilation (Go 1.27.2, -trimpath, -ldflags="-s -w")
+# - Non-root execution (UID 10001)
+# - Least privilege container security (read-only rootfs capable)
 # =============================================================================
 
 # -----------------------------------------------------------------------------
-# Build Stage: CPU Compilation with SIMD
+# Stage 1: Build Environment
 # -----------------------------------------------------------------------------
-FROM golang:1.27.1-alpine3.24 AS cpu-builder
+FROM golang:1.27.2-alpine3.24 AS cpu-builder
 
-# Install build dependencies
-RUN apk add --no-cache build-base git
+RUN apk add --no-cache build-base git ca-certificates
 
-WORKDIR /app
+WORKDIR /src
 
-# Copy go mod files
+# Cache dependencies
 COPY go.mod go.sum ./
-RUN go mod download
+RUN go mod download && go mod verify
 
 # Copy source code
 COPY . .
 
-# Build with CGO enabled for SIMD (auto-detects AVX2/AVX512 at runtime)
-RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build \
-    -ldflags "-s -w" \
-    -o quarrel-cpu ./cmd/quarrel
+# Compile hardened CPU binary with CGo for runtime SIMD dispatch
+ENV CGO_ENABLED=1 \
+    GOOS=linux \
+    GOARCH=amd64 \
+    CGO_CPPFLAGS="-D_FORTIFY_SOURCE=2" \
+    CGO_CFLAGS="-O3 -fstack-protector-strong"
+
+RUN go build -trimpath \
+    -ldflags="-s -w -X main.version=1.0.0-dev -X main.commit=$(git rev-parse --short HEAD 2>/dev/null || echo 'release')" \
+    -o /out/quarrel ./cmd/quarrel
 
 # -----------------------------------------------------------------------------
-# Runtime Stage: Minimal CPU Runtime
+# Stage 2: Hardened Minimal Runtime Environment
 # -----------------------------------------------------------------------------
-FROM alpine:3.24
+FROM alpine:3.24 AS runtime
+
+LABEL org.opencontainers.image.title="Longbow-Quarrel (CPU SIMD)" \
+      org.opencontainers.image.description="High-performance zero-copy LLM inference engine with SIMD vectorization" \
+      org.opencontainers.image.vendor="Longbow-Quarrel Project" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.base.name="alpine:3.24"
+
+# Minimal runtime libraries for CGO-linked binary
+RUN apk add --no-cache ca-certificates libstdc++ tzdata && \
+    rm -rf /var/cache/apk/*
+
+# Create unprivileged service user and group
+RUN addgroup -g 10001 -S quarrel && \
+    adduser -u 10001 -S quarrel -G quarrel -h /home/quarrel -s /sbin/nologin
 
 WORKDIR /app
 
-# Runtime deps for CGO binary
-RUN apk add --no-cache ca-certificates libstdc++
+# Copy binary from builder
+COPY --from=cpu-builder --chown=10001:10001 /out/quarrel /app/quarrel
 
-# Copy binary
-COPY --from=cpu-builder /app/quarrel-cpu ./quarrel
+# Create persistent storage mountpoints with non-root ownership
+RUN mkdir -p /data/models /data/cache && \
+    chown -R 10001:10001 /data /app
 
-# Set default command
-CMD ["./quarrel", "--help"]
+# Switch to non-root user
+USER 10001:10001
 
-# =============================================================================
-# Build Instructions
-# =============================================================================
-# Linux (CPU with SIMD):
-#   docker build -f Dockerfile.cpu -t longbow-quarrel:cpu .
-#   docker run -v $(pwd)/models:/data longbow-quarrel:cpu --model /data/model.gguf
-#
-# =============================================================================
+# Healthcheck to verify binary integrity
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+    CMD ["/app/quarrel", "--help"]
+
+ENTRYPOINT ["/app/quarrel"]
+CMD ["--help"]

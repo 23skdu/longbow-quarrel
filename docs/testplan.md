@@ -1,401 +1,196 @@
-# Longbow-Quarrel Test Plan: Verification vs llama.cpp
+# Longbow-Quarrel Performance A/B Testing Plan & Quality CI/CD Gates
 
-Comprehensive test plan for verifying speed, correctness, and accuracy of Longbow-Quarrel against llama.cpp as the reference implementation.
-
----
-
-## 1. Test Environment
-
-### Hardware
-- **CPU:** AMD/Intel x86_64 with AVX-512 or AVX2 support (or Apple Silicon for Metal)
-- **GPU:** NVIDIA GPU with 8+ GB VRAM (for CUDA tests)
-- **RAM:** 32 GB minimum
-- **Storage:** SSD with 50 GB free
-
-### Software
-- **Quarrel:** build from `main` (latest tag is `0.3.0`)
-- **llama.cpp:** Latest release (b4500+)
-- **OS:** Ubuntu 24.04+ or macOS 14+ (matches the container bases; CUDA 12.9 images are Ubuntu 24.04)
-
-### Models (Same GGUF Files for Both)
-
-| Model | Quantization | Size | Purpose |
-|-------|-------------|------|---------|
-| Qwen3.5-4B | Q8_0 | ~4.4 GB | Primary benchmark model |
-| Qwen3.5-4B | Q4_K | ~2.5 GB | Quantized comparison |
-| Llama-3.2-3B | Q8_0 | ~3.2 GB | Cross-architecture |
-| Mistral-7B | Q4_K | ~4.1 GB | Sliding window test |
-| Gemma-4-9B | BF16 | ~18 GB | BF16 correctness |
+> **Document Status**: Production Test Plan  
+> **Target Hardware Envelope**: Intel Core i7-12650H (Alder Lake: 16 vCPUs, AVX2 + FMA + AVX_VNNI, no AVX-512) & NVIDIA GeForce RTX 4060 Laptop GPU (8 GB VRAM, Ada Lovelace compute capability 8.9, CUDA 12.4).  
+> **Companion Documents**: [docs/performance.md](performance.md), [docs/nextsteps.md](nextsteps.md), [scripts/bench_gate.sh](../scripts/bench_gate.sh).
 
 ---
 
-## 2. Speed Benchmarks
+## 1. Executive Summary & Goals
 
-### 2.1 Throughput (Tokens/Second)
+This test plan defines the formal, statistically sound methodology for A/B testing performance optimizations, SIMD vectorization routines, and CUDA kernel enhancements in Longbow-Quarrel. It explicitly addresses the specific architectural constraints of consumer and edge hardware lacking AVX-512 but equipped with **AVX2, FMA, AVX-VNNI (256-bit VEX)**, and modern NVIDIA GPUs (RTX 40-series).
 
-**Method:** Generate 512 tokens from a fixed prompt, measure total time.
-
-```bash
-# Quarrel
-./quarrel -model Qwen3.5-4B-Q8_0.gguf -prompt "$(cat prompts/benchmark.txt)" -n 512 -temp 0
-
-# llama.cpp
-./llama-cli -m Qwen3.5-4B-Q8_0.gguf -p "$(cat prompts/benchmark.txt)" -n 512 -t 0
-```
-
-**Measurements:**
-
-| Metric | Quarrel | llama.cpp | Delta |
-|--------|---------|-----------|-------|
-| Prompt eval (tok/s) | | | |
-| Generation (tok/s) | | | |
-| Total time (s) | | | |
-
-### 2.2 Time-to-First-Token (TTFT)
-
-**Method:** Measure latency from prompt submission to first generated token.
-
-```bash
-# Quarrel (with PromptCache - second call should be faster)
-./quarrel -model Qwen3.5-4B-Q8_0.gguf -prompt "Short prompt" -n 1 -stream
-
-# llama.cpp
-./llama-cli -m Qwen3.5-4B-Q8_0.gguf -p "Short prompt" -n 1
-```
-
-**Measurements:**
-
-| Metric | Quarrel (Cold) | Quarrel (Cached) | llama.cpp |
-|--------|---------------|------------------|-----------|
-| TTFT (ms) | | | |
-
-### 2.3 Batch Prefill Performance
-
-**Method:** Measure prefill speed for varying prompt lengths (128, 512, 2048, 8192 tokens).
-
-| Prompt Length | Quarrel (tok/s) | llama.cpp (tok/s) | Speedup |
-|--------------|-----------------|-------------------|---------|
-| 128 | | | |
-| 512 | | | |
-| 2048 | | | |
-| 8192 | | | |
-
-### 2.4 Memory Usage
-
-**Method:** Peak RSS during 512-token generation.
-
-| Metric | Quarrel | llama.cpp |
-|--------|---------|-----------|
-| Peak RSS (MB) | | |
-| VRAM Used (MB) | | |
-| Heap Allocated (MB) | | |
-
-### 2.5 Partial GPU Offloading
-
-**Method:** Vary `-ngl` and measure throughput on CUDA builds.
-
-| GPU Layers | Quarrel (tok/s) | llama.cpp -ngl (tok/s) |
-|-----------|-----------------|----------------------|
-| 0 (CPU only) | | |
-| 8 | | |
-| 16 | | |
-| 24 | | |
-| 32 (full GPU) | | |
+### Core Objectives
+1. **Prevent Regressions**: Ensure no commit degrades Time-to-First-Token (TTFT), inter-token decode latency, or tokens/sec by $\ge 5\%$.
+2. **Zero-Allocation Hotpaths**: Enforce strict zero heap allocations ($0\text{ allocs/op}$) in CPU and GPU token decode loops.
+3. **Statistical Integrity**: Eliminate thermal throttling, scheduler migration, and background system noise via thread pinning, clock stabilization, and sample size requirements ($N \ge 20, CV < 3\%$).
+4. **CI/CD Quality Gates**: Integrate regression detection into automated test runs (`scripts/bench_gate.sh` and `scripts/run_all_tests.sh`).
 
 ---
 
-## 3. Correctness Tests
+## 2. Target Hardware & Architectural Envelope
 
-### 3.1 Token-Level Parity
-
-**Method:** Generate 256 tokens with temperature=0 (deterministic) and compare output token IDs.
-
-```bash
-# Both should produce identical token sequences with same seed
-./quarrel -model Qwen3.5-4B-Q8_0.gguf -prompt "The capital of France is" -n 256 -temp 0 -seed 42
-./llama-cli -m Qwen3.5-4B-Q8_0.gguf -p "The capital of France is" -n 256 -temp 0 -s 42
-```
-
-**Expected:** 100% token-level match for deterministic generation.
-
-### 3.2 Quantization Format Correctness
-
-**Method:** For each quantization format, generate 100 tokens at temperature=0 and compare against llama.cpp reference.
-
-| Format | Token Match Rate | Notes |
-|--------|-----------------|-------|
-| Q8_0 | | |
-| Q4_K | | |
-| Q6_K | | |
-| Q4_0 | | |
-| Q5_0 | | |
-| Q5_K | | |
-| Q2_K | | |
-| Q3_K | | |
-| BF16 | | |
-| FP16 | | |
-
-### 3.3 F16/BF16 Weight Correctness
-
-**Method:** Load a BF16 model, generate text, verify output is coherent (not garbage/zeros).
-
-```bash
-# Quarrel - BF16 model should produce coherent text
-./quarrel -model Gemma-4-9B-BF16.gguf -prompt "Explain quantum computing" -n 100
-
-# llama.cpp reference
-./llama-cli -m Gemma-4-9B-BF16.gguf -p "Explain quantum computing" -n 100
-```
-
-**Expected:** Both produce identical or near-identical coherent text.
-
-### 3.4 Chat Template Correctness
-
-**Method:** Send multi-turn chat prompts and verify correct formatting.
-
-```bash
-curl -X POST http://localhost:8080/v1/chat/completions \
-  -d '{
-    "model": "default",
-    "messages": [
-      {"role": "system", "content": "You are a helpful assistant."},
-      {"role": "user", "content": "What is 2+2?"}
-    ],
-    "temperature": 0
-  }'
-```
-
-**Expected:** Model receives properly formatted prompt with correct delimiters for the model family (e.g., `<|im_start|>system` for Qwen, `<|begin_of_text|>` for Llama 3).
-
-### 3.5 Top-P Sampling Correctness
-
-**Method:** Verify applyTopPCPU correctly filters tokens outside the nucleus.
-
-```bash
-# Generate with very low top_p (0.1) - should produce very repetitive text
-./quarrel -model Qwen3.5-4B-Q8_0.gguf -prompt "Write a poem" -n 100 -temp 1.0 -topp 0.1
-```
-
-**Expected:** Output vocabulary is highly restricted, consistent with top-10% probability mass.
+| Component | Hardware Specification | Capabilities & Features | Constraints |
+|:---|:---|:---|:---|
+| **Host CPU** | Intel Core i7-12650H (10 Cores: 6 P-Cores, 4 E-Cores / 16 Threads) | AVX, AVX2, FMA3, F16C, BMI1/2, **AVX_VNNI** | **No AVX-512**. Heterogeneous P/E core architecture requires thread pinning. |
+| **Host RAM** | 24 GB DDR5 | L1: 48KB/core, L2: 1.25MB/core, L3: 24MB shared | GOMEMLIMIT=2GiB enforced in CI/CD to prevent OOM. |
+| **GPU** | NVIDIA GeForce RTX 4060 Laptop GPU | 8 GB GDDR6, 24 SMs (3072 CUDA Cores), 96 4th-Gen Tensor Cores, FP8/BF16/FP16 | Max VRAM ~7.5 GB usable; PCIe 4.0 x8 interface. |
+| **Compiler / Toolchain** | GCC 13+ / Clang 17+, NVCC 12.4, Go 1.24+ | CGo, `#pragma GCC target("avx2,fma,f16c,avxvnni")`, `-O3` | Strict CGo boundary overhead (~5μs per call) during decode. |
 
 ---
 
-## 4. Accuracy Tests
+## 3. Key Performance Indicators (KPIs) & Metrics
 
-### 4.1 Coherence Evaluation
+All A/B comparisons evaluate the following five orthogonal vectors:
 
-**Method:** Generate 512 tokens on 10 standard prompts and rate coherence on 1-5 scale.
-
-Prompts:
-1. "Explain the theory of relativity in simple terms"
-2. "Write a Python function to sort a list"
-3. "What are the benefits of exercise?"
-4. "Describe the water cycle"
-5. "Write a haiku about technology"
-6. "What is the capital of France?"
-7. "How does photosynthesis work?"
-8. "Explain machine learning to a child"
-9. "Write a short story about a robot"
-10. "What are the three laws of thermodynamics?"
-
-| Prompt | Quarrel Score | llama.cpp Score | Notes |
-|--------|--------------|-----------------|-------|
-| 1 | | | |
-| 2 | | | |
-| ... | | | |
-
-### 4.2 Instruction Following
-
-**Method:** Test instruction-following with structured prompts.
-
-```bash
-# List generation
-./quarrel -model Qwen3.5-4B-Q8_0.gguf -prompt "List 5 fruits, one per line:" -n 50 -temp 0
-
-# JSON generation
-./quarrel -model Qwen3.5-4B-Q8_0.gguf -prompt "Return a JSON object with keys name and age:" -n 50 -temp 0
+```
++-----------------------------------------------------------------------------------+
+|                           Longbow-Quarrel KPI Matrix                              |
++--------------------------+----------------------------+---------------------------+
+| Latency & Speed          | Memory & Allocations       | Compute & Accuracy        |
++--------------------------+----------------------------+---------------------------+
+| 1. TTFT (ms)             | 4. Heap Allocs (allocs/op) | 7. SIMD Throughput (M/s)  |
+| 2. ITL (ms/tok)          | 5. Heap Growth (B/op)      | 8. GPU SM Occupancy (%)   |
+| 3. Throughput (tok/s)    | 6. Peak RSS (MB)           | 9. Max Diff vs Ref (ULP)  |
++--------------------------+----------------------------+---------------------------+
 ```
 
-**Expected:** Quarrel produces structured output matching the instruction format.
-
-### 4.3 Multi-Turn Conversation
-
-**Method:** Verify context retention across 5 conversation turns via API.
-
-**Expected:** Model correctly references information from earlier turns.
+1. **Time To First Token (TTFT)**: Elapsed time from prompt submission to generation of token #1 (prefill latency in milliseconds).
+2. **Inter-Token Latency (ITL)**: Time per decode step $t_{i} - t_{i-1}$ across autoregressive generation. Measured as P50, P95, and P99.
+3. **Generation Throughput**: Sustained tokens per second $\text{tok/s} = \frac{N_{\text{tokens}}}{\sum \text{ITL}}$.
+4. **Per-Token Heap Allocations**: Number of allocations during steady-state decode. Target: **0 allocs/token**.
+5. **Peak Resident Set Size (RSS)**: Operating system memory consumed by process via `/proc/self/statm`.
+6. **Numerical Accuracy (Parity)**: Maximum absolute difference against FP32 ground truth ($\max |y_{\text{candidate}} - y_{\text{ref}}| \le 1.0 \times 10^{-5}$).
 
 ---
 
-## 5. Feature-Specific Tests
+## 4. Control of Confounding Variables
 
-### 5.1 Speculative Decoding
+To ensure benchmark reproducibility on desktop/laptop hardware, tests must isolate system noise:
 
-**Method:** Enable speculative decoding and measure acceptance rate.
+### 4.1 CPU Pinning & Thread Isolation (P-Cores vs E-Cores)
+Alder Lake CPUs contain performance cores (P-cores 0-11 hyperthreaded) and efficiency cores (E-cores 12-15). Running benchmarks across E-cores introduces up to $45\%$ artificial latency variance.
+- **Harness Rule**: Pin benchmarking harnesses to physical P-cores using `taskset`:
+  ```bash
+  # Run benchmark strictly on first 6 physical Performance Cores
+  taskset -c 0,2,4,6,8,10 go test -run '^$' -bench . -benchmem ./internal/simd/
+  ```
+- **GOMAXPROCS Pinning**: Set `GOMAXPROCS=6` matching the number of pinned physical cores.
 
-```bash
-# Via API
-curl -X POST http://localhost:8080/v1/completions \
-  -d '{"model": "default", "prompt": "Write a story", "max_tokens": 256, "speculative": true, "draft_k": 4}'
-```
+### 4.2 GPU Clock Stabilization
+Laptop GPUs dynamically throttle clock speeds based on thermal headroom and power profiles (causing up to $30\%$ run-to-run drift).
+- **Harness Rule**: If running as root or with NVML privileges, lock GPU clocks to nominal base:
+  ```bash
+  sudo nvidia-smi -pm 1                  # Enable persistence mode
+  sudo nvidia-smi -lgc 1470,1470         # Lock graphics clock to 1470 MHz
+  ```
+- If running unprivileged, verify GPU temperature is $< 65^\circ\text{C}$ before commencing benchmarks using `nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader`.
 
-**Expected:** Acceptance rate >= 50% with matched draft model; throughput improvement over non-speculative.
-
-### 5.2 LoRA Adapter Loading
-
-**Method:** Load a LoRA adapter and verify output changes.
-
-```bash
-# Without LoRA
-./quarrel -model Llama-3.2-3B.gguf -prompt "Hello, my name is" -n 20 -temp 0
-
-# With LoRA
-./quarrel -model Llama-3.2-3B.gguf -lora adapter.gguf -prompt "Hello, my name is" -n 20 -temp 0
-```
-
-**Expected:** Output differs between base and LoRA-adapted model.
-
-### 5.3 PromptCache TTFT Reduction
-
-**Method:** Send the same prompt twice, measure TTFT difference.
-
-**Expected:** Second call TTFT is significantly lower than first call (target: >50% reduction).
-
-### 5.4 Sliding Window Attention
-
-**Method:** Generate 4096+ tokens with Mistral-7B and verify memory stability.
-
-```bash
-./quarrel -model Mistral-7B-Q4_K.gguf -prompt "$(python3 -c 'print("hello " * 2000)')" -n 4096
-```
-
-**Expected:** No OOM, memory usage stays bounded by window size.
+### 4.3 Garbage Collection & Go Runtime Stabilization
+- Set `GODEBUG=gctrace=0` and `GOMEMLIMIT=2GiB`.
+- Enforce explicit runtime GC sweeps before benchmark timer start (`runtime.GC()`).
 
 ---
 
-## 6. Regression Tests
+## 5. Statistical Methodology & Acceptance Thresholds
 
-### 6.1 Existing Fuzz Tests
+### 5.1 Sample Size and Warmup
+- **Warmup Cycles**: $N_{\text{warmup}} = 5$ iterations discarded to populate kernel code caches, CUDA driver module tables, and mmap page faults.
+- **Active Iterations**: $N_{\text{eval}} \ge 20$ iterations per candidate configuration.
+- **Outlier Filtering**: Apply Interquartile Range (IQR) filtering: values outside $[Q_1 - 1.5 \times \text{IQR}, Q_3 + 1.5 \times \text{IQR}]$ are reported and logged.
 
-Run all existing fuzz test corpora to verify no regressions:
+### 5.2 Coefficient of Variation ($CV$)
+The benchmark suite calculates the coefficient of variation:
+$$CV = \frac{\sigma}{\mu} \times 100\%$$
+- If $CV > 3.0\%$ in isolated runs ($CV > 5.0\%$ in CI environments), the benchmark is marked **UNSTABLE** and re-run.
 
-```bash
-go test ./internal/simd/... -fuzz FuzzMatMul -fuzztime 60s
-go test ./internal/engine/... -fuzz FuzzApplyLayerCPU -fuzztime 60s
-go test ./internal/gguf/... -fuzz FuzzDequantizeQ4K_SIMD -fuzztime 60s
-go test ./internal/engine/... -fuzz FuzzSampler -fuzztime 60s
-```
+### 5.3 A/B Decision Matrix & Regression Rejection Gates
 
-### 6.2 Data Race Detection
-
-```bash
-go test -race ./internal/...
-```
-
-**Expected:** 0 data races.
-
-### 6.3 Security Audit
-
-```bash
-go vet ./...
-gosec ./...
-```
-
-**Expected:** 0 issues.
+A candidate change (Branch B) is accepted against baseline (Branch A) if and only if:
+1. **Throughput Gate**: Throughput ratio $\frac{\text{tok/s}_B}{\text{tok/s}_A} \ge 0.95$ (no more than 5% regression under noisy CI, $\ge 1.00$ in controlled local runs).
+2. **Allocation Gate**: Decode allocations must satisfy $\Delta \text{allocs} \le 0$. Any increase in `allocs/op` on decode loops fails immediately.
+3. **Parity Gate**: Max relative error across logits or activations $\epsilon_{\text{rel}} \le 10^{-4}$.
+4. **Latency Gate**: P99 inter-token latency does not exceed $1.10 \times \text{Baseline P99}$.
 
 ---
 
-## 7. Automated Benchmark Script
+## 6. A/B Test Scenarios for Localhost Hardware
 
-```bash
-#!/bin/bash
-# scripts/benchmark_vs_llamacpp.sh
+### Scenario 1: CPU Quantized Matrix-Vector Multiplication (AVX2 vs AVX_VNNI)
+- **Goal**: Compare Q4_K and Q8_0 dot product throughput between:
+  1. Scalar Go loop (baseline).
+  2. Pure AVX2 integer dot product (`vpmaddubsw` + `vpmaddwd`).
+  3. AVX-VNNI integer dot product (`vpdpbusd` 256-bit VEX).
+- **Benchmark Command**:
+  ```bash
+  taskset -c 0,2,4,6,8,10 go test -run '^$' -bench 'BenchmarkVecDotQ|BenchmarkMatVecMulQ' -benchmem -count=5 ./internal/simd/ > simd_candidate.txt
+  scripts/bench_gate.sh compare simd_baseline.txt simd_candidate.txt 1.2
+  ```
+- **Success Criteria**:
+  - Q8_0 dot product throughput $\ge 2,500\text{ M elem/s}$.
+  - Q4_K dot product throughput $\ge 1,500\text{ M elem/s}$.
+  - Zero heap allocations ($0\text{ B/op}, 0\text{ allocs/op}$).
 
-QUARREL=./quarrel
-LLAMACLI=./llama-cli
-MODEL=$1
-PROMPT="The quick brown fox jumps over the lazy dog. "
+### Scenario 2: CPU Layer Execution & Worker Pool
+- **Goal**: Measure memory allocation and latency impact of persistent `WorkerPool` and `CPULayerScratch` vs dynamic goroutine spawning.
+- **Benchmark Command**:
+  ```bash
+  go test -run '^$' -bench 'BenchmarkWorkerPool|BenchmarkEndToEndInferenceStep' -benchmem -count=5 ./internal/simd/
+  ```
+- **Success Criteria**:
+  - $0\text{ allocs/op}$ in `BenchmarkWorkerPool_ParallelFor`.
+  - Latency reduction $\ge 10\times$ vs `BenchmarkWorkerPool_RawGoroutines`.
 
-echo "=== Quarrel vs llama.cpp Benchmark ==="
-echo "Model: $MODEL"
-echo ""
+### Scenario 3: GPU Attention (Standard vs Split-K FlashDecoding)
+- **Goal**: Validate that Split-K FlashDecoding eliminates SM starvation at sequence lengths $\ge 2048$ on the RTX 4060 (24 SMs).
+- **Test Command**:
+  ```bash
+  go test -v -tags cuda -run 'TestCUDA_AttentionPagedSplitK' ./internal/device
+  ```
+- **Success Criteria**:
+  - Kernel executes across $S \ge 8$ splits.
+  - Maximum absolute difference vs reference attention $\le 1.0 \times 10^{-6}$.
+  - Execution time on $N=4096$ context drops by $\ge 4\times$ over single-block sequential reduction.
 
-# Quarrel throughput
-echo "--- Quarrel ---"
-$QUARREL -model "$MODEL" -prompt "$PROMPT" -n 512 -temp 0 2>&1 | grep -E "tokens|tok/s"
-
-# llama.cpp throughput
-echo "--- llama.cpp ---"
-$LLAMACLI -m "$MODEL" -p "$PROMPT" -n 512 -t 0 2>&1 | grep -E "eval|speed"
-```
-
----
-
-## 8. Math Backend (`emlgo`) Parity & A/B Test Plan
-
-See [nextsteps.md](nextsteps.md) Phase 3 for the full plan. The test plan for the
-swap is gated on the module-path prerequisite in
-[dependencies.md](dependencies.md) (a fork of `github.com/23skdu/emlgo` with a
-corrected `module` line).
-
-### 8.1 Parity Tests (`internal/mathx/parity_test.go`)
-
-For every wrapped function, assert bit-exactness against stdlib (or `≤ 1 ULP`
-for `emlfast`) over a deterministic input sweep: edge values, denormals, large
-and small magnitudes, negatives.
-
-| Function | stdlib | emlgo scalar | emlgo fast | Expected |
-|----------|--------|--------------|------------|----------|
-| `Exp` | `math.Exp` | `logexp.Exp` | `fastmath.FastExp` | bit-exact / ≤1 ULP |
-| `Log` | `math.Log` | `logexp.Log` | `fastmath.FastLog` | bit-exact / ≤1 ULP |
-| `Sqrt` | `math.Sqrt` | `arithmetic.Sqrt` | — | bit-exact |
-| `Pow` | `math.Pow` | `arithmetic.Pow` | — | bit-exact |
-| `Sin` / `Cos` | `math.Sin`/`Cos` | `trig.Sin`/`Cos` | `trig.SinFast`/`CosFast` | bit-exact / ≤1 ULP |
-| `Tanh` | `math.Tanh` | `hyper.Tanh` | — | bit-exact |
-| `Abs` | `math.Abs` | `arithmetic.Abs` | `eml.AbsBranchless` | bit-exact |
-
-`IsNaN`, `IsInf`, `NaN`, `Inf`, `*bits`/`frombits`, `Copysign`, `MaxInt`,
-`MaxFloat32/64`, `SmallestNonzeroFloat32`, and `Pi` stay on stdlib (no emlgo
-equivalent).
-
-### 8.2 Golden Regression
-
-Capture sampler logits / generated token IDs on a fixed prompt+seed with the
-stdlib build, then assert the `emlgo` build reproduces them (bit-exact for
-scalar; tolerance for `emlfast`).
-
-### 8.3 Property Tests
-
-`Exp(Log(x))≈x`, `Sqrt(x)²≈x`, `Sin²+Cos²≈1` across the SIMD batch paths.
-
-### 8.4 A/B Performance
-
-```bash
-go test -run '^$' -bench . -benchmem ./internal/mathx/ > stdlib.txt
-go test -tags emlgo -run '^$' -bench . -benchmem ./internal/mathx/ > emlgo.txt
-scripts/bench_gate.sh compare stdlib.txt emlgo.txt
-```
-
-End-to-end: build `quarrel` with and without `-tags emlgo`, run
-`scripts/benchmark_models.sh` / `profile_tokens.sh` on Qwen3.5-4B-Q8_0, record
-TTFT, tok/s, P95/P99, peak RSS. Publish results in
-[performance.md](performance.md) §8.
-
-### 8.5 Existing Gates
-
-The swap must keep every existing gate green: `scripts/run_all_tests.sh` (8
-gates), coverage ≥ 80%, `go vet`, `gosec`, race detector.
+### Scenario 4: CUDA Graph Capture & Replay
+- **Goal**: Eliminate host CGo kernel launch latency (~5μs per kernel across 30 kernels = 150μs) by replaying captured graphs.
+- **Test Command**:
+  ```bash
+  go test -v -tags cuda -run 'TestCUDA_GraphManager' ./internal/device
+  ```
+- **Success Criteria**:
+  - Graph capture completes without CUDA runtime errors.
+  - Graph replay produces bit-exact outputs matching stream execution.
+  - Dispatch overhead drops to $< 20\mu$s per decode step.
 
 ---
 
-## 9. Acceptance Criteria
+## 7. CI/CD Integration & Automated Regression Gates
 
-| Category | Criterion | Target |
-|----------|-----------|--------|
-| Speed | Generation throughput | Within 20% of llama.cpp (CPU), within 15% (GPU) |
-| Speed | TTFT (cached) | >50% reduction vs cold start |
-| Correctness | Token-level parity (temp=0) | >=99% match for Q8_0 |
-| Correctness | BF16/F16 weight decoding | Coherent output, no zeros/garbage |
-| Accuracy | Coherence score | >=4.0/5.0 average |
-| Memory | Peak RSS (4B model) | <25% of llama.cpp RSS |
-| Stability | Data races | 0 |
-| Security | gosec vulnerabilities | 0 |
+The test runner `scripts/run_all_tests.sh` executes the following regression gates in sequence:
+
+```mermaid
+graph TD
+    G1[Gate 1: Core CPU Tests] --> G2[Gate 2: SIMD & VNNI Tests]
+    G2 --> G3[Gate 3: Multiplatform VLM Tests]
+    G3 --> G4[Gate 4: Grammar & Sampler Tests]
+    G4 --> G5[Gate 5: Speculative & Cache Tests]
+    G5 --> G6[Gate 6: CUDA Compilation & Kernels]
+    G6 --> G7[Gate 7: Concurrency Race Detector]
+    G7 --> G8[Gate 8: Code Coverage >= 80%]
+    G8 --> G9[Gate 9: Coverage Ratchet Floors]
+    G9 --> G10[Gate 10: SIMD AVX2 Zero-Alloc & Perf Gate]
+    G10 --> G11[Gate 11: CUDA Precision & Graph Gate]
+```
+
+### Gate 10: SIMD AVX2 Performance & Zero-Alloc Gate
+Ensures all SIMD dot product and activation kernels execute with zero heap allocations and meet baseline latency floors:
+```bash
+scripts/bench_gate.sh check-zero-alloc ./internal/simd
+```
+
+### Gate 11: CUDA Acceleration & Precision Gate
+Ensures Split-K FlashDecoding, QK-Norm RMSNorm, and CUDA Graph managers compile cleanly, pass numerical tolerance ($\le 10^{-5}$), and incur zero memory leaks.
+
+---
+
+## 8. Summary of Execution Commands
+
+| Action | Command Line |
+|:---|:---|
+| **Run Complete CI/CD Suite** | `./scripts/run_all_tests.sh` |
+| **Record Baseline Benchmark** | `./scripts/bench_gate.sh measure ./internal/simd > baseline.txt` |
+| **Record Candidate Benchmark** | `./scripts/bench_gate.sh measure ./internal/simd > candidate.txt` |
+| **Compare A/B Regression** | `./scripts/bench_gate.sh compare baseline.txt candidate.txt 1.2` |
+| **Verify Zero-Allocation Gate** | `./scripts/bench_gate.sh check-zero-alloc ./internal/simd` |
+| **Run CUDA Unit Tests** | `go test -v -tags cuda -count=1 ./internal/device` |

@@ -3,36 +3,72 @@ services:
     build:
       context: ../..
       dockerfile: Dockerfile.webui
+    container_name: quarrel-webui
+    user: "10001:10001"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     ports:
       - "8080:8080"
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     volumes:
-      - ./models:/app/models:ro
+      - ./models:/data/models:ro
     environment:
-      - MODEL_PATH=/app/models/smollm2.gguf
+      - MODEL_PATH=/data/models/smollm2.gguf
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 8G
     restart: unless-stopped
 
   prometheus:
-    image: prom/prometheus:v2.48.0
+    image: prom/prometheus:v3.15.0
+    container_name: quarrel-prometheus
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     ports:
-      - "9091:9090"
+      - "127.0.0.1:9091:9090"
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
       - '--web.enable-lifecycle'
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+    restart: unless-stopped
 
   grafana:
-    image: grafana/grafana:10.2.0
+    image: grafana/grafana:13.2.3
+    container_name: quarrel-grafana
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana_data:/var/lib/grafana
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
     depends_on:
       - prometheus
+    restart: unless-stopped
 
 volumes:
   prometheus_data:

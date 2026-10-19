@@ -130,10 +130,10 @@ if [ "${HAS_CUDA}" -eq 1 ]; then
         log_fail "CUDA Compile & Vet Gate"
     fi
 
-    if go test -v -tags cuda -timeout 90s -count=1 ./internal/device -run 'CUDA|Flash|Dequant'; then
-        log_pass "CUDA Zero-Dequant & Flash Attention Tests"
+    if go test -v -tags cuda -timeout 90s -count=1 ./internal/device -run 'CUDA|Flash|Dequant|Graph'; then
+        log_pass "CUDA Zero-Dequant, Flash Attention, & Graph Capture Tests"
     else
-        log_fail "CUDA Zero-Dequant & Flash Attention Tests"
+        log_fail "CUDA Zero-Dequant, Flash Attention, & Graph Capture Tests"
     fi
 
     if go test -tags cuda -timeout 300s -count=1 ./internal/engine/...; then
@@ -231,6 +231,16 @@ if [ "${RATCHET_FAILED}" -eq 0 ]; then
     log_pass "Coverage Ratchet Floors"
 else
     log_fail "Coverage Ratchet Floors"
+fi
+
+# ------------------------------------------------------------------------------
+# 10. Zero-Allocation Hotpath Regression Gate
+# ------------------------------------------------------------------------------
+log_header "10. Validating Zero-Allocation Hotpath Invariants"
+if "${REPO_ROOT}/scripts/bench_gate.sh" check-zero-alloc "${REPO_ROOT}/internal/simd"; then
+    log_pass "Zero-Allocation Hotpath Invariants (0 allocs/op)"
+else
+    log_fail "Zero-Allocation Hotpath Invariants (Regressions detected)"
 fi
 
 # ------------------------------------------------------------------------------

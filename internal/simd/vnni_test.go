@@ -125,3 +125,110 @@ func TestVecDotQ4_K_VNNI(t *testing.T) {
 		t.Errorf("MatVecMulQ4_K_VNNI row 0 mismatch: got %f, want %f", matVecRes[0], gotDot)
 	}
 }
+
+func BenchmarkVecDotQ8_0_VNNI_1024(b *testing.B) {
+	const n = 1024
+	numBlocks := n / 32
+	data := make([]byte, numBlocks*34)
+	vec := make([]float32, n)
+	for i := range vec {
+		vec[i] = 0.5
+	}
+	for i := range data {
+		data[i] = byte(i % 127)
+	}
+	b.ReportAllocs()
+	var res float32
+	for b.Loop() {
+		res += VecDotQ8_0_VNNI(data, vec)
+	}
+	_ = res
+}
+
+func BenchmarkVecDotQ8_0_VNNI_4096(b *testing.B) {
+	const n = 4096
+	numBlocks := n / 32
+	data := make([]byte, numBlocks*34)
+	vec := make([]float32, n)
+	for i := range vec {
+		vec[i] = 0.5
+	}
+	for i := range data {
+		data[i] = byte(i % 127)
+	}
+	b.ReportAllocs()
+	var res float32
+	for b.Loop() {
+		res += VecDotQ8_0_VNNI(data, vec)
+	}
+	_ = res
+}
+
+func BenchmarkVecDotQ4_K_VNNI_1024(b *testing.B) {
+	const n = 1024
+	numBlocks := n / 256
+	data := make([]byte, numBlocks*144)
+	vec := make([]float32, n)
+	for i := range vec {
+		vec[i] = 0.5
+	}
+	for i := range data {
+		data[i] = byte(i % 255)
+	}
+	b.ReportAllocs()
+	var res float32
+	for b.Loop() {
+		res += VecDotQ4_K_VNNI(data, vec)
+	}
+	_ = res
+}
+
+func BenchmarkVecDotQ4_K_VNNI_4096(b *testing.B) {
+	const n = 4096
+	numBlocks := n / 256
+	data := make([]byte, numBlocks*144)
+	vec := make([]float32, n)
+	for i := range vec {
+		vec[i] = 0.5
+	}
+	for i := range data {
+		data[i] = byte(i % 255)
+	}
+	b.ReportAllocs()
+	var res float32
+	for b.Loop() {
+		res += VecDotQ4_K_VNNI(data, vec)
+	}
+	_ = res
+}
+
+func BenchmarkMatVecMulQ8_0_VNNI(b *testing.B) {
+	rows := 128
+	cols := 1024
+	numBlocks := cols / 32
+	data := make([]byte, rows*numBlocks*34)
+	vec := make([]float32, cols)
+	for i := range vec {
+		vec[i] = 0.5
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = MatVecMulQ8_0_VNNI(data, vec, rows, cols)
+	}
+}
+
+func BenchmarkMatVecMulQ4_K_VNNI(b *testing.B) {
+	rows := 128
+	cols := 1024
+	numBlocks := cols / 256
+	data := make([]byte, rows*numBlocks*144)
+	vec := make([]float32, cols)
+	for i := range vec {
+		vec[i] = 0.5
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = MatVecMulQ4_K_VNNI(data, vec, rows, cols)
+	}
+}
+

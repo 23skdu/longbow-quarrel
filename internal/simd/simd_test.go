@@ -895,3 +895,133 @@ func TestVecDotF32_And_VecFMAF32(t *testing.T) {
 		}
 	}
 }
+
+func BenchmarkVecDotF32(b *testing.B) {
+	n := 1024
+	x := make([]float32, n)
+	y := make([]float32, n)
+	for i := range x {
+		x[i] = float32(i) * 0.01
+		y[i] = float32(i) * 0.02
+	}
+	b.ReportAllocs()
+	var res float32
+	for b.Loop() {
+		res += VecDotF32(x, y)
+	}
+	_ = res
+}
+
+func BenchmarkVecFMAF32(b *testing.B) {
+	n := 1024
+	dst := make([]float32, n)
+	src := make([]float32, n)
+	for i := range src {
+		src[i] = float32(i) * 0.01
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		VecFMAF32(dst, src, 1.5)
+	}
+}
+
+func BenchmarkRMSNorm(b *testing.B) {
+	dim := 1024
+	input := make([]float32, dim)
+	weight := make([]float32, dim)
+	output := make([]float32, dim)
+	for i := range input {
+		input[i] = float32(i) * 0.01
+		weight[i] = 1.0
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		RMSNorm(input, weight, output, 1, dim, 1e-5)
+	}
+}
+
+func BenchmarkMatMul(b *testing.B) {
+	dim := 64
+	matA := make([]float32, dim*dim)
+	matB := make([]float32, dim*dim)
+	for i := range matA {
+		matA[i] = 0.5
+		matB[i] = 0.25
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = MatMul(matA, matB, dim, dim, dim)
+	}
+}
+
+func BenchmarkMatVecMul(b *testing.B) {
+	dim := 1024
+	mat := make([]float32, dim*dim)
+	vec := make([]float32, dim)
+	for i := range vec {
+		vec[i] = 0.5
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = MatVecMul(mat, vec, dim, dim)
+	}
+}
+
+func BenchmarkAttentionF32(b *testing.B) {
+	dim := 64
+	seqLen := 16
+	q := make([]float32, seqLen*dim)
+	k := make([]float32, seqLen*dim)
+	v := make([]float32, seqLen*dim)
+	for i := range q {
+		q[i] = 0.1
+		k[i] = 0.1
+		v[i] = 0.1
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = AttentionF32(q, k, v, seqLen, 1, dim)
+	}
+}
+
+func BenchmarkRoPE(b *testing.B) {
+	dim := 128
+	seqLen := 16
+	tensor := make([]float32, seqLen*dim)
+	posIds := make([]int, seqLen)
+	for i := range posIds {
+		posIds[i] = i
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		RoPE(tensor, posIds, 1, 1, seqLen, dim, 10000.0)
+	}
+}
+
+func BenchmarkFusedAttention(b *testing.B) {
+	dim := 64
+	seqLen := 16
+	q := make([]float32, seqLen*dim)
+	k := make([]float32, seqLen*dim)
+	v := make([]float32, seqLen*dim)
+	out := make([]float32, seqLen*dim)
+	b.ReportAllocs()
+	for b.Loop() {
+		FusedAttention(q, k, v, out, 1, 1, seqLen, seqLen, dim, 0.125)
+	}
+}
+
+func BenchmarkFusedMLP(b *testing.B) {
+	dim := 256
+	hiddenDim := 512
+	in := make([]float32, dim)
+	gate := make([]float32, hiddenDim)
+	up := make([]float32, hiddenDim)
+	down := make([]float32, hiddenDim*dim)
+	out := make([]float32, dim)
+	b.ReportAllocs()
+	for b.Loop() {
+		FusedMLP(in, gate, up, down, out, 1, dim, hiddenDim)
+	}
+}
+

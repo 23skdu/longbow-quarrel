@@ -1,3 +1,4 @@
+# DevSecOps Hardened Docker Compose for Longbow-Quarrel WebUI & Monitoring
 services:
   webui:
     build:
@@ -5,12 +6,17 @@ services:
       dockerfile: Dockerfile.webui
       target: runtime
     container_name: longbow-quarrel-webui
+    user: "10001:10001"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     ports:
       - "8080:8080"
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     volumes:
       - ./models:/data/models:ro
-      - ./cache:/data/cache
+      - ./cache:/data/cache:rw
     environment:
       - WEBUI_PORT=8080
       - WEBUI_METRICS_PORT=9090
@@ -22,6 +28,9 @@ services:
     restart: unless-stopped
     deploy:
       resources:
+        limits:
+          cpus: "8.0"
+          memory: 16G
         reservations:
           devices:
             - driver: nvidia
@@ -30,7 +39,7 @@ services:
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
       interval: 30s
-      timeout: 10s
+      timeout: 5s
       retries: 3
       start_period: 10s
     networks:
@@ -44,12 +53,17 @@ services:
       dockerfile: Dockerfile.webui
       target: runtime-cpu
     container_name: longbow-quarrel-webui-cpu
+    user: "10001:10001"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     ports:
       - "8080:8080"
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     volumes:
       - ./models:/data/models:ro
-      - ./cache:/data/cache
+      - ./cache:/data/cache:rw
     environment:
       - WEBUI_PORT=8080
       - WEBUI_METRICS_PORT=9090
@@ -59,10 +73,15 @@ services:
       - WEBUI_API_KEY=${WEBUI_API_KEY:-}
       - WEBUI_ALLOWED_ORIGINS=${WEBUI_ALLOWED_ORIGINS:-*}
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "8.0"
+          memory: 12G
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
       interval: 30s
-      timeout: 10s
+      timeout: 5s
       retries: 3
       start_period: 10s
     networks:
@@ -73,8 +92,12 @@ services:
   prometheus:
     image: prom/prometheus:v3.15.0
     container_name: longbow-quarrel-prometheus
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     ports:
-      - "9091:9090"
+      - "127.0.0.1:9091:9090"
     volumes:
       - ./cmd/webui/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
@@ -82,7 +105,11 @@ services:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
       - '--web.enable-lifecycle'
-      - '--web.enable-admin-api'
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
     restart: unless-stopped
     networks:
       - webui-network
@@ -92,8 +119,12 @@ services:
   grafana:
     image: grafana/grafana:13.2.3
     container_name: longbow-quarrel-grafana
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     volumes:
       - ./cmd/webui/grafana/provisioning:/etc/grafana/provisioning:ro
       - grafana_data:/var/lib/grafana
@@ -101,6 +132,11 @@ services:
       - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
       - GF_USERS_ALLOW_SIGN_UP=false
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
     restart: unless-stopped
     networks:
       - webui-network
@@ -112,16 +148,18 @@ services:
   nginx:
     image: nginx:alpine
     container_name: longbow-quarrel-nginx
+    security_opt:
+      - no-new-privileges:true
     ports:
       - "80:80"
       - "443:443"
-    volumes:
-      # NOTE: provide your own nginx configs + certs, e.g.:
-      # - ./deploy/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      # - ./deploy/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
-      # - ./deploy/ssl:/etc/nginx/ssl:ro
     environment:
       - NGINX_HOST=localhost
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1G
     restart: unless-stopped
     networks:
       - webui-network

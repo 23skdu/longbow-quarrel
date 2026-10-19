@@ -3,10 +3,10 @@
 package mathx
 
 import (
-	"github.com/23skdu/emlgo/pkg/arithmetic"
-	"github.com/23skdu/emlgo/pkg/hyper"
-	"github.com/23skdu/emlgo/pkg/logexp"
-	"github.com/23skdu/emlgo/pkg/trig"
+	"github.com/emlgo/eml/pkg/arithmetic"
+	"github.com/emlgo/eml/pkg/hyper"
+	"github.com/emlgo/eml/pkg/logexp"
+	"github.com/emlgo/eml/pkg/trig"
 )
 
 // This file is the emlgo backend. The scalar emlgo functions delegate to the

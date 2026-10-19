@@ -197,3 +197,18 @@ func HasAVXVNNI() bool {
 	}
 	return hasAVXVNNI
 }
+
+// HasAVX2 returns whether AVX2 instructions are available.
+func HasAVX2() bool {
+	if !cpuInitDone {
+		detectCPU()
+	}
+	return hasAVX2
+}
+
+func useAVX2() bool {
+	if !cpuInitDone {
+		detectCPU()
+	}
+	return cpuInitDone && hasAVX2
+}

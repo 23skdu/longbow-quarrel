@@ -1,4 +1,10 @@
-# NOTE: requires Dockerfile.nvidia (CUDA 12.9.2). See Makefile `docker-nvidia` target.
+# DevSecOps Hardened Docker Compose for Longbow-Quarrel CUDA
+# Features:
+# - Unprivileged non-root execution (UID:GID 10001:10001)
+# - Privilege escalation prevention (no-new-privileges)
+# - Linux capability shedding (cap_drop: ALL)
+# - Explicit resource ceiling limits (DoS prevention)
+# - Isolated internal bridge network
 services:
   quarrel-cuda:
     build:
@@ -7,22 +13,37 @@ services:
     image: longbow-quarrel:cuda
     container_name: quarrel-cuda
     runtime: nvidia
+    user: "10001:10001"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: unless-stopped
     volumes:
-      - ${MODEL_PATH:-./models}:/data:ro
-      - ${QUARREL_DATA:-./data}:/app/data
+      - ${MODEL_PATH:-./models}:/data/models:ro
+      - ${QUARREL_DATA:-./data}:/data/cache:rw
     environment:
       - CUDA_VISIBLE_DEVICES=0
     deploy:
       resources:
+        limits:
+          cpus: "8.0"
+          memory: 16G
         reservations:
           devices:
             - driver: nvidia
               count: all
               capabilities: [gpu]
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
+    healthcheck:
+      test: ["CMD", "/app/quarrel", "--help"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     command: >
-      --model /data/${MODEL:-smollm2.gguf}
+      --model /data/models/${MODEL:-smollm2.gguf}
       --prompt "The capital of France is"
       --n 50
       --metrics :9090
@@ -34,24 +55,34 @@ services:
     image: longbow-quarrel:cuda
     container_name: quarrel-interactive
     runtime: nvidia
+    user: "10001:10001"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     stdin_open: true
     tty: true
     volumes:
-      - ${MODEL_PATH:-./models}:/data:ro
+      - ${MODEL_PATH:-./models}:/data/models:ro
     environment:
       - CUDA_VISIBLE_DEVICES=0
     deploy:
       resources:
+        limits:
+          cpus: "8.0"
+          memory: 16G
         reservations:
           devices:
             - driver: nvidia
               count: all
               capabilities: [gpu]
     command: >
-      --model /data/${MODEL:-smollm2.gguf}
+      --model /data/models/${MODEL:-smollm2.gguf}
       --interactive
       --prompt "You are a helpful AI assistant. "
 
 networks:
   default:
     name: quarrel-network
+    driver: bridge
+    internal: false

@@ -4,11 +4,8 @@ import (
 	"encoding/binary"
 	"runtime"
 	"sync"
-	"time"
 
 	"github.com/23skdu/longbow-quarrel/internal/mathx"
-
-	"github.com/23skdu/longbow-quarrel/internal/metrics"
 )
 
 // VNNI dot product function pointers (set from avx512.go when VNNI is available)
@@ -296,18 +293,10 @@ func VecDotQ8_0_VNNI(data []byte, vector []float32) float32 {
 		return 0
 	}
 
-	start := time.Now()
-	defer func() {
-		metrics.RecordVNNIDotProduct(time.Since(start))
-	}()
-
-	if HasAVXVNNI() || HasAMX() {
-		metrics.RecordSIMDDispatch("vnni_q8_0")
+	if HasAVXVNNI() || HasAMX() || useAVX2() {
 		if dotQ8_0VNNI != nil {
 			return dotQ8_0VNNI(data, vector, n)
 		}
-	} else {
-		metrics.RecordSIMDDispatch("fallback_q8_0")
 	}
 
 	var totalSum float32
@@ -347,18 +336,10 @@ func VecDotQ4_K_VNNI(data []byte, vector []float32) float32 {
 		return 0
 	}
 
-	start := time.Now()
-	defer func() {
-		metrics.RecordVNNIDotProduct(time.Since(start))
-	}()
-
-	if HasAVXVNNI() || HasAMX() {
-		metrics.RecordSIMDDispatch("vnni_q4_k")
+	if HasAVXVNNI() || HasAMX() || useAVX2() {
 		if dotQ4KVNNI != nil {
 			return dotQ4KVNNI(data, vector, n)
 		}
-	} else {
-		metrics.RecordSIMDDispatch("fallback_q4_k")
 	}
 
 	var totalSum float32

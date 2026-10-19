@@ -424,3 +424,113 @@ void fused_mlp_avx2(const float* input, const float* gateWeight,
     if (temp != tl_temp_avx2) free(temp);
 }
 
+// AVX2 Q8_0 dot product: 32 elements per block, 34 bytes (2B fp16 scale + 32B int8)
+float dot_q8_0_avx2(const uint8_t* data, const float* vector, int n) {
+    float sum = 0.0f;
+    int numBlocks = n / 32;
+    for (int b = 0; b < numBlocks; b++) {
+        const uint8_t* block = data + b * 34;
+        uint16_t scaleBits = (uint16_t)block[0] | ((uint16_t)block[1] << 8);
+        __m128i scale16 = _mm_set1_epi16((short)scaleBits);
+        float scale = _mm_cvtss_f32(_mm_cvtph_ps(scale16));
+        const int8_t* q = (const int8_t*)(block + 2);
+
+        __m256i w = _mm256_loadu_si256((const __m256i*)q);
+        __m128i lo16 = _mm256_castsi256_si128(w);
+        __m128i hi16 = _mm256_extracti128_si256(w, 1);
+
+        __m256i w0_i = _mm256_cvtepi8_epi32(lo16);
+        __m256i w1_i = _mm256_cvtepi8_epi32(_mm_srli_si128(lo16, 8));
+        __m256i w2_i = _mm256_cvtepi8_epi32(hi16);
+        __m256i w3_i = _mm256_cvtepi8_epi32(_mm_srli_si128(hi16, 8));
+
+        __m256 fw0 = _mm256_cvtepi32_ps(w0_i);
+        __m256 fw1 = _mm256_cvtepi32_ps(w1_i);
+        __m256 fw2 = _mm256_cvtepi32_ps(w2_i);
+        __m256 fw3 = _mm256_cvtepi32_ps(w3_i);
+
+        const float* vPtr = vector + b * 32;
+        __m256 v0 = _mm256_loadu_ps(vPtr);
+        __m256 v1 = _mm256_loadu_ps(vPtr + 8);
+        __m256 v2 = _mm256_loadu_ps(vPtr + 16);
+        __m256 v3 = _mm256_loadu_ps(vPtr + 24);
+
+        __m256 dot = _mm256_mul_ps(fw0, v0);
+        dot = _mm256_fmadd_ps(fw1, v1, dot);
+        dot = _mm256_fmadd_ps(fw2, v2, dot);
+        dot = _mm256_fmadd_ps(fw3, v3, dot);
+
+        sum += scale * hsum_avx2(dot);
+    }
+    return sum;
+}
+
+
+// AVX2 Q4_K dot product: 256 elements per block, 144 bytes
+float dot_q4_k_avx2(const uint8_t* data, const float* vector, int n) {
+    float sum = 0.0f;
+    int numBlocks = n / 256;
+    for (int b = 0; b < numBlocks; b++) {
+        const uint8_t* block = data + b * 144;
+        uint16_t dBits = (uint16_t)block[0] | ((uint16_t)block[1] << 8);
+        uint16_t dminBits = (uint16_t)block[2] | ((uint16_t)block[3] << 8);
+        float d = _mm_cvtss_f32(_mm_cvtph_ps(_mm_set1_epi16((short)dBits)));
+        float dmin = _mm_cvtss_f32(_mm_cvtph_ps(_mm_set1_epi16((short)dminBits)));
+
+        const uint8_t* sPtr = block + 4;
+        const uint8_t* qPtr = block + 16;
+        float blockSum = 0.0f;
+
+        for (int sb = 0; sb < 8; sb++) {
+            uint8_t sc, m;
+            if (sb < 4) {
+                sc = sPtr[sb] & 63;
+                m = sPtr[sb + 4] & 63;
+            } else {
+                sc = sPtr[sb + 4] & 0x0F;
+                m = sPtr[sb + 4] >> 4;
+            }
+            float step = (d * (float)sc) / 225.0f;
+            float mj = (float)m;
+
+            int qOffset = sb * 16;
+            int vBase = b * 256 + sb * 32;
+
+            __m128i q16 = _mm_loadu_si128((const __m128i*)(qPtr + qOffset));
+            __m128i lo_nib = _mm_and_si128(q16, _mm_set1_epi8(0x0F));
+            __m128i hi_nib = _mm_and_si128(_mm_srli_epi16(q16, 4), _mm_set1_epi8(0x0F));
+
+            __m256i lo0_i = _mm256_cvtepi8_epi32(lo_nib);
+            __m256i lo1_i = _mm256_cvtepi8_epi32(_mm_srli_si128(lo_nib, 8));
+            __m256i hi0_i = _mm256_cvtepi8_epi32(hi_nib);
+            __m256i hi1_i = _mm256_cvtepi8_epi32(_mm_srli_si128(hi_nib, 8));
+
+            __m256 flo0 = _mm256_cvtepi32_ps(lo0_i);
+            __m256 flo1 = _mm256_cvtepi32_ps(lo1_i);
+            __m256 fhi0 = _mm256_cvtepi32_ps(hi0_i);
+            __m256 fhi1 = _mm256_cvtepi32_ps(hi1_i);
+
+            const float* vPtr = vector + vBase;
+            __m256 v0 = _mm256_loadu_ps(vPtr);
+            __m256 v1 = _mm256_loadu_ps(vPtr + 8);
+            __m256 v2 = _mm256_loadu_ps(vPtr + 16);
+            __m256 v3 = _mm256_loadu_ps(vPtr + 24);
+
+            __m256 v_sum = _mm256_add_ps(_mm256_add_ps(v0, v1), _mm256_add_ps(v2, v3));
+            float vSum = hsum_avx2(v_sum);
+
+            __m256 dot = _mm256_mul_ps(flo0, v0);
+            dot = _mm256_fmadd_ps(flo1, v1, dot);
+            dot = _mm256_fmadd_ps(fhi0, v2, dot);
+            dot = _mm256_fmadd_ps(fhi1, v3, dot);
+            float dotVal = hsum_avx2(dot);
+
+            blockSum += step * (dotVal - mj * vSum);
+        }
+        sum += blockSum;
+    }
+    return sum;
+}
+
+
+

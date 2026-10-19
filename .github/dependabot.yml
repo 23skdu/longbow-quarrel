@@ -1,6 +1,6 @@
 version: 2
 updates:
-  # Go modules
+  # Root Go modules
   - package-ecosystem: "gomod"
     directory: "/"
     schedule:
@@ -26,6 +26,31 @@ updates:
           - "*"
         update-types:
           - "minor"
+          - "patch"
+
+  # WebUI Sub-module
+  - package-ecosystem: "gomod"
+    directory: "/cmd/webui"
+    schedule:
+      interval: "weekly"
+      day: "sunday"
+      time: "00:30"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "go"
+      - "webui"
+    commit-message:
+      prefix: "webui"
+    ignore:
+      - dependency-name: "github.com/23skdu/*"
+    groups:
+      webui-updates:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
 
   # npm packages (WebUI tests)
   - package-ecosystem: "npm"
@@ -41,8 +66,6 @@ updates:
       - "javascript"
     commit-message:
       prefix: "npm"
-    ignore:
-      - dependency-name: "@types/*"
     groups:
       testing-libraries:
         patterns:
@@ -51,40 +74,41 @@ updates:
         update-types:
           - "minor"
           - "patch"
-      development-tools:
+
+  # Docker images (Root Dockerfiles: CPU, NVIDIA, WebUI)
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "sunday"
+      time: "02:00"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "docker"
+    commit-message:
+      prefix: "docker"
+    groups:
+      docker-images:
         patterns:
-          - "@types/*"
+          - "*"
         update-types:
+          - "minor"
           - "patch"
 
-  # Docker images
+  # Docker images (WebUI directory)
   - package-ecosystem: "docker"
     directory: "/cmd/webui"
     schedule:
       interval: "weekly"
       day: "sunday"
-      time: "02:00"
+      time: "02:30"
     open-pull-requests-limit: 5
     labels:
       - "dependencies"
       - "docker"
     commit-message:
       prefix: "docker"
-    ignore:
-      - dependency-name: "nvidia/cuda*"
-      - dependency-name: "alpine*"
-    groups:
-      cuda-updates:
-        patterns:
-          - "nvidia/cuda*"
-        update-types:
-          - "minor"
-          - "patch"
-      runtime-updates:
-        patterns:
-          - "alpine*"
-        update-types:
-          - "patch"
 
   # GitHub Actions
   - package-ecosystem: "github-actions"
@@ -99,42 +123,10 @@ updates:
       - "github-actions"
     commit-message:
       prefix: "actions"
-    ignore:
-      - dependency-name: "actions/checkout"
-      - dependency-name: "actions/setup-go"
     groups:
-      core-actions:
+      ci-actions:
         patterns:
-          - "actions/checkout"
-          - "actions/setup-go"
-          - "actions/setup-node"
+          - "*"
         update-types:
-          - "major"
-      security-actions:
-        patterns:
-          - "github/codeql-action*"
-        update-types:
-          - "security-updates"
-
-  # Prometheus rules (if applicable)
-  - package-ecosystem: "prometheus"
-    directory: "/docker/prometheus/rules"
-    schedule:
-      interval: "monthly"
-    open-pull-requests-limit: 5
-    labels:
-      - "dependencies"
-      - "monitoring"
-    commit-message:
-      prefix: "prometheus"
-
-# Enable version updates for all
-enable-auto-merge: false
-
-# Auto-merge settings (optional - uncomment to enable)
-# auto-merge: true
-# auto-merge-method: squash
-
-# Exclude specific packages from automatic updates
-# exclude:
-#   - dependency-name: "golang.org/x/*"
+          - "minor"
+          - "patch"
