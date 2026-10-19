@@ -589,6 +589,19 @@ func (c *Context) NewTensorFP32(rows, cols int) *Tensor {
 	return c.newTensorFP32Internal(rows, cols)
 }
 
+// NewPagedKVPool allocates the paged KV cache pool for one layer.
+//
+// The Metal store and attention kernels read and write the pool as packed
+// half-precision values, so the pool has to be allocated with a two-byte
+// element type. The engine used to declare it float32, which allocated
+// twice the memory the cache actually needed and forced every host-side
+// read to decode the halves by hand.
+func (c *Context) NewPagedKVPool(capacity, kvDim int) *Tensor {
+	c.ExecMu.Lock()
+	defer c.ExecMu.Unlock()
+	return c.NewTensorWithType(capacity, kvDim, DataTypeF16)
+}
+
 func (c *Context) NewTensorFromData(rows, cols int, dt DataType, data []byte) (*Tensor, error) {
 	t := c.NewTensorWithType(rows, cols, dt)
 	if len(data) != t.sizeBytes {
@@ -2831,7 +2844,6 @@ func (ctx *Context) QKNormRMSNorm(q, k, qWeight, kWeight *Tensor, numTokens, num
 		k.LoadFrom(kData)
 	}
 }
-
 
 // StoreKVPagedBatch stores K and V projections for a batch of sequences into their respective physical blocks
 func (ctx *Context) StoreKVPagedBatch(k, v, kCache, vCache, physicalPositions *Tensor, kvDim, batchSize int) {

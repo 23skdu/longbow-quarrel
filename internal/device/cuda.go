@@ -213,6 +213,18 @@ func (ctx *Context) NewTensorFP32(rows, cols int) *Tensor {
 	return t
 }
 
+// NewPagedKVPool allocates the paged KV cache pool for one layer.
+//
+// The CUDA store and attention kernels read and write the pool as packed
+// half-precision values, so the pool has to be allocated with a two-byte
+// element type. The engine used to declare it float32, which allocated
+// twice the memory the cache actually needed and forced every host-side
+// read to decode the halves by hand.
+func (ctx *Context) NewPagedKVPool(capacity, kvDim int) *Tensor {
+	t, _ := ctx.NewTensor(capacity, kvDim, DataTypeF16)
+	return t
+}
+
 func (ctx *Context) NewTensorI32(rows, cols int) *Tensor {
 	t, _ := ctx.NewTensor(rows, cols, DataTypeI32)
 	return t
@@ -498,12 +510,27 @@ func (t *Tensor) StoreKV(v *Tensor, kCache, vCache *Tensor, pos, heads, headDim,
 	}
 
 	count := heads * headDim
-	if t.dataType == DataTypeF16 {
+	// The cache's element type decides the layout, not the source's: the
+	// paged pool holds packed half-precision values, so a float32 source
+	// has to be converted before it is copied in.
+	if kCache.dataType == DataTypeF16 {
 		offset := uintptr(pos%windowSize) * uintptr(count) * 2
 		kTarget := unsafe.Pointer(uintptr(kCache.devPtr) + offset)
 		vTarget := unsafe.Pointer(uintptr(vCache.devPtr) + offset)
-		C.cudaMemcpyAsync(kTarget, t.devPtr, C.size_t(count*2), C.cudaMemcpyDeviceToDevice, t.ctx.Ctx)
-		C.cudaMemcpyAsync(vTarget, v.devPtr, C.size_t(count*2), C.cudaMemcpyDeviceToDevice, t.ctx.Ctx)
+		if t.dataType == DataTypeF16 {
+			C.cudaMemcpyAsync(kTarget, t.devPtr, C.size_t(count*2), C.cudaMemcpyDeviceToDevice, t.ctx.Ctx)
+			C.cudaMemcpyAsync(vTarget, v.devPtr, C.size_t(count*2), C.cudaMemcpyDeviceToDevice, t.ctx.Ctx)
+			return
+		}
+		kHost := t.ToHostF32()
+		vHost := v.ToHostF32()
+		if len(kHost) < count || len(vHost) < count {
+			return
+		}
+		kHalf := Float32SliceToFloat16(kHost[:count])
+		vHalf := Float32SliceToFloat16(vHost[:count])
+		C.cudaMemcpy(kTarget, unsafe.Pointer(&kHalf[0]), C.size_t(len(kHalf)*2), C.cudaMemcpyHostToDevice)
+		C.cudaMemcpy(vTarget, unsafe.Pointer(&vHalf[0]), C.size_t(len(vHalf)*2), C.cudaMemcpyHostToDevice)
 	} else {
 		offset := uintptr(pos%windowSize) * uintptr(count) * 4
 		kTarget := unsafe.Pointer(uintptr(kCache.devPtr) + offset)
@@ -1554,7 +1581,6 @@ func (c *Context) QKNormRMSNorm(q, k, qWeight, kWeight *Tensor, numTokens, numQH
 		(*C.float)(qWPtr), (*C.float)(kWPtr),
 		C.int(numTokens), C.int(numQHeads), C.int(numKHeads), C.int(headDim), C.float(eps))
 }
-
 
 // StoreKVPagedBatch stores K and V projections into their respective physical blocks in the GPU cache pool.
 func (c *Context) StoreKVPagedBatch(k, v, kCache, vCache, physicalPositions *Tensor, kvDim, batchSize int) {

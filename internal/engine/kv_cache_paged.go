@@ -179,8 +179,14 @@ func (c *PagedKVCache) Init(ctx *device.Context, config config.Config) error {
 			k = ctx.NewTensorWithType(capacity, kvDim, device.DataTypeFP8)
 			v = ctx.NewTensorWithType(capacity, kvDim, device.DataTypeFP8)
 		default:
-			k = ctx.NewTensorFP32(capacity, kvDim)
-			v = ctx.NewTensorFP32(capacity, kvDim)
+			// The pool has to be allocated with the element type the
+			// backend's store and attention kernels actually use: float32
+			// on the CPU, packed half-precision values on the GPU
+			// backends. Declaring it float32 everywhere allocated twice
+			// the memory the cache needed on a GPU and forced every
+			// host-side read to decode the halves by hand.
+			k = ctx.NewPagedKVPool(capacity, kvDim)
+			v = ctx.NewPagedKVPool(capacity, kvDim)
 		}
 
 		if k == nil || v == nil {

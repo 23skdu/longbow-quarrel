@@ -501,8 +501,9 @@ Based on deep profiling of autoregressive decode loops, CUDA kernel execution pr
 > **Batch 1 (Steps 28, 31, 32, 34), Batch 2 (Steps 29, 30, 41, 42, 43,
 > 44, 45, 48), Batch 3 (Steps 33, 49), Batch 4 (Steps 37, 38, 39, 40, 46,
 > 47), Batch 5 (Steps 31, 35, 36, 44, 48), Batch 6 (Steps 35, 44), Batch 7
-> (Steps 44, 47), Batch 8 (Step 40) and Batch 9 (Step 40) are DONE** — see the
-> status markers on each step. Verified locally after the change:
+> (Steps 44, 47), Batch 8 (Step 40), Batch 9 (Step 40), Batch 10 (Step 35)
+> and Batch 11 (Step 35) are DONE** — see the status markers on each step.
+> Verified locally after the change:
 >
 > | Check | Command | Result |
 > |---|---|---|
@@ -1089,13 +1090,51 @@ Graphs, the multi-GPU TP/PP engine, the quantization tooling and the
 activation/audit logging. Each needs to be either wired behind a documented
 flag or removed.
 
-A related inconsistency is *not* fixed: the CUDA and Metal paged-KV pools are
-declared float32 but the store and attention kernels treat them as packed
-half-precision arrays. The two kernels agree with each other, so the cache
-works, but the pool is allocated at twice the size it needs and a host-side
-read of the pool has to decode the halves by hand. Aligning the declared type
-with the stored type is a separate change, because it affects the whole
-paged-attention path.
+**Batch 11 aligned the paged-KV pool's declared type with its stored type.**
+
+The CUDA and Metal paged-KV pools were declared float32, but the store and
+attention kernels treat them as packed half-precision arrays. The two
+kernels agree with each other, so the cache *worked*, but two things were
+wrong:
+
+- the pool was allocated at **twice** the size it needs, and
+- a host-side read of the pool had to decode the halves by hand.
+
+For a 7B-class model (32 layers, 8 KV heads, 128 head dim, 4K context) that
+is roughly 2 GB of VRAM allocated for a 1 GB cache — a direct contradiction
+of the "run models that exceed your GPU's VRAM" claim.
+
+The fix introduces `device.Context.NewPagedKVPool(capacity, kvDim)`, which
+each backend implements with the element type its kernels actually use:
+float32 on the CPU, packed half-precision values on CUDA and Metal. The
+engine allocates the pool through it.
+
+Everything that reads the pool on the host now works unchanged, because the
+device layer converts at the boundary: `ToHostF32` decodes the halves and
+`LoadFrom` encodes them, on both CUDA and Metal. The offload/restore
+tiering, the defragmentation and the block copy all round-trip correctly.
+
+Two related inconsistencies fell out of the change:
+
+- `device.Tensor.StoreKV` on CUDA branched on the **source** tensor's type
+  rather than the **cache's**, so it copied four bytes per element into a
+  two-byte-per-element pool. It now follows the cache's type and converts
+  the source when it has to.
+- The GPU test helper that read the pool had to reach into the raw bytes
+  and decode the halves by hand. The two backend-specific helpers collapsed
+  into one, which is the proof that the declared type now matches the
+  stored type.
+
+`internal/engine/kv_cache_pool_type_test.go` guards the invariant: it stores
+a value that half precision cannot represent exactly and checks that the
+read-back comes back half-rounded on the GPU and exact on the CPU, and that
+the pool occupies exactly the space its element type needs. Reverting the
+pool to the old float32 declaration makes it fail with garbage values
+(`K[0] = 2.003662, want 1`).
+
+**Not fixed:** the TPU backend has no `NewTensorFP32`, so the TPU build of
+`internal/engine` does not compile at all. It could not be checked here
+either, because the build needs `libtpu`.
 
 **Plan.** For each row, choose one: wire it behind a documented flag, or delete it. The volume here (~3,500 LOC) makes "delete" the better default for anything without a near-term plan — dead code in an inference engine is a correctness liability, not just clutter.
 
@@ -1460,6 +1499,11 @@ Two more live bugs surfaced:
 
 Both are fixed and covered by regression tests. The `internal/engine` package
 is now at 68.1%.
+
+**Batch 10** fixed the Arrow Flight protocol's silent corruption and a crash
+that only the GPU builds hit (see Step 35). **Batch 11** aligned the paged-KV
+pool's declared type with its stored type, which halves the KV cache's VRAM
+footprint on CUDA and Metal (see Step 35).
 
 **Still open:** raising `internal/engine` above 80%, and generating the README table from a script so it cannot drift apart from the floors again.
 

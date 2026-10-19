@@ -115,6 +115,13 @@ func NewTPUContext() (*Context, error) {
 	}, nil
 }
 
+// NewPagedKVPool allocates the paged KV cache pool for one layer.
+//
+// The TPU kernels read and write the pool as float32.
+func (ctx *Context) NewPagedKVPool(rows, cols int) *Tensor {
+	return ctx.NewTensor(rows, cols)
+}
+
 func (ctx *Context) NewTensor(rows, cols int) *Tensor {
 	size := rows * cols * 4
 	devPtr := C.tpuAllocate(C.size_t(size))

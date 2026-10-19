@@ -110,6 +110,15 @@ func (c *Context) NewTensorFP32(rows, cols int) *Tensor {
 	return c.NewTensor(rows, cols)
 }
 
+// NewPagedKVPool allocates the paged KV cache pool for one layer.
+//
+// The CPU reference kernels read and write the pool as float32, so that is
+// what the pool is allocated as. The GPU backends use packed half-precision
+// values and allocate it as float16 instead.
+func (c *Context) NewPagedKVPool(capacity, kvDim int) *Tensor {
+	return c.NewTensorFP32(capacity, kvDim)
+}
+
 func (c *Context) NewTensorFP32Pooled(rows, cols int) *Tensor {
 	return c.NewTensor(rows, cols)
 }
