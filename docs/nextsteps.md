@@ -161,7 +161,7 @@ Expose one API matching the subset the repo uses (`Exp`, `Log`, `Log2`, `Sqrt`, 
 
 Based on deep profiling of autoregressive decode loops, CUDA kernel execution profiles, SIMD vectorization bottlenecks, and runtime diagnostics (`gopls` build-tag isolation warnings on `cpu.go` and `simd_default.go`), the following 10 steps define the core performance engineering work for v1.0.0.
 
-#### Part 8 (Step 8): Split-K FlashDecoding & Cooperative Warp Reduction for PagedAttention
+#### Part 8 (Step 8): Split-K FlashDecoding & Cooperative Warp Reduction for PagedAttention (P0) — [IMPLEMENTED]
 - **Objective**: Eliminate GPU Streaming Multiprocessor (SM) starvation during autoregressive decoding on long contexts.
 - **Bottleneck Analysis**:
   - In `internal/device/cuda_kernels.cu:2028-2037` (`cudaPagedAttentionBatch`), the grid launch configuration is hardcoded as `dim3 grid(numTokens)` with `dim3 block(32, heads)`.
@@ -179,7 +179,7 @@ Based on deep profiling of autoregressive decode loops, CUDA kernel execution pr
 - **Files**: `internal/device/cuda_kernels.cu`, `internal/device/cuda.go`, `internal/device/cuda_wrapper.c`, `internal/engine/kv_cache_paged.go`
 - **Acceptance Criteria**: Single-token decode latency on context lengths $\ge 8\text{k}$ tokens drops by $\ge 8\times$ (from $\sim 35$ms to $<4$ms); GPU SM occupancy during decode increases from $<5\%$ to $>75\%$.
 
-#### Part 9 (Step 9): GPU-Native Fused QK-Norm & RoPE Elimination of CPU Fallback
+#### Part 9 (Step 9): GPU-Native Fused QK-Norm & RoPE Elimination of CPU Fallback (P0) — [IMPLEMENTED]
 - **Objective**: Prevent CPU layer fallback and eliminate all GPU-host ping-pong memory copies for models utilizing per-head QK normalization (Qwen 2.5, Qwen 3.5, Gemma 2/4).
 - **Bottleneck Analysis**:
   - In `internal/engine/engine_cuda.go:512-536`, `needsCPU` triggers whenever:
@@ -210,7 +210,7 @@ Based on deep profiling of autoregressive decode loops, CUDA kernel execution pr
 - **Files**: `internal/device/cuda_graph.go`, `internal/device/cuda.go`, `internal/device/cuda_wrapper.c`, `internal/engine/engine_cuda.go`
 - **Acceptance Criteria**: Host CPU dispatch time per decode step drops from $>3.0$ms to $<150\,\mu$s; end-to-end token generation throughput on low batch sizes improves by $30\text{--}50\%$.
 
-#### Part 11 (Step 11): Persistent Thread Worker Pool & Zero-Allocation Scratchpad for CPU Inference
+#### Part 11 (Step 11): Persistent Thread Worker Pool & Zero-Allocation Scratchpad for CPU Inference (P0) — [IMPLEMENTED]
 - **Objective**: Eliminate Go runtime goroutine creation thrashing and GC allocation pressure in CPU-based layer execution.
 - **Bottleneck Analysis**:
   - In `internal/gguf/dequant_simd.go:196` (`MatVecMulQ4_K`), every matrix-vector multiplication queries `workers := runtime.GOMAXPROCS(0)` and dynamically spawns goroutines: `for w := 0; w < workers; w++ { go func(...) }` managed by `sync.WaitGroup`.
@@ -282,7 +282,7 @@ Based on deep profiling of autoregressive decode loops, CUDA kernel execution pr
 - **Files**: `internal/engine/continuous_batching.go`, `internal/engine/engine_cuda.go`, `internal/engine/engine_cpu.go`
 - **Acceptance Criteria**: Multi-tenant serving throughput (aggregate tok/s across concurrent streams) increases by $\ge 50\%$; Time-to-First-Token (TTFT) degradation during high-concurrency decode drops by $\ge 40\%$.
 
-#### Part 15 (Step 15): Ahead-of-Time Weight Packing & Cache-Line Blocked Transposition
+#### Part 15 (Step 15): Ahead-of-Time Weight Packing & Cache-Line Blocked Transposition (P1) — [IMPLEMENTED]
 - **Objective**: Eliminate runtime matrix transposition and optimize spatial memory locality for CPU and GPU GEMM kernels.
 - **Bottleneck Analysis**:
   - In `internal/simd/simd.go:58-64` (`MatMul`), matrix $\mathbf{B}$ is dynamically allocated and transposed on every invocation:
