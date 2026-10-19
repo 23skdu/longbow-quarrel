@@ -134,13 +134,18 @@ func (cm *ContinuousBatchManager) PreemptLowestPriority(kvCache *PagedKVCache) u
 	seq := cm.running[lowestID]
 	delete(cm.running, lowestID)
 
-	// Free KV blocks for this sequence
+	// Offload or free KV blocks for this sequence to pinned host RAM
+	offloaded := false
 	if kvCache != nil {
 		seqIDStr := fmt.Sprintf("seq-%d", lowestID)
-		kvCache.FreeSequence(seqIDStr)
+		if err := kvCache.OffloadSequence(seqIDStr); err == nil {
+			offloaded = true
+		} else {
+			kvCache.FreeSequence(seqIDStr)
+		}
 	}
 
-	// Re-queue as a new request (preserving prompt, resetting position)
+	// Re-queue as a new request (preserving prompt and prefill state if offloaded)
 	requeue := &InferenceRequest{
 		ID:               seq.ID,
 		Prompt:           seq.Tokens[:seq.PromptLen],
@@ -155,7 +160,7 @@ func (cm *ContinuousBatchManager) PreemptLowestPriority(kvCache *PagedKVCache) u
 		Speculative:      seq.Speculative,
 		DraftK:           seq.DraftK,
 		NumPaths:         seq.NumPaths,
-		PrefillCompleted: false,
+		PrefillCompleted: offloaded && seq.PrefillCompleted,
 	}
 	cm.waitingQueue.Push(requeue)
 
@@ -284,6 +289,11 @@ func (cm *ContinuousBatchManager) Step(maxBatchSize int, kvCache *PagedKVCache, 
 			if matchedCount > 0 {
 				_ = kvCache.AttachPrefixBlocks(seqIDStr, cachedBlocks)
 				seq.Pos = matchedCount
+			} else if kvCache != nil && kvCache.IsOffloaded(seqIDStr) {
+				if err := kvCache.RestoreSequence(seqIDStr); err == nil {
+					seq.Pos = seq.PromptLen
+					seq.PrefillCompleted = true
+				}
 			}
 
 			cm.prefill[seq.ID] = seq

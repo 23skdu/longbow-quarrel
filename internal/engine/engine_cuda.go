@@ -325,16 +325,6 @@ func (e *cudaEngine) runBatchLoop() {
 
 		// 3. Sampling & Update
 		for i, seq := range desc.Sequences {
-			logits := results[i].ToHostF32()
-			results[i].Free()
-
-			if e.config.FinalLogitSoftcapping > 0 {
-				capVal := e.config.FinalLogitSoftcapping
-				for j := range logits {
-					logits[j] = capVal * float32(mathx.Tanh(float64(logits[j]/capVal)))
-				}
-			}
-
 			// Update Sequence State
 			chunkLen := 1
 			if i < len(desc.Offsets)-1 {
@@ -345,16 +335,46 @@ func (e *cudaEngine) runBatchLoop() {
 
 			// If this is an intermediate prefill chunk, just advance position and continue
 			if i < len(desc.IsDecode) && !desc.IsDecode[i] && seq.Pos+chunkLen < seq.PromptLen {
+				results[i].Free()
 				seq.Pos += chunkLen
 				continue
 			}
 
-			if seq.LogitsCallback != nil {
-				seq.LogitsCallback(logits)
-			}
+			var token int
+			if seq.LogitsCallback == nil && seq.Config.Grammar == nil && e.config.FinalLogitSoftcapping == 0 {
+				prevTokens := make([]int32, len(seq.Tokens))
+				for idx, t := range seq.Tokens {
+					prevTokens[idx] = int32(t)
+				}
+				token = e.ctx.SampleTopKTopP(
+					results[i],
+					prevTokens,
+					float32(seq.Config.RepPenalty),
+					float32(seq.Config.FrequencyPenalty),
+					float32(seq.Config.PresencePenalty),
+					float32(seq.Config.Temperature),
+					seq.Config.TopK,
+					float32(seq.Config.TopP),
+					uint64(time.Now().UnixNano()),
+					e.config.VocabSize,
+				)
+				results[i].Free()
+			} else {
+				logits := results[i].ToHostF32()
+				results[i].Free()
 
-			sampler := NewSampler(seq.Config)
-			token := sampler.Sample(logits, seq.Tokens)
+				if e.config.FinalLogitSoftcapping > 0 {
+					capVal := e.config.FinalLogitSoftcapping
+					for j := range logits {
+						logits[j] = capVal * float32(mathx.Tanh(float64(logits[j]/capVal)))
+					}
+				}
+				if seq.LogitsCallback != nil {
+					seq.LogitsCallback(logits)
+				}
+				sampler := NewSampler(seq.Config)
+				token = sampler.Sample(logits, seq.Tokens)
+			}
 
 			// Record TTFT on first generated token
 			if !seq.PrefillCompleted || len(seq.Tokens) == seq.PromptLen {

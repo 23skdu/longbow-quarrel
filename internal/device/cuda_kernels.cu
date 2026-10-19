@@ -4,25 +4,122 @@
 #include <math.h>
 #include <float.h>
 #include <cuda_fp16.h>
+#include <stdint.h>
 
 // =============================================================================
 // Standard Operations
 // =============================================================================
 
+// =============================================================================
+// Cooperative Warp & Block Reduction Primitives
+// =============================================================================
+
+__device__ __forceinline__ float warpReduceSum(float val) {
+    #pragma unroll
+    for (int offset = 16; offset > 0; offset /= 2) {
+        val += __shfl_down_sync(0xffffffff, val, offset);
+    }
+    return val;
+}
+
+__device__ __forceinline__ float blockReduceSum(float val) {
+    __shared__ float shared[32]; // Up to 1024 threads (32 warps)
+    int lane = threadIdx.x % 32;
+    int wid = threadIdx.x / 32;
+
+    val = warpReduceSum(val);
+    if (lane == 0) {
+        shared[wid] = val;
+    }
+    __syncthreads();
+
+    val = (threadIdx.x < (blockDim.x + 31) / 32) ? shared[lane] : 0.0f;
+    if (wid == 0) {
+        val = warpReduceSum(val);
+    }
+    return val;
+}
+
+__device__ __forceinline__ float warpReduceMax(float val) {
+    #pragma unroll
+    for (int offset = 16; offset > 0; offset /= 2) {
+        val = fmaxf(val, __shfl_down_sync(0xffffffff, val, offset));
+    }
+    return val;
+}
+
+__device__ __forceinline__ float blockReduceMax(float val) {
+    __shared__ float shared[32];
+    int lane = threadIdx.x % 32;
+    int wid = threadIdx.x / 32;
+
+    val = warpReduceMax(val);
+    if (lane == 0) {
+        shared[wid] = val;
+    }
+    __syncthreads();
+
+    val = (threadIdx.x < (blockDim.x + 31) / 32) ? shared[lane] : -1e38f;
+    if (wid == 0) {
+        val = warpReduceMax(val);
+    }
+    return val;
+}
+
 __global__ void rmsnorm_kernel(float* input, float* weight, float* output, int rows, int cols, float eps) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    
-    for (int i = idx; i < rows; i += gridDim.x * blockDim.x) {
+    __shared__ float s_rms;
+    bool aligned = (((uintptr_t)input % 16 == 0) &&
+                    ((uintptr_t)weight % 16 == 0) &&
+                    ((uintptr_t)output % 16 == 0) &&
+                    (cols % 4 == 0));
+
+    for (int r = blockIdx.x; r < rows; r += gridDim.x) {
+        const float* in_row = input + r * cols;
+        float* out_row = output + r * cols;
+
         float sum = 0.0f;
-        for (int j = 0; j < cols; j++) {
-            float val = input[i * cols + j];
-            sum += val * val;
+        if (aligned) {
+            const float4* in_v = reinterpret_cast<const float4*>(in_row);
+            int num_v = cols / 4;
+            for (int j = threadIdx.x; j < num_v; j += blockDim.x) {
+                float4 v = in_v[j];
+                sum += v.x * v.x + v.y * v.y + v.z * v.z + v.w * v.w;
+            }
+        } else {
+            for (int j = threadIdx.x; j < cols; j += blockDim.x) {
+                float v = in_row[j];
+                sum += v * v;
+            }
         }
-        float rms = sqrtf(sum / cols + eps);
-        
-        for (int j = 0; j < cols; j++) {
-            output[i * cols + j] = (input[i * cols + j] / rms) * weight[j];
+
+        float total_sum = blockReduceSum(sum);
+        if (threadIdx.x == 0) {
+            s_rms = rsqrtf(total_sum / (float)cols + eps);
         }
+        __syncthreads();
+
+        float inv_rms = s_rms;
+        if (aligned) {
+            const float4* in_v = reinterpret_cast<const float4*>(in_row);
+            const float4* w_v = reinterpret_cast<const float4*>(weight);
+            float4* out_v = reinterpret_cast<float4*>(out_row);
+            int num_v = cols / 4;
+            for (int j = threadIdx.x; j < num_v; j += blockDim.x) {
+                float4 v = in_v[j];
+                float4 w = w_v[j];
+                float4 o;
+                o.x = v.x * inv_rms * w.x;
+                o.y = v.y * inv_rms * w.y;
+                o.z = v.z * inv_rms * w.z;
+                o.w = v.w * inv_rms * w.w;
+                out_v[j] = o;
+            }
+        } else {
+            for (int j = threadIdx.x; j < cols; j += blockDim.x) {
+                out_row[j] = in_row[j] * inv_rms * weight[j];
+            }
+        }
+        __syncthreads();
     }
 }
 
@@ -38,22 +135,43 @@ __global__ void swiglu_kernel(float* gate, float* up, float* output, int size) {
 }
 
 __global__ void softmax_kernel(float* input, float* output, int rows, int cols) {
-    int row = blockIdx.x;
-    
-    if (row < rows) {
-        float maxVal = -INFINITY;
-        for (int j = 0; j < cols; j++) {
-            maxVal = fmaxf(maxVal, input[row * cols + j]);
+    __shared__ float s_max;
+    __shared__ float s_sum;
+    for (int r = blockIdx.x; r < rows; r += gridDim.x) {
+        const float* in_row = input + r * cols;
+        float* out_row = output + r * cols;
+
+        // Pass 1: compute max across columns
+        float thread_max = -1e38f;
+        for (int j = threadIdx.x; j < cols; j += blockDim.x) {
+            thread_max = fmaxf(thread_max, in_row[j]);
         }
-        
-        float sum = 0.0f;
-        for (int j = 0; j < cols; j++) {
-            sum += expf(input[row * cols + j] - maxVal);
+        float total_max = blockReduceMax(thread_max);
+        if (threadIdx.x == 0) {
+            s_max = total_max;
         }
-        
-        for (int j = 0; j < cols; j++) {
-            output[row * cols + j] = expf(input[row * cols + j] - maxVal) / sum;
+        __syncthreads();
+
+        float max_val = s_max;
+
+        // Pass 2: compute sum of exp(x - max)
+        float thread_sum = 0.0f;
+        for (int j = threadIdx.x; j < cols; j += blockDim.x) {
+            thread_sum += expf(in_row[j] - max_val);
         }
+        float total_sum = blockReduceSum(thread_sum);
+        if (threadIdx.x == 0) {
+            s_sum = total_sum > 0.0f ? (1.0f / total_sum) : 0.0f;
+        }
+        __syncthreads();
+
+        float inv_sum = s_sum;
+
+        // Pass 3: normalize
+        for (int j = threadIdx.x; j < cols; j += blockDim.x) {
+            out_row[j] = expf(in_row[j] - max_val) * inv_sum;
+        }
+        __syncthreads();
     }
 }
 
@@ -100,6 +218,7 @@ __global__ void silu_kernel(float* input, float* output, int size) {
 // =============================================================================
 #include "cuda_moe.cu"
 #include "cuda_mla.cu"
+#include "cuda_sampling.cu"
 
 
 // =============================================================================
@@ -378,7 +497,8 @@ __global__ void dequant_q6_k_to_bf16_kernel(const unsigned char* __restrict__ sr
 
 extern "C" {
     void cudaRMSNormF16(cudaStream_t stream, void* input, void* weight, void* output, int rows, int cols, float eps) {
-        rmsnorm_kernel<<<256, 256, 0, stream>>>((float*)input, (float*)weight, (float*)output, rows, cols, eps);
+        int blocks = (rows > 65535) ? 65535 : (rows > 0 ? rows : 1);
+        rmsnorm_kernel<<<blocks, 256, 0, stream>>>((float*)input, (float*)weight, (float*)output, rows, cols, eps);
     }
     
     void cudaSwiGLUF16(cudaStream_t stream, void* gate, void* up, void* output, int size) {
@@ -386,7 +506,8 @@ extern "C" {
     }
     
     void cudaSoftmaxF16(cudaStream_t stream, void* input, void* output, int rows, int cols) {
-        softmax_kernel<<<rows, 256, 0, stream>>>((float*)input, (float*)output, rows, cols);
+        int blocks = (rows > 65535) ? 65535 : (rows > 0 ? rows : 1);
+        softmax_kernel<<<blocks, 256, 0, stream>>>((float*)input, (float*)output, rows, cols);
     }
     
     void cudaRoPEF16(cudaStream_t stream, void* tensor, int pos, int heads, int headDim, float theta) {
@@ -1629,6 +1750,7 @@ __global__ void paged_attention_kernel(
 
     // Iterate through all blocks for this sequence
     int numBlocksNeeded = (pos + 1 + blockSize - 1) / blockSize;
+    if (numBlocksNeeded > maxBlocks) numBlocksNeeded = maxBlocks;
     for (int b = 0; b < numBlocksNeeded; b++) {
         int physicalBlockIdx = blockTables[seqIdx * maxBlocks + b];
         int tokensInThisBlock = (b == numBlocksNeeded - 1) ? (pos % blockSize) + 1 : blockSize;
@@ -1960,6 +2082,7 @@ __global__ void paged_attention_quantized_kernel(
     for (int d = 0; d < headDim; d++) res[d] = 0.0f;
 
     int numBlocksNeeded = (pos + 1 + blockSize - 1) / blockSize;
+    if (numBlocksNeeded > maxBlocks) numBlocksNeeded = maxBlocks;
     for (int b = 0; b < numBlocksNeeded; b++) {
         int physicalBlockIdx = blockTables[seqIdx * maxBlocks + b];
         int tokensInThisBlock = (b == numBlocksNeeded - 1) ? (pos % blockSize) + 1 : blockSize;

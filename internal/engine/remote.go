@@ -8,16 +8,19 @@ import (
 	"github.com/23skdu/longbow-quarrel/internal/arrow_client"
 	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/device"
+	"github.com/23skdu/longbow-quarrel/internal/logger"
 	"github.com/23skdu/longbow-quarrel/internal/metrics"
 )
 
 // RemoteWorkerEngine is an implementation of DistributedEngine that
 // offloads execution to a remote Arrow Flight worker node.
 type RemoteWorkerEngine struct {
-	client    *arrow_client.FlightClient
-	config    config.Config
-	role      ShardRole
-	deviceCtx *device.Context
+	client         *arrow_client.FlightClient
+	fallbackClient *arrow_client.FlightClient
+	nextStageAddr  string
+	config         config.Config
+	role           ShardRole
+	deviceCtx      *device.Context
 }
 
 func NewRemoteWorkerEngine(host string, port int, cfg config.Config) (*RemoteWorkerEngine, error) {
@@ -25,12 +28,33 @@ func NewRemoteWorkerEngine(host string, port int, cfg config.Config) (*RemoteWor
 	if err != nil {
 		return nil, err
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = client.Connect(ctx)
 
 	return &RemoteWorkerEngine{
 		client: client,
 		config: cfg,
 		role:   RoleWorker,
 	}, nil
+}
+
+// SetFallbackWorker configures an alternative worker to handle requests if primary fails.
+func (e *RemoteWorkerEngine) SetFallbackWorker(host string, port int) error {
+	fb, err := arrow_client.NewFlightClient(host, port, host, port+1)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = fb.Connect(ctx)
+	e.fallbackClient = fb
+	return nil
+}
+
+// SetNextStage configures pipeline stage chaining target address.
+func (e *RemoteWorkerEngine) SetNextStage(host string, port int) {
+	e.nextStageAddr = fmt.Sprintf("%s:%d", host, port)
 }
 
 func (e *RemoteWorkerEngine) SetDeviceContext(ctx *device.Context) {
@@ -44,6 +68,9 @@ func (e *RemoteWorkerEngine) Close() {
 	}
 	if e.client != nil {
 		_ = e.client.Close()
+	}
+	if e.fallbackClient != nil {
+		_ = e.fallbackClient.Close()
 	}
 }
 
@@ -282,11 +309,18 @@ func (e *RemoteWorkerEngine) ForwardBatch(batch *BatchDescriptor) ([]*device.Ten
 		if idx < len(batch.AdapterIDs) && batch.AdapterIDs[idx] != "" {
 			meta["adapter_id"] = batch.AdapterIDs[idx]
 		}
+		if e.nextStageAddr != "" {
+			meta["next_stage"] = e.nextStageAddr
+		}
 
 		// Forward each sequence through the remote worker via DoPutTensor
 		t0 := time.Now()
 		// #nosec G115 -- safe: sequence token count is bounded and fits in int32
 		resultData, err := e.client.DoPutTensor(ctx, tokenData, []int32{int32(len(seqTokens))}, meta)
+		if err != nil && e.fallbackClient != nil {
+			logger.Log.Warn("Primary worker failed in ForwardBatch, failing over to fallback worker", "error", err)
+			resultData, err = e.fallbackClient.DoPutTensor(ctx, tokenData, []int32{int32(len(seqTokens))}, meta)
+		}
 		if err != nil {
 			for j := 0; j < idx; j++ {
 				if results[j] != nil {
@@ -432,10 +466,17 @@ func (e *RemoteWorkerEngine) ForwardShardedLayer(ctx context.Context, layerIdx i
 		"rows":      fmt.Sprintf("%d", input.Rows()),
 		"cols":      fmt.Sprintf("%d", input.Cols()),
 	}
+	if e.nextStageAddr != "" {
+		meta["next_stage"] = e.nextStageAddr
+	}
 
 	// Send input tensor to worker via DoPut
 	t0 := time.Now()
 	resultData, err := e.client.DoPutTensor(ctx, inputData, []int32{int32(input.Rows())}, meta) // #nosec G115 -- safe: Rows() is bounded by model config
+	if err != nil && e.fallbackClient != nil {
+		logger.Log.Warn("Primary worker failed in ForwardShardedLayer, failing over to fallback worker", "error", err)
+		resultData, err = e.fallbackClient.DoPutTensor(ctx, inputData, []int32{int32(input.Rows())}, meta)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("DoPutTensor failed: %w", err)
 	}

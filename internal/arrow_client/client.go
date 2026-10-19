@@ -2,8 +2,10 @@ package arrow_client
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 	"sync/atomic"
 	"time"
 
@@ -73,6 +75,79 @@ func (fc *FlightClient) Connect(ctx context.Context) error {
 
 	fc.client = client
 	return nil
+}
+
+// ConnectWithRetry attempts to connect with exponential backoff.
+func (fc *FlightClient) ConnectWithRetry(ctx context.Context, maxRetries int, initialBackoff time.Duration) error {
+	if maxRetries <= 0 {
+		maxRetries = 3
+	}
+	if initialBackoff <= 0 {
+		initialBackoff = 50 * time.Millisecond
+	}
+
+	backoff := initialBackoff
+	var lastErr error
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		err := fc.Connect(ctx)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff):
+			backoff *= 2
+		}
+	}
+	return fmt.Errorf("failed to connect after %d retries: %w", maxRetries, lastErr)
+}
+
+// Ping checks server liveness.
+func (fc *FlightClient) Ping(ctx context.Context) error {
+	if fc.client == nil {
+		if err := fc.Connect(ctx); err != nil {
+			return err
+		}
+	}
+	stream, err := fc.client.ListActions(ctx, &flight.Empty{})
+	if err != nil {
+		return err
+	}
+	for {
+		_, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// StartHeartbeat monitors connectivity in the background, executing onFail when unreachable.
+func (fc *FlightClient) StartHeartbeat(ctx context.Context, interval time.Duration, onFail func()) {
+	if interval <= 0 {
+		interval = 500 * time.Millisecond
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := fc.Ping(ctx); err != nil {
+					if onFail != nil {
+						onFail()
+					}
+				}
+			}
+		}
+	}()
 }
 
 // Close disconnects from Flight server
@@ -299,8 +374,16 @@ func (fc *FlightClient) DoPutTensor(ctx context.Context, data []float32, rows []
 		return []float32{}, nil
 	}
 
-	// Extract result data if available
+	// Extract result data if available from PutResult AppMetadata
 	resultData := make([]float32, 0)
+	if len(result.AppMetadata) > 0 && len(result.AppMetadata)%4 == 0 {
+		count := len(result.AppMetadata) / 4
+		resultData = make([]float32, count)
+		for i := 0; i < count; i++ {
+			bits := binary.LittleEndian.Uint32(result.AppMetadata[i*4 : (i+1)*4])
+			resultData[i] = math.Float32frombits(bits)
+		}
+	}
 
 	logger.Log.Info("DoPutTensor completed", "input_size", len(data), "output_size", len(resultData), "metadata", metadata)
 

@@ -37,7 +37,9 @@ extern void cudaDequantQ6_KToBF16(cudaStream_t stream, void* src, void* dst, int
 // Basic math kernels
 extern void cudaAdd(float* a, float* b, float* out, int size, cudaStream_t stream);
 extern void cudaRMSNorm(float* input, float* weight, float* output, int rows, int cols, float eps, cudaStream_t stream);
+extern void cudaSoftmax(float* input, float* output, int rows, int cols, cudaStream_t stream);
 extern void cudaSwiGLU(float* gate, float* up, float* output, int size, cudaStream_t stream);
+extern int cudaSample(float* logits, const int32_t* prevTokens, int numPrevTokens, float repetitionPenalty, float frequencyPenalty, float presencePenalty, float temperature, int topK, float topP, unsigned long long seed, int vocabSize, cudaStream_t stream);
 
 // Fused kernel exports
 extern void cudaFusedAttention(cudaStream_t stream, const void* q, const void* k, const void* v, void* output, const void* kCache, const void* vCache, int batch, int heads, int seqLen, int kvSeqLen, int headDim, float scale, int useCache, int windowSize);
@@ -620,6 +622,34 @@ func dequantizeBlockCUDA(src []byte, dst []float32, blockSize, qjlRows int, rotD
 
 func (ctx *Context) RMSNorm(input, weight, output *Tensor, rows, cols int, eps float32) {
 	C.cudaRMSNorm((*C.float)(input.devPtr), (*C.float)(weight.devPtr), (*C.float)(output.devPtr), C.int(rows), C.int(cols), C.float(eps), ctx.Ctx)
+}
+
+func (ctx *Context) Softmax(input, output *Tensor, rows, cols int) {
+	C.cudaSoftmax((*C.float)(input.devPtr), (*C.float)(output.devPtr), C.int(rows), C.int(cols), ctx.Ctx)
+}
+
+func (ctx *Context) SampleTopKTopP(logits *Tensor, prevTokens []int32, repetitionPenalty, frequencyPenalty, presencePenalty, temperature float32, topK int, topP float32, seed uint64, vocabSize int) int {
+	var prevPtr *C.int32_t
+	numPrev := C.int(0)
+	if len(prevTokens) > 0 {
+		prevPtr = (*C.int32_t)(&prevTokens[0])
+		numPrev = C.int(len(prevTokens))
+	}
+	res := C.cudaSample(
+		(*C.float)(logits.devPtr),
+		prevPtr,
+		numPrev,
+		C.float(repetitionPenalty),
+		C.float(frequencyPenalty),
+		C.float(presencePenalty),
+		C.float(temperature),
+		C.int(topK),
+		C.float(topP),
+		C.ulonglong(seed),
+		C.int(vocabSize),
+		ctx.Ctx,
+	)
+	return int(res)
 }
 
 func (ctx *Context) Add(a, b, out *Tensor, size int) {

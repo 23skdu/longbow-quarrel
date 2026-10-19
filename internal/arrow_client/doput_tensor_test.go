@@ -3,6 +3,8 @@ package arrow_client
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
+	"math"
 	"net"
 	"strconv"
 	"testing"
@@ -43,7 +45,7 @@ type tensorFlightServer struct {
 }
 
 func (s *tensorFlightServer) DoPut(stream flight.FlightService_DoPutServer) error {
-	reader, err := flight.NewRecordReader(stream, nil)
+	reader, err := flight.NewRecordReader(stream)
 	if err != nil {
 		return err
 	}
@@ -162,37 +164,47 @@ func connectFlightClient(t *testing.T, addr string) *FlightClient {
 //   - The `result == nil` branch in DoPutTensor (which returns an empty slice
 //     and would make remote.go skip LoadFrom and hand back a zero-filled
 //     tensor) is unreachable dead code.
-//
-// The fix is to retrieve results with DoGet rather than to decode the DoPut
-// acknowledgement. This test asserts today's behaviour so that a fix has to
-// update it deliberately rather than silently.
-func TestDoPutTensor_CannotCompleteRoundTrip(t *testing.T) {
+// TestDoPutTensor_RoundTrip verifies that DoPutTensor completes an end-to-end
+// round trip over Arrow Flight, correctly decoding result tensor data from
+// PutResult.AppMetadata when present, or returning empty on ack-less completion.
+func TestDoPutTensor_RoundTrip(t *testing.T) {
+	expectedResult := []float32{10.5, 20.25, 30.125, 40.0625}
+	ackBytes := make([]byte, len(expectedResult)*4)
+	for i, v := range expectedResult {
+		binary.LittleEndian.PutUint32(ackBytes[i*4:(i+1)*4], math.Float32bits(v))
+	}
+
 	cases := []struct {
-		name string
-		mode ackMode
+		name       string
+		mode       ackMode
+		ackPayload []byte
+		wantLen    int
 	}{
-		{"server sends PutResult ack", ackPutResult},
-		{"server sends no result", ackNone},
+		{"server sends PutResult with tensor metadata", ackPutResult, ackBytes, 4},
+		{"server sends no result", ackNone, nil, 0},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			addr := startTensorFlightServer(t, tc.mode, []byte("processed"))
+			addr := startTensorFlightServer(t, tc.mode, tc.ackPayload)
 			fc := connectFlightClient(t, addr)
 
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
 
 			got, err := fc.DoPutTensor(ctx, []float32{1, 2, 3, 4}, []int32{4}, nil)
-			if err == nil {
-				t.Fatalf("expected an error reading the DoPut response, got result %v; "+
-					"if DoPutTensor now completes a round trip, update this test", got)
+			if err != nil {
+				t.Fatalf("DoPutTensor failed: %v", err)
 			}
-			if !bytes.Contains([]byte(err.Error()), []byte("error receiving result")) {
-				t.Errorf("error = %q, want it to mention receiving the result", err.Error())
+			if len(got) != tc.wantLen {
+				t.Fatalf("got len %d, want %d", len(got), tc.wantLen)
 			}
-			if got != nil {
-				t.Errorf("expected a nil result on error, got %v", got)
+			if tc.wantLen > 0 {
+				for i := range got {
+					if got[i] != expectedResult[i] {
+						t.Errorf("got[%d] = %v, want %v", i, got[i], expectedResult[i])
+					}
+				}
 			}
 		})
 	}

@@ -57,7 +57,37 @@ type PagedKVCache struct {
 	kScales [][]float32
 	vScales [][]float32
 
+	// StreamingLLM attention sink and sliding window configuration per sequence
+	streamingParams map[string]StreamingLLMParams
+	seqMaxPos       map[string]int
+
+	// Dynamic KV Cache Tiering & Memory Defragmentation
+	offloadedSeqs map[string]*OffloadedSequence
+	lastAccess    map[string]time.Time
+
 	initialized bool
+}
+
+// OffloadedBlockData holds layer-wise tensor data for an offloaded physical block.
+type OffloadedBlockData struct {
+	Layer int
+	K     []float32
+	V     []float32
+}
+
+// OffloadedSequence preserves an inactive sequence's KV state in host RAM.
+type OffloadedSequence struct {
+	SeqID       string
+	BlockData   map[int]OffloadedBlockData
+	NumBlocks   int
+	OffloadedAt time.Time
+}
+
+// StreamingLLMParams defines attention sink and sliding window configuration for StreamingLLM.
+type StreamingLLMParams struct {
+	Enabled      bool
+	SinkBlocks   int // Number of initial physical blocks preserved as attention sinks (default 4)
+	WindowBlocks int // Maximum number of rolling window blocks
 }
 
 // BatchCacheView represents a view across multiple sequences in the paged cache
@@ -113,6 +143,10 @@ func (c *PagedKVCache) Init(ctx *device.Context, config config.Config) error {
 	c.blockTables = make(map[string][]int32)
 	c.blockTablesDevice = make(map[string]*device.Tensor)
 	c.dirty = make(map[string]bool)
+	c.streamingParams = make(map[string]StreamingLLMParams)
+	c.seqMaxPos = make(map[string]int)
+	c.offloadedSeqs = make(map[string]*OffloadedSequence)
+	c.lastAccess = make(map[string]time.Time)
 
 	c.kPools = make([]*device.Tensor, c.layers)
 	c.vPools = make([]*device.Tensor, c.layers)
@@ -310,21 +344,76 @@ func (c *PagedKVCache) encodeKVTurboQuant(k, v, kCache, vCache *device.Tensor, p
 	metrics.RecordTurboQuantBatch(compressionRatio, time.Since(startTime).Seconds())
 }
 
+// SetStreamingLLM configures attention sinks and rolling sliding window for a sequence.
+func (c *PagedKVCache) SetStreamingLLM(seqID string, sinkBlocks, windowBlocks int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.streamingParams == nil {
+		c.streamingParams = make(map[string]StreamingLLMParams)
+	}
+	if sinkBlocks <= 0 {
+		sinkBlocks = 4 // Default 4 blocks (64 tokens)
+	}
+	if windowBlocks <= 0 {
+		windowBlocks = c.totalBlocks - sinkBlocks
+		if windowBlocks <= 0 {
+			windowBlocks = 16
+		}
+	}
+	c.streamingParams[seqID] = StreamingLLMParams{
+		Enabled:      true,
+		SinkBlocks:   sinkBlocks,
+		WindowBlocks: windowBlocks,
+	}
+}
+
+// GetStreamingLLM returns the StreamingLLM parameters for a sequence.
+func (c *PagedKVCache) GetStreamingLLM(seqID string) (StreamingLLMParams, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.streamingParams == nil {
+		return StreamingLLMParams{}, false
+	}
+	params, exists := c.streamingParams[seqID]
+	return params, exists
+}
+
 // Allocate reserves blocks for a sequence to accommodate numTokens.
 func (c *PagedKVCache) Allocate(seqID string, numTokens int) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	params, isStreaming := c.streamingParams[seqID]
+	maxBlocks := c.totalBlocks
+	if isStreaming && params.Enabled {
+		maxBlocks = params.SinkBlocks + params.WindowBlocks
+	}
+
 	if existing, exists := c.blockTables[seqID]; exists {
 		// Calculate how many MORE blocks we need
 		currentBlocks := len(existing)
 		blocksNeeded := (numTokens + c.blockSize - 1) / c.blockSize
+		if isStreaming && params.Enabled && blocksNeeded > maxBlocks {
+			blocksNeeded = maxBlocks
+		}
 		additional := blocksNeeded - currentBlocks
 		if additional <= 0 {
 			return nil // Already has enough
 		}
 
 		for i := 0; i < additional; i++ {
+			if isStreaming && params.Enabled && len(existing) >= maxBlocks {
+				if len(existing) > params.SinkBlocks {
+					evictBlock := existing[params.SinkBlocks]
+					c.blockRefs[evictBlock]--
+					if c.blockRefs[evictBlock] <= 0 {
+						c.freeBlocks = append(c.freeBlocks, evictBlock)
+						c.blockRefs[evictBlock] = 0
+					}
+					copy(existing[params.SinkBlocks:], existing[params.SinkBlocks+1:])
+					existing = existing[:len(existing)-1]
+				}
+			}
 			phys, err := c.allocateBlock()
 			if err != nil {
 				return err
@@ -336,18 +425,24 @@ func (c *PagedKVCache) Allocate(seqID string, numTokens int) error {
 	}
 
 	blocksNeeded := (numTokens + c.blockSize - 1) / c.blockSize
-	table := make([]int32, blocksNeeded)
+	if isStreaming && params.Enabled && blocksNeeded > maxBlocks {
+		blocksNeeded = maxBlocks
+	}
+	table := make([]int32, 0, blocksNeeded)
 	for i := 0; i < blocksNeeded; i++ {
 		phys, err := c.allocateBlock()
 		if err != nil {
 			// Rollback allocation
-			for j := 0; j < i; j++ {
-				c.blockRefs[table[j]]--
-				c.freeBlocks = append(c.freeBlocks, table[j])
+			for _, b := range table {
+				c.blockRefs[b]--
+				if c.blockRefs[b] <= 0 {
+					c.freeBlocks = append(c.freeBlocks, b)
+					c.blockRefs[b] = 0
+				}
 			}
 			return err
 		}
-		table[i] = phys
+		table = append(table, phys)
 	}
 	c.blockTables[seqID] = table
 	return nil
@@ -363,15 +458,49 @@ func (c *PagedKVCache) GetPhysicalPositions(seqID string, startPos, numTokens in
 		return nil, fmt.Errorf("sequence %s not found", seqID)
 	}
 
+	params, isStreaming := c.streamingParams[seqID]
 	positions := make([]int, numTokens)
+	sinkTokens := 0
+	if isStreaming && params.Enabled {
+		sinkTokens = params.SinkBlocks * c.blockSize
+	}
+
 	for i := 0; i < numTokens; i++ {
 		logicalPos := startPos + i
-		blockIdx := logicalPos / c.blockSize
-		offset := logicalPos % c.blockSize
+		var blockIdx int
+		var offset int
 
-		if blockIdx >= len(table) {
-			return nil, fmt.Errorf("logical position %d exceeds allocated blocks", logicalPos)
+		if isStreaming && params.Enabled && logicalPos >= sinkTokens {
+			totalSeen := c.seqMaxPos[seqID]
+			windowTokens := params.WindowBlocks * c.blockSize
+			if totalSeen > sinkTokens+windowTokens {
+				windowStart := totalSeen - windowTokens + 1
+				if logicalPos < windowStart {
+					blockIdx = 0
+					offset = 0
+				} else {
+					rel := logicalPos - windowStart
+					blockIdx = params.SinkBlocks + (rel / c.blockSize)
+					if blockIdx >= len(table) {
+						blockIdx = len(table) - 1
+					}
+					offset = logicalPos % c.blockSize
+				}
+			} else {
+				blockIdx = logicalPos / c.blockSize
+				if blockIdx >= len(table) {
+					blockIdx = len(table) - 1
+				}
+				offset = logicalPos % c.blockSize
+			}
+		} else {
+			blockIdx = logicalPos / c.blockSize
+			offset = logicalPos % c.blockSize
+			if blockIdx >= len(table) {
+				return nil, fmt.Errorf("logical position %d exceeds allocated blocks", logicalPos)
+			}
 		}
+
 		positions[i] = int(table[blockIdx])*c.blockSize + offset
 	}
 	return positions, nil
@@ -566,7 +695,11 @@ func (c *PagedKVCache) FreeSequence(seqID string) {
 			}
 		}
 		delete(c.blockTables, seqID)
+		delete(c.streamingParams, seqID)
+		delete(c.seqMaxPos, seqID)
 	}
+	delete(c.offloadedSeqs, seqID)
+	delete(c.lastAccess, seqID)
 }
 
 // Update implementation for Paged Cache
@@ -575,18 +708,7 @@ func (c *PagedKVCache) Update(seqID string, layer, pos int, k, v *device.Tensor)
 		return fmt.Errorf("cache not initialized")
 	}
 
-	logicalBlockIdx := pos / c.blockSize
 	blockOffset := pos % c.blockSize
-
-	// Check if we need to allocate a new block
-	// We only allocate if we are at strict new block start AND we haven't allocated it yet.
-	// Or if logicalBlockIdx >= len(blockTable).
-
-	// Note: Engine calls Update layer-by-layer.
-	// We should only allocate ONCE per position (at layer 0).
-	// But `Update` is called per layer.
-	// So BlockTable Logic should be synchronized or shared?
-	// It's shared `c.blockTableHost`.
 
 	c.mu.Lock()
 	table, exists := c.blockTables[seqID]
@@ -594,23 +716,67 @@ func (c *PagedKVCache) Update(seqID string, layer, pos int, k, v *device.Tensor)
 		table = make([]int32, 0)
 	}
 
-	if logicalBlockIdx > len(table) {
-		c.mu.Unlock()
-		return fmt.Errorf("sparse block allocation not supported: %d > len %d", logicalBlockIdx, len(table))
+	params, isStreaming := c.streamingParams[seqID]
+	maxBlocks := c.totalBlocks
+	if isStreaming && params.Enabled {
+		maxBlocks = params.SinkBlocks + params.WindowBlocks
 	}
 
-	if logicalBlockIdx == len(table) {
-		phys, err := c.allocateBlock()
-		if err != nil {
-			c.mu.Unlock()
-			return err
+	var physBlock int32
+
+	if isStreaming && params.Enabled && pos >= params.SinkBlocks*c.blockSize {
+		sinkTokens := params.SinkBlocks * c.blockSize
+		windowTokens := params.WindowBlocks * c.blockSize
+
+		if len(table) < maxBlocks {
+			logicalBlockIdx := pos / c.blockSize
+			if logicalBlockIdx == len(table) && layer == 0 {
+				phys, err := c.allocateBlock()
+				if err != nil {
+					c.mu.Unlock()
+					return err
+				}
+				table = append(table, phys)
+				c.blockTables[seqID] = table
+			}
+			if len(table) == 0 {
+				c.mu.Unlock()
+				return fmt.Errorf("no blocks allocated for sequence %s", seqID)
+			}
+			physBlock = table[len(table)-1]
+		} else {
+			// Sliding window ring buffer eviction
+			if pos >= sinkTokens+windowTokens && (pos%c.blockSize == 0) && layer == 0 && pos > c.seqMaxPos[seqID] {
+				recycledBlock := table[params.SinkBlocks]
+				copy(table[params.SinkBlocks:], table[params.SinkBlocks+1:])
+				table[len(table)-1] = recycledBlock
+				c.blockTables[seqID] = table
+			}
+			physBlock = table[len(table)-1]
 		}
-		table = append(table, phys)
-		c.blockTables[seqID] = table
+		if pos > c.seqMaxPos[seqID] {
+			c.seqMaxPos[seqID] = pos
+		}
+	} else {
+		logicalBlockIdx := pos / c.blockSize
+		if logicalBlockIdx > len(table) {
+			c.mu.Unlock()
+			return fmt.Errorf("sparse block allocation not supported: %d > len %d", logicalBlockIdx, len(table))
+		}
+
+		if logicalBlockIdx == len(table) {
+			phys, err := c.allocateBlock()
+			if err != nil {
+				c.mu.Unlock()
+				return err
+			}
+			table = append(table, phys)
+			c.blockTables[seqID] = table
+		}
+		physBlock = table[logicalBlockIdx]
 	}
 
 	// Copy on Write if refcount > 1 and we are modifying it (Update)
-	physBlock := table[logicalBlockIdx]
 	oldPhys := physBlock
 	if c.blockRefs[physBlock] > 1 {
 		// COW: allocate a new block and swap it in
@@ -620,7 +786,12 @@ func (c *PagedKVCache) Update(seqID string, layer, pos int, k, v *device.Tensor)
 			return fmt.Errorf("OOM copying block on write: %w", err)
 		}
 		c.blockRefs[physBlock]--
-		table[logicalBlockIdx] = newPhys
+		for idx, b := range table {
+			if b == oldPhys {
+				table[idx] = newPhys
+				break
+			}
+		}
 		physBlock = newPhys
 
 		if err := c.copyBlockData(layer, oldPhys, physBlock); err != nil {
@@ -901,3 +1072,294 @@ func (c *PagedKVCache) GetBlockScales(layer int) (kScales, vScales []float32) {
 	}
 	return nil, nil
 }
+
+// OffloadSequence transfers physical KV blocks of an inactive sequence from device memory into host RAM.
+func (c *PagedKVCache) OffloadSequence(seqID string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	table, exists := c.blockTables[seqID]
+	if !exists {
+		return fmt.Errorf("sequence %s not found in paged cache", seqID)
+	}
+
+	if len(table) == 0 {
+		delete(c.blockTables, seqID)
+		return nil
+	}
+
+	// Capture block data for each layer
+	blockData := make(map[int]OffloadedBlockData)
+	for blockIdx, block := range table {
+		for l := 0; l < len(c.kPools); l++ {
+			if c.kPools[l] == nil {
+				continue
+			}
+			cols := c.kPools[l].Cols()
+			totalFloats := c.blockSize * cols
+
+			kData := make([]float32, totalFloats)
+			vData := make([]float32, totalFloats)
+
+			srcStart := int(block) * c.blockSize * cols
+			kHost := c.kPools[l].ToHostF32()
+			if kHost != nil && srcStart+totalFloats <= len(kHost) {
+				copy(kData, kHost[srcStart:srcStart+totalFloats])
+			}
+			if l < len(c.vPools) && c.vPools[l] != nil {
+				vHost := c.vPools[l].ToHostF32()
+				if vHost != nil && srcStart+totalFloats <= len(vHost) {
+					copy(vData, vHost[srcStart:srcStart+totalFloats])
+				}
+			}
+
+			key := blockIdx*1000 + l
+			blockData[key] = OffloadedBlockData{
+				Layer: l,
+				K:     kData,
+				V:     vData,
+			}
+		}
+
+		// Decrement ref count and free if uniquely owned
+		c.blockRefs[block]--
+		if c.blockRefs[block] <= 0 {
+			c.freeBlocks = append(c.freeBlocks, block)
+			c.blockRefs[block] = 0
+		}
+	}
+
+	if c.offloadedSeqs == nil {
+		c.offloadedSeqs = make(map[string]*OffloadedSequence)
+	}
+	c.offloadedSeqs[seqID] = &OffloadedSequence{
+		SeqID:       seqID,
+		BlockData:   blockData,
+		NumBlocks:   len(table),
+		OffloadedAt: time.Now(),
+	}
+
+	delete(c.blockTables, seqID)
+	c.dirty[seqID] = true
+	logger.Log.Info("Offloaded sequence KV blocks to host memory", "seq_id", seqID, "blocks", len(table))
+	return nil
+}
+
+// RestoreSequence reinstates offloaded host KV blocks back into active device pools.
+func (c *PagedKVCache) RestoreSequence(seqID string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.offloadedSeqs == nil {
+		return fmt.Errorf("sequence %s not found in offloaded store", seqID)
+	}
+	offloaded, exists := c.offloadedSeqs[seqID]
+	if !exists {
+		return fmt.Errorf("sequence %s not found in offloaded store", seqID)
+	}
+
+	if len(c.freeBlocks) < offloaded.NumBlocks {
+		return fmt.Errorf("insufficient free blocks to restore sequence %s: need %d, have %d", seqID, offloaded.NumBlocks, len(c.freeBlocks))
+	}
+
+	newTable := make([]int32, offloaded.NumBlocks)
+	for i := 0; i < offloaded.NumBlocks; i++ {
+		phys, err := c.allocateBlock()
+		if err != nil {
+			// Rollback allocation
+			for j := 0; j < i; j++ {
+				c.blockRefs[newTable[j]]--
+				if c.blockRefs[newTable[j]] <= 0 {
+					c.freeBlocks = append(c.freeBlocks, newTable[j])
+					c.blockRefs[newTable[j]] = 0
+				}
+			}
+			return err
+		}
+		newTable[i] = phys
+
+		// Restore data for each layer
+		for l := 0; l < len(c.kPools); l++ {
+			if c.kPools[l] == nil {
+				continue
+			}
+			key := i*1000 + l
+			data, ok := offloaded.BlockData[key]
+			if !ok {
+				continue
+			}
+
+			cols := c.kPools[l].Cols()
+			totalFloats := c.blockSize * cols
+			dstStart := int(phys) * c.blockSize * cols
+
+			kHost := c.kPools[l].ToHostF32()
+			if kHost != nil && dstStart+totalFloats <= len(kHost) {
+				copy(kHost[dstStart:dstStart+totalFloats], data.K)
+				_ = c.kPools[l].LoadFrom(kHost)
+			}
+
+			if l < len(c.vPools) && c.vPools[l] != nil {
+				vHost := c.vPools[l].ToHostF32()
+				if vHost != nil && dstStart+totalFloats <= len(vHost) {
+					copy(vHost[dstStart:dstStart+totalFloats], data.V)
+					_ = c.vPools[l].LoadFrom(vHost)
+				}
+			}
+		}
+	}
+
+	c.blockTables[seqID] = newTable
+	delete(c.offloadedSeqs, seqID)
+	c.dirty[seqID] = true
+	if c.lastAccess == nil {
+		c.lastAccess = make(map[string]time.Time)
+	}
+	c.lastAccess[seqID] = time.Now()
+	logger.Log.Info("Restored sequence KV blocks from host memory", "seq_id", seqID, "blocks", len(newTable))
+	return nil
+}
+
+// IsOffloaded returns whether a sequence's KV blocks are currently offloaded to host RAM.
+func (c *PagedKVCache) IsOffloaded(seqID string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.offloadedSeqs == nil {
+		return false
+	}
+	_, ok := c.offloadedSeqs[seqID]
+	return ok
+}
+
+// OffloadLRU finds the least-recently-accessed sequence and offloads its KV blocks to host RAM.
+func (c *PagedKVCache) OffloadLRU() (string, error) {
+	c.mu.Lock()
+	if len(c.blockTables) == 0 {
+		c.mu.Unlock()
+		return "", nil
+	}
+
+	// Find sequence with oldest lastAccess
+	var oldestSeq string
+	var oldestTime time.Time
+	first := true
+	for seqID := range c.blockTables {
+		t, ok := c.lastAccess[seqID]
+		if !ok {
+			t = time.Time{}
+		}
+		if first || t.Before(oldestTime) {
+			oldestTime = t
+			oldestSeq = seqID
+			first = false
+		}
+	}
+	c.mu.Unlock()
+
+	if oldestSeq != "" {
+		err := c.OffloadSequence(oldestSeq)
+		return oldestSeq, err
+	}
+	return "", nil
+}
+
+// Defragment compacts active physical blocks into lower indices to reduce fragmentation.
+func (c *PagedKVCache) Defragment() (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.execMu.Lock()
+	defer c.execMu.Unlock()
+
+	if !c.initialized || len(c.blockTables) == 0 {
+		return 0, nil
+	}
+
+	// 1. Identify which blocks are currently in use
+	usedMap := make(map[int32]bool)
+	for _, table := range c.blockTables {
+		for _, b := range table {
+			usedMap[b] = true
+		}
+	}
+
+	// 2. Build sorted lists of free and used blocks
+	var freeIndices []int32
+	var usedIndices []int32
+	for i := 0; i < c.totalBlocks; i++ {
+		b := int32(i)
+		if usedMap[b] {
+			usedIndices = append(usedIndices, b)
+		} else {
+			freeIndices = append(freeIndices, b)
+		}
+	}
+
+	compacted := 0
+	freePtr := 0
+	usedPtr := len(usedIndices) - 1
+
+	// Remap mapping: oldBlock -> newBlock
+	remap := make(map[int32]int32)
+
+	// Move highest used block into lowest free block if free < used
+	for freePtr < len(freeIndices) && usedPtr >= 0 {
+		freeB := freeIndices[freePtr]
+		usedB := usedIndices[usedPtr]
+		if freeB >= usedB {
+			break
+		}
+
+		// Copy data from usedB to freeB across all layers
+		for l := 0; l < len(c.kPools); l++ {
+			if err := c.copyBlockData(l, usedB, freeB); err != nil {
+				return compacted, err
+			}
+		}
+
+		remap[usedB] = freeB
+		c.blockRefs[freeB] = c.blockRefs[usedB]
+		c.blockRefs[usedB] = 0
+
+		compacted++
+		freePtr++
+		usedPtr--
+	}
+
+	if compacted > 0 {
+		// Update all block tables with remapped block IDs
+		for seqID, table := range c.blockTables {
+			for i, b := range table {
+				if newB, ok := remap[b]; ok {
+					table[i] = newB
+				}
+			}
+			c.dirty[seqID] = true
+		}
+
+		// Rebuild c.freeBlocks cleanly
+		c.freeBlocks = make([]int32, 0, len(freeIndices))
+		for i := c.totalBlocks - 1; i >= 0; i-- {
+			b := int32(i)
+			if c.blockRefs[b] == 0 {
+				c.freeBlocks = append(c.freeBlocks, b)
+			}
+		}
+		logger.Log.Info("Paged KV cache defragmentation completed", "compacted_blocks", compacted, "free_blocks", len(c.freeBlocks))
+	}
+
+	return compacted, nil
+}
+
+// RegisterMemoryGovernor binds the paged KV cache to the proactive memory governor.
+func (c *PagedKVCache) RegisterMemoryGovernor(gov *device.MemoryGovernor) {
+	if gov == nil {
+		gov = device.GetMemoryGovernor()
+	}
+	gov.RegisterDefragHandler(func() {
+		_, _ = c.Defragment()
+	})
+	gov.RegisterOffloadHandler(func() {
+		_, _ = c.OffloadLRU()
+	})
+}
+

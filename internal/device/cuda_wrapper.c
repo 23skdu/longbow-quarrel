@@ -62,3 +62,59 @@ int cudaGraphDestroyWrapper(cudaGraph_t graph) {
     return (int)cudaGraphDestroy(graph);
 }
 
+// On-device sampling extern declaration
+extern void cudaSampleOnDevice(
+    cudaStream_t stream,
+    float* logits,
+    const int32_t* prevTokens,
+    int numPrevTokens,
+    float repetitionPenalty,
+    float frequencyPenalty,
+    float presencePenalty,
+    float temperature,
+    int topK,
+    float topP,
+    unsigned long long seed,
+    int vocabSize,
+    int32_t* outToken
+);
+
+int cudaSample(
+    float* logits,
+    const int32_t* prevTokens,
+    int numPrevTokens,
+    float repetitionPenalty,
+    float frequencyPenalty,
+    float presencePenalty,
+    float temperature,
+    int topK,
+    float topP,
+    unsigned long long seed,
+    int vocabSize,
+    cudaStream_t stream
+) {
+    int32_t h_token = 0;
+    int32_t* d_token = NULL;
+    int32_t* d_prev = NULL;
+
+    cudaMalloc((void**)&d_token, sizeof(int32_t));
+    if (numPrevTokens > 0 && prevTokens != NULL) {
+        cudaMalloc((void**)&d_prev, numPrevTokens * sizeof(int32_t));
+        cudaMemcpyAsync(d_prev, prevTokens, numPrevTokens * sizeof(int32_t), cudaMemcpyHostToDevice, stream);
+    }
+
+    cudaSampleOnDevice(
+        stream, logits, d_prev, numPrevTokens,
+        repetitionPenalty, frequencyPenalty, presencePenalty,
+        temperature, topK, topP, seed, vocabSize, d_token
+    );
+    cudaMemcpyAsync(&h_token, d_token, sizeof(int32_t), cudaMemcpyDeviceToHost, stream);
+    cudaStreamSynchronize(stream);
+
+    cudaFree(d_token);
+    if (d_prev != NULL) {
+        cudaFree(d_prev);
+    }
+    return (int)h_token;
+}
+
