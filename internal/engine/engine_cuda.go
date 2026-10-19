@@ -505,26 +505,28 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 			posIds[start+j] = desc.ContextLens[i] + j
 		}
 	}
+	maxPos := 0
+	for _, p := range posIds {
+		if p > maxPos {
+			maxPos = p
+		}
+	}
 
 	gpuLayers := e.numGPULayers
 	for layer := 0; layer < e.config.Layers; layer++ {
 		qW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_q.weight", layer))
-		needsCPU := (layer >= gpuLayers) || (e.cpuWeights != nil && (e.config.IsGemma4 ||
+		needsCPU := (layer >= gpuLayers) || (e.cpuWeights != nil && (
 			qW == nil ||
-			(layer < len(e.cpuWeights.AttnQNorm) && len(e.cpuWeights.AttnQNorm[layer]) > 0) ||
-			(layer < len(e.cpuWeights.SSMA) && len(e.cpuWeights.SSMA[layer]) > 0) ||
-			headDim > 128))
+			(layer < len(e.cpuWeights.SSMA) && len(e.cpuWeights.SSMA[layer]) > 0)))
 
 		if needsCPU && e.cpuWeights != nil {
 			// Find contiguous run of CPU layers to avoid ping-pong GPU transfers
 			endLayer := layer + 1
 			for endLayer < e.config.Layers {
 				eqW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_q.weight", endLayer))
-				eNeedsCPU := (endLayer >= gpuLayers) || (e.config.IsGemma4 ||
+				eNeedsCPU := (endLayer >= gpuLayers) || (
 					eqW == nil ||
-					(endLayer < len(e.cpuWeights.AttnQNorm) && len(e.cpuWeights.AttnQNorm[endLayer]) > 0) ||
-					(endLayer < len(e.cpuWeights.SSMA) && len(e.cpuWeights.SSMA[endLayer]) > 0) ||
-					headDim > 128)
+					(endLayer < len(e.cpuWeights.SSMA) && len(e.cpuWeights.SSMA[endLayer]) > 0))
 				if !eNeedsCPU {
 					break
 				}
@@ -670,6 +672,8 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 			// Batched Projections & RoPE
 			kW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_k.weight", layer))
 			vW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_v.weight", layer))
+			qNormW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_q_norm.weight", layer))
+			kNormW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_k_norm.weight", layer))
 
 			rotaryDim := headDim
 			if e.config.IsGemma4 && e.config.Gemma4PartialRoPEFactor > 0 {
@@ -677,7 +681,25 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 			}
 
 			var err error
-			q, k, v, err = ctx.FusedQKVRope(normed, qW, kW, vW, posIds, numTokens, dim, heads, kvHeads, headDim, rotaryDim, ropeTheta)
+			if qNormW != nil || kNormW != nil {
+				q, err = ctx.MatmulF16(normed, qW)
+				if err == nil {
+					k, err = ctx.MatmulF16(normed, kW)
+				}
+				if err == nil {
+					v, err = ctx.MatmulF16(normed, vW)
+				}
+				if err != nil {
+					normed.ReturnToPool()
+					return nil, err
+				}
+				ctx.QKNormRMSNorm(q, k, qNormW, kNormW, numTokens, heads, kvHeads, headDim, eps)
+				ctx.EnsureRoPETables(maxPos+1, headDim, rotaryDim, ropeTheta)
+				ctx.FusedRoPEPrecomputed(q, posIds, numTokens, heads, 1, headDim)
+				ctx.FusedRoPEPrecomputed(k, posIds, numTokens, kvHeads, 1, headDim)
+			} else {
+				q, k, v, err = ctx.FusedQKVRope(normed, qW, kW, vW, posIds, numTokens, dim, heads, kvHeads, headDim, rotaryDim, ropeTheta)
+			}
 			normed.ReturnToPool()
 			if err != nil {
 				return nil, err
@@ -718,6 +740,14 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 			isFP8 := e.cache.Precision == device.DataTypeFP8
 			scale := float32(1.0 / mathx.Sqrt(float64(headDim)))
 			ctx.PagedAttentionQuantized(q, kCache, vCache, kScales, vScales, attnOut, tokenPosTensor, blockTableTensor, tokenToSeqTensor, maxBlocks, heads, kvHeads, headDim, e.cache.blockSize, batchSize, scale, isFP8)
+		} else if numTokens <= 4 && maxBlocks >= 16 {
+			// Long-context decode: Split-K FlashDecoding across SMs
+			scale := float32(1.0 / mathx.Sqrt(float64(headDim)))
+			splitK := 16
+			if maxBlocks < 32 {
+				splitK = 8
+			}
+			ctx.AttentionPagedSplitK(q, kCache, vCache, attnOut, tokenPosTensor, blockTableTensor, tokenToSeqTensor, maxBlocks, heads, kvHeads, headDim, e.cache.blockSize, numTokens, scale, splitK)
 		} else {
 			ctx.AttentionPagedBatch(q, kCache, vCache, attnOut, tokenPosTensor, blockTableTensor, maxBlocks, heads, kvHeads, headDim, e.cache.blockSize, tokenToSeqTensor, batchSize)
 		}
@@ -970,6 +1000,8 @@ func (e *cudaEngine) forward(token int, pos int, _ []int) ([]float32, error) {
 		} else {
 			kW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_k.weight", layer))
 			vW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_v.weight", layer))
+			qNormW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_q_norm.weight", layer))
+			kNormW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_k_norm.weight", layer))
 
 			rotaryDim := headDim
 			if e.config.IsGemma4 && e.config.Gemma4PartialRoPEFactor > 0 {
@@ -977,9 +1009,26 @@ func (e *cudaEngine) forward(token int, pos int, _ []int) ([]float32, error) {
 			}
 
 			var err error
-			q, k, v, err = ctx.FusedQKVRope(normed, qW, kW, vW, []int{pos}, 1, dim, heads, kvHeads, headDim, rotaryDim, ropeTheta)
-			if err != nil {
-				return nil, err
+			if qNormW != nil || kNormW != nil {
+				q, err = ctx.MatmulF16(normed, qW)
+				if err == nil {
+					k, err = ctx.MatmulF16(normed, kW)
+				}
+				if err == nil {
+					v, err = ctx.MatmulF16(normed, vW)
+				}
+				if err != nil {
+					return nil, err
+				}
+				ctx.QKNormRMSNorm(q, k, qNormW, kNormW, 1, heads, kvHeads, headDim, eps)
+				ctx.EnsureRoPETables(pos+1, headDim, rotaryDim, ropeTheta)
+				ctx.FusedRoPEPrecomputed(q, []int{pos}, 1, heads, 1, headDim)
+				ctx.FusedRoPEPrecomputed(k, []int{pos}, 1, kvHeads, 1, headDim)
+			} else {
+				q, k, v, err = ctx.FusedQKVRope(normed, qW, kW, vW, []int{pos}, 1, dim, heads, kvHeads, headDim, rotaryDim, ropeTheta)
+				if err != nil {
+					return nil, err
+				}
 			}
 		}
 

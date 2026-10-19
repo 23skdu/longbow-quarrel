@@ -2795,6 +2795,44 @@ func (ctx *Context) AttentionPagedBatch(q, kCache, vCache, output, tokenPosition
 	ctx.FlashAttention2(q, kCache, vCache, output, tokenPositions, heads, kvHeads, headDim, blockSize, blockTables, maxBlocksPerSeq, tokenToSeq, batchSize)
 }
 
+// AttentionPagedSplitK performs paged attention, delegating to AttentionPagedBatch on Metal.
+func (ctx *Context) AttentionPagedSplitK(q, kCache, vCache, output, tokenPositions, blockTables, tokenToSeq *Tensor,
+	maxBlocksPerSeq, heads, kvHeads, headDim, blockSize, numTokens int, scale float32, splitK int) {
+	ctx.AttentionPagedBatch(q, kCache, vCache, output, tokenPositions, blockTables, maxBlocksPerSeq, heads, kvHeads, headDim, blockSize, tokenToSeq, numTokens)
+}
+
+// QKNormRMSNorm applies per-head RMSNorm in-place on Q and K tensors before RoPE on Metal.
+func (ctx *Context) QKNormRMSNorm(q, k, qWeight, kWeight *Tensor, numTokens, numQHeads, numKHeads, headDim int, eps float32) {
+	if numTokens <= 0 || headDim <= 0 {
+		return
+	}
+	if q != nil && qWeight != nil && numQHeads > 0 {
+		w := qWeight.ToHost()
+		qData := q.ToHost()
+		for tok := 0; tok < numTokens; tok++ {
+			for h := 0; h < numQHeads; h++ {
+				off := (tok*numQHeads + h) * headDim
+				row := qData[off : off+headDim]
+				simd.RMSNorm(row, w, row, 1, headDim, eps)
+			}
+		}
+		q.LoadFrom(qData)
+	}
+	if k != nil && kWeight != nil && numKHeads > 0 {
+		w := kWeight.ToHost()
+		kData := k.ToHost()
+		for tok := 0; tok < numTokens; tok++ {
+			for h := 0; h < numKHeads; h++ {
+				off := (tok*numKHeads + h) * headDim
+				row := kData[off : off+headDim]
+				simd.RMSNorm(row, w, row, 1, headDim, eps)
+			}
+		}
+		k.LoadFrom(kData)
+	}
+}
+
+
 // StoreKVPagedBatch stores K and V projections for a batch of sequences into their respective physical blocks
 func (ctx *Context) StoreKVPagedBatch(k, v, kCache, vCache, physicalPositions *Tensor, kvDim, batchSize int) {
 	ctx.ExecMu.Lock()

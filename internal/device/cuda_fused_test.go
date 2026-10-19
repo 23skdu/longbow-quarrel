@@ -390,3 +390,194 @@ func TestCUDA_FusedQKVRope_Partial(t *testing.T) {
 
 	t.Logf("Partial RoPE verified successfully")
 }
+
+func TestCUDA_QKNormRMSNorm(t *testing.T) {
+	ctx := NewContext()
+	defer ctx.Free()
+
+	numTokens := 3
+	qHeads := 8
+	kHeads := 2
+	headDim := 128
+	eps := float32(1e-6)
+
+	qLen := numTokens * qHeads * headDim
+	kLen := numTokens * kHeads * headDim
+
+	qHost := make([]float32, qLen)
+	kHost := make([]float32, kLen)
+	for i := range qHost {
+		qHost[i] = float32(rand.Float64()*2.0 - 1.0)
+	}
+	for i := range kHost {
+		kHost[i] = float32(rand.Float64()*2.0 - 1.0)
+	}
+
+	qWeightHost := make([]float32, headDim)
+	kWeightHost := make([]float32, headDim)
+	for i := range qWeightHost {
+		qWeightHost[i] = float32(rand.Float64()*1.5 + 0.5)
+		kWeightHost[i] = float32(rand.Float64()*1.5 + 0.5)
+	}
+
+	qTensor, _ := ctx.NewTensorFromData(1, qLen, DataTypeF32, float32ToBytes(qHost))
+	defer qTensor.Free()
+	kTensor, _ := ctx.NewTensorFromData(1, kLen, DataTypeF32, float32ToBytes(kHost))
+	defer kTensor.Free()
+	qWTensor, _ := ctx.NewTensorFromData(1, headDim, DataTypeF32, float32ToBytes(qWeightHost))
+	defer qWTensor.Free()
+	kWTensor, _ := ctx.NewTensorFromData(1, headDim, DataTypeF32, float32ToBytes(kWeightHost))
+	defer kWTensor.Free()
+
+	ctx.QKNormRMSNorm(qTensor, kTensor, qWTensor, kWTensor, numTokens, qHeads, kHeads, headDim, eps)
+	ctx.Synchronize()
+
+	qResult := qTensor.ToHostF32()
+	kResult := kTensor.ToHostF32()
+
+	// CPU reference verification for Q
+	for tok := 0; tok < numTokens; tok++ {
+		for h := 0; h < qHeads; h++ {
+			offset := (tok*qHeads + h) * headDim
+			var sumSq float64
+			for d := 0; d < headDim; d++ {
+				v := float64(qHost[offset+d])
+				sumSq += v * v
+			}
+			invRms := float32(1.0 / math.Sqrt(sumSq/float64(headDim)+float64(eps)))
+			for d := 0; d < headDim; d++ {
+				expected := qHost[offset+d] * invRms * qWeightHost[d]
+				actual := qResult[offset+d]
+				diff := float32(math.Abs(float64(actual - expected)))
+				if diff > 1e-4 {
+					t.Fatalf("Q Norm mismatch at tok=%d, head=%d, dim=%d: got %f, want %f (diff %f)",
+						tok, h, d, actual, expected, diff)
+				}
+			}
+		}
+	}
+
+	// CPU reference verification for K
+	for tok := 0; tok < numTokens; tok++ {
+		for h := 0; h < kHeads; h++ {
+			offset := (tok*kHeads + h) * headDim
+			var sumSq float64
+			for d := 0; d < headDim; d++ {
+				v := float64(kHost[offset+d])
+				sumSq += v * v
+			}
+			invRms := float32(1.0 / math.Sqrt(sumSq/float64(headDim)+float64(eps)))
+			for d := 0; d < headDim; d++ {
+				expected := kHost[offset+d] * invRms * kWeightHost[d]
+				actual := kResult[offset+d]
+				diff := float32(math.Abs(float64(actual - expected)))
+				if diff > 1e-4 {
+					t.Fatalf("K Norm mismatch at tok=%d, head=%d, dim=%d: got %f, want %f (diff %f)",
+						tok, h, d, actual, expected, diff)
+				}
+			}
+		}
+	}
+
+	t.Logf("QKNormRMSNorm GPU kernel successfully verified against CPU reference")
+}
+
+func TestCUDA_AttentionPagedSplitK(t *testing.T) {
+	ctx := NewContext()
+	defer ctx.Free()
+
+	numTokens := 1
+	heads := 4
+	kvHeads := 2
+	headDim := 64
+	blockSize := 16
+	seqLen := 256
+	maxBlocks := (seqLen + blockSize - 1) / blockSize
+
+	scale := float32(1.0 / math.Sqrt(float64(headDim)))
+
+	qData := make([]float32, numTokens*heads*headDim)
+	for i := range qData {
+		qData[i] = float32(rand.Float64()*0.4 - 0.2)
+	}
+
+	kvDim := kvHeads * headDim
+	poolSize := maxBlocks * blockSize * kvDim
+	kPoolFP16 := make([]uint16, poolSize)
+	vPoolFP16 := make([]uint16, poolSize)
+	for i := range kPoolFP16 {
+		kPoolFP16[i] = Float32ToFloat16(float32(rand.Float64()*0.4 - 0.2))
+		vPoolFP16[i] = Float32ToFloat16(float32(rand.Float64()*0.4 - 0.2))
+	}
+
+	blockTable := make([]int32, maxBlocks)
+	for b := 0; b < maxBlocks; b++ {
+		blockTable[b] = int32(b)
+	}
+
+	tokenPositions := []int32{int32(seqLen - 1)}
+	tokenToSeq := []int32{0}
+
+	qTensor, _ := ctx.NewTensorFromData(1, len(qData), DataTypeF32, float32ToBytes(qData))
+	defer qTensor.Free()
+
+	kBytes := make([]byte, len(kPoolFP16)*2)
+	vBytes := make([]byte, len(vPoolFP16)*2)
+	for i, v := range kPoolFP16 {
+		binary.LittleEndian.PutUint16(kBytes[i*2:], v)
+	}
+	for i, v := range vPoolFP16 {
+		binary.LittleEndian.PutUint16(vBytes[i*2:], v)
+	}
+
+	kPoolTensor, _ := ctx.NewTensorFromData(1, poolSize, DataTypeF16, kBytes)
+	defer kPoolTensor.Free()
+	vPoolTensor, _ := ctx.NewTensorFromData(1, poolSize, DataTypeF16, vBytes)
+	defer vPoolTensor.Free()
+
+	posTensor := ctx.NewTensorI32(1, numTokens)
+	defer posTensor.Free()
+	_ = posTensor.LoadFrom(tokenPositions)
+
+	tokSeqTensor := ctx.NewTensorI32(1, numTokens)
+	defer tokSeqTensor.Free()
+	_ = tokSeqTensor.LoadFrom(tokenToSeq)
+
+	blockTableTensor := ctx.NewTensorI32(1, maxBlocks)
+	defer blockTableTensor.Free()
+	_ = blockTableTensor.LoadFrom(blockTable)
+
+	refOut := ctx.NewTensorFP32(numTokens, heads*headDim)
+	defer refOut.Free()
+
+	splitOut := ctx.NewTensorFP32(numTokens, heads*headDim)
+	defer splitOut.Free()
+
+	// 1. Compute reference attention via AttentionPagedBatch
+	ctx.AttentionPagedBatch(qTensor, kPoolTensor, vPoolTensor, refOut, posTensor, blockTableTensor,
+		maxBlocks, heads, kvHeads, headDim, blockSize, tokSeqTensor, 1)
+	ctx.Synchronize()
+
+	// 2. Compute attention via Split-K FlashDecoding (splitK = 4)
+	ctx.AttentionPagedSplitK(qTensor, kPoolTensor, vPoolTensor, splitOut, posTensor, blockTableTensor, tokSeqTensor,
+		maxBlocks, heads, kvHeads, headDim, blockSize, numTokens, scale, 4)
+	ctx.Synchronize()
+
+	refHost := refOut.ToHostF32()
+	splitHost := splitOut.ToHostF32()
+
+	var maxDiff float32
+	for i := range refHost {
+		diff := float32(math.Abs(float64(refHost[i] - splitHost[i])))
+		if diff > maxDiff {
+			maxDiff = diff
+		}
+		if diff > 1e-3 {
+			t.Fatalf("Split-K mismatch at idx %d: ref=%f, split=%f (diff=%f)", i, refHost[i], splitHost[i], diff)
+		}
+	}
+
+	t.Logf("Split-K FlashDecoding verified successfully against reference (max diff: %e)", maxDiff)
+}
+
+

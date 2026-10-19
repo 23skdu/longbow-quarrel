@@ -62,6 +62,9 @@ extern void cudaMatVecDequantQ4_K(cudaStream_t stream, const void* weight, const
 extern void cudaMatVecDequantQ6_K(cudaStream_t stream, const void* weight, const float* x, float* y, int M, int K);
 extern void cudaFlashAttentionPrefill(cudaStream_t stream, const float* q, const float* k, const float* v, float* output, int batch, int heads, int kvHeads, int qSeqLen, int kvSeqLen, int headDim, float scale, int slidingWindow);
 extern void cudaPagedAttentionQuantized(cudaStream_t stream, const float* q, const void* kPool, const void* vPool, const float* kScales, const float* vScales, float* output, const int* tokenPositions, const int* blockTables, const int* tokenToSeq, int maxBlocks, int heads, int kvHeads, int headDim, int blockSize, int numTokens, float scale, int isFP8);
+extern void cudaPerHeadRMSNorm(cudaStream_t stream, float* tensor, const float* weight, int totalHeads, int headDim, float eps);
+extern void cudaQKNormRMSNorm(cudaStream_t stream, float* q, float* k, const float* qWeight, const float* kWeight, int numTokens, int numQHeads, int numKHeads, int headDim, float eps);
+extern void cudaPagedAttentionSplitK(cudaStream_t stream, const float* q, const void* kPool, const void* vPool, float* output, float* partialOut, float* partialMax, float* partialSum, const int* tokenPositions, const int* blockTables, const int* tokenToSeq, int maxBlocks, int heads, int kvHeads, int headDim, int blockSize, int numTokens, float scale, int splitK);
 
 // MOE Kernels
 extern void cudaMOERouterLogits(cudaStream_t stream, const void* input, const void* gate, float* output, int batch, int dim, int num_experts, int isF16);
@@ -111,6 +114,9 @@ type Context struct {
 	ropeRotDim  int
 	ropeTheta   float32
 	dPosIds     unsafe.Pointer
+	splitKMax   *Tensor
+	splitKSum   *Tensor
+	splitKOut   *Tensor
 }
 
 func (ctx *Context) DeviceID() int {
@@ -170,6 +176,18 @@ func (ctx *Context) Free() {
 	if ctx.ropeSin != nil {
 		ctx.ropeSin.Free()
 		ctx.ropeSin = nil
+	}
+	if ctx.splitKMax != nil {
+		ctx.splitKMax.Free()
+		ctx.splitKMax = nil
+	}
+	if ctx.splitKSum != nil {
+		ctx.splitKSum.Free()
+		ctx.splitKSum = nil
+	}
+	if ctx.splitKOut != nil {
+		ctx.splitKOut.Free()
+		ctx.splitKOut = nil
 	}
 	if ctx.Ctx != nil {
 		C.cudaStreamDestroy(ctx.Ctx)
@@ -1442,6 +1460,62 @@ func (c *Context) Slice(src *Tensor, dst *Tensor, rowIdx, vocabSize int) {
 func (c *Context) AttentionPagedBatch(q, kCache, vCache, output, tokenPositions, blockTables *Tensor, maxBlocksPerSeq, heads, kvHeads, headDim, blockSize int, tokenToSeq *Tensor, batchSize int) {
 	C.cudaPagedAttentionBatch(c.Ctx, (*C.float)(q.devPtr), kCache.devPtr, vCache.devPtr, (*C.float)(output.devPtr), (*C.int)(tokenPositions.devPtr), (*C.int)(blockTables.devPtr), (*C.int)(tokenToSeq.devPtr), C.int(maxBlocksPerSeq), C.int(heads), C.int(kvHeads), C.int(headDim), C.int(blockSize), C.int(q.rows), C.float(1.0/mathx.Sqrt(float64(headDim))))
 }
+
+// AttentionPagedSplitK performs Split-K FlashDecoding across GPU SMs for long sequences.
+func (c *Context) AttentionPagedSplitK(q, kCache, vCache, output, tokenPositions, blockTables, tokenToSeq *Tensor,
+	maxBlocksPerSeq, heads, kvHeads, headDim, blockSize, numTokens int, scale float32, splitK int) {
+	if numTokens == 0 || splitK <= 0 {
+		return
+	}
+	neededSlots := numTokens * heads * splitK
+	if c.splitKMax == nil || c.splitKMax.rows*c.splitKMax.cols < neededSlots {
+		if c.splitKMax != nil {
+			c.splitKMax.Free()
+			c.splitKSum.Free()
+			c.splitKOut.Free()
+		}
+		allocSlots := neededSlots
+		if allocSlots < 8*64*32 {
+			allocSlots = 8 * 64 * 32
+		}
+		c.splitKMax = c.NewTensorFP32(1, allocSlots)
+		c.splitKSum = c.NewTensorFP32(1, allocSlots)
+		c.splitKOut = c.NewTensorFP32(allocSlots, headDim)
+	}
+
+	C.cudaPagedAttentionSplitK(c.Ctx, (*C.float)(q.devPtr), kCache.devPtr, vCache.devPtr,
+		(*C.float)(output.devPtr), (*C.float)(c.splitKOut.devPtr),
+		(*C.float)(c.splitKMax.devPtr), (*C.float)(c.splitKSum.devPtr),
+		(*C.int)(tokenPositions.devPtr), (*C.int)(blockTables.devPtr), (*C.int)(tokenToSeq.devPtr),
+		C.int(maxBlocksPerSeq), C.int(heads), C.int(kvHeads), C.int(headDim), C.int(blockSize),
+		C.int(numTokens), C.float(scale), C.int(splitK))
+}
+
+// QKNormRMSNorm applies per-head RMSNorm in-place on Q and K tensors before RoPE on GPU.
+// q is [numTokens, numQHeads * headDim], k is [numTokens, numKHeads * headDim].
+// qWeight and kWeight are [headDim] float32 weight vectors.
+func (c *Context) QKNormRMSNorm(q, k, qWeight, kWeight *Tensor, numTokens, numQHeads, numKHeads, headDim int, eps float32) {
+	if numTokens <= 0 || headDim <= 0 {
+		return
+	}
+	var qPtr, kPtr, qWPtr, kWPtr unsafe.Pointer
+	if q != nil {
+		qPtr = q.devPtr
+	}
+	if k != nil {
+		kPtr = k.devPtr
+	}
+	if qWeight != nil {
+		qWPtr = qWeight.devPtr
+	}
+	if kWeight != nil {
+		kWPtr = kWeight.devPtr
+	}
+	C.cudaQKNormRMSNorm(c.Ctx, (*C.float)(qPtr), (*C.float)(kPtr),
+		(*C.float)(qWPtr), (*C.float)(kWPtr),
+		C.int(numTokens), C.int(numQHeads), C.int(numKHeads), C.int(headDim), C.float(eps))
+}
+
 
 // StoreKVPagedBatch stores K and V projections into their respective physical blocks in the GPU cache pool.
 func (c *Context) StoreKVPagedBatch(k, v, kCache, vCache, physicalPositions *Tensor, kvDim, batchSize int) {

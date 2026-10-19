@@ -1955,8 +1955,8 @@ __global__ void paged_attention_quantized_kernel(
 
     float max_score = -INFINITY;
     float sum_exp = 0.0f;
-    float res[128];
-    if (headDim > 128) return;
+    float res[256];
+    if (headDim > 256) return;
     for (int d = 0; d < headDim; d++) res[d] = 0.0f;
 
     int numBlocksNeeded = (pos + 1 + blockSize - 1) / blockSize;
@@ -2090,6 +2090,217 @@ void cudaPagedAttentionQuantized(cudaStream_t stream, const float* q, const void
     paged_attention_quantized_kernel<<<grid, block, 0, stream>>>(
         q, (const int8_t*)kPool, (const int8_t*)vPool, kScales, vScales, output,
         tokenPositions, blockTables, tokenToSeq, maxBlocks, heads, kvHeads, headDim, blockSize, numTokens, scale, isFP8);
+}
+
+} // extern "C"
+
+// =============================================================================
+// Per-Head Q/K RMSNorm Kernel (Step 9)
+// =============================================================================
+
+__global__ void qknorm_rmsnorm_kernel(
+    float* __restrict__ tensor,
+    const float* __restrict__ weight,
+    int totalHeads, int headDim, float eps) {
+
+    int warpId = threadIdx.x / 32;
+    int laneId = threadIdx.x % 32;
+    int headIdx = blockIdx.x * (blockDim.x / 32) + warpId;
+
+    if (headIdx >= totalHeads) return;
+
+    float* row = tensor + headIdx * headDim;
+
+    float sum_sq = 0.0f;
+    for (int d = laneId; d < headDim; d += 32) {
+        float val = row[d];
+        sum_sq += val * val;
+    }
+
+    #pragma unroll
+    for (int mask = 16; mask > 0; mask /= 2) {
+        sum_sq += __shfl_xor_sync(0xffffffff, sum_sq, mask);
+    }
+
+    float inv_rms = rsqrtf((sum_sq / (float)headDim) + eps);
+
+    for (int d = laneId; d < headDim; d += 32) {
+        float w = (weight != NULL) ? weight[d] : 1.0f;
+        row[d] = row[d] * inv_rms * w;
+    }
+}
+
+// =============================================================================
+// Split-K FlashDecoding Paged Attention (Step 8)
+// =============================================================================
+
+__global__ void paged_attention_splitk_kernel(
+    const float* __restrict__ q,       // [numTokens, heads, headDim]
+    const __half* __restrict__ kPool,   // [numPhysicalBlocks, blockSize, kvDim]
+    const __half* __restrict__ vPool,   // [numPhysicalBlocks, blockSize, kvDim]
+    float* __restrict__ partialOut,     // [numTokens, heads, splitK, headDim]
+    float* __restrict__ partialMax,     // [numTokens, heads, splitK]
+    float* __restrict__ partialSum,     // [numTokens, heads, splitK]
+    const int* __restrict__ tokenPositions, // [numTokens]
+    const int* __restrict__ blockTables,    // [batchSize, maxBlocks]
+    const int* __restrict__ tokenToSeq,     // [numTokens]
+    int maxBlocks, int heads, int kvHeads, int headDim, int blockSize,
+    int numTokens, float scale, int splitK) {
+
+    int splitIdx = blockIdx.x;
+    int headIdx = blockIdx.y;
+    int tokenIdx = blockIdx.z;
+    int tid = threadIdx.x;
+
+    if (tokenIdx >= numTokens || headIdx >= heads || splitIdx >= splitK) return;
+
+    int seqIdx = tokenToSeq[tokenIdx];
+    int totalKV = tokenPositions[tokenIdx] + 1;
+    int kvHeadIdx = headIdx * kvHeads / heads;
+    int kvDim = kvHeads * headDim;
+
+    const float* q_row = q + (tokenIdx * heads + headIdx) * headDim;
+    int slotIdx = (tokenIdx * heads + headIdx) * splitK + splitIdx;
+
+    int tokensPerSplit = (totalKV + splitK - 1) / splitK;
+    int startTok = splitIdx * tokensPerSplit;
+    int endTok = startTok + tokensPerSplit;
+    if (endTok > totalKV) endTok = totalKV;
+
+    float max_score = -INFINITY;
+    float sum_exp = 0.0f;
+    float part_res[256];
+    if (headDim > 256) return;
+    for (int d = 0; d < headDim; d++) part_res[d] = 0.0f;
+
+    if (startTok < endTok) {
+        for (int t = startTok; t < endTok; t++) {
+            int b = t / blockSize;
+            int offset = t % blockSize;
+            int physicalBlockIdx = blockTables[seqIdx * maxBlocks + b];
+            int poolSlotIdx = physicalBlockIdx * blockSize + offset;
+            const __half* k_ptr = kPool + poolSlotIdx * kvDim + kvHeadIdx * headDim;
+            const __half* v_ptr = vPool + poolSlotIdx * kvDim + kvHeadIdx * headDim;
+
+            float score = 0.0f;
+            for (int d = tid; d < headDim; d += blockDim.x) {
+                score += q_row[d] * __half2float(k_ptr[d]);
+            }
+            #pragma unroll
+            for (int offsetWarp = blockDim.x / 2; offsetWarp > 0; offsetWarp /= 2) {
+                score += __shfl_down_sync(0xffffffff, score, offsetWarp);
+            }
+            score *= scale;
+            score = __shfl_sync(0xffffffff, score, 0);
+
+            float old_max = max_score;
+            if (score > max_score) max_score = score;
+
+            float exp_val = expf(score - max_score);
+            float scale_old = expf(old_max - max_score);
+
+            sum_exp = sum_exp * scale_old + exp_val;
+
+            for (int d = 0; d < headDim; d++) {
+                part_res[d] = part_res[d] * scale_old + exp_val * __half2float(v_ptr[d]);
+            }
+        }
+    }
+
+    if (tid == 0) {
+        partialMax[slotIdx] = max_score;
+        partialSum[slotIdx] = sum_exp;
+    }
+    for (int d = tid; d < headDim; d += blockDim.x) {
+        partialOut[slotIdx * headDim + d] = part_res[d];
+    }
+}
+
+__global__ void paged_attention_splitk_reduce_kernel(
+    const float* __restrict__ partialOut, // [numTokens, heads, splitK, headDim]
+    const float* __restrict__ partialMax, // [numTokens, heads, splitK]
+    const float* __restrict__ partialSum, // [numTokens, heads, splitK]
+    float* __restrict__ output,           // [numTokens, heads, headDim]
+    int heads, int headDim, int numTokens, int splitK) {
+
+    int headIdx = blockIdx.x;
+    int tokenIdx = blockIdx.y;
+    int tid = threadIdx.x;
+
+    if (tokenIdx >= numTokens || headIdx >= heads) return;
+
+    int slotBase = (tokenIdx * heads + headIdx) * splitK;
+    float* out_row = output + (tokenIdx * heads + headIdx) * headDim;
+
+    float global_max = -INFINITY;
+    for (int s = 0; s < splitK; s++) {
+        float m = partialMax[slotBase + s];
+        if (m > global_max) global_max = m;
+    }
+
+    float global_sum = 0.0f;
+    for (int s = 0; s < splitK; s++) {
+        float m = partialMax[slotBase + s];
+        float sum_s = partialSum[slotBase + s];
+        if (sum_s > 0.0f) {
+            global_sum += sum_s * expf(m - global_max);
+        }
+    }
+
+    float inv_sum = (global_sum > 0.0f) ? (1.0f / global_sum) : 0.0f;
+    for (int d = tid; d < headDim; d += blockDim.x) {
+        float acc = 0.0f;
+        for (int s = 0; s < splitK; s++) {
+            float sum_s = partialSum[slotBase + s];
+            if (sum_s > 0.0f) {
+                float m = partialMax[slotBase + s];
+                acc += partialOut[(slotBase + s) * headDim + d] * expf(m - global_max);
+            }
+        }
+        out_row[d] = acc * inv_sum;
+    }
+}
+
+extern "C" {
+
+void cudaPerHeadRMSNorm(cudaStream_t stream, float* tensor, const float* weight,
+                        int totalHeads, int headDim, float eps) {
+    if (totalHeads <= 0 || headDim <= 0) return;
+    int threadsPerBlock = 128;
+    int warpsPerBlock = threadsPerBlock / 32;
+    int blocks = (totalHeads + warpsPerBlock - 1) / warpsPerBlock;
+    qknorm_rmsnorm_kernel<<<blocks, threadsPerBlock, 0, stream>>>(
+        tensor, weight, totalHeads, headDim, eps);
+}
+
+void cudaQKNormRMSNorm(cudaStream_t stream, float* q, float* k,
+                       const float* qWeight, const float* kWeight,
+                       int numTokens, int numQHeads, int numKHeads, int headDim, float eps) {
+    if (numTokens <= 0 || headDim <= 0) return;
+    if (q != NULL && qWeight != NULL && numQHeads > 0) {
+        cudaPerHeadRMSNorm(stream, q, qWeight, numTokens * numQHeads, headDim, eps);
+    }
+    if (k != NULL && kWeight != NULL && numKHeads > 0) {
+        cudaPerHeadRMSNorm(stream, k, kWeight, numTokens * numKHeads, headDim, eps);
+    }
+}
+
+void cudaPagedAttentionSplitK(cudaStream_t stream, const float* q, const __half* kPool, const __half* vPool,
+                               float* output, float* partialOut, float* partialMax, float* partialSum,
+                               const int* tokenPositions, const int* blockTables, const int* tokenToSeq,
+                               int maxBlocks, int heads, int kvHeads, int headDim, int blockSize,
+                               int numTokens, float scale, int splitK) {
+    if (numTokens == 0 || splitK <= 0) return;
+    dim3 gridMap(splitK, heads, numTokens);
+    dim3 blockMap(32);
+    paged_attention_splitk_kernel<<<gridMap, blockMap, 0, stream>>>(
+        q, kPool, vPool, partialOut, partialMax, partialSum,
+        tokenPositions, blockTables, tokenToSeq, maxBlocks, heads, kvHeads, headDim, blockSize, numTokens, scale, splitK);
+
+    dim3 gridReduce(heads, numTokens);
+    dim3 blockReduce(32);
+    paged_attention_splitk_reduce_kernel<<<gridReduce, blockReduce, 0, stream>>>(
+        partialOut, partialMax, partialSum, output, heads, headDim, numTokens, splitK);
 }
 
 } // extern "C"
