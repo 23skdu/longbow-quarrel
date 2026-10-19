@@ -36,14 +36,15 @@ var (
 	blockSize    = flag.Int("block-size", 16, "Paged attention block size")
 	totalBlocks  = flag.Int("total-blocks", 256, "Total number of physical blocks in paged cache")
 
-	temperature  = flag.Float64("temp", 0.7, "Temperature for sampling")
-	topK         = flag.Int("topk", 40, "Top-K sampling")
-	topP         = flag.Float64("topp", 0.95, "Top-P sampling")
-	repPenalty   = flag.Float64("penalty", 1.1, "Repetition penalty")
-	streamOutput = flag.Bool("stream", false, "Stream tokens as they are generated")
-	DraftModel   = flag.String("draft-model", "", "Path to a smaller GGUF model used for speculative decoding (optional)")
-	DraftLength  = flag.Int("draft-length", 4, "How many tokens the draft model proposes per step")
-	DraftPaths   = flag.Int("draft-paths", 2, "How many parallel draft paths to generate per step")
+	temperature   = flag.Float64("temp", 0.7, "Temperature for sampling")
+	topK          = flag.Int("topk", 40, "Top-K sampling")
+	topP          = flag.Float64("topp", 0.95, "Top-P sampling")
+	repPenalty    = flag.Float64("penalty", 1.1, "Repetition penalty")
+	streamOutput  = flag.Bool("stream", false, "Stream tokens as they are generated")
+	ActivationLog = flag.String("activation-log", "", "Write a JSON activation log (embedding, per-layer activations, logits) to this path")
+	DraftModel    = flag.String("draft-model", "", "Path to a smaller GGUF model used for speculative decoding (optional)")
+	DraftLength   = flag.Int("draft-length", 4, "How many tokens the draft model proposes per step")
+	DraftPaths    = flag.Int("draft-paths", 2, "How many parallel draft paths to generate per step")
 )
 
 func main() {
@@ -132,6 +133,9 @@ func main() {
 		MaxBatchSize: *maxBatchSize,
 		BlockSize:    *blockSize,
 		TotalBlocks:  *totalBlocks,
+	}
+	if *ActivationLog != "" {
+		engineConfig.ActivationLogPath = *ActivationLog
 	}
 
 	e, err := engine.NewEngine(*modelPath, engineConfig)

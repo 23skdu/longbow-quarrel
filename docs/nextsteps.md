@@ -502,8 +502,8 @@ Based on deep profiling of autoregressive decode loops, CUDA kernel execution pr
 > 44, 45, 48), Batch 3 (Steps 33, 49), Batch 4 (Steps 37, 38, 39, 40, 46,
 > 47), Batch 5 (Steps 31, 35, 36, 44, 48), Batch 6 (Steps 35, 44), Batch 7
 > (Steps 44, 47), Batch 8 (Step 40), Batch 9 (Step 40), Batch 10 (Step 35)
-> and Batch 11 (Step 35), Batch 12 (Step 35), Batch 13 (Step 35) are
-> DONE** — see the status markers on each step.
+> and Batch 11 (Step 35), Batch 12 (Step 35), Batch 13 (Step 35),
+> Batch 14 (Step 35) are DONE** — see the status markers on each step.
 > Verified locally after the change:
 >
 > | Check | Command | Result |
@@ -904,7 +904,7 @@ Verified by `deadcode -tags cuda -test ./internal/... ./cmd/quarrel` cross-check
 | CUDA Graph capture | `internal/device/cuda_graph.go` | 8 fns | TEST-ONLY |
 | Multi-GPU TP/PP | `internal/device/multi_gpu.go` | 1038 | 34 of ~50 methods TEST-ONLY — **the CLI now refuses to pretend** (Batch 13) |
 | Quantization tooling | `internal/gguf/quantize*.go` | 784 | TEST-ONLY |
-| Activation logging / audits | `internal/engine/activation_logger.go`, `audit.go` | ~750 | TEST-ONLY |
+| Activation logging / audits | `internal/engine/activation_logger.go`, `audit.go` | ~750 | **DONE (Batch 14)** — reachable via `-activation-log`; the audits now feed the metrics |
 | SIMD instrumentation | `internal/simd/metrics.go` `metricsWrapper` | 3 fns | DEAD — never instantiated |
 | Grammar sampling constructors | `internal/sampler/grammar.go:56,70` | 2 fns | Only setter is the never-started API |
 
@@ -1184,10 +1184,54 @@ integration — per-device model shards, cross-device activation transfer
 and collectives in the forward pass. That is a feature, not a wiring fix,
 and it needs two GPUs and an NCCL build to validate.
 
+**Batch 14 made the audit and activation logging real.**
+
+Two separate clusters were inert.
+
+**The audits.** `internal/engine/audit.go` (~600 lines) held a dozen
+diagnostics — logit range and flatness, KV cache position overlap, scratch
+buffer sizing, dequantization accuracy, weight alignment, softmax masking,
+head dimension logic, activation flow, NaN propagation, RoPE deviation —
+and none of them was called from anywhere. The file was also Metal-only
+(`//go:build darwin && metal && cgo`) even though everything it depends on
+is platform-agnostic, so on the CPU and CUDA builds it did not even
+compile.
+
+The most useful of them, the logit range audit, now runs after every
+forward pass on the CPU and CUDA engines, and its result feeds the
+"logit range audit" Prometheus metrics — `logit_max_value`,
+`logit_min_value`, `logit_mean_value`, `logit_rms`,
+`logit_flat_distribution_total`, `logit_nan_count_total`,
+`logit_inf_count_total` and `logit_extreme_values_total`. Every one of
+those metrics existed and was permanently zero, because the function that
+was supposed to record them had no caller. A model that produces NaNs or a
+flat distribution now says so, in the log and in the metrics.
+
+The audit is O(vocab), which is negligible next to the forward pass that
+produced the logits, so it runs on every request.
+
+**The activation logger.** `internal/engine/activation_logger.go` was
+instantiated by the Metal engine and *none of its methods were ever
+called*: the logger was allocated and inert. It is now reachable with
+`quarrel -activation-log <path>`, which writes a JSON file with the
+embedding, the per-layer activations (peak magnitude, a sample, and the
+NaN and Inf counts of each tensor) and the final logits of the top tokens.
+
+The per-layer values are collected by a `LayerActivationCollector` that
+hangs off the existing `CPULayerScratch`, so the hot path pays one nil
+check per layer and nothing at all when the log is off. The layer function
+computes the query, key, value, attention output and FFN output anyway;
+it just kept them in local variables.
+
+**A caveat worth recording:** `AuditDequantizationAccuracy` does not
+dequantize anything. It checks that the quantization type is one it knows
+and returns `Passed: true`. Its comment says as much. It is a stub that
+looks like an audit, and it is left as it is rather than pretending
+otherwise.
+
 **Still open:** the distributed/Arrow Flight stack, CUDA
-Graphs, the quantization tooling and the
-activation/audit logging. Each needs to be either wired behind a documented
-flag or removed.
+Graphs and the quantization tooling. Each needs to be either wired behind
+a documented flag or removed.
 
 **Batch 11 aligned the paged-KV pool's declared type with its stored type.**
 
@@ -1606,7 +1650,8 @@ footprint on CUDA and Metal (see Step 35). **Batch 12** wired the speculative
 decoding stack, which turned out to have an acceptance rule that rejected
 almost every draft token (see Step 35). **Batch 13** made the multi-device
 flags fail loudly instead of printing a topology the engine never applied
-(see Step 35).
+(see Step 35). **Batch 14** made the audit functions and the activation
+logger real (see Step 35).
 
 **Still open:** raising `internal/engine` above 80%, and generating the README table from a script so it cannot drift apart from the floors again.
 

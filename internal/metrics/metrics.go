@@ -119,6 +119,11 @@ var (
 		Help: "Total count of NaN values in logits",
 	})
 
+	LogitInfCount = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "logit_inf_count_total",
+		Help: "Total count of Inf values in logits",
+	})
+
 	LogitExtremeValues = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "logit_extreme_values_total",
 		Help: "Count of extreme logit values detected",
@@ -455,8 +460,12 @@ func RecordModelHotSwap(duration time.Duration, success bool) {
 
 // ===== New Audit Recording Functions =====
 
-// RecordLogitAudit records logit range audit results
-func RecordLogitAudit(max, min, mean, rms float32, hasNaN, hasExtreme, isFlat bool) {
+// RecordLogitAudit records logit range audit results.
+//
+// The metrics and this function both existed, but nothing ever called it:
+// the audit functions in internal/engine/audit.go were never reached, so
+// the "logit range audit" metrics were permanently zero.
+func RecordLogitAudit(max, min, mean, rms float32, nanCount, infCount int, hasExtreme, isFlat bool) {
 	LogitMaxValue.Observe(float64(max))
 	LogitMinValue.Observe(float64(min))
 	LogitMeanValue.Observe(float64(mean))
@@ -464,8 +473,11 @@ func RecordLogitAudit(max, min, mean, rms float32, hasNaN, hasExtreme, isFlat bo
 	if isFlat {
 		LogitFlatDistribution.Inc()
 	}
-	if hasNaN {
-		LogitNaNCount.Inc()
+	if nanCount > 0 {
+		LogitNaNCount.Add(float64(nanCount))
+	}
+	if infCount > 0 {
+		LogitInfCount.Add(float64(infCount))
 	}
 	if hasExtreme {
 		LogitExtremeValues.Inc()

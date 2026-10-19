@@ -363,10 +363,27 @@ func (e *CPUEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, error
 				layerScratch = NewCPULayerScratch(hiddenSize, e.config.Heads, e.config.HeadDim)
 			}
 
+			// The activation log is a debugging aid: it records the
+			// embedding, the per-layer activations and the final logits
+			// so that a broken layer can be found.
+			var actLog *ActivationLogger
+			if e.config.ActivationLogPath != "" {
+				actLog = NewActivationLogger()
+				actLog.Enable("", seqTokens)
+			}
+			var collector *LayerActivationCollector
+			if actLog != nil {
+				collector = &LayerActivationCollector{}
+				layerScratch.Collector = collector
+			}
+
 			var logits []float32
 			for t, tok := range seqTokens {
 				pos := basePos + t
 				hidden := e.weights.GetTokenEmbedding(tok, hiddenSize)
+				if actLog != nil && t == 0 {
+					actLog.LogEmbedding(hidden)
+				}
 
 				if e.config.IsGemma4 {
 					scaleEmb := float32(mathx.Sqrt(float64(hiddenSize)))
@@ -380,6 +397,9 @@ func (e *CPUEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, error
 				} else {
 					for layerIdx := 0; layerIdx < e.config.Layers; layerIdx++ {
 						hidden = ApplyLayerCPUKVWithScratch(e.weights, hidden, layerIdx, pos, kvCache, e.config, layerScratch)
+						if actLog != nil {
+							logLayerActivations(actLog, collector)
+						}
 					}
 				}
 
@@ -401,6 +421,18 @@ func (e *CPUEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, error
 						capVal := e.config.FinalLogitSoftcapping
 						for j := range logits {
 							logits[j] = capVal * float32(mathx.Tanh(float64(logits[j]/capVal)))
+						}
+					}
+
+					// Audit the distribution. A model that produces NaNs
+					// or a flat distribution says nothing about it, and
+					// the audit is cheap next to the forward pass.
+					auditLogits(logits)
+
+					if actLog != nil {
+						actLog.LogLogits(logits, topTokenIDs(logits, 5))
+						if err := actLog.SaveToFile(e.config.ActivationLogPath); err != nil {
+							logger.Log.Warn("failed to write the activation log", "error", err)
 						}
 					}
 				}

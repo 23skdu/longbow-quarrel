@@ -46,10 +46,16 @@ func (m *MasterDistributedEngine) InferWithCallback(tokens []int, count int, cfg
 }
 
 func (m *MasterDistributedEngine) InferWithLogits(tokens []int, count int, cfg SamplerConfig) ([]int, []float32, error) {
+	if len(m.shards) == 0 {
+		return nil, nil, fmt.Errorf("no distributed shards available")
+	}
 	return m.shards[0].InferWithLogits(tokens, count, cfg)
 }
 
 func (m *MasterDistributedEngine) InferWithCallbackLogits(tokens []int, count int, cfg SamplerConfig, tokenCallback func(int), logitsCallback func([]float32)) ([]int, error) {
+	if len(m.shards) == 0 {
+		return nil, fmt.Errorf("no distributed shards available")
+	}
 	return m.shards[0].InferWithCallbackLogits(tokens, count, cfg, tokenCallback, logitsCallback)
 }
 
@@ -204,6 +210,9 @@ func (m *MasterDistributedEngine) RollbackKV(seqID string, newPos int) error {
 }
 
 func (m *MasterDistributedEngine) ForwardDraft(tokens []int) ([][]float32, error) {
+	if len(m.shards) == 0 {
+		return nil, fmt.Errorf("no distributed shards available")
+	}
 	return m.shards[0].ForwardDraft(tokens)
 }
 
@@ -223,5 +232,8 @@ func (m *MasterDistributedEngine) SwapModel(modelPath string, cfg config.Config)
 }
 
 func (m *MasterDistributedEngine) GetSeqCachePos(seqID string) int {
+	if len(m.shards) == 0 {
+		return 0
+	}
 	return m.shards[0].GetSeqCachePos(seqID)
 }

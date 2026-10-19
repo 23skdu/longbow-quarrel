@@ -129,6 +129,7 @@ Comprehensive Prometheus metrics reference for monitoring inference performance,
 | Metric | Type | Description |
 |--------|------|-------------|
 | `logit_nan_count_total` | Counter | NaN values detected in output logits. |
+| `logit_inf_count_total` | Counter | Inf values detected in output logits. |
 | `logit_extreme_values_total` | Counter | Logit values exceeding +/- 1000 in probability distribution. |
 | `logit_flat_distribution_total` | Counter | Flat logit distributions detected (low entropy). |
 | `logit_max_value` | Histogram | Maximum logit value observed. |

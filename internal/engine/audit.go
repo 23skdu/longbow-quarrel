@@ -1,5 +1,3 @@
-//go:build darwin && metal && cgo
-
 package engine
 
 import (
@@ -8,6 +6,14 @@ import (
 	"github.com/23skdu/longbow-quarrel/internal/mathx"
 
 	"github.com/23skdu/longbow-quarrel/internal/device"
+)
+
+// The thresholds an activation trace is judged against. A layer whose
+// activations have collapsed towards zero, or that has saturated, is the
+// usual sign of a broken weight or a broken normalisation.
+const (
+	CollapseThreshold   = 0.00001
+	SaturationThreshold = 10000.0
 )
 
 // LogitRangeAuditResult contains the results of a logit range audit
@@ -343,8 +349,13 @@ func AuditWeightPadding(tensorName string, reportedRows, reportedCols, actualRow
 		audit.PaddingBytes = actualSize - reportedSize
 	}
 
-	// Check alignment
-	audit.IsAligned = actualRows%audit.AlignmentReq == 0 && actualCols%audit.AlignmentReq == 0
+	// Check alignment. The requirement is on the number of elements in a
+	// row, not on both dimensions: a Q4_K tensor with 128 rows of 4096
+	// columns is perfectly valid, because each row holds 4096 elements,
+	// which is a whole number of 256-element blocks. The old check
+	// demanded that the row count was a multiple of the block size too,
+	// and so rejected valid tensors.
+	audit.IsAligned = audit.AlignmentReq <= 1 || actualCols%audit.AlignmentReq == 0
 
 	// Validate tensor dimensions
 	audit.Valid = actualRows > 0 && actualCols > 0
@@ -384,6 +395,12 @@ func AuditSoftmaxMasking(seqLen, pos, windowSize int, scores [][]float32) Softma
 	audit.NumMasked = 0
 	audit.NumUnmasked = 0
 
+	// The strictness is tracked in a local and assigned once at the end.
+	// Assigning it inside the loop and then setting it to true afterwards
+	// clobbered the detection, so the audit always reported strict
+	// masking -- which is the one thing it exists to question.
+	strict := true
+
 	// Determine which positions should be masked
 	for i := 0; i < len(currentScores) && i < seqLen; i++ {
 		shouldMask := false
@@ -412,19 +429,19 @@ func AuditSoftmaxMasking(seqLen, pos, windowSize int, scores [][]float32) Softma
 			audit.NumMasked++
 			// Verify it's actually masked
 			if !isActuallyMasked {
-				audit.IsStrict = false // Not strictly masked
+				strict = false // Not strictly masked
 			}
 		} else {
 			audit.NumUnmasked++
 			// Verify it's not masked
 			if isActuallyMasked {
-				audit.IsStrict = false // Incorrectly masked
+				strict = false // Incorrectly masked
 			}
 		}
 	}
 
 	// If we didn't find any issues, masking is strict
-	audit.IsStrict = true
+	audit.IsStrict = strict
 
 	// Check all positions are in bounds
 	audit.AllPositionsInBounds = len(currentScores) >= pos+1

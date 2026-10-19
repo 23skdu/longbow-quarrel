@@ -89,7 +89,7 @@ func TestRecordLogitAuditBasic(t *testing.T) {
 	max := promtest.Value(t, "logit_max_value", LogitMaxValue)
 	nan := promtest.Value(t, "logit_nan_count_total", LogitNaNCount)
 
-	RecordLogitAudit(10.0, -5.0, 2.5, 3.0, false, false, false)
+	RecordLogitAudit(10.0, -5.0, 2.5, 3.0, 0, 0, false, false)
 
 	promtest.RequireDelta(t, "logit_max_value", LogitMaxValue, max, 1)
 	promtest.RequireDelta(t, "logit_nan_count_total", LogitNaNCount, nan, 0)
@@ -100,7 +100,7 @@ func TestRecordLogitAuditWithIssues(t *testing.T) {
 	extreme := promtest.Value(t, "logit_extreme_values_total", LogitExtremeValues)
 	flat := promtest.Value(t, "logit_flat_distribution_total", LogitFlatDistribution)
 
-	RecordLogitAudit(1000.0, -1000.0, 0.0, 500.0, true, true, true)
+	RecordLogitAudit(1000.0, -1000.0, 0.0, 500.0, 1, 1, true, true)
 
 	promtest.RequireDelta(t, "logit_nan_count_total", LogitNaNCount, nan, 1)
 	promtest.RequireDelta(t, "logit_extreme_values_total", LogitExtremeValues, extreme, 1)

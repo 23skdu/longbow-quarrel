@@ -102,6 +102,14 @@ type Config struct {
 	TensorParallelSize int
 	PipelineStages     int
 
+	// ActivationLogPath is the file the activation log is written to. When
+	// it is empty, the activation log is off.
+	//
+	// The activation log records the embedding, the per-layer
+	// activations and the final logits of a request, which is what you
+	// need to find the layer that broke.
+	ActivationLogPath string
+
 	// Speculative decoding. A smaller "draft" model proposes tokens and the
 	// target model verifies them, which trades extra draft compute for
 	// fewer target forward passes.

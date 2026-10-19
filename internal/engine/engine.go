@@ -43,6 +43,12 @@ func NewMetalEngine(modelPath string, config config.Config) (Engine, error) {
 		stopTokens: stopTokenSet(config.StopTokens),
 	}
 
+	// The activation log is off unless a path is configured. It used to
+	// be instantiated and never used, so it never produced anything.
+	if config.ActivationLogPath != "" {
+		e.ActLogger.Enable("", nil)
+	}
+
 	e.TraceTracker = NewActivationTraceTracker(e.config.Layers)
 	e.BatchManager = NewContinuousBatchManager()
 	e.PromptCache = NewPromptCache()

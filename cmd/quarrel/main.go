@@ -52,6 +52,7 @@ var (
 	numGPULayers     = flag.Int("ngl", -1, "Number of layers to offload to GPU (-1 for all)")
 	gpuLayers        = flag.Int("gpu-layers", -1, "Alias for -ngl")
 	loraPath         = flag.String("lora", "", "Path to LoRA adapter .gguf file (optional)")
+	ActivationLog    = flag.String("activation-log", "", "Write a JSON activation log (embedding, per-layer activations, logits) to this path")
 	DraftModel       = flag.String("draft-model", "", "Path to a smaller GGUF model used for speculative decoding (optional)")
 	DraftLength      = flag.Int("draft-length", 4, "How many tokens the draft model proposes per step")
 	DraftPaths       = flag.Int("draft-paths", 2, "How many parallel draft paths to generate per step")
@@ -102,6 +103,9 @@ func main() {
 	fmt.Printf("Architecture: %s\n", arch)
 
 	engineConfig := engine.ExtractModelConfig(f)
+	if *ActivationLog != "" {
+		engineConfig.ActivationLogPath = *ActivationLog
+	}
 	if *kvCacheSize > 0 {
 		engineConfig.KVCacheSize = *kvCacheSize
 		engineConfig.SeqLen = *kvCacheSize

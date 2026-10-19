@@ -398,6 +398,12 @@ func (e *cudaEngine) runBatchLoop() {
 						logits[j] = capVal * float32(mathx.Tanh(float64(logits[j]/capVal)))
 					}
 				}
+
+				// Audit the distribution. A model that produces NaNs
+				// or a flat distribution says nothing about it, and
+				// the audit is cheap next to the forward pass.
+				auditLogits(logits)
+
 				if seq.LogitsCallback != nil {
 					seq.LogitsCallback(logits)
 				}

@@ -118,10 +118,22 @@ make nvidia
 -max-batch-size int Maximum batch size (default: 16)
 -block-size int     Paged attention block size (default: 16)
 -total-blocks int   Total paged cache blocks (default: 256)
+-activation-log string  Write a JSON activation log (embedding, per-layer activations, logits) to this path
 -draft-model string Path to a smaller GGUF model used for speculative decoding (optional)
 -draft-length int   Tokens the draft model proposes per step (default: 4)
 -draft-paths int    Parallel draft paths per step (default: 2)
 ```
+
+### Activation Logging
+
+`quarrel -activation-log <path>` writes a JSON file with the embedding, the
+per-layer activations and the final logits of the request. Each layer
+records the peak magnitude of its query, key, value, attention output and
+FFN output, a short sample, and the number of NaN and Inf values in it —
+which is what tells you which layer first went wrong.
+
+The log is off by default. It is a debugging aid, not something to leave
+on.
 
 ### Speculative Decoding
 

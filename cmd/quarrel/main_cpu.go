@@ -25,24 +25,25 @@ import (
 )
 
 var (
-	cpuModelPath    = flag.String("model", "", "Path to GGUF model file")
-	cpuPrompt       = flag.String("prompt", "Hello world", "Prompt to generate from")
-	cpuNumTokens    = flag.Int("n", 20, "Number of tokens to generate")
-	cpuMetricsAddr  = flag.String("metrics", ":9090", "Address to serve Prometheus metrics")
-	cpuAPIAddr      = flag.String("api-addr", ":8080", "Address to serve the OpenAI-compatible REST API (empty disables it)")
-	cpuKVCacheSize  = flag.Int("kv-cache-size", 2048, "KV cache max sequence length")
-	cpuTemp         = flag.Float64("temp", 0.7, "Temperature for sampling")
-	cpuTopK         = flag.Int("topk", 40, "Top-K sampling")
-	cpuTopP         = flag.Float64("topp", 0.95, "Top-P sampling")
-	cpuRepPenalty   = flag.Float64("rep-penalty", 1.1, "Repetition penalty")
-	cpuMinP         = flag.Float64("min-p", 0.0, "Min-P sampling threshold")
-	cpuSeed         = flag.Int64("seed", 0, "Random seed (0 for auto)")
-	cpuStream       = flag.Bool("stream", false, "Stream tokens as they are generated")
-	cpuMaxBatchSize = flag.Int("max-batch-size", 16, "Maximum number of sequences in a batch")
-	cpuLoraPath     = flag.String("lora", "", "Path to LoRA adapter .gguf file (optional)")
-	cpuDraftModel   = flag.String("draft-model", "", "Path to a smaller GGUF model used for speculative decoding (optional)")
-	cpuDraftLength  = flag.Int("draft-length", 4, "How many tokens the draft model proposes per step")
-	cpuDraftPaths   = flag.Int("draft-paths", 2, "How many parallel draft paths to generate per step")
+	cpuModelPath     = flag.String("model", "", "Path to GGUF model file")
+	cpuPrompt        = flag.String("prompt", "Hello world", "Prompt to generate from")
+	cpuNumTokens     = flag.Int("n", 20, "Number of tokens to generate")
+	cpuMetricsAddr   = flag.String("metrics", ":9090", "Address to serve Prometheus metrics")
+	cpuAPIAddr       = flag.String("api-addr", ":8080", "Address to serve the OpenAI-compatible REST API (empty disables it)")
+	cpuKVCacheSize   = flag.Int("kv-cache-size", 2048, "KV cache max sequence length")
+	cpuTemp          = flag.Float64("temp", 0.7, "Temperature for sampling")
+	cpuTopK          = flag.Int("topk", 40, "Top-K sampling")
+	cpuTopP          = flag.Float64("topp", 0.95, "Top-P sampling")
+	cpuRepPenalty    = flag.Float64("rep-penalty", 1.1, "Repetition penalty")
+	cpuMinP          = flag.Float64("min-p", 0.0, "Min-P sampling threshold")
+	cpuSeed          = flag.Int64("seed", 0, "Random seed (0 for auto)")
+	cpuStream        = flag.Bool("stream", false, "Stream tokens as they are generated")
+	cpuMaxBatchSize  = flag.Int("max-batch-size", 16, "Maximum number of sequences in a batch")
+	cpuLoraPath      = flag.String("lora", "", "Path to LoRA adapter .gguf file (optional)")
+	cpuActivationLog = flag.String("activation-log", "", "Write a JSON activation log (embedding, per-layer activations, logits) to this path")
+	cpuDraftModel    = flag.String("draft-model", "", "Path to a smaller GGUF model used for speculative decoding (optional)")
+	cpuDraftLength   = flag.Int("draft-length", 4, "How many tokens the draft model proposes per step")
+	cpuDraftPaths    = flag.Int("draft-paths", 2, "How many parallel draft paths to generate per step")
 )
 
 // GPU-offload flags are accepted for command-line compatibility with the CUDA
@@ -103,6 +104,9 @@ func main() {
 	fmt.Printf("Architecture: %s\n", arch)
 
 	engineConfig := engine.ExtractModelConfig(f)
+	if *cpuActivationLog != "" {
+		engineConfig.ActivationLogPath = *cpuActivationLog
+	}
 	if *cpuKVCacheSize > 0 {
 		engineConfig.KVCacheSize = *cpuKVCacheSize
 		engineConfig.SeqLen = *cpuKVCacheSize

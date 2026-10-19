@@ -473,6 +473,25 @@ type CPULayerScratch struct {
 	KNormed   []float32
 	Ping      []float32
 	Pong      []float32
+
+	// Collector captures the per-layer activations for the activation
+	// log. It is nil unless the log is enabled, so the hot path pays one
+	// nil check per layer.
+	Collector *LayerActivationCollector
+}
+
+// LayerActivationCollector captures the activations of one transformer
+// layer, so that the activation log can record them.
+//
+// The activation logger existed and was instantiated by the Metal engine,
+// but nothing ever called its methods, so the log was never produced.
+type LayerActivationCollector struct {
+	LayerIdx int
+	Q        []float32
+	K        []float32
+	V        []float32
+	AttnOut  []float32
+	FFNOut   []float32
 }
 
 // NewCPULayerScratch creates a buffer struct sized for the given model dimensions.
@@ -517,6 +536,9 @@ func ApplyLayerCPUKVWithScratch(w *CPUWeights, input []float32, layerIdx int, po
 	}
 
 	var out []float32
+
+	// Captured for the activation log. They stay nil when the log is off.
+	var capQ, capK, capV, capAttn, capFFN []float32
 
 	if w.HasFullAttn(layerIdx) {
 		var qWeight, kWeight, vWeight, oWeight []float32
@@ -657,6 +679,7 @@ func ApplyLayerCPUKVWithScratch(w *CPUWeights, input []float32, layerIdx int, po
 			}
 		}
 		out = w.MatVec(oWeight, rawO, attn)
+		capQ, capK, capV, capAttn = query, k, v, attn
 	} else if w.HasSSM(layerIdx) {
 		var qkvWeight []float32
 		var rawQKV *gguf.TensorInfo
@@ -731,10 +754,19 @@ func ApplyLayerCPUKVWithScratch(w *CPUWeights, input []float32, layerIdx int, po
 			gate[i] = siluCPU(gate[i]) * up[i]
 		}
 		down := w.MatVec(downWeight, rawDown, gate)
+		capFFN = down
 
 		for i := range residual {
 			residual[i] += down[i]
 		}
+	}
+
+	if scratch != nil && scratch.Collector != nil {
+		c := scratch.Collector
+		c.LayerIdx = layerIdx
+		c.Q, c.K, c.V = capQ, capK, capV
+		c.AttnOut = capAttn
+		c.FFNOut = capFFN
 	}
 
 	return residual

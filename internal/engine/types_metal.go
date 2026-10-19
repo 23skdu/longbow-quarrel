@@ -122,11 +122,6 @@ type ActivationTraceTracker struct {
 	enabled   bool
 }
 
-const (
-	CollapseThreshold   = 0.00001
-	SaturationThreshold = 10000.0
-)
-
 func NewActivationTraceTracker(numLayers int) *ActivationTraceTracker {
 	return &ActivationTraceTracker{
 		NumLayers: numLayers,
