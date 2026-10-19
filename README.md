@@ -68,6 +68,7 @@ see [docs/dependencies.md](docs/dependencies.md).
 - **Vectorized TurboQuant Kernels:** AVX-512, AVX2 and ARM NEON implementations of the PolarQuant and QJL transforms, dispatched at runtime by CPU feature detection, with a canonical pure-Go fallback.
 - **SIMD GGUF Dequantization Kernels:** Vectorized batch dequantization and zero-copy matrix-vector multiplication (`MatVecMulQ4_K`, `MatVecMulQ6_K`).
 - **Comprehensive Verification:** Clean `go vet`, 0 `gosec` security vulnerabilities, 0 data races (`go test -race`), a `vacuous_tests` gate that fails any test which cannot fail, and a `dupcheck` gate that fails on duplicate package-level declarations in any build configuration.
+- **Speculative Decoding:** A smaller draft model proposes the next tokens and the target model verifies them in one forward pass, with the standard `min(1, p_target/p_draft)` acceptance test and a residual-distribution correction. Enable it with `-draft-model <path>`; the draft model runs on the CPU so the GPU memory stays with the target.
 - **Distributed Inference (Arrow Flight):** A Flight client, a master engine, a remote worker engine and a Flight server for single-request inference. The **sharded** tensor forward is *not* implemented on the worker side: the worker rejects it with `Unimplemented` rather than silently returning zeroed activations. See `docs/nextsteps.md` (Step 35) for the exact boundary.
 
 ---
@@ -90,6 +91,7 @@ see [docs/dependencies.md](docs/dependencies.md).
 - **Paged KV Cache**: Virtual memory block allocation with prefix caching
 - **TurboQuant KV Cache**: 8x KV cache compression with PolarQuant + QJL residual
 - **Distributed Sharding**: Client, master and worker plumbing via Apache Arrow Flight RPC. The worker-side sharded forward is not implemented yet (it fails loudly, not silently).
+- **Speculative Decoding**: Draft-model token proposals verified by the target model, exposed as `-draft-model` and as the REST API's `"speculative"` / `"draft_k"` fields.
 - **API**: OpenAI-compatible (`/v1/chat/completions`, `/v1/completions`), WebSocket streaming, and Prometheus metrics (`/metrics`)
 
 ---

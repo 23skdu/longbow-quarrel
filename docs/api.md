@@ -73,7 +73,7 @@ Quarrel automatically applies the `tokenizer.chat_template` Jinja2 string from G
 
 **Extensions (Implemented):**
 - `"adapter"`: (string) ID of a previously loaded LoRA adapter.
-- `"speculative"`: (bool) Enable speculative decoding with multi-token draft verification.
+- `"speculative"`: (bool) Enable speculative decoding with multi-token draft verification. The server has to be started with a draft model (`quarrel -draft-model <path>`); without one the field is ignored and the request is served by the plain engine.
 - `"draft_k"`: (int, optional) Number of tokens to draft per step (default: 4).
 
 ### Custom Endpoints

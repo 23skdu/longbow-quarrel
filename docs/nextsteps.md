@@ -502,7 +502,8 @@ Based on deep profiling of autoregressive decode loops, CUDA kernel execution pr
 > 44, 45, 48), Batch 3 (Steps 33, 49), Batch 4 (Steps 37, 38, 39, 40, 46,
 > 47), Batch 5 (Steps 31, 35, 36, 44, 48), Batch 6 (Steps 35, 44), Batch 7
 > (Steps 44, 47), Batch 8 (Step 40), Batch 9 (Step 40), Batch 10 (Step 35)
-> and Batch 11 (Step 35) are DONE** — see the status markers on each step.
+> and Batch 11 (Step 35), Batch 12 (Step 35) are DONE** — see the
+> status markers on each step.
 > Verified locally after the change:
 >
 > | Check | Command | Result |
@@ -896,7 +897,7 @@ Verified by `deadcode -tags cuda -test ./internal/... ./cmd/quarrel` cross-check
 | Cluster | Location | LOC | Status |
 |---|---|---|---|
 | Arrow Flight distributed inference | `internal/arrow_client/*`, `internal/engine/remote.go`, `distributed_master.go` | ~800 | PARTIAL — single-request `DoGet` works; the sharded forward is **not implemented on the worker** and used to fail silently (Batch 10) |
-| Speculative decoding | `internal/engine/speculative.go` | 367 | TEST-ONLY |
+| Speculative decoding | `internal/engine/speculative.go` | 367 | **DONE (Batch 12)** — reachable via `-draft-model` and the API's `speculative` field |
 | Radix prefix cache | `internal/engine/radix_cache.go` | 286 | **DEAD — duplicate of the wired `prompt_cache.go`** |
 | Jinja2 chat templates | `internal/engine/prompt_wrapper.go` | 372 | TEST-ONLY — **no chat template is ever applied** |
 | OTEL tracing | `internal/telemetry/telemetry.go` `InitTracer:29` | 8 fns | DEAD — tracer never initialised |
@@ -1085,7 +1086,69 @@ that exists, the master mode (`MasterDistributedEngine`) has no working
 peer to talk to, and the single-request `DoGet` path is the only part of
 the distributed stack that functions end to end.
 
-**Still open:** the distributed/Arrow Flight stack, speculative decoding, CUDA
+**Batch 12 wired the speculative decoding stack, and found two real bugs in
+it.**
+
+The stack was complete but unreachable: `SpeculativeManager`,
+`AsymmetricSpeculativeEngine` and the acceptance test all existed, and
+nothing in any shipped binary ever constructed them. The REST API even
+accepted a `"speculative"` request field and a `"draft_k"` field, and then
+ignored both — the handler always used the plain engine, so a request that
+asked for speculative decoding silently got ordinary generation.
+
+It is now reachable three ways:
+
+- `quarrel -draft-model <path>` loads a second, smaller model and wraps the
+  target engine with it. The draft model runs on the CPU, because a draft
+  model is small by definition and the GPU memory is better spent on the
+  target.
+- `-draft-length` and `-draft-paths` set the draft length and the number of
+  parallel draft paths.
+- The REST API's `"speculative"` and `"draft_k"` fields now select the
+  speculative engine and set its draft length.
+
+**The acceptance test was wrong.** It compared the target's *normalized*
+probability for a token with the target's *unnormalized* `exp(logit)` for
+the same token:
+
+```go
+draftProb := mathx.Exp(float64(targetLogits[draftToken]))   // unnormalized
+targetProb := probs[draftToken]                              // normalized
+acceptanceRatio := targetProb / draftProb
+```
+
+With the logit scale real models use, the unnormalized value dwarfs the
+normalized one — for a logit of 20 the ratio is about 2e-9 — so **virtually
+every draft token was rejected** and the scheme could not have produced a
+speedup. The draft model's probability for the token it proposed was
+available all along: the manager called `InferWithLogits` and threw the
+logits away.
+
+The acceptance test is now the standard one, `min(1, p_target / p_draft)`,
+with the rejection replaced by a draw from the residual distribution
+`norm(max(0, p_target - p_draft))`. The manager keeps the draft's
+distribution for every proposed token, and the `rejectSample` signature
+gained the draft logits. When the draft and the target disagree on the
+vocabulary size the two distributions cannot be compared, and the draft
+token is accepted only when the target ranks it first.
+
+**The correction was computed and then dropped.** When a draft token was
+rejected, the residual sample was written into the candidate list, but only
+the *accepted prefix* was appended to the sequence, so a rejection produced
+no token at all. The correction is now emitted, and the sequence's position
+accounts for it.
+
+A third, smaller fix: a speculative step can produce more tokens than were
+asked for, and the surplus was returned to the caller even though it had
+never been emitted through the callback. The return is now trimmed to what
+was emitted.
+
+`internal/engine/speculative_wiring_test.go` covers all of it. The
+regression test for the acceptance rule stores a value with a logit of 20
+and checks that a token the target agrees with is accepted: with the old
+rule it was rejected on the first trial.
+
+**Still open:** the distributed/Arrow Flight stack, CUDA
 Graphs, the multi-GPU TP/PP engine, the quantization tooling and the
 activation/audit logging. Each needs to be either wired behind a documented
 flag or removed.
@@ -1503,7 +1566,9 @@ is now at 68.1%.
 **Batch 10** fixed the Arrow Flight protocol's silent corruption and a crash
 that only the GPU builds hit (see Step 35). **Batch 11** aligned the paged-KV
 pool's declared type with its stored type, which halves the KV cache's VRAM
-footprint on CUDA and Metal (see Step 35).
+footprint on CUDA and Metal (see Step 35). **Batch 12** wired the speculative
+decoding stack, which turned out to have an acceptance rule that rejected
+almost every draft token (see Step 35).
 
 **Still open:** raising `internal/engine` above 80%, and generating the README table from a script so it cannot drift apart from the floors again.
 

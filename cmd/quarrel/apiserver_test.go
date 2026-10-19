@@ -43,7 +43,7 @@ func TestStartAPIServer_ServesEndpoints(t *testing.T) {
 
 	addr := freePort(t)
 
-	srv, err := startAPIServer(addr, func() int64 { return 0 }, mockEng, nil)
+	srv, err := startAPIServer(addr, func() int64 { return 0 }, mockEng, nil, nil)
 	if err != nil {
 		t.Fatalf("startAPIServer failed: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestStartAPIServer_ServesEndpoints(t *testing.T) {
 
 // TestStartAPIServer_EmptyAddressDisables ensures the API can be turned off.
 func TestStartAPIServer_EmptyAddressDisables(t *testing.T) {
-	srv, err := startAPIServer("", func() int64 { return 0 }, nil, nil)
+	srv, err := startAPIServer("", func() int64 { return 0 }, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("startAPIServer with an empty address failed: %v", err)
 	}

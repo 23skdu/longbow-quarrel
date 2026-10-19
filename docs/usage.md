@@ -118,7 +118,23 @@ make nvidia
 -max-batch-size int Maximum batch size (default: 16)
 -block-size int     Paged attention block size (default: 16)
 -total-blocks int   Total paged cache blocks (default: 256)
+-draft-model string Path to a smaller GGUF model used for speculative decoding (optional)
+-draft-length int   Tokens the draft model proposes per step (default: 4)
+-draft-paths int    Parallel draft paths per step (default: 2)
 ```
+
+### Speculative Decoding
+
+A smaller draft model proposes the next tokens and the target model verifies
+them in one forward pass. The draft model is loaded on the CPU so the GPU
+memory stays with the target.
+
+```bash
+./bin/quarrel-linux-amd64-cuda -model Qwen3.5 -draft-model ./qwen2.5-0.5b.gguf
+```
+
+The REST API exposes the same thing per request: `"speculative": true` with
+an optional `"draft_k"`. See `docs/api.md`.
 
 ### Example
 ```bash

@@ -101,6 +101,16 @@ type Config struct {
 	Devices            []int
 	TensorParallelSize int
 	PipelineStages     int
+
+	// Speculative decoding. A smaller "draft" model proposes tokens and the
+	// target model verifies them, which trades extra draft compute for
+	// fewer target forward passes.
+	//
+	// SpeculativeDraftModel is the path to the draft model. When it is
+	// empty, speculative decoding is off.
+	SpeculativeDraftModel  string
+	SpeculativeDraftLength int // How many tokens the draft model proposes per step
+	SpeculativeNumPaths    int // How many parallel draft paths to generate per step
 }
 
 type Gemma4Config struct {
@@ -236,5 +246,9 @@ func Default() Config {
 		DebugLayerOutput: false,
 		DebugLogits:      false,
 		DebugMemory:      false,
+
+		// Speculative decoding is off unless a draft model is given.
+		SpeculativeDraftLength: 4,
+		SpeculativeNumPaths:    2,
 	}
 }

@@ -40,6 +40,9 @@ var (
 	cpuStream       = flag.Bool("stream", false, "Stream tokens as they are generated")
 	cpuMaxBatchSize = flag.Int("max-batch-size", 16, "Maximum number of sequences in a batch")
 	cpuLoraPath     = flag.String("lora", "", "Path to LoRA adapter .gguf file (optional)")
+	cpuDraftModel   = flag.String("draft-model", "", "Path to a smaller GGUF model used for speculative decoding (optional)")
+	cpuDraftLength  = flag.Int("draft-length", 4, "How many tokens the draft model proposes per step")
+	cpuDraftPaths   = flag.Int("draft-paths", 2, "How many parallel draft paths to generate per step")
 )
 
 // GPU-offload flags are accepted for command-line compatibility with the CUDA
@@ -154,6 +157,29 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to initialize engine: %v", err)
 	}
+
+	// Speculative decoding: a smaller draft model proposes the next tokens
+	// and the target model verifies them, which trades draft compute for
+	// fewer target forward passes. The defer has to come after the
+	// wrapping, because the wrapper owns both engines.
+	// The target engine is kept separately: the REST API serves ordinary
+	// requests with it and only uses the speculative engine for the
+	// requests that ask for it.
+	targetEngine := e
+	var specEngine engine.Engine
+	if *cpuDraftModel != "" {
+		engineConfig.SpeculativeDraftModel = *cpuDraftModel
+		engineConfig.SpeculativeDraftLength = *cpuDraftLength
+		engineConfig.SpeculativeNumPaths = *cpuDraftPaths
+		speculative, specErr := engine.NewSpeculativeEngine(e, *cpuDraftModel, engineConfig)
+		if specErr != nil {
+			logger.Log.Error("Failed to enable speculative decoding", "error", specErr)
+		} else {
+			specEngine = speculative
+			e = speculative
+			fmt.Printf("Speculative decoding enabled with draft model: %s\n", *cpuDraftModel)
+		}
+	}
 	defer e.Close()
 
 	if *cpuLoraPath != "" {
@@ -166,7 +192,7 @@ func main() {
 
 	// OpenAI-compatible REST API. This is the surface documented in README.md
 	// and docs/api.md; it was previously never started by any binary.
-	apiSrv, err := startAPIServer(*cpuAPIAddr, device.CPUAllocatedBytes, e, tok)
+	apiSrv, err := startAPIServer(*cpuAPIAddr, device.CPUAllocatedBytes, targetEngine, specEngine, tok)
 	if err != nil {
 		logger.Log.Error("failed to start REST API", "error", err)
 	}

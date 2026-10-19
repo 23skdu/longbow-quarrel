@@ -27,12 +27,15 @@ type apiServer struct {
 //
 // addr may be empty, in which case the API is disabled and (nil, nil) is
 // returned.
-func startAPIServer(addr string, memFn func() int64, e engine.Engine, tok *tokenizer.Tokenizer) (*apiServer, error) {
+//
+// specEngine is the optional speculative-decoding engine. When it is given,
+// the requests that set "speculative" use it.
+func startAPIServer(addr string, memFn func() int64, e engine.Engine, specEngine engine.Engine, tok *tokenizer.Tokenizer) (*apiServer, error) {
 	if addr == "" {
 		return nil, nil
 	}
 
-	mux := api.InitServer(0, memFn, e, tok)
+	mux := api.InitServerWithSpeculative(0, memFn, e, specEngine, tok)
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           mux,

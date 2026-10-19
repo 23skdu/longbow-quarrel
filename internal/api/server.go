@@ -23,12 +23,40 @@ type Server struct {
 	UsedMemory func() int64
 	Engine     engine.Engine
 	Tokenizer  TokenizerShim
+
+	// SpeculativeEngine is the optional speculative-decoding engine. It
+	// is the same target model with a draft model attached, and it is used
+	// for the requests that ask for speculative decoding.
+	//
+	// The "speculative" request field used to be accepted and then
+	// ignored: the handler always used the plain engine, so a request
+	// that asked for speculative decoding silently got ordinary
+	// generation.
+	SpeculativeEngine engine.Engine
 }
 
 type TokenizerShim interface {
 	Encode(s string) []int
 	Decode(tokens []int) string
 	GetVocab() []string
+}
+
+// engineFor returns the engine that should serve a request.
+//
+// A request that asks for speculative decoding uses the speculative engine
+// when the server was given one, and the plain engine otherwise. The
+// per-request draft length is applied to whichever engine is chosen.
+func (s *Server) engineFor(speculative bool, draftK int) engine.Engine {
+	chosen := s.Engine
+	if speculative && s.SpeculativeEngine != nil {
+		chosen = s.SpeculativeEngine
+	}
+	if draftK > 0 {
+		if setter, ok := chosen.(engine.DraftLengthSetter); ok {
+			setter.SetDraftLength(draftK)
+		}
+	}
+	return chosen
 }
 
 func (s *Server) getUsedMemory() int64 {
@@ -107,11 +135,19 @@ var globalServer *Server
 // between tests, and is one reason the API was never wired into any binary.
 // Callers own the returned mux and decide where to serve it.
 func InitServer(maxMemory int64, memCallback func() int64, e engine.Engine, t TokenizerShim) *http.ServeMux {
+	return InitServerWithSpeculative(maxMemory, memCallback, e, nil, t)
+}
+
+// InitServerWithSpeculative is InitServer with an optional speculative
+// engine. When it is given, the requests that set "speculative" use it
+// instead of the plain engine.
+func InitServerWithSpeculative(maxMemory int64, memCallback func() int64, e engine.Engine, spec engine.Engine, t TokenizerShim) *http.ServeMux {
 	globalServer = &Server{
-		MaxMemory:  maxMemory,
-		UsedMemory: memCallback,
-		Engine:     e,
-		Tokenizer:  t,
+		MaxMemory:         maxMemory,
+		UsedMemory:        memCallback,
+		Engine:            e,
+		Tokenizer:         t,
+		SpeculativeEngine: spec,
 	}
 
 	// Start resource monitor background loop
@@ -153,6 +189,7 @@ type CompletionRequest struct {
 	Temperature float64  `json:"temperature"`
 	Adapter     string   `json:"adapter"`
 	Speculative bool     `json:"speculative"`
+	DraftK      int      `json:"draft_k"` // Draft tokens per step when speculative
 	Images      []string `json:"images"`  // Base64 encoded images
 	Grammar     string   `json:"grammar"` // EBNF grammar source
 }
@@ -215,11 +252,12 @@ func (s *Server) CompletionsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// For Phase 3, we pass Speculative and Adapter info via the internal engine logic
-	// In a real implementation, we would update the Engine.Infer method or use continuous batching Submit.
-	// For now, we'll use the existing sync Infer and assume it handles internal state if possible.
+	// The "speculative" field selects the speculative engine, which is the
+	// same target model with a draft model attached. It used to be
+	// accepted and then ignored.
+	eng := s.engineFor(req.Speculative, req.DraftK)
 
-	resTokens, err := s.Engine.Infer(tokens, req.MaxTokens, samplerCfg)
+	resTokens, err := eng.Infer(tokens, req.MaxTokens, samplerCfg)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -266,6 +304,8 @@ type ChatCompletionRequest struct {
 	TopP        float64       `json:"top_p"`
 	Stream      bool          `json:"stream"`
 	Grammar     string        `json:"grammar,omitempty"`
+	Speculative bool          `json:"speculative,omitempty"`
+	DraftK      int           `json:"draft_k,omitempty"` // Draft tokens per step when speculative
 }
 
 type ChatCompletionResponse struct {
@@ -425,7 +465,11 @@ func (s *Server) ChatCompletionsHandler(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	resTokens, err := s.Engine.Infer(tokens, maxTokens, samplerCfg)
+	// A request that asks for speculative decoding uses the speculative
+	// engine, which is the same target model with a draft model attached.
+	eng := s.engineFor(req.Speculative, req.DraftK)
+
+	resTokens, err := eng.Infer(tokens, maxTokens, samplerCfg)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

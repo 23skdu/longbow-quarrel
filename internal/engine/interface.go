@@ -27,6 +27,16 @@ type Engine interface {
 	ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, error)
 }
 
+// DraftLengthSetter is implemented by engines whose speculative draft
+// length can be changed at runtime.
+//
+// The REST API exposes a per-request "draft_k" field, so an engine that
+// supports speculative decoding has to be able to take the requested draft
+// length.
+type DraftLengthSetter interface {
+	SetDraftLength(k int)
+}
+
 // EngineCreator defines the factory function for creating an engine
 type EngineCreator func(modelPath string, cfg config.Config) (Engine, error)
 
