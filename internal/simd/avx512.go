@@ -123,6 +123,9 @@ func SwiGLU(gate, up, out []float32) {
 	if !simdInitDone {
 		initSIMD()
 	}
+	m := newMetricsWrapper("SwiGLU", len(gate))
+	defer m.record()
+	defer checkOutputNaNInf(out, "SwiGLU")
 
 	n := len(gate)
 	if n == 0 || n != len(up) || n != len(out) {
@@ -246,6 +249,9 @@ func RMSNorm(input, weight, output []float32, rows, cols int, eps float32) {
 	if !simdInitDone {
 		initSIMD()
 	}
+	m := newMetricsWrapper("RMSNorm", cols)
+	defer m.record()
+	defer checkOutputNaNInf(output, "RMSNorm")
 
 	if rows*cols == 0 {
 		return
@@ -274,6 +280,9 @@ func Matmul(a, b, c []float32, m, n, k int) {
 	if !simdInitDone {
 		initSIMD()
 	}
+	mw := newMetricsWrapper("Matmul", n)
+	defer mw.record()
+	defer checkOutputNaNInf(c, "Matmul")
 
 	if m*n*k == 0 {
 		return
@@ -312,6 +321,8 @@ func RoPE(tensor []float32, positions []int, batch, heads, seqLen, headDim int, 
 	if !simdInitDone {
 		initSIMD()
 	}
+	m := newMetricsWrapper("RoPE", headDim)
+	defer m.record()
 
 	if batch*heads*seqLen*headDim == 0 {
 		return
@@ -347,6 +358,9 @@ func FusedAttention(q, k, v, output []float32, batch, heads, seqLen, kvSeqLen, h
 	if !simdInitDone {
 		initSIMD()
 	}
+	m := newMetricsWrapper("Attention", seqLen*headDim)
+	defer m.record()
+	defer checkOutputNaNInf(output, "Attention")
 
 	if batch*heads*seqLen*headDim == 0 {
 		return
@@ -381,6 +395,9 @@ func FusedMLP(input, gateW, upW, downW, output []float32, batch, dim, hiddenDim 
 	if !simdInitDone {
 		initSIMD()
 	}
+	m := newMetricsWrapper("FusedMLP", dim)
+	defer m.record()
+	defer checkOutputNaNInf(output, "FusedMLP")
 
 	if batch*dim*hiddenDim == 0 {
 		return

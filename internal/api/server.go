@@ -38,6 +38,28 @@ func (s *Server) getUsedMemory() int64 {
 	return 0
 }
 
+// chatTemplateProvider is implemented by tokenizers that expose the model's
+// own Jinja2 chat template.
+//
+// It is an optional interface rather than part of TokenizerShim so that a
+// tokenizer without a template (or a test double) still satisfies the
+// contract.
+type chatTemplateProvider interface {
+	ChatTemplate() string
+}
+
+// chatTemplate returns the model's chat template, or "" when the model does
+// not ship one.
+func (s *Server) chatTemplate() string {
+	if s == nil || s.Tokenizer == nil {
+		return ""
+	}
+	if p, ok := s.Tokenizer.(chatTemplateProvider); ok {
+		return p.ChatTemplate()
+	}
+	return ""
+}
+
 type HealthResponse struct {
 	Status      string `json:"status"`
 	MemoryUsed  int64  `json:"memory_used"`
@@ -287,18 +309,26 @@ func (s *Server) ChatCompletionsHandler(w http.ResponseWriter, r *http.Request) 
 	var promptBuilder strings.Builder
 	var imagePayloads [][]byte
 
+	// The text of each message, in order, so the model's own chat template
+	// can be applied when it ships one.
+	textMessages := make([]engine.Message, 0, len(req.Messages))
+	var systemPrompt string
+
 	for _, msg := range req.Messages {
-		fmt.Fprintf(&promptBuilder, "<|im_start|>%s\n", msg.Role)
 		switch c := msg.Content.(type) {
 		case string:
-			promptBuilder.WriteString(c)
+			textMessages = append(textMessages, engine.Message{Role: msg.Role, Content: c})
+			if msg.Role == "system" {
+				systemPrompt = c
+			}
 		case []interface{}:
+			var textParts strings.Builder
 			for _, partObj := range c {
 				partBytes, _ := json.Marshal(partObj)
 				var part ChatContentPart
 				if err := json.Unmarshal(partBytes, &part); err == nil {
 					if part.Type == "text" {
-						promptBuilder.WriteString(part.Text)
+						textParts.WriteString(part.Text)
 					} else if part.Type == "image_url" && part.ImageURL != nil {
 						rawURL := part.ImageURL.URL
 						// Support base64 data URIs: data:image/...;base64,...
@@ -314,10 +344,40 @@ func (s *Server) ChatCompletionsHandler(w http.ResponseWriter, r *http.Request) 
 					}
 				}
 			}
+			textMessages = append(textMessages, engine.Message{Role: msg.Role, Content: textParts.String()})
+			if msg.Role == "system" {
+				systemPrompt = textParts.String()
+			}
 		}
-		promptBuilder.WriteString("<|im_end|>\n")
 	}
-	promptBuilder.WriteString("<|im_start|>assistant\n")
+
+	// Use the model's own chat template when it ships one. The handler used
+	// to hardcode the ChatML format (<|im_start|>...) for every model, which
+	// is the Qwen format: a Llama 3, Gemma or Mistral model prompted that way
+	// produces garbage.
+	//
+	// The template comes from the GGUF metadata key
+	// "tokenizer.chat_template" and is rendered by the Jinja2-subset renderer
+	// in internal/engine.
+	prompt := ""
+	if tmpl := s.chatTemplate(); tmpl != "" {
+		wrapper := &engine.PromptWrapper{ChatTemplate: tmpl, SystemPrompt: systemPrompt}
+		rendered, err := wrapper.Wrap(textMessages)
+		if err == nil && rendered != "" {
+			prompt = rendered
+		} else if err != nil {
+			logger.Log.Warn("chat template rendering failed; falling back to the default format", "error", err)
+		}
+	}
+	if prompt == "" {
+		for _, msg := range textMessages {
+			fmt.Fprintf(&promptBuilder, "<|im_start|>%s\n", msg.Role)
+			promptBuilder.WriteString(msg.Content)
+			promptBuilder.WriteString("<|im_end|>\n")
+		}
+		promptBuilder.WriteString("<|im_start|>assistant\n")
+		prompt = promptBuilder.String()
+	}
 
 	// If images were decoded, process through VLM encoder using the model's actual architecture
 	if len(imagePayloads) > 0 && s.Engine != nil {
@@ -337,14 +397,13 @@ func (s *Server) ChatCompletionsHandler(w http.ResponseWriter, r *http.Request) 
 					visionTensor, encErr := vDecoder.Decode(imgData)
 					if encErr == nil && visionTensor != nil {
 						_ = visionTensor
-						promptBuilder.WriteString("[vision_features_injected]")
+						prompt += "[vision_features_injected]"
 					}
 				}
 			}
 		}
 	}
 
-	prompt := promptBuilder.String()
 	tokens := s.Tokenizer.Encode(prompt)
 
 	maxTokens := req.MaxTokens

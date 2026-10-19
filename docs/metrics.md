@@ -59,7 +59,6 @@ Comprehensive Prometheus metrics reference for monitoring inference performance,
 | `kv_cache_capacity_bytes` | Gauge | Total pre-allocated KV cache memory capacity. |
 | `kv_cache_used_bytes` | Gauge | Current KV cache memory utilization in bytes. |
 | `kv_cache_hits_total` | Counter | Number of prefix tokens retrieved directly from prompt cache. |
-| `kv_cache_misses_total` | Counter | Number of token positions requiring new attention computation. |
 | `kv_cache_evictions_total` | Counter | Total blocks evicted under cache pressure. |
 | `kv_cache_oob_total` | Counter | Count of prevented out-of-bounds KV cache access attempts. |
 | `kv_cache_overlap_total` | Counter | Count of prevented position overlaps in block tables. |
@@ -73,7 +72,6 @@ Comprehensive Prometheus metrics reference for monitoring inference performance,
 | Metric | Type | Description |
 |--------|------|-------------|
 | `kv_cache_hits_total` | Counter | Prefix tokens retrieved from prompt cache (skips prefill computation). |
-| `kv_cache_misses_total` | Counter | Tokens requiring new attention computation. |
 | `kv_cache_evictions_total` | Counter | Blocks evicted from prompt cache under memory pressure. |
 
 ---
@@ -101,7 +99,6 @@ Comprehensive Prometheus metrics reference for monitoring inference performance,
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `lora_dispatch_groups_per_batch` | Histogram | Number of unique LoRA adapter groups per batch. |
 
 ---
 
@@ -114,8 +111,6 @@ Comprehensive Prometheus metrics reference for monitoring inference performance,
 | `sampling_top_p` | Histogram | Top-P values used in sampling. |
 | `sampling_entropy` | Histogram | Logit entropy as a quality metric. |
 | `sampling_repetition_penalty` | Histogram | Repetition penalty values used. |
-| `sampling_nan_handling_total` | Counter | NaN/Inf values handled during sampling. |
-| `sampling_seed_reproducible_total` | Counter | Reproducible seeded sampling operations. |
 
 ---
 
@@ -208,8 +203,6 @@ Comprehensive Prometheus metrics reference for monitoring inference performance,
 |--------|------|-------------|
 | `dequant_max_abs_error` | Histogram | Maximum absolute dequantization error. |
 | `dequant_max_rel_error` | Histogram | Maximum relative dequantization error. |
-| `dequant_pass_total` | Counter | Passing dequantization accuracy checks. |
-| `dequant_fail_total` | Counter | Failing dequantization accuracy checks. |
 
 ---
 
@@ -217,8 +210,6 @@ Comprehensive Prometheus metrics reference for monitoring inference performance,
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `weight_aligned_total` | Counter | Properly aligned weight tensors (no padding required). |
-| `weight_not_aligned_total` | Counter | Misaligned weight tensors requiring padding. |
 | `weight_padding_bytes` | Histogram | Number of padding bytes in weight tensors. |
 
 ---
@@ -228,8 +219,6 @@ Comprehensive Prometheus metrics reference for monitoring inference performance,
 | Metric | Type | Description |
 |--------|------|-------------|
 | `buffer_gqa_ratio` | Histogram | GQA ratio (heads / kv_heads). |
-| `buffer_alignment_total` | Counter | Properly aligned buffer allocations. |
-| `buffer_invalid_total` | Counter | Invalid buffer configurations detected. |
 
 ---
 
@@ -251,3 +240,100 @@ Comprehensive Prometheus metrics reference for monitoring inference performance,
 | `quarrel_tpu_inference_total` | CounterVec (model) | Total TPU inference calls. |
 | `quarrel_tpu_tokens_generated_total` | CounterVec (model) | Total tokens generated on TPU. |
 | `quarrel_tpu_memory_bytes` | GaugeVec (model) | Current TPU memory usage. |
+
+---
+
+## 23. Metrics Not Previously Documented
+
+These metrics are registered by the code and were missing from the
+reference above. The `internal/metrics` test suite now checks that this
+table and the registry agree in both directions, so a metric cannot be
+documented without existing, nor exist without being documented.
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `activation_collapsed_layers` | Gauge | Layers whose activations collapsed during the last forward pass. |
+| `activation_saturated_layers` | Gauge | Layers whose activations saturated during the last forward pass. |
+| `arrow_flight_embeddings_pushed_total` | Counter | Total embedding batches pushed over Arrow Flight. |
+| `gemma4_context_length_tokens` | Gauge | Configured Gemma 4 context length. |
+| `gemma4_full_head_dim` | Gauge | Configured head dimension of the full-attention layers. |
+| `gemma4_layer_pattern_ratio` | Gauge | Ratio of sliding-window to full-attention layers. |
+| `gemma4_partial_rope_factor` | Gauge | Partial RoPE factor used by the full-attention layers. |
+| `gemma4_rope_theta` | Gauge | RoPE theta configured for the Gemma 4 model. |
+| `gemma4_sliding_head_dim` | Gauge | Configured head dimension of the sliding-window layers. |
+| `gemma4_sliding_window_size` | Gauge | Configured sliding-window size. |
+| `head_dim_threadgroup_size` | Gauge | Thread-group size used for the head-dimension kernels. |
+| `host_memory_allocated_bytes` | Gauge | Current bytes allocated in host memory by the inference engine. |
+| `logit_rms` | Gauge | Root-mean-square of the sampled logits. |
+| `nan_layer_end` | Gauge | Index of the last layer in which a NaN was detected. |
+| `nan_layer_start` | Gauge | Index of the first layer in which a NaN was detected. |
+| `nan_total_count` | Counter | Total number of NaN values detected. |
+| `quarrel_active_prefill_tokens` | Gauge | Tokens currently being prefilled. |
+| `quarrel_continuous_batch_active_requests` | Gauge | Requests currently active in the continuous batch. |
+| `quarrel_continuous_batch_iteration_duration_seconds` | Histogram | Duration of one continuous batching iteration. |
+| `quarrel_continuous_batch_preemptions_total` | Counter | Total sequences preempted by the continuous batch scheduler. |
+| `quarrel_flash_attention_prefill_duration_seconds` | Histogram | Duration of a Flash Attention prefill. |
+| `quarrel_flash_attention_sliding_window_tokens_total` | Counter | Total tokens attended with a sliding window. |
+| `quarrel_grammar_constrained_tokens_total` | Counter | Total tokens produced under a grammar constraint. |
+| `quarrel_grammar_filter_duration_seconds` | Histogram | Duration of a grammar filter pass. |
+| `quarrel_inter_token_latency_seconds` | Histogram | Latency between two consecutive generated tokens. |
+| `quarrel_prefill_chunk_latency_seconds` | Histogram | Latency of a single prefill chunk. |
+| `quarrel_simd_vnni_dot_product_duration_seconds` | Histogram | Duration of a SIMD VNNI dot product. |
+| `quarrel_speculative_acceptance_rate` | Gauge | Fraction of drafted tokens that were accepted. |
+| `quarrel_speculative_accepted_tokens_total` | Counter | Total drafted tokens that were accepted. |
+| `quarrel_speculative_draft_tokens_total` | Counter | Total tokens produced by the draft model. |
+| `quarrel_speculative_dynamic_draft_length` | Gauge | Current dynamic draft length. |
+| `quarrel_time_to_first_token_seconds` | Histogram | Time to the first generated token. |
+| `quarrel_vlm_image_encoding_duration_seconds` | Histogram | Duration of a vision encoder invocation. |
+| `quarrel_vlm_patches_processed_total` | Counter | Total image patches processed by the vision encoder. |
+| `rope_deviation` | Gauge | Maximum deviation of the RoPE output from the reference. |
+| `rope_deviation_ratio` | Gauge | Ratio of the RoPE deviation to the signal magnitude. |
+| `rope_fail_total` | Counter | RoPE parity checks that failed. |
+| `rope_pass_total` | Counter | RoPE parity checks that passed. |
+| `sampling_top_token_probability` | Gauge | Probability of the most likely sampled token. |
+| `sampling_unique_samples` | Gauge | Number of distinct tokens observed while sampling. |
+| `simd_attention_duration_seconds` | Histogram | Duration of a SIMD attention kernel. |
+| `simd_fused_mlp_duration_seconds` | Histogram | Duration of a SIMD fused MLP kernel. |
+| `simd_rope_duration_seconds` | Histogram | Duration of a SIMD RoPE kernel. |
+| `simd_swiglu_duration_seconds` | Histogram | Duration of a SIMD SwiGLU kernel. |
+| `softmax_mask_value` | Gauge | The value used to mask out the softmax denominator. |
+| `tokenizer_encode_length` | Histogram | Number of tokens produced by the tokenizer. |
+| `tokenizer_vocab_size` | Gauge | Size of the tokenizer vocabulary. |
+
+---
+
+## 24. Metrics Declared in Other Packages
+
+The metrics below are declared outside `internal/metrics` (in
+`internal/device`, `internal/simd` and `cmd/webui/handlers`) and were
+missing from the reference. The `internal/metrics` test suite now checks
+the table and the source in both directions.
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `quarrel_cuda_dequant_gemm_duration_seconds` | Histogram | Duration of a CUDA dequantization GEMM. |
+| `quarrel_cuda_vram_saved_bytes` | Gauge | VRAM saved by keeping weights quantized. |
+| `quarrel_distributed_transfer_bytes_total` | Counter | Total bytes transferred between distributed workers. |
+| `quarrel_distributed_transfer_duration_seconds` | Histogram | Duration of a distributed tensor transfer. |
+| `quarrel_kv_cache_compression_ratio` | Gauge | Ratio of the compressed KV cache size to the uncompressed one. |
+| `quarrel_kv_cache_quantized_pages_total` | Counter | Total KV cache pages stored in quantized form. |
+| `quarrel_memory_governor_actions_total` | Counter | Total actions taken by the memory governor. |
+| `quarrel_memory_pressure_events_total` | Counter | Total memory pressure events observed. |
+| `quarrel_memory_pressure_ratio` | Gauge | Ratio of used to available memory. |
+| `quarrel_tpu_attention_seconds` | Histogram | Attention time on the TPU backend. |
+| `quarrel_tpu_batch_size` | Gauge | Current batch size on the TPU backend. |
+| `quarrel_tpu_dequantization_seconds` | Histogram | Dequantization time on the TPU backend. |
+| `quarrel_tpu_engine_failed_total` | Counter | Total TPU engine initialisation failures. |
+| `quarrel_tpu_inference_duration_seconds` | Histogram | Duration of a TPU inference call. |
+| `quarrel_tpu_layer_latency_seconds` | Histogram | Latency of a single TPU layer. |
+| `quarrel_tpu_sampling_seconds` | Histogram | Sampling time on the TPU backend. |
+| `quarrel_tpu_tokens_per_second` | Gauge | Token generation rate on the TPU backend. |
+| `quarrel_webui_connections_active` | Gauge | Active WebUI connections. |
+| `quarrel_webui_errors_total` | Counter | Total WebUI errors. |
+| `quarrel_webui_inference_duration_seconds` | Histogram | Duration of a WebUI inference request. |
+| `quarrel_webui_requests_total` | Counter | Total WebUI requests. |
+| `quarrel_webui_tokens_total` | Counter | Total tokens generated through the WebUI. |
+| `simd_dispatch_total` | Counter | Total SIMD kernel dispatches. |
+| `simd_inf_count_total` | Counter | Total Inf values detected in SIMD kernel outputs. |
+| `simd_kernel_errors_total` | Counter | Total SIMD kernel errors. |
+| `simd_nan_count_total` | Counter | Total NaN values detected in SIMD kernel outputs. |

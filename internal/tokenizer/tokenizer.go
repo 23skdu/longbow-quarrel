@@ -147,15 +147,21 @@ func NewFromGGUF(f *gguf.GGUFFile) (*Tokenizer, error) {
 		}
 	}
 
+	// The chat template, when the model ships one. Without it a chat model
+	// has to be prompted in a hardcoded format, which is wrong for every
+	// model that does not use that format.
+	chatTemplate, _ := f.KV["tokenizer.chat_template"].(string)
+
 	return &Tokenizer{
-		Tokens:      tokens,
-		Vocab:       vocab,
-		Merges:      merges,
-		Ranks:       ranks,
-		EOSTokenIDs: eosMap,
-		UseByteBPE:  useByteBPE,
-		BOSTokenID:  bosTokenID,
-		AddBOSToken: addBOSToken,
+		Tokens:       tokens,
+		Vocab:        vocab,
+		Merges:       merges,
+		Ranks:        ranks,
+		EOSTokenIDs:  eosMap,
+		UseByteBPE:   useByteBPE,
+		BOSTokenID:   bosTokenID,
+		AddBOSToken:  addBOSToken,
+		chatTemplate: chatTemplate,
 	}, nil
 }
 
@@ -209,6 +215,11 @@ type Tokenizer struct {
 	UseByteBPE  bool
 	BOSTokenID  int
 	AddBOSToken bool
+
+	// chatTemplate is the model's Jinja2 chat template, read from the GGUF
+	// metadata key "tokenizer.chat_template". It is empty when the model
+	// does not ship one.
+	chatTemplate string
 }
 
 // IsEOS returns true if the tokenID is recognized as an end-of-sequence token.
@@ -217,6 +228,17 @@ func (t *Tokenizer) IsEOS(tokenID int) bool {
 		return tokenID == 2
 	}
 	return t.EOSTokenIDs[tokenID]
+}
+
+// ChatTemplate returns the model's Jinja2 chat template, or "" when the model
+// does not ship one.
+//
+// It is read from the GGUF metadata key "tokenizer.chat_template".
+func (t *Tokenizer) ChatTemplate() string {
+	if t == nil {
+		return ""
+	}
+	return t.chatTemplate
 }
 
 // GetEOSTokenIDs returns a slice of all recognized EOS token IDs.

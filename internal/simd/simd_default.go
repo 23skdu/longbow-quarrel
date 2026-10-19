@@ -6,6 +6,9 @@ import "github.com/23skdu/longbow-quarrel/internal/mathx"
 
 // RMSNorm scalar fallback
 func RMSNorm(input, weight, output []float32, rows, cols int, eps float32) {
+	m := newMetricsWrapper("RMSNorm", cols)
+	defer m.record()
+	defer checkOutputNaNInf(output, "RMSNorm")
 	for r := 0; r < rows; r++ {
 		offset := r * cols
 		sum := float32(0.0)
@@ -22,6 +25,9 @@ func RMSNorm(input, weight, output []float32, rows, cols int, eps float32) {
 
 // Matmul scalar fallback (C = A * B, A: m×k, B: k×n)
 func Matmul(a, b, c []float32, m, n, k int) {
+	mw := newMetricsWrapper("Matmul", n)
+	defer mw.record()
+	defer checkOutputNaNInf(c, "Matmul")
 	for i := 0; i < m; i++ {
 		for j := 0; j < n; j++ {
 			sum := float32(0.0)
@@ -35,6 +41,8 @@ func Matmul(a, b, c []float32, m, n, k int) {
 
 // RoPE scalar fallback
 func RoPE(tensor []float32, positions []int, batch, heads, seqLen, headDim int, theta float32) {
+	m := newMetricsWrapper("RoPE", headDim)
+	defer m.record()
 	for b := 0; b < batch; b++ {
 		for h := 0; h < heads; h++ {
 			for s := 0; s < seqLen; s++ {
@@ -62,6 +70,9 @@ func RoPE(tensor []float32, positions []int, batch, heads, seqLen, headDim int, 
 
 // FusedAttention scalar fallback
 func FusedAttention(q, k, v, output []float32, batch, heads, seqLen, kvSeqLen, headDim int, scale float32) {
+	m := newMetricsWrapper("Attention", seqLen*headDim)
+	defer m.record()
+	defer checkOutputNaNInf(output, "Attention")
 	for b := 0; b < batch; b++ {
 		for h := 0; h < heads; h++ {
 			for s := 0; s < seqLen; s++ {
@@ -109,6 +120,9 @@ func FusedAttention(q, k, v, output []float32, batch, heads, seqLen, kvSeqLen, h
 
 // FusedMLP scalar fallback
 func FusedMLP(input, gateW, upW, downW, output []float32, batch, dim, hiddenDim int) {
+	m := newMetricsWrapper("FusedMLP", dim)
+	defer m.record()
+	defer checkOutputNaNInf(output, "FusedMLP")
 	for b := 0; b < batch; b++ {
 		inOff := b * dim
 		for d := 0; d < dim; d++ {
@@ -134,6 +148,8 @@ func Softmax(x []float64) {
 	if len(x) == 0 {
 		return
 	}
+	m := newMetricsWrapper("Softmax", len(x))
+	defer m.record()
 
 	max := x[0]
 	for _, v := range x {
@@ -161,6 +177,10 @@ func SwiGLU(gate, up, out []float32) {
 	if n != len(up) || n != len(out) {
 		return
 	}
+
+	m := newMetricsWrapper("SwiGLU", n)
+	defer m.record()
+	defer checkOutputNaNInf(out, "SwiGLU")
 
 	for i := 0; i < n; i++ {
 		g := gate[i]

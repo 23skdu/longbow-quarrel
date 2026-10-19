@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -19,6 +20,7 @@ import (
 	"github.com/23skdu/longbow-quarrel/internal/logger"
 	"github.com/23skdu/longbow-quarrel/internal/metrics"
 	"github.com/23skdu/longbow-quarrel/internal/ollama"
+	"github.com/23skdu/longbow-quarrel/internal/telemetry"
 	"github.com/23skdu/longbow-quarrel/internal/tokenizer"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -103,6 +105,14 @@ func main() {
 	// Start the background metrics flusher (hotpath-safe)
 	metricsFlusher := metrics.NewBgFlusher(5 * time.Second)
 	defer metricsFlusher.Stop()
+
+	// OpenTelemetry tracing. The tracer is only really initialised when
+	// an OTLP endpoint is configured; without one it stays a no-op so
+	// the instrumentation costs nothing.
+	shutdownTracer := telemetry.InitTracer()
+	if shutdownTracer != nil {
+		defer func() { _ = shutdownTracer(context.Background()) }()
+	}
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)

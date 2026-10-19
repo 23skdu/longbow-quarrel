@@ -97,9 +97,10 @@ A high-performance, memory-efficient LLM inference engine written in Go with nat
   - `FuzzApplyLayerCPU` — Validates CPU layer execution under randomized hidden states, dimensions, and layer indices.
   - `FuzzPolarQuant` & `FuzzQJLTransform` — Validates SIMD TurboQuant vector operations against mathematical boundaries.
   - `FuzzDequantizeQ4K_SIMD` & `FuzzDequantizeQ6K_SIMD` — Validates SIMD dequantization parity against scalar baselines.
-  - `FuzzPagedKVCache` & `FuzzSampler` — Validates concurrency and input edge cases.
+  - `FuzzPagedKVCache_TurboQuant` & `FuzzSamplerQualityControl` — Validates the paged KV cache and the sampler against input edge cases.
+  - `FuzzKVCacheUpdate` & `FuzzSharedKVCache` — Validates KV cache updates and the shared-cache path.
   - `FuzzMatMul` — Validates MatMul with VecDotF32 inner loop against reference implementation.
 - **Security & Concurrency Audits**:
   - `go vet ./...` & `go vet -tags cuda ./...` — Clean (0 warnings).
-  - `gosec` — Clean (0 vulnerabilities, 114 verified `#nosec` directives).
+  - `gosec` — Clean (0 vulnerabilities, 146 verified `#nosec` directives).
   - `go test -race` — Clean (0 data races across all packages).

@@ -95,7 +95,12 @@ func (p *PromptWrapper) Wrap(messages []Message) (string, error) {
 // Supported: {{ variable }}, {% if cond %}...{% endif %}, {% for msg in messages %}...{% endfor %},
 // {% set var = value %}, {{ msg.role }}, {{ msg.content }}, {{ bos_token }}, {{ eos_token }}.
 func renderJinja2Subset(tmpl string, messages []Message, systemPrompt string) (string, error) {
-	// Build variable context
+	return renderTemplate(tmpl, messages, defaultTemplateVars(systemPrompt))
+}
+
+// defaultTemplateVars builds the variable context a template is rendered
+// against.
+func defaultTemplateVars(systemPrompt string) map[string]string {
 	vars := map[string]string{
 		"bos_token":             "<s>",
 		"eos_token":             "</s>",
@@ -117,7 +122,18 @@ func renderJinja2Subset(tmpl string, messages []Message, systemPrompt string) (s
 	for k, v := range tokenAliases {
 		vars[k] = v
 	}
+	return vars
+}
 
+// renderTemplate renders a template fragment against an existing variable
+// context.
+//
+// The context is threaded through the recursion so that the loop variables
+// set by a `for` block survive into the body. The previous implementation
+// rebuilt the context on every recursive call, which discarded them: the
+// body of a `for` block rendered as the empty string, so the real Llama 3,
+// Qwen, Gemma and Mistral chat templates produced just "<s>".
+func renderTemplate(tmpl string, messages []Message, vars map[string]string) (string, error) {
 	var sb strings.Builder
 
 	// Tokenize template into segments
@@ -175,19 +191,37 @@ func renderJinja2Subset(tmpl string, messages []Message, systemPrompt string) (s
 				// Find matching endfor
 				inner, after := splitBlock(remaining, "endfor")
 				remaining = after
+
+				// The loop variable can be named anything ("msg",
+				// "message", "m", ...), so it has to be taken from the
+				// statement rather than assumed.
+				loopVar := "message"
+				if spec := strings.TrimSpace(strings.TrimPrefix(stmt, "for ")); spec != "" {
+					if name, _, ok := strings.Cut(spec, " in "); ok {
+						loopVar = strings.TrimSpace(name)
+					} else {
+						loopVar = strings.TrimSpace(spec)
+					}
+				}
+
 				for _, msg := range messages {
 					vars["msg.role"] = msg.Role
 					vars["msg.content"] = msg.Content
-					// Also support loop var if named "message"
+					// The loop variable under its own name, and the
+					// conventional "message" alias.
+					vars[loopVar+".role"] = msg.Role
+					vars[loopVar+".content"] = msg.Content
 					vars["message.role"] = msg.Role
 					vars["message.content"] = msg.Content
-					rendered, _ := renderJinja2Subset(inner, nil, vars["system"])
-					// Pass vars through rendered inner
-					rendered = applyVars(rendered, vars)
+					rendered, _ := renderTemplate(inner, messages, vars)
 					sb.WriteString(rendered)
 				}
 				delete(vars, "msg.role")
 				delete(vars, "msg.content")
+				delete(vars, loopVar+".role")
+				delete(vars, loopVar+".content")
+				delete(vars, "message.role")
+				delete(vars, "message.content")
 
 			} else if strings.HasPrefix(stmt, "if ") {
 				// {% if cond %} ... {% else %} ... {% endif %}
@@ -197,12 +231,12 @@ func renderJinja2Subset(tmpl string, messages []Message, systemPrompt string) (s
 				if evalCondition(cond, vars) {
 					// Check for else
 					ifPart, _ := splitBlock(inner, "else")
-					rendered, _ := renderJinja2Subset(ifPart, messages, vars["system"])
+					rendered, _ := renderTemplate(ifPart, messages, vars)
 					sb.WriteString(rendered)
 				} else {
 					_, elsePart := splitBlock(inner, "else")
 					if elsePart != "" {
-						rendered, _ := renderJinja2Subset(elsePart, messages, vars["system"])
+						rendered, _ := renderTemplate(elsePart, messages, vars)
 						sb.WriteString(rendered)
 					}
 				}
@@ -241,94 +275,256 @@ func splitBlock(s, endTag string) (string, string) {
 		tagEnd += tagStart + 2
 
 		stmt := strings.TrimSpace(s[tagStart+2 : tagEnd-2])
-		if strings.HasPrefix(stmt, "for ") || strings.HasPrefix(stmt, "if ") {
+		switch {
+		case strings.HasPrefix(stmt, "for ") || strings.HasPrefix(stmt, "if "):
 			depth++
 			i = tagEnd
-		} else if stmt == endTag && depth == 0 {
-			return s[:tagStart], s[tagEnd:]
-		} else if stmt == endTag {
+		case stmt == endTag:
+			if depth == 0 {
+				return s[:tagStart], s[tagEnd:]
+			}
 			depth--
 			i = tagEnd
-		} else {
+		case stmt == "endif" || stmt == "endfor":
+			// A different block terminator. It closes a nested block, so the
+			// nesting depth still decreases even though it is not the tag
+			// being looked for. Without this, a `{% if %}` inside a
+			// `{% for %}` made the search for "endfor" run past the end of
+			// the loop body.
+			depth--
+			i = tagEnd
+		default:
 			i = tagEnd
 		}
 	}
 	return s, ""
 }
 
-// evalVarExpr evaluates a Jinja2 variable expression like "msg.role", "bos_token", etc.
+// evalVarExpr evaluates a Jinja2 variable expression.
+//
+// It supports the forms the shipped chat templates actually use:
+//
+//	{{ bos_token }}
+//	{{ message['role'] }}          {{ message.role }}
+//	{{ '[INST] ' + message['content'] + ' [/INST]' }}
+//	{{ message['content'] | trim }}
+//
+// The filter is stripped only at the top level: the Llama 3 template
+// contains "{{ '<|start_header_id|>' + ... }}", where the pipe is inside a
+// quoted literal and must not be treated as a filter separator.
 func evalVarExpr(expr string, vars map[string]string, messages []Message) string {
 	_ = messages
-	// Strip filters (e.g., "messages | selectattr(...)")
-	if idx := strings.Index(expr, "|"); idx >= 0 {
+	expr = strings.TrimSpace(expr)
+
+	// Strip a trailing filter, but only at the top level.
+	if idx := indexTopLevel(expr, "|"); idx >= 0 {
 		expr = strings.TrimSpace(expr[:idx])
 	}
+
+	// String concatenation: a + b + c
+	if parts := splitTopLevel(expr, "+"); len(parts) > 1 {
+		var sb strings.Builder
+		for _, p := range parts {
+			sb.WriteString(evalOperand(p, vars))
+		}
+		return sb.String()
+	}
+
+	return evalOperand(expr, vars)
+}
+
+// evalOperand evaluates a single term of an expression.
+func evalOperand(expr string, vars map[string]string) string {
+	expr = strings.TrimSpace(expr)
+	if expr == "" {
+		return ""
+	}
+
+	// A quoted literal.
+	if len(expr) >= 2 {
+		if (expr[0] == '\'' && expr[len(expr)-1] == '\'') ||
+			(expr[0] == '"' && expr[len(expr)-1] == '"') {
+			return unescapeLiteral(expr[1 : len(expr)-1])
+		}
+	}
+
+	// name['key'] / name["key"]
+	if name, key, ok := parseIndexed(expr); ok {
+		if v, found := vars[name+"."+key]; found {
+			return v
+		}
+		return ""
+	}
+
 	if v, ok := vars[expr]; ok {
 		return v
 	}
-	// Direct message field access
-	if expr == "message.role" || expr == "msg.role" {
-		if v, ok := vars["msg.role"]; ok {
-			return v
-		}
-	}
-	if expr == "message.content" || expr == "msg.content" {
-		if v, ok := vars["msg.content"]; ok {
-			return v
-		}
-	}
 	return ""
+}
+
+// unescapeLiteral processes the escape sequences Jinja2 recognises inside a
+// quoted string literal.
+//
+// The chat templates rely on this: the Llama 3 template contains
+// "'<|end_header_id|>\n\n' + message['content']", and without the escape
+// processing the prompt would contain a literal backslash-n instead of the
+// two newlines the model expects.
+func unescapeLiteral(s string) string {
+	if !strings.ContainsRune(s, '\\') {
+		return s
+	}
+	var sb strings.Builder
+	sb.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] != '\\' || i+1 >= len(s) {
+			sb.WriteByte(s[i])
+			continue
+		}
+		i++
+		switch s[i] {
+		case 'n':
+			sb.WriteByte('\n')
+		case 't':
+			sb.WriteByte('\t')
+		case 'r':
+			sb.WriteByte('\r')
+		case '\\':
+			sb.WriteByte('\\')
+		case '\'':
+			sb.WriteByte('\'')
+		case '"':
+			sb.WriteByte('"')
+		default:
+			sb.WriteByte('\\')
+			sb.WriteByte(s[i])
+		}
+	}
+	return sb.String()
+}
+
+// parseIndexed parses "name['key']" or "name[\"key\"]".
+func parseIndexed(expr string) (name, key string, ok bool) {
+	open := strings.Index(expr, "[")
+	if open <= 0 || !strings.HasSuffix(expr, "]") {
+		return "", "", false
+	}
+	name = strings.TrimSpace(expr[:open])
+	inner := strings.TrimSpace(expr[open+1 : len(expr)-1])
+	if len(inner) >= 2 {
+		if (inner[0] == '\'' && inner[len(inner)-1] == '\'') ||
+			(inner[0] == '"' && inner[len(inner)-1] == '"') {
+			return name, inner[1 : len(inner)-1], true
+		}
+	}
+	return "", "", false
+}
+
+// indexTopLevel returns the index of sep in s, ignoring occurrences inside
+// quoted literals. It returns -1 when sep does not occur at the top level.
+//
+// The whole separator has to match: matching on sep[0] alone would make
+// " or ", " and " and " == " all match on a plain space.
+func indexTopLevel(s, sep string) int {
+	if sep == "" {
+		return -1
+	}
+	inSingle, inDouble := false, false
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '\'':
+			if !inDouble {
+				inSingle = !inSingle
+			}
+			continue
+		case '"':
+			if !inSingle {
+				inDouble = !inDouble
+			}
+			continue
+		}
+		if inSingle || inDouble {
+			continue
+		}
+		if i+len(sep) <= len(s) && s[i:i+len(sep)] == sep {
+			return i
+		}
+	}
+	return -1
+}
+
+// splitTopLevel splits s on sep, ignoring separators inside quoted literals.
+func splitTopLevel(s, sep string) []string {
+	var parts []string
+	start := 0
+	for {
+		idx := indexTopLevel(s[start:], sep)
+		if idx < 0 {
+			parts = append(parts, s[start:])
+			return parts
+		}
+		parts = append(parts, s[start:start+idx])
+		start += idx + len(sep)
+	}
 }
 
 // evalCondition evaluates a simple Jinja2 boolean condition.
 func evalCondition(cond string, vars map[string]string) bool {
 	cond = strings.TrimSpace(cond)
+
 	// Handle "not X"
 	if strings.HasPrefix(cond, "not ") {
 		return !evalCondition(strings.TrimPrefix(cond, "not "), vars)
 	}
-	// Handle "X and Y"
-	if idx := strings.Index(cond, " and "); idx >= 0 {
-		return evalCondition(cond[:idx], vars) && evalCondition(cond[idx+5:], vars)
+
+	// Handle "X and Y" / "X or Y", splitting only at the top level so a
+	// quoted literal containing " or " is not mistaken for an operator.
+	if parts := splitTopLevel(cond, " or "); len(parts) > 1 {
+		for _, p := range parts {
+			if evalCondition(p, vars) {
+				return true
+			}
+		}
+		return false
 	}
-	// Handle "X or Y"
-	if idx := strings.Index(cond, " or "); idx >= 0 {
-		return evalCondition(cond[:idx], vars) || evalCondition(cond[idx+4:], vars)
+	if parts := splitTopLevel(cond, " and "); len(parts) > 1 {
+		for _, p := range parts {
+			if !evalCondition(p, vars) {
+				return false
+			}
+		}
+		return true
 	}
+
+	// Check for equality test: X == "value"
+	if idx := indexTopLevel(cond, " == "); idx >= 0 {
+		lhs := strings.TrimSpace(cond[:idx])
+		rhs := strings.TrimSpace(cond[idx+4:])
+		return evalOperand(lhs, vars) == evalOperand(rhs, vars)
+	}
+
+	// Check "X != value"
+	if idx := indexTopLevel(cond, " != "); idx >= 0 {
+		lhs := strings.TrimSpace(cond[:idx])
+		rhs := strings.TrimSpace(cond[idx+4:])
+		return evalOperand(lhs, vars) != evalOperand(rhs, vars)
+	}
+
+	// Check "X is defined"
+	if strings.HasSuffix(cond, " is defined") {
+		key := strings.TrimSuffix(cond, " is defined")
+		key = strings.TrimSpace(key)
+		if _, ok := vars[key]; ok {
+			return true
+		}
+		_, _, ok := parseIndexed(key)
+		return ok
+	}
+
 	// Variable lookup
 	if v, ok := vars[cond]; ok {
 		return v != "" && v != "false" && v != "0"
 	}
-	// Check for equality test: X == "value"
-	if idx := strings.Index(cond, " == "); idx >= 0 {
-		lhs := strings.TrimSpace(cond[:idx])
-		rhs := strings.Trim(strings.TrimSpace(cond[idx+4:]), "\"'")
-		lhsVal := vars[lhs]
-		return lhsVal == rhs
-	}
-	// Check "X != value"
-	if idx := strings.Index(cond, " != "); idx >= 0 {
-		lhs := strings.TrimSpace(cond[:idx])
-		rhs := strings.Trim(strings.TrimSpace(cond[idx+4:]), "\"'")
-		lhsVal := vars[lhs]
-		return lhsVal != rhs
-	}
-	// Check "X is defined"
-	if strings.HasSuffix(cond, " is defined") {
-		key := strings.TrimSuffix(cond, " is defined")
-		_, ok := vars[strings.TrimSpace(key)]
-		return ok
-	}
 	return false
-}
-
-// applyVars replaces {{ key }} expressions in s using vars map.
-func applyVars(s string, vars map[string]string) string {
-	for k, v := range vars {
-		s = strings.ReplaceAll(s, "{{ "+k+" }}", v)
-		s = strings.ReplaceAll(s, "{{"+k+"}}", v)
-	}
-	return s
 }
 
 // simpleWrap creates a simple concatenated prompt

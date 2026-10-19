@@ -64,7 +64,9 @@ func InitTracer() func(context.Context) error {
 				sdkmetric.WithReader(sdkmetric.NewPeriodicReader(metricExporter)),
 			)
 		}
-	} else {
+	} else if os.Getenv("OTEL_TRACES_EXPORTER") == "console" {
+		// The console exporter is opt-in: it prints every span, which is
+		// unusable for a serving binary.
 		stdExporter, _ := stdouttrace.New(stdouttrace.WithPrettyPrint())
 		tp = sdktrace.NewTracerProvider(
 			sdktrace.WithResource(res),
@@ -72,6 +74,12 @@ func InitTracer() func(context.Context) error {
 			sdktrace.WithBatcher(stdExporter),
 		)
 		mp = sdkmetric.NewMeterProvider()
+	} else {
+		// No exporter configured: leave the global providers as the no-op
+		// ones. The spans are still created (so the call sites do not need
+		// to care), they simply go nowhere.
+		tracer = otel.Tracer(tracerName)
+		return func(context.Context) error { return nil }
 	}
 
 	otel.SetTracerProvider(tp)

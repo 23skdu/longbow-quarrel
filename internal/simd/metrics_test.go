@@ -1,5 +1,3 @@
-//go:build amd64 && cgo
-
 package simd
 
 import (
@@ -57,8 +55,9 @@ func kernelHistograms() map[string]any {
 }
 
 func TestMetricsRecordCalls(t *testing.T) {
-	metricsEnabled = true
-	defer func() { metricsEnabled = true }()
+	origEnabled := simdMetricsEnabled
+	defer func() { simdMetricsEnabled = origEnabled }()
+	simdMetricsEnabled = true
 
 	dispatch := metrics.SIMDKernelDuration.WithLabelValues("Softmax", "medium")
 	softmax := kernelHistograms()["Softmax"]
@@ -77,8 +76,9 @@ func TestMetricsRecordCalls(t *testing.T) {
 }
 
 func TestMetricsRecordAllKernels(t *testing.T) {
-	metricsEnabled = true
-	defer func() { metricsEnabled = true }()
+	origEnabled := simdMetricsEnabled
+	defer func() { simdMetricsEnabled = origEnabled }()
+	simdMetricsEnabled = true
 
 	kernels := []string{"Softmax", "RMSNorm", "Matmul", "Attention", "FusedMLP", "RoPE", "SwiGLU", "Unknown"}
 	perKernel := make([]float64, len(kernels))
@@ -114,8 +114,9 @@ func TestMetricsRecordAllKernels(t *testing.T) {
 }
 
 func TestMetricsDisabled(t *testing.T) {
-	metricsEnabled = false
-	defer func() { metricsEnabled = true }()
+	origEnabled := simdMetricsEnabled
+	defer func() { simdMetricsEnabled = origEnabled }()
+	simdMetricsEnabled = false
 
 	dispatch := metrics.SIMDKernelDuration.WithLabelValues("Softmax", "medium")
 	nan := metrics.SIMDNaNCount.WithLabelValues("Softmax")
@@ -136,8 +137,7 @@ func TestMetricsDisabled(t *testing.T) {
 }
 
 func TestCheckOutputNaN(t *testing.T) {
-	metricsEnabled = true
-	defer func() { metricsEnabled = true }()
+	simdMetricsEnabled = true
 
 	nan := metrics.SIMDNaNCount.WithLabelValues("Softmax")
 	inf := metrics.SIMDInfCount.WithLabelValues("Softmax")
@@ -155,8 +155,7 @@ func TestCheckOutputNaN(t *testing.T) {
 }
 
 func TestCheckOutputInf(t *testing.T) {
-	metricsEnabled = true
-	defer func() { metricsEnabled = true }()
+	simdMetricsEnabled = true
 
 	nan := metrics.SIMDNaNCount.WithLabelValues("RMSNorm")
 	inf := metrics.SIMDInfCount.WithLabelValues("RMSNorm")
@@ -174,8 +173,7 @@ func TestCheckOutputInf(t *testing.T) {
 }
 
 func TestCheckOutputBothNaNInf(t *testing.T) {
-	metricsEnabled = true
-	defer func() { metricsEnabled = true }()
+	simdMetricsEnabled = true
 
 	nan := metrics.SIMDNaNCount.WithLabelValues("Matmul")
 	inf := metrics.SIMDInfCount.WithLabelValues("Matmul")
@@ -190,8 +188,7 @@ func TestCheckOutputBothNaNInf(t *testing.T) {
 }
 
 func TestCheckOutputClean(t *testing.T) {
-	metricsEnabled = true
-	defer func() { metricsEnabled = true }()
+	simdMetricsEnabled = true
 
 	nan := metrics.SIMDNaNCount.WithLabelValues("Softmax")
 	errs := metrics.SIMDKernelErrors.WithLabelValues("Softmax", "output_invalid")
@@ -203,4 +200,34 @@ func TestCheckOutputClean(t *testing.T) {
 
 	promtest.RequireDelta(t, "simd_nan_count_total(clean output)", nan, nanBefore, 0)
 	promtest.RequireDelta(t, "simd_kernel_errors_total(clean output)", errs, errsBefore, 0)
+}
+
+// TestSIMDMetricsOffByDefault documents that the SIMD instrumentation is
+// opt-in.
+//
+// Instrumenting a kernel costs a timestamp pair plus a Prometheus histogram
+// observation, and these kernels run thousands of times per generated token,
+// so a default-on cost in the inference hot path is not acceptable. The
+// switch is QUARREL_SIMD_METRICS=1.
+//
+// The wrapper was previously never instantiated at all, so all 14 SIMD
+// histograms and counters exported a permanent zero: the observability was
+// documented but not real.
+func TestSIMDMetricsOffByDefault(t *testing.T) {
+	origEnabled := simdMetricsEnabled
+	defer func() { simdMetricsEnabled = origEnabled }()
+
+	simdMetricsEnabled = false
+	m := newMetricsWrapper("RMSNorm", 128)
+	if !m.startTime.IsZero() {
+		t.Error("the wrapper started its timer even though the instrumentation is off")
+	}
+	// record() must be a no-op when the instrumentation is off.
+	m.record()
+
+	simdMetricsEnabled = true
+	m2 := newMetricsWrapper("RMSNorm", 128)
+	if m2.startTime.IsZero() {
+		t.Error("the wrapper did not start its timer even though the instrumentation is on")
+	}
 }

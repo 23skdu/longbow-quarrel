@@ -500,8 +500,9 @@ Based on deep profiling of autoregressive decode loops, CUDA kernel execution pr
 >
 > **Batch 1 (Steps 28, 31, 32, 34), Batch 2 (Steps 29, 30, 41, 42, 43,
 > 44, 45, 48), Batch 3 (Steps 33, 49), Batch 4 (Steps 37, 38, 39, 40, 46,
-> 47) and Batch 5 (Steps 31, 35, 36) are DONE** — see the status markers on
-> each step. Verified locally after the change:
+> 47), Batch 5 (Steps 31, 35, 36, 44, 48) and Batch 6 (Steps 35, 44) are
+> DONE** — see the status markers on each step. Verified locally after the
+> change:
 >
 > | Check | Command | Result |
 > |---|---|---|
@@ -524,6 +525,8 @@ Based on deep profiling of autoregressive decode loops, CUDA kernel execution pr
 > | `internal/engine` coverage | `go test -cover ./internal/engine/` | **62.8%** (was 51.0%) |
 > | Consolidated suite | `./scripts/run_all_tests.sh` | **12/12 gates pass** |
 > | WebUI inference | `cmd/webui/engine/adapter_protocol_test.go` | **works** (hung on every backend) |
+> | Chat templates | `internal/engine/chat_template_render_test.go` | **renders** (produced only "<s>") |
+> | Metrics reference | `internal/metrics/docs_test.go` | **verified both ways** (73 metrics were wrong) |
 
 #### Diagnostic Summary (as found, before Batch 1)
 
@@ -935,14 +938,47 @@ Storing the leading blocks on the intermediate nodes would fix that, but it
 needs the KV block size and changes the refcount semantics, so it is left as
 a follow-up.
 
-**Still open:** the distributed/Arrow Flight stack, speculative decoding, the
-Jinja2 prompt templates, OTEL, CUDA Graphs, the multi-GPU TP/PP engine, the
-quantization tooling, the activation/audit logging and the SIMD metrics
-wrapper. Each needs to be either wired behind a documented flag or removed.
-`internal/simd/metrics.go` is the cheapest of these: instantiating
-`metricsWrapper` would make all 14 SIMD histograms in
-`internal/metrics/metrics_simd.go` report real data instead of a permanent
-zero.
+**Batch 6 wired three more of these.**
+
+**The Jinja2 chat templates now work.** `internal/engine/prompt_wrapper.go`
+claimed to cover "Llama 3, Qwen, Gemma, and Mistral", but it did not: the
+renderer rebuilt its variable context on every recursive call, so the body
+of a `for` block rendered as the empty string and every real template
+produced just `"<s>"`. Three separate defects had to be fixed:
+
+- The variable context was rebuilt per recursion, discarding the loop
+  variables. It is now threaded through.
+- `message['role']` (bracket access) and `{{ 'a' + b }}` (concatenation)
+  were not supported. Both are now, and the loop variable can be named
+  anything (`msg`, `message`, `m`, ...), not just the two hardcoded names.
+- `splitBlock` did not decrement its nesting depth for a *different* block
+  terminator, so a `{% if %}` inside a `{% for %}` made the search for
+  `endfor` run past the end of the loop body.
+
+`internal/engine/chat_template_render_test.go` renders the real Llama 3, Qwen,
+Gemma and Mistral templates and checks their markers. The API's
+`/v1/chat/completions` handler now uses the model's own template (read from
+the GGUF metadata key `tokenizer.chat_template`) instead of hardcoding the
+ChatML format, which is the Qwen format and wrong for every other model.
+
+**The OTEL tracer is now initialised.** `telemetry.InitTracer` was never
+called by any binary, so the declared `go.opentelemetry.io/otel` dependency
+produced nothing. All four binaries now call it. Its default branch also
+set up a stdout exporter with `AlwaysSample`, which would have printed every
+span of every request to stdout; the default is now a no-op tracer and the
+console exporter is opt-in via `OTEL_TRACES_EXPORTER=console`.
+
+**The SIMD kernel instrumentation now works.** `internal/simd/metrics.go`
+was never instantiated, so all 14 SIMD histograms and counters exported a
+permanent zero. The kernels are now instrumented, guarded by
+`QUARREL_SIMD_METRICS=1`. It is **off by default** on purpose: instrumenting
+a kernel costs a timestamp pair plus a histogram observation, and these
+kernels run thousands of times per generated token.
+
+**Still open:** the distributed/Arrow Flight stack, speculative decoding, CUDA
+Graphs, the multi-GPU TP/PP engine, the quantization tooling and the
+activation/audit logging. Each needs to be either wired behind a documented
+flag or removed.
 
 **Plan.** For each row, choose one: wire it behind a documented flag, or delete it. The volume here (~3,500 LOC) makes "delete" the better default for anything without a near-term plan — dead code in an inference engine is a correctness liability, not just clutter.
 
@@ -1168,9 +1204,23 @@ false have been corrected:
 | `internal/mathx`, `internal/promtest` missing from the table | Added |
 | `docker-compose.cuda.yml --interactive` | Now `--stream` (the flag that exists) |
 
+**Batch 6 continued this work.**
+
+- `docs/metrics.md` documented **ten metrics that do not exist** and omitted
+  **73 that do**. Both are fixed, and `internal/metrics/docs_test.go` now
+  checks the reference against the source in both directions: a metric cannot
+  be documented without existing, and (outside the Go runtime and process
+  collectors) a metric cannot exist without being documented. The check
+  parses the source with `go/ast` so that the `Namespace` and `Subsystem`
+  options are folded into the metric name the way the Prometheus client does.
+- `docs/features.md` named `FuzzPagedKVCache` and `FuzzSampler`, which do
+  not exist. The real targets are `FuzzPagedKVCache_TurboQuant` and
+  `FuzzSamplerQualityControl`.
+- `docs/features.md` claimed "114 verified `#nosec` directives"; the actual
+  count is 146.
+
 **Still open:** the false claims in `docs/performance.md`,
-`docs/comparison.md`, `docs/turboquant.md`, `docs/architecture.md`,
-`docs/features.md`, `docs/dependencies.md`, `docs/roadmap.md`,
+`docs/comparison.md`, `docs/dependencies.md`, `docs/roadmap.md`,
 `docs/testplan.md` and `docs/webui_plan.md`. Most of them are performance
 numbers that cannot be reproduced without a GPU, so they need either a
 corrected methodology or an explicit "unverified" marker.
@@ -1357,7 +1407,17 @@ There is also **no `.dockerignore`**, so `COPY . .` in every Dockerfile ships `.
 
 **Status: PARTIALLY COMPLETE.** A `.dockerignore` was added, excluding `.git`, `bin/`, `dist/`, `*.test`, `*.cov.out`, `performance_profiles/`, `coherence_results_*/`, `__pycache__/` and the editor/OS noise. The version stamp no longer needs `.git`: `Dockerfile.cpu` and `Dockerfile.nvidia` now take `ARG QUARREL_VERSION` / `ARG QUARREL_BUILD_TIME`.
 
-**Still open:** the tracked artifacts themselves (`engine.test`, `quarrel`, the `*.cov.out` files, `coherence_verification_results.json`, `internal/gguf/fuzz_test.go.bak`) are still in the index and need a `git rm --cached` commit.
+**Status: COMPLETE, with a correction to the original finding.** The
+artifacts (`engine.test`, `quarrel`, the `*.cov.out` files,
+`coherence_verification_results.json`, `performance_profiles/`, `bin/`) were
+**never tracked** — they are all covered by `.gitignore` and were only present
+in the working directory. The original finding was based on `ls`, not
+`git ls-files`.
+
+The one genuinely tracked artifact, `internal/gguf/fuzz_test.go.bak`, has been
+removed. A `.dockerignore` was added so that `COPY . .` no longer ships
+`.git`, `bin/`, the coverage dumps or the test binaries into the build
+context.
 
 ---
 
