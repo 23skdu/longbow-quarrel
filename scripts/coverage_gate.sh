@@ -49,10 +49,10 @@ CORE_PKGS=(
 # runner noise cannot flip the gate red.
 #
 # Measured 2026-10 (must stay in sync with .github/workflows/ci.yml):
-#   engine 68.1, device 75.7
+#   engine 80.3, device 75.3
 RATCHET_PKGS=(
-    "./internal/engine/...:64.0"
-    "./internal/device/...:72.0"
+    "./internal/engine/...:80.0"
+    "./internal/device/...:75.0"
 )
 
 # package_coverage prints the coverage percentage for the package matching

@@ -579,7 +579,15 @@ func (e *CPUEngine) Close() {
 		}
 	}
 	if e.doneChan != nil {
-		<-e.doneChan
+		// The batch loop closes the done channel when it exits. Waiting
+		// for it makes sure the cache is not freed while the loop is
+		// still using it, but a loop that was never started would
+		// block the close forever, so the wait is bounded.
+		select {
+		case <-e.doneChan:
+		case <-time.After(5 * time.Second):
+			logger.Log.Warn("the batch loop did not stop in time")
+		}
 	}
 	if e.cache != nil {
 		e.cache.Free()
@@ -711,9 +719,15 @@ func (e *CPUEngine) LoadAdapter(path, id string) error {
 		if !ok {
 			continue
 		}
-		dimIn := int(tA.Dimensions[0])  // #nosec G115
-		rank := int(tA.Dimensions[1])   // #nosec G115
-		dimOut := int(tB.Dimensions[1]) // #nosec G115
+		// The GGUF dimensions are the number of elements in a row first,
+		// so a LoRA A matrix of the logical shape [dimIn, rank] is stored
+		// as [rank, dimIn], and a B matrix of [rank, dimOut] as
+		// [dimOut, rank]. The dimensions used to be read the other way
+		// round, so a real adapter was merged with the rank and the
+		// dimensions swapped.
+		rank := int(tA.Dimensions[0])   // #nosec G115
+		dimIn := int(tA.Dimensions[1])  // #nosec G115
+		dimOut := int(tB.Dimensions[0]) // #nosec G115
 
 		aData, err2 := decodeTensorData(tA)
 		if err2 != nil || len(aData) != dimIn*rank {

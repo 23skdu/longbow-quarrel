@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strconv"
 
 	"github.com/23skdu/longbow-quarrel/internal/engine"
 	"github.com/23skdu/longbow-quarrel/internal/logger"
@@ -50,10 +51,20 @@ func (s *InferenceFlightServer) DoGet(tckt *flight.Ticket, stream flight.FlightS
 	// Metadata for GPU discovery
 	meta := arrow.NewMetadata([]string{"QUARREL:device_id"}, []string{"0"})
 
+	// The schema carries the token id three ways: as an integer, as the
+	// decoded text, and in the "id" and "vector" columns the Arrow Flight
+	// client reads.
+	//
+	// The client looks for "id" and "vector" and ignores everything else,
+	// so a server that only sent "token_id", "logits" and "text" produced
+	// a stream the client could not read: the remote worker came back
+	// with no tokens at all, and with no error.
 	schema := arrow.NewSchema([]arrow.Field{
 		{Name: "token_id", Type: arrow.PrimitiveTypes.Int32},
 		{Name: "logits", Type: arrow.FixedSizeListOf(int32(10), arrow.PrimitiveTypes.Float32), Nullable: true},
 		{Name: "text", Type: arrow.BinaryTypes.String, Nullable: true},
+		{Name: "id", Type: arrow.BinaryTypes.String, Nullable: true},
+		{Name: "vector", Type: arrow.FixedSizeListOf(1, arrow.PrimitiveTypes.Float32), Nullable: true},
 	}, &meta)
 
 	writer := flight.NewRecordWriter(stream, ipc.WithSchema(schema))
@@ -80,8 +91,17 @@ func (s *InferenceFlightServer) DoGet(tckt *flight.Ticket, stream flight.FlightS
 		// Ensure all fields have same row count
 		builder.Field(1).(*array.FixedSizeListBuilder).AppendNull()
 
+		text := s.tokenizer.Decode([]int{token})
 		textBuilder := builder.Field(2).(*array.StringBuilder)
-		textBuilder.Append(s.tokenizer.Decode([]int{token}))
+		textBuilder.Append(text)
+
+		// The columns the Arrow Flight client reads.
+		idBuilder := builder.Field(3).(*array.StringBuilder)
+		idBuilder.Append(strconv.Itoa(token))
+
+		vectorBuilder := builder.Field(4).(*array.FixedSizeListBuilder)
+		vectorBuilder.Append(true)
+		vectorBuilder.ValueBuilder().(*array.Float32Builder).Append(float32(token))
 
 		rec := builder.NewRecordBatch()
 		err := writer.Write(rec)
@@ -136,10 +156,15 @@ func (s *InferenceFlightServer) DoPut(stream flight.FlightService_DoPutServer) e
 func (s *InferenceFlightServer) GetSchema(ctx context.Context, desc *flight.FlightDescriptor) (*flight.SchemaResult, error) {
 	meta := arrow.NewMetadata([]string{"QUARREL:device_id"}, []string{"0"})
 
+	// It has to be the same schema the DoGet stream carries, because a
+	// client that reads the schema before the data uses it to find the
+	// columns.
 	schema := arrow.NewSchema([]arrow.Field{
 		{Name: "token_id", Type: arrow.PrimitiveTypes.Int32},
 		{Name: "logits", Type: arrow.FixedSizeListOf(10, arrow.PrimitiveTypes.Float32), Nullable: true},
-		{Name: "metadata", Type: arrow.BinaryTypes.String, Nullable: true},
+		{Name: "text", Type: arrow.BinaryTypes.String, Nullable: true},
+		{Name: "id", Type: arrow.BinaryTypes.String, Nullable: true},
+		{Name: "vector", Type: arrow.FixedSizeListOf(1, arrow.PrimitiveTypes.Float32), Nullable: true},
 	}, &meta)
 	return &flight.SchemaResult{
 		Schema: flight.SerializeSchema(schema, s.allocator),

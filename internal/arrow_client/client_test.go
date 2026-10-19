@@ -112,17 +112,26 @@ func TestGetSchemaReturnsErrorWhenNotConnected(t *testing.T) {
 	}
 }
 
+// TestDoPutEmptyVectors checks that a message with no vectors is a
+// control message rather than a malformed request.
+//
+// The remote worker uses it for the operations that carry no tensor, such
+// as loading an adapter and synchronising the weights. The old check
+// rejected them before they ever reached the worker, so those operations
+// could never succeed.
 func TestDoPutEmptyVectors(t *testing.T) {
 	client, _ := NewFlightClient("localhost", 3000, "localhost", 3001)
 
 	ctx := context.Background()
 	err := client.DoPut(ctx, [][]float32{}, nil, nil)
 
+	// The client is not connected, so the control message cannot be
+	// sent, but it is not rejected for the wrong reason.
 	if err == nil {
-		t.Error("Expected error for empty vectors")
+		t.Error("Expected an error for a disconnected client")
 	}
-	if !strings.Contains(err.Error(), "no vectors") {
-		t.Errorf("Expected 'no vectors' error, got: %v", err)
+	if strings.Contains(err.Error(), "no vectors") {
+		t.Errorf("An empty vector list is a control message, not an error: %v", err)
 	}
 }
 

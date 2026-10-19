@@ -85,30 +85,42 @@ func (lm *LoRAManager) LoadAdapter(ctx *device.Context, path string, id string) 
 			continue
 		}
 
-		// Rank is the rows of A (or cols of B)
-		// GGUF Dims: [DimIn, Rank] for A, [Rank, DimOut] for B
-		r := int(tA.Dimensions[1])      // #nosec G115 -- safe: LoRA dimensions are always small
-		dimIn := int(tA.Dimensions[0])  // #nosec G115 -- safe: LoRA dimensions are always small
-		dimOut := int(tB.Dimensions[1]) // #nosec G115 -- safe: LoRA dimensions are always small
+		// The GGUF dimensions are the number of elements in a row first,
+		// so a LoRA A matrix of the logical shape [dimIn, rank] is stored
+		// as [rank, dimIn], and a B matrix of [rank, dimOut] as
+		// [dimOut, rank]. The dimensions used to be read the other way
+		// round, so a real adapter was loaded with the rank and the
+		// dimensions swapped.
+		r := int(tA.Dimensions[0])      // #nosec G115 -- safe: LoRA dimensions are always small
+		dimIn := int(tA.Dimensions[1])  // #nosec G115 -- safe: LoRA dimensions are always small
+		dimOut := int(tB.Dimensions[0]) // #nosec G115 -- safe: LoRA dimensions are always small
 
 		weight := &LoRAWeight{
 			Rank:  r,
 			Alpha: alpha,
 		}
 
-		// Upload A
+		// Upload A.
+		//
+		// The tensor is dequantized first: the file may hold float32
+		// values, and loading those bytes into a half-precision tensor
+		// read them as half-precision and produced garbage. The comment
+		// in the old code said "convert F32 to F16 if needed" and then
+		// did the same thing either way.
 		weight.A = ctx.NewTensorWithType(r, dimIn, device.DataTypeF16)
-		if tA.Type == gguf.GGMLTypeF16 {
-			_ = weight.A.LoadFrom(tA.Data)
-		} else {
-			// Convert F32 to F16 if needed
-			// For now, assume F16
-			_ = weight.A.LoadFrom(tA.Data)
+		aValues, err := gguf.DequantizeTensor(tA)
+		if err != nil {
+			continue
 		}
+		_ = weight.A.LoadFrom(aValues)
 
-		// Upload B
+		// Upload B.
 		weight.B = ctx.NewTensorWithType(dimOut, r, device.DataTypeF16)
-		_ = weight.B.LoadFrom(tB.Data)
+		bValues, err := gguf.DequantizeTensor(tB)
+		if err != nil {
+			continue
+		}
+		_ = weight.B.LoadFrom(bValues)
 
 		adapter.Weights[base] = weight
 	}

@@ -503,8 +503,8 @@ Based on deep profiling of autoregressive decode loops, CUDA kernel execution pr
 > 47), Batch 5 (Steps 31, 35, 36, 44, 48), Batch 6 (Steps 35, 44), Batch 7
 > (Steps 44, 47), Batch 8 (Step 40), Batch 9 (Step 40), Batch 10 (Step 35)
 > and Batch 11 (Step 35), Batch 12 (Step 35), Batch 13 (Step 35),
-> Batch 14 (Step 35), Batch 15 (Step 35) are DONE** — see the
-> status markers on each step.
+> Batch 14 (Step 35), Batch 15 (Step 35), Batch 16 (Step 35) are
+> DONE** — see the status markers on each step.
 > Verified locally after the change:
 >
 > | Check | Command | Result |
@@ -532,7 +532,7 @@ Based on deep profiling of autoregressive decode loops, CUDA kernel execution pr
 > | Metrics reference | `internal/metrics/docs_test.go` | **verified both ways** (73 metrics were wrong) |
 > | Browser e2e | `go test -run TestPlaywrightE2E ./internal/api/` | **runs** (the driver could not be downloaded) |
 > | Paged KV batch | `go test -run TestPagedKVCacheUpdateBatch ./internal/engine/` | **works** (it panicked on every backend) |
-> | `internal/engine` coverage | `go test -cover ./internal/engine/` | **68.1%** (was 51.0% at the start) |
+> | `internal/engine` coverage | `go test -cover ./internal/engine/` | **80.4%** (was 51.0% at the start) |
 
 #### Diagnostic Summary (as found, before Batch 1)
 
@@ -1306,6 +1306,67 @@ fail on the old code: with the interleaved nibble order the GPU returns
 A Q8_0 encoder was added as well (`gguf.QuantizeWeightsToQ8_0`): the
 repository could dequantize Q8_0 but not produce it.
 
+**Batch 16 raised the engine coverage to 80% and found six more bugs.**
+
+The `internal/engine` coverage was 68.1% at the start of the roadmap work
+and 71.9% after the previous batches. It is now **80.4%**, and the CI
+ratchet floor was raised from 64.0% to 80.0% to hold it there. The
+`internal/device` floor went from 72.0% to 75.0% (the measured value is
+75.3%).
+
+Getting there meant exercising the engine's interface, and the bugs fell
+out of it.
+
+**The Arrow Flight server and the client disagreed on the wire format, so
+the distributed inference returned no tokens.** The server sent the
+generated tokens in the columns `token_id`, `logits` and `text`; the
+client looked for `id` and `vector` and ignored everything else. The
+client therefore read a stream with no vectors in it, and
+`RemoteWorkerEngine.Infer` came back with **an empty token list and no
+error**. The server now also sends the `id` and `vector` columns, and its
+`GetSchema` handler returns the same schema the stream carries.
+
+**The Flight client's `DoGet` panicked on a record with more than one
+row.** It took the number of rows in the record for the width of the
+vector list, and then read that many values per row. The list's fixed size
+is now read from its type.
+
+**The remote worker's control messages could never be sent.** The client
+rejected an empty vector list, and the operations that carry no tensor —
+loading an adapter, synchronising the weights — send exactly that. So
+`RemoteWorkerEngine.LoadAdapter` and `SyncWeights` always failed with
+"no vectors provided". An empty vector list is a control message now.
+
+**The LoRA loaders read the GGUF dimensions swapped.** The GGUF dimensions
+are the number of elements in a row first, so a LoRA A matrix of the
+logical shape `[dimIn, rank]` is stored as `[rank, dimIn]`. Both the CPU
+engine's loader and the shared `LoRAManager` read them the other way
+round, so a real adapter was merged with the rank and the input dimension
+swapped. The length check still passed, because the product of the two is
+the same either way, and the garbage delta was merged into the weights.
+
+**The LoRA manager loaded float32 bytes into a half-precision tensor.**
+The comment in the code said "convert F32 to F16 if needed" and then did
+the same thing either way, so an adapter stored in float32 was read as
+half-precision and produced nonsense. The tensors are dequantized before
+they are uploaded now.
+
+**The speculative engine dropped the logits callback.**
+`InferWithCallbackLogits` called the token-only path, so a caller that
+asked for the logits never got any. The target's distribution for every
+accepted token is now reported, which is the distribution that justifies
+the token.
+
+**The CPU engine's close could block forever.** `Close` waited for the
+batch loop to exit, and an engine whose loop was never started never
+exited it. The wait is bounded now.
+
+The new tests are in `internal/engine/engine_interface_test.go`,
+`engine_coverage_test.go`, `cpu_forward_test.go`, `cpu_lora_test.go`,
+`lora_manager_test.go` and `kv_cache_coverage_test.go`, plus
+`internal/api/flight_roundtrip_test.go` for the server and the client
+talking to each other.
+
 **Still open:** the distributed/Arrow Flight stack and CUDA Graphs. The
 first needs a worker-side sharded forward, the second needs a decode path
 with static device buffers.
@@ -1517,7 +1578,7 @@ architecture-specific functions from 0% to:
 
 **Still open:** `lora.go:41` `LoadAdapter`, `kv_cache_paged.go:616`
 `ForkSequence`, `:873` `UpdateBatch`, `:1067` `GetBlockScales` and `:1235`
-`OffloadLRU` are still at 0%, as are the `remote.go` / `distributed_master.go`
+`OffloadLRU` were at 0%, as were the `remote.go` / `distributed_master.go`
 / `speculative.go` stacks (Step 35).
 
 ---
@@ -1718,7 +1779,7 @@ Two more live bugs surfaced:
   when an already-cached prompt was re-inserted, double-counting it.
 
 Both are fixed and covered by regression tests. The `internal/engine` package
-is now at 68.1%.
+was at 68.1% then, and is at 80.4% now.
 
 **Batch 10** fixed the Arrow Flight protocol's silent corruption and a crash
 that only the GPU builds hit (see Step 35). **Batch 11** aligned the paged-KV
@@ -1730,7 +1791,9 @@ flags fail loudly instead of printing a topology the engine never applied
 (see Step 35). **Batch 14** made the audit functions and the activation
 logger real (see Step 35). **Batch 15** made the quantization tooling real,
 and found that the Q4_K and FP8 codecs did not round-trip and that the CPU
-and the GPU decoded Q4_K differently (see Step 35).
+and the GPU decoded Q4_K differently (see Step 35). **Batch 16** raised the
+engine coverage to 80% and found six more bugs, among them the Arrow
+Flight server and client disagreeing on the wire format (see Step 35).
 
 **Still open:** raising `internal/engine` above 80%, and generating the README table from a script so it cannot drift apart from the floors again.
 

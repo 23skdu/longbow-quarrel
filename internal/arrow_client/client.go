@@ -176,11 +176,15 @@ func NewRecordBatch(vectors [][]float32, ids []string) *RecordBatch {
 	}
 }
 
-// DoPut sends embeddings to Longbow data port
+// DoPut sends embeddings to Longbow data port.
+//
+// An empty vector list is a control message: the operations that carry no
+// tensor, such as loading an adapter or synchronising the weights, use it.
+// The previous check rejected them before they ever reached the worker, so
+// the remote worker's LoadAdapter and SyncWeights could never succeed.
 func (fc *FlightClient) DoPut(ctx context.Context, vectors [][]float32, ids []string, metadata map[string]string) error {
-	// Validate input before checking connection
 	if len(vectors) == 0 {
-		return fmt.Errorf("no vectors provided")
+		return fc.doPutControl(ctx, ids, metadata)
 	}
 
 	// Get vector dimension from first vector
@@ -275,6 +279,64 @@ func (fc *FlightClient) DoPut(ctx context.Context, vectors [][]float32, ids []st
 	// Update hotpath metrics
 	fc.BytesTransferred.Add(int64(record.NumRows() * int64(vecDim) * 4))
 	metrics.RecordArrowBytesHotpath(int64(record.NumRows() * int64(vecDim) * 4))
+	metrics.RecordArrowEmbeddingHotpath()
+
+	return nil
+}
+
+// doPutControl sends a message that carries no tensor.
+//
+// The record holds only the identifiers, so the worker receives a valid
+// Arrow stream with nothing in it.
+func (fc *FlightClient) doPutControl(ctx context.Context, ids []string, metadata map[string]string) error {
+	if fc.client == nil {
+		return fmt.Errorf("client not connected, call Connect() first")
+	}
+
+	schema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+
+	builder := array.NewRecordBuilder(fc.allocator, schema)
+	defer builder.Release()
+
+	idBuilder := builder.Field(0).(*array.StringBuilder)
+	for _, id := range ids {
+		idBuilder.Append(id)
+	}
+
+	//nolint:staticcheck // SA1019: builder.NewRecord is deprecated but NewRecordBatch API not available in current arrow version
+	record := builder.NewRecord()
+	defer record.Release()
+
+	desc := &flight.FlightDescriptor{
+		Type: flight.DescriptorPATH,
+		Path: []string{"embeddings"},
+	}
+
+	stream, err := fc.client.DoPut(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to create DoPut stream: %w", err)
+	}
+
+	writer := flight.NewRecordWriter(stream, ipc.WithSchema(schema))
+	writer.SetFlightDescriptor(desc)
+
+	if err := writer.Write(record); err != nil {
+		return fmt.Errorf("failed to write record: %w", err)
+	}
+	_ = writer.Close()
+
+	if err := stream.CloseSend(); err != nil {
+		return fmt.Errorf("failed to close send stream: %w", err)
+	}
+
+	_, err = stream.Recv()
+	if err != nil && err != io.EOF {
+		return fmt.Errorf("error receiving acknowledgment: %w", err)
+	}
+
+	logger.Log.Info("Sent control message", "count", len(ids), "metadata", metadata)
 	metrics.RecordArrowEmbeddingHotpath()
 
 	return nil
@@ -608,7 +670,15 @@ func (fc *FlightClient) DoGet(ctx context.Context, ids []string) (*RecordBatch, 
 		// Process vector column
 		switch vecList := record.Column(vectorIdx).(type) {
 		case *array.FixedSizeList:
-			vecDim = int(vecList.Len())
+			// The width of the list is its fixed size, not the number of
+			// rows in the record. Using the row count made the reader
+			// walk off the end of the values whenever a record held
+			// more than one row.
+			if listType, ok := vecList.DataType().(*arrow.FixedSizeListType); ok {
+				vecDim = int(listType.Len())
+			} else {
+				vecDim = 0
+			}
 			listValues := vecList.ListValues()
 			if values, ok := listValues.(*array.Float32); ok {
 				for i := 0; i < int(record.NumRows()); i++ {

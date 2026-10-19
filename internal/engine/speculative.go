@@ -87,7 +87,12 @@ func (sm *SpeculativeManager) GetDynamicDraftLength() int {
 }
 
 // GenerateSpeculativeMultiPath performs continuous decoding using multiple parallel draft paths.
-func (sm *SpeculativeManager) GenerateSpeculativeMultiPath(ctx context.Context, seq *Sequence) error {
+//
+// logitsCallback, when it is not nil, receives the target model's
+// distribution for every accepted token. Those are the logits that
+// justify the token, so they are the ones a caller sampling from the
+// target would have seen.
+func (sm *SpeculativeManager) GenerateSpeculativeMultiPath(ctx context.Context, seq *Sequence, logitsCallback func([]float32)) error {
 	if sm.draftEngine == nil || sm.targetEngine == nil {
 		return fmt.Errorf("engines not fully initialized")
 	}
@@ -177,6 +182,9 @@ func (sm *SpeculativeManager) GenerateSpeculativeMultiPath(ctx context.Context, 
 			isAccepted, correctedToken := rejectSample(targetLogits[i], draftVec, draftToken, sm.rng)
 			if isAccepted {
 				accepted++
+				if logitsCallback != nil {
+					logitsCallback(targetLogits[i])
+				}
 				continue
 			}
 			// The draft token was rejected. The correction is the token
@@ -233,7 +241,7 @@ func (sm *SpeculativeManager) GenerateSpeculativeMultiPath(ctx context.Context, 
 func (sm *SpeculativeManager) GenerateSpeculative(ctx context.Context, seq *Sequence) error {
 	seq.NumPaths = 1
 	seq.DraftK = sm.GetDynamicDraftLength()
-	return sm.GenerateSpeculativeMultiPath(ctx, seq)
+	return sm.GenerateSpeculativeMultiPath(ctx, seq, nil)
 }
 
 // AsymmetricSpeculativeEngine combines an arbitrary draft engine with a primary target engine.
@@ -305,6 +313,12 @@ func (e *AsymmetricSpeculativeEngine) InferWithLogits(tokens []int, count int, c
 }
 
 func (e *AsymmetricSpeculativeEngine) InferWithCallback(tokens []int, count int, cfg SamplerConfig, callback func(int)) ([]int, error) {
+	return e.inferWithCallbacks(tokens, count, cfg, callback, nil)
+}
+
+// inferWithCallbacks is the shared implementation of the two inference
+// entry points.
+func (e *AsymmetricSpeculativeEngine) inferWithCallbacks(tokens []int, count int, cfg SamplerConfig, callback func(int), logitsCallback func([]float32)) ([]int, error) {
 	currentTokens := append([]int{}, tokens...)
 	seq := &Sequence{
 		Tokens:   currentTokens,
@@ -320,7 +334,7 @@ func (e *AsymmetricSpeculativeEngine) InferWithCallback(tokens []int, count int,
 	for generated < count {
 		seq.DraftK = e.manager.GetDynamicDraftLength()
 		startLen := len(seq.Tokens)
-		if err := e.manager.GenerateSpeculativeMultiPath(ctx, seq); err != nil {
+		if err := e.manager.GenerateSpeculativeMultiPath(ctx, seq, logitsCallback); err != nil {
 			single, err2 := e.targetEngine.Infer(seq.Tokens, 1, cfg)
 			if err2 != nil {
 				return seq.Tokens[len(tokens):], err
@@ -373,8 +387,13 @@ func (e *AsymmetricSpeculativeEngine) InferWithCallback(tokens []int, count int,
 	return all, nil
 }
 
+// InferWithCallbackLogits reports the target model's distribution for
+// every generated token.
+//
+// It used to drop the logits callback and call the token-only path, so a
+// caller that asked for the logits never got any.
 func (e *AsymmetricSpeculativeEngine) InferWithCallbackLogits(tokens []int, count int, cfg SamplerConfig, tokenCallback func(int), logitsCallback func([]float32)) ([]int, error) {
-	return e.InferWithCallback(tokens, count, cfg, tokenCallback)
+	return e.inferWithCallbacks(tokens, count, cfg, tokenCallback, logitsCallback)
 }
 
 func (e *AsymmetricSpeculativeEngine) Config() config.Config {
