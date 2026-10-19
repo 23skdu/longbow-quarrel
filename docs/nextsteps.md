@@ -894,7 +894,7 @@ Verified by `deadcode -tags cuda -test ./internal/... ./cmd/quarrel` cross-check
 
 | Cluster | Location | LOC | Status |
 |---|---|---|---|
-| Arrow Flight distributed inference | `internal/arrow_client/*`, `internal/engine/remote.go`, `distributed_master.go` | ~800 | TEST-ONLY |
+| Arrow Flight distributed inference | `internal/arrow_client/*`, `internal/engine/remote.go`, `distributed_master.go` | ~800 | PARTIAL — single-request `DoGet` works; the sharded forward is **not implemented on the worker** and used to fail silently (Batch 10) |
 | Speculative decoding | `internal/engine/speculative.go` | 367 | TEST-ONLY |
 | Radix prefix cache | `internal/engine/radix_cache.go` | 286 | **DEAD — duplicate of the wired `prompt_cache.go`** |
 | Jinja2 chat templates | `internal/engine/prompt_wrapper.go` | 372 | TEST-ONLY — **no chat template is ever applied** |
@@ -997,6 +997,92 @@ Metal kernels cast them to `int` themselves, and the CPU reads them from the
 tensor's float data. `internal/engine/kv_cache_batch_test.go` verifies that
 the K and V values actually land in the physical slot the sequence was
 assigned, on both the CPU and the CUDA build.
+
+**Batch 10 found a silent-corruption bug in the Arrow Flight protocol.**
+
+The Flight stack is more than "not reachable": the *server* side of the
+sharded tensor forward was never implemented, and both ends of the protocol
+conspired to hide that.
+
+The worker (`internal/api/flight_server.go`) implements `DoGet` properly: it
+tokenizes the prompt, runs `InferWithCallback`, and streams the generated
+tokens back. That is the path the single-request inference uses, and it
+works.
+
+`DoPut` is the path the *batched / sharded* forward uses, and it did this:
+
+```go
+for {
+    _, err := stream.Recv()
+    if err == io.EOF {
+        return stream.SendMsg(&flight.PutResult{})   // no AppMetadata
+    }
+    ...
+}
+```
+
+It read the payload and **threw it away**, then answered with an empty
+`PutResult`. Two more gaps made the failure invisible:
+
+- The client never transmitted the operation metadata. `DoPutTensor` takes a
+  `metadata map[string]string` and only ever **logged** it, so the server
+  could not even tell what had been asked for. The descriptor path is the
+  only thing that distinguishes the requests, and it does: the tensor
+  forward uses `["compute", "layer"]` while the control messages use
+  `["embeddings"]`.
+- The client read the empty `PutResult` as *"the worker processed it but
+  did not return data"* and returned an empty slice. Every one of the four
+  `DoPutTensor` call sites then did `tensor.LoadFrom(resultData)` on that
+  empty slice, producing a **zero-filled** hidden state. The master
+  continued with zero activations and emitted garbage — with no error
+  anywhere in the stack.
+
+The fix turns the silent corruption into a diagnosable failure:
+
+- The worker now inspects the descriptor on the first message of the
+  `DoPut` stream and returns `codes.Unimplemented` for the tensor forward
+  it cannot serve, while still accepting the control messages that share
+  the handler.
+- The client treats an empty result as an **error** rather than as success.
+  Every caller needs the result tensor, so an empty response can only ever
+  have been a failure.
+
+`internal/api/flight_server_forward_test.go` covers both ends, and the two
+existing tests that had encoded the old behaviour
+(`TestDoPutTensor_RoundTrip/server_sends_no_result` and
+`TestFlightClient_DoPutTensor_ServerInteractions`) were corrected.
+
+**A second bug surfaced in the same area: a crash on the GPU builds.**
+
+`FlightClient.StreamEmbeddings` derives the Arrow schema from the first
+tensor's column count and calls `arrow.FixedSizeListOf`. Arrow **panics**
+on a non-positive list size rather than returning an error. The backends
+disagree about the shape of a zero-value tensor:
+
+- the CPU reports one column (`Cols()` returns 1 when the tensor has no
+  dimensions), so the panic never fired there;
+- the CUDA and Metal backends report zero columns, so a zero-column tensor
+  took down the process with `panic: arrow: invalid size`.
+
+The client now validates the tensor dimensions before it builds the schema
+and returns an error, and `device.Tensor.ToArrowArray` rejects a
+zero-column tensor as well. The `default` branch of `ToArrowArray` (the
+quantized-type fallback) also indexed `hostData[0]` without checking the
+length, which was a second panic waiting to happen.
+
+This is a good reminder of why the CI matrix runs the test suite under
+every build tag: the CPU test suite was green while the CUDA build
+crashed.
+
+**What is still missing for the distributed stack:** the worker cannot serve
+a *sharded layer* forward at all. There is no engine API that takes a
+hidden state, runs it through a layer range, and returns the output hidden
+state; `engine.ForwardBatch` takes token IDs and runs the whole model. A
+real implementation needs that API, a protocol that carries the layer range
+and the sequence state, and a worker that owns a slice of the layers. Until
+that exists, the master mode (`MasterDistributedEngine`) has no working
+peer to talk to, and the single-request `DoGet` path is the only part of
+the distributed stack that functions end to end.
 
 **Still open:** the distributed/Arrow Flight stack, speculative decoding, CUDA
 Graphs, the multi-GPU TP/PP engine, the quantization tooling and the

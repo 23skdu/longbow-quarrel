@@ -29,8 +29,8 @@ for what has landed and what is still planned.
 >
 > **Still outstanding:** `internal/engine` coverage is ~68% (up from 51%), a
 > number of implemented features are still not wired into any shipped binary
-> (the distributed/Arrow Flight stack, speculative decoding, the Jinja2 prompt
-> templates, OTEL, CUDA Graphs and the multi-GPU TP/PP engine), and several
+> (speculative decoding, CUDA Graphs, the multi-GPU TP/PP engine, the
+> quantization tooling and the activation/audit logging), and several
 > documented performance numbers remain unreproducible.
 
 High-performance, memory-efficient LLM inference engine written in Go with native GPU acceleration (Apple Silicon Metal, NVIDIA CUDA) and optimized CPU SIMD vectorization (AVX-512, AVX2, ARM NEON).
@@ -68,7 +68,7 @@ see [docs/dependencies.md](docs/dependencies.md).
 - **Vectorized TurboQuant Kernels:** AVX-512, AVX2 and ARM NEON implementations of the PolarQuant and QJL transforms, dispatched at runtime by CPU feature detection, with a canonical pure-Go fallback.
 - **SIMD GGUF Dequantization Kernels:** Vectorized batch dequantization and zero-copy matrix-vector multiplication (`MatVecMulQ4_K`, `MatVecMulQ6_K`).
 - **Comprehensive Verification:** Clean `go vet`, 0 `gosec` security vulnerabilities, 0 data races (`go test -race`), a `vacuous_tests` gate that fails any test which cannot fail, and a `dupcheck` gate that fails on duplicate package-level declarations in any build configuration.
-- **Distributed Inference (Arrow Flight):** Tensor and pipeline parallelism over Apache Arrow Flight RPC. The `DoPutTensor` round trip is implemented and verified by `TestDoPutTensor_RoundTrip` against an in-process Flight server.
+- **Distributed Inference (Arrow Flight):** A Flight client, a master engine, a remote worker engine and a Flight server for single-request inference. The **sharded** tensor forward is *not* implemented on the worker side: the worker rejects it with `Unimplemented` rather than silently returning zeroed activations. See `docs/nextsteps.md` (Step 35) for the exact boundary.
 
 ---
 
@@ -89,7 +89,7 @@ see [docs/dependencies.md](docs/dependencies.md).
 - **Continuous Batching**: Dynamic iteration-level batching with preemption
 - **Paged KV Cache**: Virtual memory block allocation with prefix caching
 - **TurboQuant KV Cache**: 8x KV cache compression with PolarQuant + QJL residual
-- **Distributed Sharding**: Zero-copy tensor parallelism via Apache Arrow Flight RPC
+- **Distributed Sharding**: Client, master and worker plumbing via Apache Arrow Flight RPC. The worker-side sharded forward is not implemented yet (it fails loudly, not silently).
 - **API**: OpenAI-compatible (`/v1/chat/completions`, `/v1/completions`), WebSocket streaming, and Prometheus metrics (`/metrics`)
 
 ---

@@ -15,6 +15,8 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/ipc"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // InferenceFlightServer handles bidirectional Arrow streaming for the generation endpoints.
@@ -95,14 +97,37 @@ func (s *InferenceFlightServer) DoGet(tckt *flight.Ticket, stream flight.FlightS
 }
 
 // DoPut receives an Arrow stream and stores it as a sequence.
+//
+// The Flight descriptor distinguishes the two kinds of request:
+//
+//	["compute", "layer"]  a tensor forward, which needs a result tensor back
+//	anything else         a fire-and-forget control message
+//
+// The tensor forward is not implemented on the server side: there is no
+// engine API that runs a hidden state through a layer range and returns the
+// output hidden state. The previous implementation discarded the payload and
+// answered with an empty PutResult, which the client interpreted as "the
+// worker processed it but sent no data" and turned into a **zero-filled**
+// hidden state. Failing loudly is much better than silently corrupting the
+// activations.
 func (s *InferenceFlightServer) DoPut(stream flight.FlightService_DoPutServer) error {
+	first := true
 	for {
-		_, err := stream.Recv()
+		fd, err := stream.Recv()
 		if err == io.EOF {
 			return stream.SendMsg(&flight.PutResult{})
 		}
 		if err != nil {
 			return err
+		}
+		if first {
+			first = false
+			// The descriptor is carried on the first message of the stream.
+			if desc := fd.GetFlightDescriptor(); desc != nil && len(desc.Path) >= 2 &&
+				desc.Path[0] == "compute" && desc.Path[1] == "layer" {
+				return status.Errorf(codes.Unimplemented,
+					"the tensor forward operation is not implemented by this worker")
+			}
 		}
 	}
 }

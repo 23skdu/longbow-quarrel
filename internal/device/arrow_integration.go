@@ -18,6 +18,12 @@ func (t *Tensor) ToArrowArray(allocator memory.Allocator) (*array.FixedSizeList,
 	var arrowType arrow.DataType
 	var arrowBuf *memory.Buffer
 
+	// A FixedSizeList needs a positive list size, and arrow panics on a
+	// non-positive one rather than returning an error.
+	if t.Cols() <= 0 {
+		return nil, fmt.Errorf("tensor has no columns to convert to Arrow")
+	}
+
 	if t.IsDevice() {
 		switch t.dataType {
 		case DataTypeF16:
@@ -58,6 +64,9 @@ func (t *Tensor) ToArrowArray(allocator memory.Allocator) (*array.FixedSizeList,
 			// For quantized or other types, we must currently fall back to an F32 host copy
 			// because most analytical consumers expect standard floating point arrays.
 			hostData := t.ToHostF32()
+			if len(hostData) == 0 {
+				return nil, fmt.Errorf("tensor provides no host data for Arrow conversion")
+			}
 			// Wrap the new slice. Note: This copy is intended for non-native Arrow formats.
 			ptr := unsafe.Pointer(&hostData[0]) // #nosec G103 -- intentional unsafe for zero-copy
 			size := len(hostData) * 4

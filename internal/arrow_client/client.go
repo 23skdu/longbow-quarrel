@@ -368,23 +368,32 @@ func (fc *FlightClient) DoPutTensor(ctx context.Context, data []float32, rows []
 	}
 
 	if result == nil {
-		// Flight protocol may not support response data in DoPut
-		// Return empty slice to indicate success (worker processed but didn't return data)
-		logger.Log.Info("DoPutTensor completed (no response)", "input_size", len(data), "metadata", metadata)
+		// The Flight protocol may not carry response data in a DoPut. The
+		// caller asked for a result tensor, though, so an empty response is
+		// a failure and not a success: every caller loads the returned data
+		// into a tensor, and an empty slice silently produced a zero-filled
+		// tensor.
+		logger.Log.Warn("DoPutTensor completed without a result", "input_size", len(data), "metadata", metadata)
 		fc.BytesTransferred.Add(int64(len(data) * 4))
 		metrics.RecordArrowBytesHotpath(int64(len(data) * 4))
-		return []float32{}, nil
+		return nil, fmt.Errorf("the worker returned no result tensor for the request")
 	}
 
-	// Extract result data if available from PutResult AppMetadata
-	resultData := make([]float32, 0)
-	if len(result.AppMetadata) > 0 && len(result.AppMetadata)%4 == 0 {
-		count := len(result.AppMetadata) / 4
-		resultData = make([]float32, count)
-		for i := 0; i < count; i++ {
-			bits := binary.LittleEndian.Uint32(result.AppMetadata[i*4 : (i+1)*4])
-			resultData[i] = math.Float32frombits(bits)
-		}
+	// Extract result data from the PutResult AppMetadata.
+	if len(result.AppMetadata) == 0 || len(result.AppMetadata)%4 != 0 {
+		// The worker accepted the request but sent no data back. Every
+		// caller needs the result tensor, so this is a failure.
+		logger.Log.Warn("DoPutTensor completed without result data", "input_size", len(data), "metadata", metadata)
+		fc.BytesTransferred.Add(int64(len(data) * 4))
+		metrics.RecordArrowBytesHotpath(int64(len(data) * 4))
+		return nil, fmt.Errorf("the worker returned an empty result for the request")
+	}
+
+	count := len(result.AppMetadata) / 4
+	resultData := make([]float32, count)
+	for i := 0; i < count; i++ {
+		bits := binary.LittleEndian.Uint32(result.AppMetadata[i*4 : (i+1)*4])
+		resultData[i] = math.Float32frombits(bits)
 	}
 
 	logger.Log.Info("DoPutTensor completed", "input_size", len(data), "output_size", len(resultData), "metadata", metadata)
@@ -409,6 +418,15 @@ func (fc *FlightClient) StreamEmbeddings(ctx context.Context, tensors []*device.
 	// 1. Determine Schema from the first tensor
 	first := tensors[0]
 	vecDim := first.Cols()
+	// arrow.FixedSizeListOf panics on a non-positive list size, so a
+	// zero-column tensor has to be rejected before the schema is built.
+	// The CPU backend reports 1 column for a zero-value tensor, but the
+	// CUDA and Metal backends report 0, so this guard is what keeps the
+	// streaming path from crashing on a GPU build. A tensor with no rows
+	// carries no embeddings at all and is rejected for the same reason.
+	if vecDim <= 0 || first.Rows() <= 0 {
+		return fmt.Errorf("invalid tensor dimensions: tensor 0 is %dx%d", first.Rows(), vecDim)
+	}
 	var arrowType arrow.DataType
 	switch first.DataType() {
 	case device.DataTypeF32:

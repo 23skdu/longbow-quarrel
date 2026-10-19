@@ -180,9 +180,13 @@ func TestDoPutTensor_RoundTrip(t *testing.T) {
 		mode       ackMode
 		ackPayload []byte
 		wantLen    int
+		wantErr    bool
 	}{
-		{"server sends PutResult with tensor metadata", ackPutResult, ackBytes, 4},
-		{"server sends no result", ackNone, nil, 0},
+		{"server sends PutResult with tensor metadata", ackPutResult, ackBytes, 4, false},
+		// A worker that sends no data back is a failure, not a success: every
+		// caller loads the returned data into a tensor, and an empty result
+		// silently produced a zero-filled tensor.
+		{"server sends no result", ackNone, nil, 0, true},
 	}
 
 	for _, tc := range cases {
@@ -194,6 +198,15 @@ func TestDoPutTensor_RoundTrip(t *testing.T) {
 			defer cancel()
 
 			got, err := fc.DoPutTensor(ctx, []float32{1, 2, 3, 4}, []int32{4}, nil)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected an error when the worker returns no data, got %v", got)
+				}
+				if len(got) != 0 {
+					t.Errorf("expected no result data, got %v", got)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("DoPutTensor failed: %v", err)
 			}

@@ -71,3 +71,19 @@ func TestToArrowArray(t *testing.T) {
 		}
 	}
 }
+
+// TestToArrowArray_InvalidTensor checks that a tensor that cannot be
+// represented as a FixedSizeList is reported as an error instead of
+// panicking.
+//
+// arrow.FixedSizeListOf panics on a non-positive list size, so the
+// conversion has to reject a zero-column tensor up front. The backends
+// disagree about the shape of a zero-value tensor (the CPU reports one
+// column and no rows, the GPU backends report zero columns and no rows),
+// so the test only requires that an error comes back.
+func TestToArrowArray_InvalidTensor(t *testing.T) {
+	empty := &Tensor{}
+	if _, err := empty.ToArrowArray(nil); err == nil {
+		t.Error("expected an error for a tensor with no columns, got nil")
+	}
+}

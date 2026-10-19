@@ -281,21 +281,26 @@ func TestFlightClient_DoPutTensor_ServerInteractions(t *testing.T) {
 
 	// 4. Default rowsCount = 1 when len(rows) == 0, with padding
 	// data len=3, rows=[] -> rowsCount=1, colsCount=3
+	//
+	// The mock server does not return a result tensor, so this is a
+	// failure: every caller loads the returned data into a tensor, and an
+	// empty result silently produced a zero-filled tensor.
 	res, err := client.DoPutTensor(ctx, []float32{1.0, 2.0, 3.0}, nil, nil)
-	if err != nil {
-		t.Fatalf("DoPutTensor failed with empty rows: %v", err)
+	if err == nil {
+		t.Errorf("expected an error when the worker returns no data, got %v", res)
 	}
 	if len(res) != 0 {
-		t.Errorf("expected empty result, got %v", res)
+		t.Errorf("expected no result data, got %v", res)
 	}
 
 	// 5. Padding: rows=[2], data=[1, 2, 3] -> rowsCount=1, colsCount=3. rowLen=2, so offset=2, pads 1 zero.
+	// The mock server does not return a result tensor, so this fails too.
 	paddedRes, err := client.DoPutTensor(ctx, []float32{1.0, 2.0, 3.0}, []int32{2}, nil)
-	if err != nil {
-		t.Fatalf("DoPutTensor failed with padded row: %v", err)
+	if err == nil {
+		t.Errorf("expected an error for the ack-less padded put, got %v", paddedRes)
 	}
 	if len(paddedRes) != 0 {
-		t.Errorf("expected empty result for ack-less padded put, got %v", paddedRes)
+		t.Errorf("expected no result data for the ack-less padded put, got %v", paddedRes)
 	}
 
 	// 6. With server sending PutResult response
@@ -303,13 +308,13 @@ func TestFlightClient_DoPutTensor_ServerInteractions(t *testing.T) {
 	srv.sendPutRes = true
 	srv.mu.Unlock()
 	res, err = client.DoPutTensor(ctx, []float32{1.0, 2.0}, []int32{2}, nil)
-	if err != nil {
-		t.Fatalf("DoPutTensor failed with response: %v", err)
+	if err == nil {
+		t.Errorf("expected an error for a bare PutResult ack, got %v", res)
 	}
-	// A bare PutResult carries no AppMetadata, so the ack completes cleanly
-	// with an empty payload rather than an error.
+	// A bare PutResult carries no AppMetadata, so there is no result
+	// tensor: the request fails rather than yielding a zero-filled tensor.
 	if len(res) != 0 {
-		t.Errorf("expected empty payload from bare PutResult ack, got %v", res)
+		t.Errorf("expected no payload from bare PutResult ack, got %v", res)
 	}
 }
 
@@ -763,15 +768,21 @@ func TestFlightClient_StreamErrorBranches(t *testing.T) {
 		t.Errorf("expected failed to write record error, got: %v", err)
 	}
 
-	// 10b. StreamEmbeddings ToArrowArray error
+	// 10b. StreamEmbeddings rejects an invalid tensor.
+	//
+	// arrow.FixedSizeListOf panics on a non-positive list size, so a
+	// zero-column tensor has to be rejected before the schema is built.
+	// The CPU backend reports 1 column for a zero-value tensor while the
+	// CUDA and Metal backends report 0, so the guard covers both the
+	// column count and the row count.
 	fc.client = &mockFlightClientWrapper{
 		doPutFunc: func(ctx context.Context, opts ...grpc.CallOption) (flight.FlightService_DoPutClient, error) {
 			return &mockDoPutClient{}, nil
 		},
 	}
 	emptyTensor := &device.Tensor{}
-	if err := fc.StreamEmbeddings(ctx, []*device.Tensor{emptyTensor}, nil, nil); err == nil || !strings.Contains(err.Error(), "failed to convert tensor 0 to Arrow") {
-		t.Errorf("expected failed to convert tensor 0 to Arrow error, got: %v", err)
+	if err := fc.StreamEmbeddings(ctx, []*device.Tensor{emptyTensor}, nil, nil); err == nil || !strings.Contains(err.Error(), "invalid tensor dimensions") {
+		t.Errorf("expected invalid tensor dimensions error, got: %v", err)
 	}
 
 	// 11. StreamEmbeddings CloseSend error
