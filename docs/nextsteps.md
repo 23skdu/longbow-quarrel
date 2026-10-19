@@ -501,8 +501,8 @@ Based on deep profiling of autoregressive decode loops, CUDA kernel execution pr
 > **Batch 1 (Steps 28, 31, 32, 34), Batch 2 (Steps 29, 30, 41, 42, 43,
 > 44, 45, 48), Batch 3 (Steps 33, 49), Batch 4 (Steps 37, 38, 39, 40, 46,
 > 47), Batch 5 (Steps 31, 35, 36, 44, 48), Batch 6 (Steps 35, 44), Batch 7
-> (Steps 44, 47) and Batch 8 (Step 40) are DONE** — see the status markers
-> on each step. Verified locally after the change:
+> (Steps 44, 47), Batch 8 (Step 40) and Batch 9 (Step 40) are DONE** — see the
+> status markers on each step. Verified locally after the change:
 >
 > | Check | Command | Result |
 > |---|---|---|
@@ -529,6 +529,7 @@ Based on deep profiling of autoregressive decode loops, CUDA kernel execution pr
 > | Metrics reference | `internal/metrics/docs_test.go` | **verified both ways** (73 metrics were wrong) |
 > | Browser e2e | `go test -run TestPlaywrightE2E ./internal/api/` | **runs** (the driver could not be downloaded) |
 > | Paged KV batch | `go test -run TestPagedKVCacheUpdateBatch ./internal/engine/` | **works** (it panicked on every backend) |
+> | `internal/engine` coverage | `go test -cover ./internal/engine/` | **68.1%** (was 51.0% at the start) |
 
 #### Diagnostic Summary (as found, before Batch 1)
 
@@ -1357,8 +1358,22 @@ Only `engine` and `device` are still below 80%, so `README.md:145`'s framing ("p
 
 **Batch 8 also closed the last of the paged-KV coverage gaps**: `ForkSequence`,
 `UpdateBatch`, `GetBlockScales`, `OffloadLRU` and `Size` now have tests, and
-the first of them found a live bug in `UpdateBatch` (see Step 35). The
-`internal/engine` package is now at 66.6%.
+the first of them found a live bug in `UpdateBatch` (see Step 35).
+
+**Batch 9** added tests for the LoRA merge and the adapter registry, the
+chat-template loader, `NewEngine` (the public entry point, previously at 0%),
+`MatVec` (a hot path, previously at 22%) and the prompt-cache LRU eviction.
+Two more live bugs surfaced:
+
+- `PromptCache.Evict` cleared an entry's blocks *before* calling
+  `removeLRU`, which computes the `lruSize` decrement from those blocks. The
+  decrement was therefore always zero, so `lruSize` stayed permanently too
+  high and the cache believed it was over its limit and evicted everything.
+- `PromptCache.moveToHead` added an entry's block count to `lruSize` again
+  when an already-cached prompt was re-inserted, double-counting it.
+
+Both are fixed and covered by regression tests. The `internal/engine` package
+is now at 68.1%.
 
 **Still open:** raising `internal/engine` above 80%, and generating the README table from a script so it cannot drift apart from the floors again.
 

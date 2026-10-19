@@ -49,9 +49,9 @@ CORE_PKGS=(
 # runner noise cannot flip the gate red.
 #
 # Measured 2026-10 (must stay in sync with .github/workflows/ci.yml):
-#   engine 62.6, device 75.7
+#   engine 68.1, device 75.7
 RATCHET_PKGS=(
-    "./internal/engine/...:58.0"
+    "./internal/engine/...:64.0"
     "./internal/device/...:72.0"
 )
 

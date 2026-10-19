@@ -27,7 +27,7 @@ for what has landed and what is still planned.
 > are actually called (7.5x faster) — which also surfaced a CPU/GPU
 > divergence in the KV-cache encoder.
 >
-> **Still outstanding:** `internal/engine` coverage is ~67% (up from 51%), a
+> **Still outstanding:** `internal/engine` coverage is ~68% (up from 51%), a
 > number of implemented features are still not wired into any shipped binary
 > (the distributed/Arrow Flight stack, speculative decoding, the Jinja2 prompt
 > templates, OTEL, CUDA Graphs and the multi-GPU TP/PP engine), and several
@@ -201,7 +201,7 @@ and `scripts/run_all_tests.sh` and must be kept in sync.
 | `internal/api` | 91.7% |
 | `internal/arrow_client` | 88.3% |
 | `internal/device` | 75.7% |
-| `internal/engine` | 66.6% |
+| `internal/engine` | 68.1% |
 
 ---
 

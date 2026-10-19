@@ -125,8 +125,14 @@ func (pc *PromptCache) moveToHead(node *RadixNode) {
 		return
 	}
 
+	// Whether the node is already on the list. If it is, its blocks are
+	// already accounted for in lruSize and must not be counted a second
+	// time when the entry is moved to the head.
+	alreadyCounted := false
+
 	for existing := pc.lruHead; existing != nil; existing = existing.next {
 		if existing.node == node {
+			alreadyCounted = true
 			if existing == pc.lruHead {
 				return
 			}
@@ -146,7 +152,9 @@ func (pc *PromptCache) moveToHead(node *RadixNode) {
 	lru.next = pc.lruHead
 	pc.lruHead.prev = lru
 	pc.lruHead = lru
-	pc.lruSize += len(node.PhysicalBlocks)
+	if !alreadyCounted {
+		pc.lruSize += len(node.PhysicalBlocks)
+	}
 }
 
 func (pc *PromptCache) removeLRU() {
@@ -183,9 +191,14 @@ func (pc *PromptCache) Evict(kvCache *PagedKVCache) int {
 			}
 		}
 
+		// removeLRU decrements lruSize by the number of blocks the entry
+		// holds, so it has to run before the blocks are cleared. Clearing
+		// them first left lruSize permanently too high, which made the cache
+		// believe it was over its limit and evict everything.
+		pc.removeLRU()
+
 		node.PhysicalBlocks = nil
 		node.RefCount = 0
-		pc.removeLRU()
 	}
 
 	return freed
