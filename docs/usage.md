@@ -238,13 +238,30 @@ readinessProbe:
 When memory pressure exceeds 95% of `MaxMemory`, the engine returns `503` for new requests while keeping `/healthz` alive to prevent pod restarts. Normal operation resumes automatically when memory is freed.
 
 ### Distributed Sharding (Arrow Flight)
-> **Not available.** The distributed stack (`internal/arrow_client`,
-> `internal/engine/remote.go`, `internal/engine/distributed_master.go`) is
-> implemented and unit-tested, but it is not reachable from any binary: no
-> flag or environment variable selects it. The `QUARREL_SHARD_ROLE` and
-> `QUARREL_WORKER_ADDRS` variables that earlier revisions of this document
-> described do not exist in the code.
+> **Partially available.** The Arrow Flight server is started by
+> `quarrel -flight <addr>` and serves single-request inference: it
+> tokenizes the prompt, runs the engine, and streams the generated tokens
+> back over `DoGet`.
 >
-> Until the stack is wired behind a flag, use a single process with
-> `-devices`, `-tp-size` and `-pp-stages` for multi-GPU, and run separate
-> processes behind your own load balancer for scale-out.
+> The *sharded* forward is not. The worker has no engine API that runs a
+> hidden state through a layer range, so the worker rejects the tensor
+> forward with `Unimplemented` instead of silently returning zeroed
+> activations. The distributed master (`internal/engine/distributed_master.go`)
+> therefore has no working peer to talk to. See
+> [nextsteps.md](nextsteps.md) (Step 35) for the exact boundary.
+
+### Multi-Device Parallelism
+> **Not available.** The managers in `internal/device/multi_gpu.go` —
+> tensor parallelism (AllReduce, AllGather, Broadcast) and pipeline
+> parallelism — are implemented and unit-tested, but the inference engine
+> does not use them: it loads the whole model onto a single device and
+> never calls a collective.
+>
+> `-devices` with a *single* device id does work: it selects the CUDA
+> device the engine runs on. `-devices 0,1`, `-tp-size 2` and `-pp-stages 2`
+> now exit with an error rather than printing a topology that the engine
+> never applies.
+>
+> To spread a model across machines, run one process per machine behind
+> your own load balancer. To spread it across *devices in one process* is
+> not implemented.

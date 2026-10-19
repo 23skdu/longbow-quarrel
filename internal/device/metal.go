@@ -583,6 +583,12 @@ func (c *Context) newTensorFP32Internal(rows, cols int) *Tensor {
 	return t
 }
 
+// NewContextOnDevice creates a context. The Metal backend has a single
+// device, so the identifier is ignored.
+func NewContextOnDevice(deviceID int) (*Context, error) {
+	return NewContext(), nil
+}
+
 func (c *Context) NewTensorFP32(rows, cols int) *Tensor {
 	c.ExecMu.Lock()
 	defer c.ExecMu.Unlock()

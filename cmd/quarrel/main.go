@@ -140,31 +140,37 @@ func main() {
 	engineConfig.TensorParallelSize = *tpSizeFlag
 	engineConfig.PipelineStages = *ppStagesFlag
 
-	if len(devIDs) > 0 || *tpSizeFlag > 1 || *ppStagesFlag > 1 {
-		mode := device.TensorParallelism
-		if *ppStagesFlag > 1 {
-			mode |= device.PipelineParallelism
+	// A single device is a real setting: it selects the CUDA device the
+	// engine runs on.
+	//
+	// A topology that spans more than one device is not. The managers in
+	// internal/device/multi_gpu.go are complete, but the inference engine
+	// does not use them: it loads the whole model onto one device and
+	// never calls a collective. Asking for tensor or pipeline parallelism
+	// used to print a topology line and then run the model on a single
+	// GPU, which is worse than an error because the user believes their
+	// model was split.
+	multiDevice := len(devIDs) > 1 || *tpSizeFlag > 1 || *ppStagesFlag > 1
+	if multiDevice {
+		fmt.Fprintf(os.Stderr,
+			"error: multi-device parallelism is not implemented: the inference engine loads the whole model onto a single device.\n"+
+				"       -devices=%v -tp-size=%d -pp-stages=%d was requested, but no model sharding, no cross-device\n"+
+				"       activation transfer and no collective is performed. The supported way to spread a model\n"+
+				"       across devices is the Arrow Flight distributed path (see docs/nextsteps.md, Step 35).\n",
+			devIDs, *tpSizeFlag, *ppStagesFlag)
+		os.Exit(1)
+	}
+	if len(devIDs) == 1 {
+		count, err := device.GetDeviceCount()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
 		}
-		numGPUs := len(devIDs)
-		if numGPUs == 0 {
-			numGPUs = *tpSizeFlag
+		if devIDs[0] < 0 || devIDs[0] >= count {
+			fmt.Fprintf(os.Stderr, "error: CUDA device %d does not exist (the host has %d)\n", devIDs[0], count)
+			os.Exit(1)
 		}
-		mgpuCfg := &device.MultiGPUConfig{
-			Mode:               mode,
-			NumGPUs:            numGPUs,
-			Devices:            devIDs,
-			TensorParallelSize: *tpSizeFlag,
-			PipelineStages:     *ppStagesFlag,
-			BatchSizePerGPU:    1,
-			UseNCCL:            true,
-			UsePipelineBubbles: false,
-			PipelineDepth:      4,
-		}
-		if err := device.InitializeMultiGPU(mgpuCfg); err != nil {
-			logger.Log.Warn("Multi-GPU initialization skipped or fallback", "error", err)
-		} else {
-			fmt.Printf("Multi-GPU Topology: devices=%v, tp_size=%d, pp_stages=%d\n", devIDs, *tpSizeFlag, *ppStagesFlag)
-		}
+		fmt.Printf("CUDA device: %d\n", devIDs[0])
 	}
 
 	fmt.Printf("Layers: %d (GPU: %d)\n", engineConfig.Layers, engineConfig.NumGPULayers)

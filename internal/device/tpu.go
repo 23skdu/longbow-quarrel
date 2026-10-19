@@ -115,6 +115,12 @@ func NewTPUContext() (*Context, error) {
 	}, nil
 }
 
+// NewContextOnDevice creates a context. The TPU backend has a single
+// device, so the identifier is ignored.
+func NewContextOnDevice(deviceID int) (*Context, error) {
+	return NewTPUContext()
+}
+
 // NewPagedKVPool allocates the paged KV cache pool for one layer.
 //
 // The TPU kernels read and write the pool as float32.

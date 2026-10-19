@@ -113,6 +113,10 @@ import (
 var globalContext *Context
 
 type Context struct {
+	// deviceID is the CUDA device the context was created on. It used to
+	// be hardcoded to 0, so DeviceID() could not report the device the
+	// engine was actually running on.
+	deviceID    int
 	Ctx         C.cudaStream_t
 	Cublas      C.cublasHandle_t
 	pool        *tensorPool
@@ -149,6 +153,18 @@ type Tensor struct {
 type tensorPool struct {
 	mu   sync.Mutex
 	free map[int][]*Tensor
+}
+
+// NewContextOnDevice creates a context on a specific CUDA device.
+//
+// The engine used to always create its context on the current device, so
+// the -devices flag could not select one: it was accepted, printed, and
+// then ignored.
+func NewContextOnDevice(deviceID int) (*Context, error) {
+	if err := C.cudaSetDevice(C.int(deviceID)); err != 0 {
+		return nil, fmt.Errorf("failed to select CUDA device %d: %v", deviceID, int(err))
+	}
+	return NewContext(), nil
 }
 
 func NewContext() *Context {

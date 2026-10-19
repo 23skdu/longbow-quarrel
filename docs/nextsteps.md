@@ -502,8 +502,8 @@ Based on deep profiling of autoregressive decode loops, CUDA kernel execution pr
 > 44, 45, 48), Batch 3 (Steps 33, 49), Batch 4 (Steps 37, 38, 39, 40, 46,
 > 47), Batch 5 (Steps 31, 35, 36, 44, 48), Batch 6 (Steps 35, 44), Batch 7
 > (Steps 44, 47), Batch 8 (Step 40), Batch 9 (Step 40), Batch 10 (Step 35)
-> and Batch 11 (Step 35), Batch 12 (Step 35) are DONE** — see the
-> status markers on each step.
+> and Batch 11 (Step 35), Batch 12 (Step 35), Batch 13 (Step 35) are
+> DONE** — see the status markers on each step.
 > Verified locally after the change:
 >
 > | Check | Command | Result |
@@ -902,7 +902,7 @@ Verified by `deadcode -tags cuda -test ./internal/... ./cmd/quarrel` cross-check
 | Jinja2 chat templates | `internal/engine/prompt_wrapper.go` | 372 | TEST-ONLY — **no chat template is ever applied** |
 | OTEL tracing | `internal/telemetry/telemetry.go` `InitTracer:29` | 8 fns | DEAD — tracer never initialised |
 | CUDA Graph capture | `internal/device/cuda_graph.go` | 8 fns | TEST-ONLY |
-| Multi-GPU TP/PP | `internal/device/multi_gpu.go` | 1038 | 34 of ~50 methods TEST-ONLY |
+| Multi-GPU TP/PP | `internal/device/multi_gpu.go` | 1038 | 34 of ~50 methods TEST-ONLY — **the CLI now refuses to pretend** (Batch 13) |
 | Quantization tooling | `internal/gguf/quantize*.go` | 784 | TEST-ONLY |
 | Activation logging / audits | `internal/engine/activation_logger.go`, `audit.go` | ~750 | TEST-ONLY |
 | SIMD instrumentation | `internal/simd/metrics.go` `metricsWrapper` | 3 fns | DEAD — never instantiated |
@@ -1148,8 +1148,44 @@ regression test for the acceptance rule stores a value with a logit of 20
 and checks that a token the target agrees with is accepted: with the old
 rule it was rejected on the first trial.
 
+**Batch 13 made the multi-device flags honest.**
+
+The multi-GPU stack (`internal/device/multi_gpu.go`, ~1,000 lines) is
+complete: a tensor-parallel manager with NCCL-backed AllReduce, AllGather
+and Broadcast, a pipeline-parallel manager with 1F1B scheduling and double
+buffering, a cross-GPU communicator with peer access and staging buffers, a
+hybrid manager, and layer distribution across devices. None of it is used
+by the inference engine, which loads the whole model onto one device and
+never calls a collective.
+
+The CLI made that worse than useless: `quarrel -devices 0,1 -tp-size 2`
+called `device.InitializeMultiGPU`, printed
+
+```
+Multi-GPU Topology: devices=[0 1] tp_size=2 pp_stages=1
+```
+
+and then ran the entire model on one GPU. The user had every reason to
+believe their model was split.
+
+Now:
+
+- A topology that spans more than one device **exits with an error** that
+  says exactly what is and is not happening, and points at the Arrow Flight
+  path. It no longer prints a topology it does not deliver.
+- `-devices N` with a *single* device now works: `device.NewContextOnDevice`
+  selects the CUDA device, and the engine uses it. It used to be ignored,
+  because the engine always created its context on the current device.
+- An out-of-range device id is rejected up front.
+
+The managers themselves are left in place: they are a working, tested
+implementation of the collectives, and the missing piece is the engine
+integration — per-device model shards, cross-device activation transfer
+and collectives in the forward pass. That is a feature, not a wiring fix,
+and it needs two GPUs and an NCCL build to validate.
+
 **Still open:** the distributed/Arrow Flight stack, CUDA
-Graphs, the multi-GPU TP/PP engine, the quantization tooling and the
+Graphs, the quantization tooling and the
 activation/audit logging. Each needs to be either wired behind a documented
 flag or removed.
 
@@ -1568,7 +1604,9 @@ that only the GPU builds hit (see Step 35). **Batch 11** aligned the paged-KV
 pool's declared type with its stored type, which halves the KV cache's VRAM
 footprint on CUDA and Metal (see Step 35). **Batch 12** wired the speculative
 decoding stack, which turned out to have an acceptance rule that rejected
-almost every draft token (see Step 35).
+almost every draft token (see Step 35). **Batch 13** made the multi-device
+flags fail loudly instead of printing a topology the engine never applied
+(see Step 35).
 
 **Still open:** raising `internal/engine` above 80%, and generating the README table from a script so it cannot drift apart from the floors again.
 

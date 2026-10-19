@@ -90,7 +90,18 @@ func NewcudaEngine(modelPath string, cfg config.Config) (Engine, error) {
 	}
 	cfg = modelCfg
 
-	ctx := device.NewContext()
+	// The -devices flag selects the CUDA device the engine runs on. It
+	// used to be ignored: the engine always created its context on the
+	// current device.
+	var ctx *device.Context
+	if len(cfg.Devices) > 0 {
+		ctx, err = device.NewContextOnDevice(cfg.Devices[0])
+		if err != nil {
+			return nil, fmt.Errorf("failed to select CUDA device %d: %w", cfg.Devices[0], err)
+		}
+	} else {
+		ctx = device.NewContext()
+	}
 
 	numGPULayers := cfg.Layers
 	if cfg.NumGPULayers >= 0 && cfg.NumGPULayers < cfg.Layers {

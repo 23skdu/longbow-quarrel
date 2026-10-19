@@ -51,7 +51,7 @@ A high-performance, memory-efficient LLM inference engine written in Go with nat
 - Dynamic partial GPU layer offloading (`-ngl`) to bound VRAM consumption.
 - Tensor Core WMMA support and cuDNN Flash Attention kernels.
 - Paged KV cache directly in GPU VRAM.
-- Multi-GPU tensor parallelism (AllReduce, AllGather, Broadcast) and pipeline parallelism.
+- Multi-GPU tensor parallelism (AllReduce, AllGather, Broadcast) and pipeline parallelism — implemented in `internal/device/multi_gpu.go` with NCCL, but **not used by the inference engine**, which loads the whole model onto one device. `-devices 0,1` / `-tp-size 2` / `-pp-stages 2` exit with an error rather than pretending to shard.
 - Automated compilation via `make nvidia` (`internal/device/libcuda_kernels.a`).
 
 ### Apple Silicon Metal

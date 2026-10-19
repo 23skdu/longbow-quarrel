@@ -57,7 +57,6 @@ func TestCUDA_GraphManager_Lifecycle(t *testing.T) {
 	// Enqueue kernel operations into stream during capture
 	ctx.Add(tA, tB, tOut, size)
 
-
 	if err := gm.EndCapture(1); err != nil {
 		t.Fatalf("EndCapture failed: %v", err)
 	}

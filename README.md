@@ -29,7 +29,7 @@ for what has landed and what is still planned.
 >
 > **Still outstanding:** `internal/engine` coverage is ~68% (up from 51%), a
 > number of implemented features are still not wired into any shipped binary
-> (speculative decoding, CUDA Graphs, the multi-GPU TP/PP engine, the
+> (CUDA Graphs, the multi-GPU TP/PP engine, the
 > quantization tooling and the activation/audit logging), and several
 > documented performance numbers remain unreproducible.
 
@@ -82,7 +82,7 @@ see [docs/dependencies.md](docs/dependencies.md).
 
 ### Hardware Acceleration
 - **Apple Silicon (Metal)**: 60+ custom MSL compute kernels (MatMul, RMSNorm, RoPE, SwiGLU, Flash Attention)
-- **NVIDIA GPU (CUDA)**: Fused FP16/FP8 kernels, Tensor Cores, cuDNN flash attention, multi-GPU tensor & pipeline parallelism
+- **NVIDIA GPU (CUDA)**: Fused FP16/FP8 kernels, Tensor Cores, cuDNN flash attention, and a single selectable device (`-devices N`). Multi-device tensor and pipeline parallelism are implemented in the device layer but **not used by the engine**: `-tp-size 2` / `-pp-stages 2` exit with an error rather than pretending to shard the model.
 - **CPU SIMD**: AVX-512, AVX2, and ARM64 NEON vectorized arithmetic
 - **Hybrid Offloading**: Partition layers dynamically between GPU VRAM and CPU system RAM
 

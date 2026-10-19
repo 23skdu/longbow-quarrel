@@ -245,7 +245,6 @@ func (t *TensorParallelManager) Broadcast(data []float32, count int, root int) e
 	return nil
 }
 
-
 func (t *TensorParallelManager) SynchronizeAll() {
 	for _, device := range t.devices {
 		ctx, err := t.GetContext(device)

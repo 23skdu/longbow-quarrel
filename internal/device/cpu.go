@@ -106,6 +106,12 @@ func (c *Context) NewTensor(rows, cols int) *Tensor {
 	}
 }
 
+// NewContextOnDevice creates a context. The CPU backend has a single
+// device, so the identifier is ignored.
+func NewContextOnDevice(deviceID int) (*Context, error) {
+	return NewContext(), nil
+}
+
 func (c *Context) NewTensorFP32(rows, cols int) *Tensor {
 	return c.NewTensor(rows, cols)
 }

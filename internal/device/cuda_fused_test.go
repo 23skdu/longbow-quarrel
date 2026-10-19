@@ -579,5 +579,3 @@ func TestCUDA_AttentionPagedSplitK(t *testing.T) {
 
 	t.Logf("Split-K FlashDecoding verified successfully against reference (max diff: %e)", maxDiff)
 }
-
-
