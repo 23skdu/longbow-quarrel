@@ -229,6 +229,23 @@ func (t *TensorParallelManager) AllGather(input []float32, output []float32, cou
 	return nil
 }
 
+// Broadcast broadcasts data from root rank to all other ranks.
+func (t *TensorParallelManager) Broadcast(data []float32, count int, root int) error {
+	if t.worldSize <= 1 || len(data) == 0 {
+		return nil
+	}
+	ctx, err := t.GetContext(t.devices[t.localRank])
+	if err != nil {
+		return err
+	}
+	buffPtr := unsafe.Pointer(&data[0])
+	if t.ncclComm != nil {
+		return t.ncclComm.ncclBroadcast(buffPtr, count, root, unsafe.Pointer(ctx.Ctx))
+	}
+	return nil
+}
+
+
 func (t *TensorParallelManager) SynchronizeAll() {
 	for _, device := range t.devices {
 		ctx, err := t.GetContext(device)
