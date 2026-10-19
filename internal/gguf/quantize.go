@@ -29,124 +29,129 @@ func Float32ToFloat16(f float32) uint16 {
 	return sign | uint16(exp<<10) | uint16(frac>>13) // #nosec G115 -- safe bit manipulation for float16
 }
 
+// QuantizeWeightsToQ4K encodes float32 values into Q4_K blocks.
+//
+// The block layout is the GGML one: a half-precision super-block scale `d`
+// for the quantized values, a half-precision super-block scale `dmin` for
+// the minimums, twelve bytes of packed six-bit scales and minimums, and
+// 128 bytes of four-bit quantized values.
+//
+// The encoder used to write a different layout from the one the decoder
+// read, so a quantized model could not be read back. It is also the layout
+// the CUDA kernel reads, so a model quantized here is read the same way on
+// the CPU and on the GPU.
 func QuantizeWeightsToQ4K(weights []float32, numElements int) ([]byte, error) {
 	if numElements%Q4KBlockSize != 0 {
 		return nil, fmt.Errorf("QuantizeWeightsToQ4K: numElements %d must be multiple of %d", numElements, Q4KBlockSize)
+	}
+	if len(weights) < numElements {
+		return nil, fmt.Errorf("QuantizeWeightsToQ4K: got %d weights, want %d", len(weights), numElements)
 	}
 
 	numBlocks := numElements / Q4KBlockSize
 	out := make([]byte, numBlocks*Q4KBlockSizeBytes)
 
 	for i := 0; i < numBlocks; i++ {
-		blockStart := i * Q4KBlockSize
-		blockWeights := weights[blockStart : blockStart+Q4KBlockSize]
+		block := weights[i*Q4KBlockSize : (i+1)*Q4KBlockSize]
 
-		var d float32 = 0
-		for _, w := range blockWeights {
-			absW := float32(mathx.Abs(float64(w)))
-			if absW > d {
-				d = absW
+		// Each group of 32 values is represented by
+		//     d*sc[g]*q - dmin*m[g]
+		// with q in [0, 15]. The group's lowest value is the offset and
+		// its highest value is the offset plus fifteen steps.
+		var lo, hi [8]float32
+		var step [8]float32
+		maxStep := float32(0)
+		maxOffset := float32(0)
+
+		for g := 0; g < 8; g++ {
+			group := block[g*32 : (g+1)*32]
+			low, high := group[0], group[0]
+			for _, v := range group {
+				if v < low {
+					low = v
+				}
+				if v > high {
+					high = v
+				}
+			}
+			// The offset is always subtracted, so a group whose values
+			// are all positive is represented from zero upwards.
+			if low > 0 {
+				low = 0
+			}
+			if high < 0 {
+				high = 0
+			}
+			lo[g], hi[g] = low, high
+			step[g] = (high - low) / 15.0
+			if step[g] > maxStep {
+				maxStep = step[g]
+			}
+			if -low > maxOffset {
+				maxOffset = -low
 			}
 		}
 
-		if d == 0 {
-			d = 1.0
+		d := float32(1)
+		if maxStep > 0 {
+			d = maxStep / 63.0
+		}
+		dmin := float32(1)
+		if maxOffset > 0 {
+			dmin = maxOffset / 63.0
 		}
 
-		dmin := d
+		var sc, m [8]uint8
+		for g := 0; g < 8; g++ {
+			sc[g] = uint8(mathx.Round(float64(step[g] / d))) // #nosec G115 -- the ratio is at most 63
+			if sc[g] > 63 {
+				sc[g] = 63
+			}
+			m[g] = uint8(mathx.Round(float64(-lo[g] / dmin))) // #nosec G115 -- the ratio is at most 63
+			if m[g] > 63 {
+				m[g] = 63
+			}
+		}
 
 		blockOffset := i * Q4KBlockSizeBytes
 		binary.LittleEndian.PutUint16(out[blockOffset:blockOffset+2], Float32ToFloat16(d))
 		binary.LittleEndian.PutUint16(out[blockOffset+2:blockOffset+4], Float32ToFloat16(dmin))
 
-		scales := out[blockOffset+4 : blockOffset+16]
-		qs := out[blockOffset+16 : blockOffset+Q4KBlockSizeBytes]
+		// The scales and the minimums are packed six bits each: the
+		// first four of each in the low six bits of their own byte, and
+		// the last four split between the high bits of the first four
+		// and the low and high nibbles of bytes eight to eleven.
+		scaleBytes := out[blockOffset+4 : blockOffset+16]
+		for j := 0; j < 4; j++ {
+			scaleBytes[j] = (sc[j] & 0x3F) | ((sc[j+4] >> 4) << 6)
+			scaleBytes[j+4] = (m[j] & 0x3F) | ((m[j+4] >> 4) << 6)
+		}
+		for j := 0; j < 4; j++ {
+			scaleBytes[8+j] = (sc[j+4] & 0x0F) | ((m[j+4] & 0x0F) << 4)
+		}
 
-		var sc [16]uint8
-		var m [16]uint8
-
+		// The four-bit values: the first sixteen of a group are the low
+		// nibbles and the next sixteen the high nibbles of the same
+		// bytes.
+		quants := out[blockOffset+16 : blockOffset+Q4KBlockSizeBytes]
 		for g := 0; g < 8; g++ {
-			groupStart := g * 32
-
-			var groupMinVal float32 = 0
-			var groupMaxVal float32 = 0
-			for _, w := range blockWeights[groupStart : groupStart+32] {
-				if w < groupMinVal {
-					groupMinVal = w
-				}
-				if w > groupMaxVal {
-					groupMaxVal = w
-				}
-			}
-
-			rangeVal := groupMaxVal - groupMinVal
-			if rangeVal == 0 {
-				rangeVal = d
-			}
-
-			sc[g] = uint8(mathx.Round(float64(rangeVal / d * 15.0)))
-			if sc[g] == 0 {
-				sc[g] = 1
-			}
-
-			m[g] = uint8(mathx.Round(float64(-groupMinVal / rangeVal * 15.0)))
-		}
-
-		for j := 0; j < 8; j++ {
-			sc[j] = sc[j] & 63
-		}
-
-		for j := 8; j < 12; j++ {
-			sc[j-4] = (sc[j-4] & 0x0F) | ((sc[j-8] >> 6) << 4)
-		}
-
-		for j := 0; j < 8; j++ {
-			m[j] = m[j] & 63
-		}
-
-		for j := 8; j < 12; j++ {
-			m[j-4] = (m[j-4] & 0x0F) | ((m[j-8] >> 6) << 4)
-		}
-
-		scales[0] = sc[0]
-		scales[1] = sc[1]
-		scales[2] = sc[2]
-		scales[3] = sc[3]
-		scales[4] = m[0]
-		scales[5] = m[1]
-		scales[6] = m[2]
-		scales[7] = m[3]
-		scales[8] = (sc[4] & 0x0F) | ((m[4] & 0x0F) << 4)
-		scales[9] = (sc[5] & 0x0F) | ((m[5] & 0x0F) << 4)
-		scales[10] = (sc[6] & 0x0F) | ((m[6] & 0x0F) << 4)
-		scales[11] = (sc[7] & 0x0F) | ((m[7] & 0x0F) << 4)
-
-		for g := 0; g < 8; g++ {
-			groupStart := g * 32
-
-			var groupMinVal float32 = 0
-			for _, w := range blockWeights[groupStart : groupStart+32] {
-				if w < groupMinVal {
-					groupMinVal = w
-				}
-			}
-
-			D := d * float32(sc[g]) / 225.0
-			offset := -groupMinVal
-
+			group := block[g*32 : (g+1)*32]
 			for j := 0; j < 32; j++ {
-				w := blockWeights[groupStart+j]
-
-				q := int8(mathx.Round(float64((w + offset) / D)))
+				var q int
+				if step[g] > 0 {
+					q = int(mathx.Round(float64((group[j] - lo[g]) / step[g])))
+				}
+				if q < 0 {
+					q = 0
+				}
 				if q > 15 {
 					q = 15
 				}
-
-				qsIdx := g*16 + j
+				qsOffset := g*16 + j
 				if j < 16 {
-					qs[qsIdx] = uint8(q) & 0x0F
+					quants[qsOffset] = uint8(q) & 0x0F
 				} else {
-					qs[qsIdx-16] |= (uint8(q) & 0x0F) << 4
+					quants[qsOffset-16] |= (uint8(q) & 0x0F) << 4
 				}
 			}
 		}
@@ -155,6 +160,7 @@ func QuantizeWeightsToQ4K(weights []float32, numElements int) ([]byte, error) {
 	return out, nil
 }
 
+// DequantizeWeightsFromQ4K decodes a Q4_K weight matrix.
 func DequantizeWeightsFromQ4K(data []byte, rows, cols int) ([]float32, error) {
 	numElements := rows * cols
 	return DequantizeQ4K(data, numElements), nil

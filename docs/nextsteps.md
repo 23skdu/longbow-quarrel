@@ -503,7 +503,8 @@ Based on deep profiling of autoregressive decode loops, CUDA kernel execution pr
 > 47), Batch 5 (Steps 31, 35, 36, 44, 48), Batch 6 (Steps 35, 44), Batch 7
 > (Steps 44, 47), Batch 8 (Step 40), Batch 9 (Step 40), Batch 10 (Step 35)
 > and Batch 11 (Step 35), Batch 12 (Step 35), Batch 13 (Step 35),
-> Batch 14 (Step 35) are DONE** — see the status markers on each step.
+> Batch 14 (Step 35), Batch 15 (Step 35) are DONE** — see the
+> status markers on each step.
 > Verified locally after the change:
 >
 > | Check | Command | Result |
@@ -903,7 +904,7 @@ Verified by `deadcode -tags cuda -test ./internal/... ./cmd/quarrel` cross-check
 | OTEL tracing | `internal/telemetry/telemetry.go` `InitTracer:29` | 8 fns | DEAD — tracer never initialised |
 | CUDA Graph capture | `internal/device/cuda_graph.go` | 8 fns | TEST-ONLY |
 | Multi-GPU TP/PP | `internal/device/multi_gpu.go` | 1038 | 34 of ~50 methods TEST-ONLY — **the CLI now refuses to pretend** (Batch 13) |
-| Quantization tooling | `internal/gguf/quantize*.go` | 784 | TEST-ONLY |
+| Quantization tooling | `internal/gguf/quantize*.go` | 784 | **DONE (Batch 15)** — `cmd/quantize` produces quantized models; the codecs were broken |
 | Activation logging / audits | `internal/engine/activation_logger.go`, `audit.go` | ~750 | **DONE (Batch 14)** — reachable via `-activation-log`; the audits now feed the metrics |
 | SIMD instrumentation | `internal/simd/metrics.go` `metricsWrapper` | 3 fns | DEAD — never instantiated |
 | Grammar sampling constructors | `internal/sampler/grammar.go:56,70` | 2 fns | Only setter is the never-started API |
@@ -1229,9 +1230,85 @@ and returns `Passed: true`. Its comment says as much. It is a stub that
 looks like an audit, and it is left as it is rather than pretending
 otherwise.
 
-**Still open:** the distributed/Arrow Flight stack, CUDA
-Graphs and the quantization tooling. Each needs to be either wired behind
-a documented flag or removed.
+**Batch 15 made the quantization tooling real, and found that the codecs
+were broken.**
+
+The quantization functions in `internal/gguf` (Q4_K, Q6_K, FP8, TurboQuant,
+~800 lines) were implemented and tested, and there was nowhere to put their
+output: **the repository could read GGUF files but not write them.** There
+was no GGUF writer, so a quantized model could not be produced at all.
+
+`internal/gguf/writer.go` is now a GGUF version 3 writer, and `cmd/quantize`
+uses it:
+
+```bash
+quantize -i model-f16.gguf -o model-q4_k.gguf -t q4_k
+```
+
+It dequantizes every tensor, requantizes it into the target format, copies
+the metadata, and keeps the token embedding in half precision. The target
+formats are `q4_k`, `q6_k`, `q8_0`, `f16` and `f32`. A tensor that cannot
+be dequantized is copied verbatim rather than dropped: a model with one
+unsupported tensor is still usable, a model with a missing tensor is not.
+
+**The FP8 codec did not round-trip.** `internal/gguf/quantize_fp8.go` had
+its own copy of the E4M3 and E5M2 conversions, and that copy used a
+different exponent bias and a different mantissa convention from the
+decoder next to it. A value of 16 came back as 4, and a value of -16 came
+back as -131072. It also disagreed with the copy in `internal/device`, which
+was the correct one. The only test of the pair checked the length of the
+result rather than its values.
+
+The conversions now live in one place, `internal/gguf/fp8.go`, and both the
+GGUF package and the device layer use them. The GGUF package is the
+lower-level one, so it is where they belong.
+
+**The Q4_K codec did not round-trip either, and the CPU and the GPU
+disagreed about Q4_K entirely.** This is the important one.
+
+The repository had four Q4_K decoders:
+
+| Implementation | Layout |
+|---|---|
+| `cuda_kernels.cu` `dequant_q4_k_kernel` | the GGML standard |
+| `cuda_kernels.cu` `dequant_q4_k_gemm_kernel` | the GGML standard, but the four-bit values in the wrong order |
+| `gguf.DequantizeQ4K`, `gguf.DequantizeQ4K_SIMD` | something else |
+| `simd.VecDotQ4_K_VNNI`, the AVX2 and the AVX-512 kernels | something else, and not even the same something else |
+
+The "something else" unpacked the six-bit scales and minimums with a
+different convention, and scaled the values with `d * sc / 225` and
+`step * (q - m)` instead of the GGML `d * sc * q - dmin * m`. The AVX-512
+kernel subtracted the minimum from the dot product instead of from the sum
+of the vector. The CUDA matrix-vector kernel read the four-bit values of a
+group interleaved, while the CUDA dequantization kernel next to it read
+them in the GGML order.
+
+So a Q4_K model produced **different results on the CPU and on the GPU**,
+and the CPU's answer was not the GGML one: a Q4_K file written by
+llama.cpp was read wrongly. The reference implementation in
+`internal/device/q4k_real_test.go` had the standard right all along, and
+nothing compared against it.
+
+Everything now uses the GGML layout: the Go decoders, the AVX2 and the
+AVX-512 kernels, the CUDA matrix-vector kernel, and the encoder.
+
+**The Q4_K encoder wrote a third layout**, which matched neither. It now
+writes the GGML one: a half-precision super-block scale for the values, a
+half-precision super-block scale for the minimums, twelve bytes of packed
+six-bit scales and minimums, and 128 bytes of four-bit values.
+
+`internal/device/q4k_parity_cuda_test.go` compares the CPU and the GPU on
+the same quantized weights, and `TestQ4K_DecodeMatchesTheReference`
+compares the pure Go decoder against the reference implementation. Both
+fail on the old code: with the interleaved nibble order the GPU returns
+4.99 where the CPU returns 2.19.
+
+A Q8_0 encoder was added as well (`gguf.QuantizeWeightsToQ8_0`): the
+repository could dequantize Q8_0 but not produce it.
+
+**Still open:** the distributed/Arrow Flight stack and CUDA Graphs. The
+first needs a worker-side sharded forward, the second needs a decode path
+with static device buffers.
 
 **Batch 11 aligned the paged-KV pool's declared type with its stored type.**
 
@@ -1651,7 +1728,9 @@ decoding stack, which turned out to have an acceptance rule that rejected
 almost every draft token (see Step 35). **Batch 13** made the multi-device
 flags fail loudly instead of printing a topology the engine never applied
 (see Step 35). **Batch 14** made the audit functions and the activation
-logger real (see Step 35).
+logger real (see Step 35). **Batch 15** made the quantization tooling real,
+and found that the Q4_K and FP8 codecs did not round-trip and that the CPU
+and the GPU decoded Q4_K differently (see Step 35).
 
 **Still open:** raising `internal/engine` above 80%, and generating the README table from a script so it cannot drift apart from the floors again.
 

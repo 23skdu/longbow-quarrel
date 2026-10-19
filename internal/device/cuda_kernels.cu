@@ -1908,9 +1908,16 @@ __global__ void dequant_q4_k_gemm_kernel(
         for (int sb = 0; sb < 8; sb++) {
             float dSub = d * (float)scales[sb];
             float mSub = dmin * (float)mins[sb];
-            int qByteOffset = (sb / 2) * 32 + (sb % 2) * 16 + (lane / 2);
+            // In the GGML layout the first sixteen values of a group are
+            // the low nibbles of the group's sixteen bytes and the next
+            // sixteen are the high nibbles. The kernel used to interleave
+            // them, so it read the weights in a different order than the
+            // dequantization kernel next to it and than every other
+            // implementation.
+            int byteInGroup = (lane < 16) ? lane : (lane - 16);
+            int qByteOffset = (sb / 2) * 32 + (sb % 2) * 16 + byteInGroup;
             unsigned char byteVal = qPtr[qByteOffset];
-            unsigned char nibble = (lane % 2 == 0) ? (byteVal & 0x0F) : (byteVal >> 4);
+            unsigned char nibble = (lane < 16) ? (byteVal & 0x0F) : (byteVal >> 4);
             float w = dSub * (float)nibble - mSub;
             totalSum += w * x[b * 256 + sb * 32 + lane];
         }

@@ -497,28 +497,44 @@ func TestQuantizeQ4KCoverage(t *testing.T) {
 }
 
 func TestQuantizeFP8Coverage(t *testing.T) {
-	// quantizeToE4M3 Inf/NaN, > 240, < -240, exp < -6
+	// The E4M3 and E5M2 conversions use the standard exponent biases (7
+	// and 15) and the standard mantissa convention. The copy in this
+	// package used to use a different convention from its own decoder, so
+	// the pair did not round-trip, and it also disagreed with the copy in
+	// internal/device.
+	//
+	// quantizeToE4M3 Inf/NaN, the saturation point, and the subnormal
+	// floor.
 	if quantizeToE4M3(math.Inf(1)) != 0x7F {
 		t.Errorf("expected 0x7F for +Inf")
 	}
 	if quantizeToE4M3(math.NaN()) != 0x7F {
 		t.Errorf("expected 0x7F for NaN")
 	}
-	if quantizeToE4M3(300.0) != 0x7B {
-		t.Errorf("expected 0x7B for > 240")
+	// 300 is inside the E4M3 range: the exponent field is 15 and the
+	// mantissa is 1, which decodes to 288.
+	if quantizeToE4M3(300.0) != 0x79 {
+		t.Errorf("expected 0x79 for 300, got 0x%02X", quantizeToE4M3(300.0))
 	}
-	if quantizeToE4M3(-300.0) != 0xFB {
-		t.Errorf("expected 0xFB for < -240")
+	if quantizeToE4M3(-300.0) != 0xF9 {
+		t.Errorf("expected 0xF9 for -300, got 0x%02X", quantizeToE4M3(-300.0))
 	}
-	// A value far below the normal range clamps to the smallest subnormal
-	// encoding (exp=-6, mantissa=0 => 0x08) rather than flushing to zero.
-	if got := quantizeToE4M3(1e-10); got != 0x08 {
-		t.Errorf("expected min-subnormal 0x08 for 1e-10, got 0x%02X", got)
+	// A value far below the normal range rounds to zero.
+	if got := quantizeToE4M3(1e-10); got != 0x00 {
+		t.Errorf("expected zero encoding for 1e-10, got 0x%02X", got)
+	}
+	// The largest finite E4M3 value is 448 (exponent field 15, mantissa
+	// 6), and anything above it saturates there.
+	if got := quantizeToE4M3(1e9); got != 0x7E {
+		t.Errorf("expected the saturation encoding 0x7E for 1e9, got 0x%02X", got)
+	}
+	if got := dequantizeE4M3(0x7E); math.Abs(got-448) > 0.001 {
+		t.Errorf("the largest finite E4M3 value is %v, want 448", got)
 	}
 
 	// quantizeToE5M2 Inf/NaN, > 57344, < -57344, exp < -16
-	if quantizeToE5M2(math.Inf(1)) != 0x7F {
-		t.Errorf("expected 0x7F for +Inf")
+	if quantizeToE5M2(math.Inf(1)) != 0x7C {
+		t.Errorf("expected 0x7C for +Inf")
 	}
 	if quantizeToE5M2(math.NaN()) != 0x7F {
 		t.Errorf("expected 0x7F for NaN")
@@ -529,7 +545,7 @@ func TestQuantizeFP8Coverage(t *testing.T) {
 	if quantizeToE5M2(-60000.0) != 0xFB {
 		t.Errorf("expected 0xFB for < -57344")
 	}
-	// E5M2 clamps the exponent to its -15 subnormal floor, so 1e-20 encodes to
+	// E5M2 clamps the exponent to its -14 subnormal floor, so 1e-20 encodes to
 	// zero (sign 0, exp field 0, mantissa 0).
 	if got := quantizeToE5M2(1e-20); got != 0x00 {
 		t.Errorf("expected zero encoding for 1e-20, got 0x%02X", got)

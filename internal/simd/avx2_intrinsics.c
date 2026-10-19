@@ -487,11 +487,15 @@ float dot_q4_k_avx2(const uint8_t* data, const float* vector, int n) {
                 sc = sPtr[sb] & 63;
                 m = sPtr[sb + 4] & 63;
             } else {
-                sc = sPtr[sb + 4] & 0x0F;
-                m = sPtr[sb + 4] >> 4;
+                sc = (sPtr[sb + 4] & 0x0F) | ((sPtr[sb - 4] >> 6) << 4);
+                m = (sPtr[sb + 4] >> 4) | ((sPtr[sb] >> 6) << 4);
             }
-            float step = (d * (float)sc) / 225.0f;
-            float mj = (float)m;
+            // The GGML layout: the weight is d*sc*q - dmin*m. The
+            // unpacking and the scaling used to follow a different
+            // convention, so this kernel and the CUDA kernel decoded the
+            // same Q4_K model differently.
+            float step = d * (float)sc;
+            float mj = dmin * (float)m;
 
             int qOffset = sb * 16;
             int vBase = b * 256 + sb * 32;
@@ -525,7 +529,7 @@ float dot_q4_k_avx2(const uint8_t* data, const float* vector, int n) {
             dot = _mm256_fmadd_ps(fhi1, v3, dot);
             float dotVal = hsum_avx2(dot);
 
-            blockSum += step * (dotVal - mj * vSum);
+            blockSum += step * dotVal - mj * vSum;
         }
         sum += blockSum;
     }

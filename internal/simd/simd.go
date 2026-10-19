@@ -346,38 +346,55 @@ func VecDotQ4_K_VNNI(data []byte, vector []float32) float32 {
 	for i := 0; i < numBlocks; i++ {
 		blockOffset := i * blockSizeBytes
 		d := Float16ToFloat32(binary.LittleEndian.Uint16(data[blockOffset : blockOffset+2]))
+		dmin := Float16ToFloat32(binary.LittleEndian.Uint16(data[blockOffset+2 : blockOffset+4]))
 		scales := data[blockOffset+4 : blockOffset+16]
 		qs := data[blockOffset+16 : blockOffset+144]
 
+		// The scales and the mins are packed six bits each, in the GGML
+		// layout that the CUDA kernel reads. The unpacking here used a
+		// different convention, so the CPU and the GPU decoded the same
+		// Q4_K model differently.
 		sc := [8]uint8{
 			scales[0] & 63, scales[1] & 63, scales[2] & 63, scales[3] & 63,
-			scales[8] & 0x0F, scales[9] & 0x0F, scales[10] & 0x0F, scales[11] & 0x0F,
+			(scales[8] & 0x0F) | ((scales[0] >> 6) << 4),
+			(scales[9] & 0x0F) | ((scales[1] >> 6) << 4),
+			(scales[10] & 0x0F) | ((scales[2] >> 6) << 4),
+			(scales[11] & 0x0F) | ((scales[3] >> 6) << 4),
 		}
 		m := [8]uint8{
 			scales[4] & 63, scales[5] & 63, scales[6] & 63, scales[7] & 63,
-			scales[8] >> 4, scales[9] >> 4, scales[10] >> 4, scales[11] >> 4,
+			(scales[8] >> 4) | ((scales[4] >> 6) << 4),
+			(scales[9] >> 4) | ((scales[5] >> 6) << 4),
+			(scales[10] >> 4) | ((scales[6] >> 6) << 4),
+			(scales[11] >> 4) | ((scales[7] >> 6) << 4),
 		}
 
 		var D [8]float32
+		var M [8]float32
 		for j := 0; j < 8; j++ {
-			D[j] = d * float32(sc[j]) / 225.0
+			D[j] = d * float32(sc[j])
+			M[j] = dmin * float32(m[j])
 		}
 
 		baseIdx := i * blockSize
 		var blockSum float32
 		for j := 0; j < 8; j++ {
-			step := D[j]
-			mj := float32(m[j])
+			dj := D[j]
+			mj := M[j]
 			qsOffset := j * 16
 			idxBase := baseIdx + j*32
 
-			var s0, s1 float32
+			var s0, s1, v0, v1 float32
 			for k := 0; k < 16; k++ {
 				bVal := qs[qsOffset+k]
-				s0 += (float32(bVal&0xF) - mj) * vector[idxBase+k]
-				s1 += (float32(bVal>>4) - mj) * vector[idxBase+k+16]
+				s0 += float32(bVal&0xF) * vector[idxBase+k]
+				s1 += float32(bVal>>4) * vector[idxBase+k+16]
+				v0 += vector[idxBase+k]
+				v1 += vector[idxBase+k+16]
 			}
-			blockSum += step * (s0 + s1)
+			// The value of a weight is D*q - M, so the dot product is
+			// D*sum(q*v) - M*sum(v).
+			blockSum += dj*(s0+s1) - mj*(v0+v1)
 		}
 		totalSum += blockSum
 	}

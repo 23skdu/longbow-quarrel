@@ -124,6 +124,19 @@ make nvidia
 -draft-paths int    Parallel draft paths per step (default: 2)
 ```
 
+### Model Quantization
+
+`cmd/quantize` converts a GGUF model into a quantized one. It dequantizes
+every tensor, requantizes it into the target format, copies the metadata,
+and keeps the token embedding in half precision.
+
+```bash
+go run ./cmd/quantize -i model-f16.gguf -o model-q4_k.gguf -t q4_k
+```
+
+The target formats are `q4_k`, `q6_k`, `q8_0`, `f16` and `f32`. Use
+`-dry-run` to see what would happen without writing anything.
+
 ### Activation Logging
 
 `quarrel -activation-log <path>` writes a JSON file with the embedding, the

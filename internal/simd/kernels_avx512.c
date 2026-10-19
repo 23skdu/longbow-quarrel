@@ -370,12 +370,18 @@ float dot_q4_k_vnni(const uint8_t* data, const float* vector, int n) {
                 scaleByte = (sPtr[sb + 4] & 0x0F) | ((sPtr[sb - 4] >> 6) << 4);
                 minByte = (sPtr[sb + 4] >> 4) | ((sPtr[sb] >> 6) << 4);
             }
-            float sVal = d * (float)scaleByte / 225.0f;
+            // The GGML layout: the weight is d*sc*q - dmin*m. The
+            // scaling used to divide by 225, which is a different
+            // convention from the one the CUDA kernel uses, and the
+            // accumulation below subtracted the min from the dot
+            // product instead of from the sum of the vector.
+            float sVal = d * (float)scaleByte;
             float mVal = dmin * (float)minByte;
             int qOffset = (sb / 2) * 32 + (sb % 2) * 16;
             int vBase = b * 256 + sb * 32;
             __m128i zero = _mm_setzero_si128();
             __m256i acc = _mm256_setzero_si256();
+            __m256i vacc = _mm256_setzero_si256();
             for (int k = 0; k < 16; k++) {
                 uint8_t bVal = qPtr[qOffset + k];
                 uint8_t lo = bVal & 0x0F;
@@ -389,6 +395,8 @@ float dot_q4_k_vnni(const uint8_t* data, const float* vector, int n) {
                 __m256i vi_hi = _mm256_cvtps_epi32(v_hi);
                 acc = _mm256_dpwssd_epi32(acc, w256, vi_lo);
                 acc = _mm256_dpwssd_epi32(acc, w256, vi_hi);
+                vacc = _mm256_add_epi32(vacc, vi_lo);
+                vacc = _mm256_add_epi32(vacc, vi_hi);
             }
             __m128i lo128 = _mm256_castsi256_si128(acc);
             __m128i hi128 = _mm256_extracti128_si256(acc, 1);
@@ -397,7 +405,16 @@ float dot_q4_k_vnni(const uint8_t* data, const float* vector, int n) {
             sum128 = _mm_add_epi32(sum128, _mm_shuffle_epi32(sum128, _MM_SHUFFLE(2,3,0,1)));
             sum128 = _mm_add_epi32(sum128, _mm_shuffle_epi32(sum128, _MM_SHUFFLE(1,0,3,2)));
             float dotInt = (float)_mm_cvtsi128_si32(sum128);
-            blockSum += sVal * dotInt - mVal * dotInt;
+            // The min term is subtracted from the sum of the vector, not
+            // from the dot product.
+            __m128i vlo = _mm256_castsi256_si128(vacc);
+            __m128i vhi = _mm256_extracti128_si256(vacc, 1);
+            __m128i vsum128 = _mm_add_epi32(vlo, vhi);
+            vsum128 = _mm_add_epi32(vsum128, _mm_shuffle_epi32(vsum128, _MM_SHUFFLE(0,1,2,3)));
+            vsum128 = _mm_add_epi32(vsum128, _mm_shuffle_epi32(vsum128, _MM_SHUFFLE(2,3,0,1)));
+            vsum128 = _mm_add_epi32(vsum128, _mm_shuffle_epi32(vsum128, _MM_SHUFFLE(1,0,3,2)));
+            float vSum = (float)_mm_cvtsi128_si32(vsum128);
+            blockSum += sVal * dotInt - mVal * vSum;
         }
         sum += blockSum;
     }

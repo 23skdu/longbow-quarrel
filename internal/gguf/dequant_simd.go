@@ -37,27 +37,38 @@ func dequantizeQ4KBlocks(data []byte, out []float32, startBlock, endBlock int) {
 		blockData := data[blockOffset : blockOffset+blockSizeBytes]
 
 		d := Float16ToFloat32(binary.LittleEndian.Uint16(blockData[0:2]))
+		dmin := Float16ToFloat32(binary.LittleEndian.Uint16(blockData[2:4]))
 		scales := blockData[4:16]
 		qs := blockData[16:144]
 
+		// The scales and the mins are packed six bits each, in the GGML
+		// layout that the CUDA kernel reads.
 		sc := [8]uint8{
 			scales[0] & 63, scales[1] & 63, scales[2] & 63, scales[3] & 63,
-			scales[8] & 0x0F, scales[9] & 0x0F, scales[10] & 0x0F, scales[11] & 0x0F,
+			(scales[8] & 0x0F) | ((scales[0] >> 6) << 4),
+			(scales[9] & 0x0F) | ((scales[1] >> 6) << 4),
+			(scales[10] & 0x0F) | ((scales[2] >> 6) << 4),
+			(scales[11] & 0x0F) | ((scales[3] >> 6) << 4),
 		}
 		m := [8]uint8{
 			scales[4] & 63, scales[5] & 63, scales[6] & 63, scales[7] & 63,
-			scales[8] >> 4, scales[9] >> 4, scales[10] >> 4, scales[11] >> 4,
+			(scales[8] >> 4) | ((scales[4] >> 6) << 4),
+			(scales[9] >> 4) | ((scales[5] >> 6) << 4),
+			(scales[10] >> 4) | ((scales[6] >> 6) << 4),
+			(scales[11] >> 4) | ((scales[7] >> 6) << 4),
 		}
 
 		var D [8]float32
+		var M [8]float32
 		for j := 0; j < 8; j++ {
-			D[j] = d * float32(sc[j]) / 225.0
+			D[j] = d * float32(sc[j])
+			M[j] = dmin * float32(m[j])
 		}
 
 		baseIdx := i * BlockSizeQ4K
 		for j := 0; j < 8; j++ {
-			step := D[j]
-			mj := float32(m[j])
+			dj := D[j]
+			mj := M[j]
 			qsOffset := j * 16
 			idxBase := baseIdx + j*32
 
@@ -68,15 +79,15 @@ func dequantizeQ4KBlocks(data []byte, out []float32, startBlock, endBlock int) {
 				b2 := qs[qsOffset+k+2]
 				b3 := qs[qsOffset+k+3]
 
-				out[idxBase+k] = step * (float32(b0&0xF) - mj)
-				out[idxBase+k+1] = step * (float32(b1&0xF) - mj)
-				out[idxBase+k+2] = step * (float32(b2&0xF) - mj)
-				out[idxBase+k+3] = step * (float32(b3&0xF) - mj)
+				out[idxBase+k] = dj*float32(b0&0xF) - mj
+				out[idxBase+k+1] = dj*float32(b1&0xF) - mj
+				out[idxBase+k+2] = dj*float32(b2&0xF) - mj
+				out[idxBase+k+3] = dj*float32(b3&0xF) - mj
 
-				out[idxBase+k+16] = step * (float32(b0>>4) - mj)
-				out[idxBase+k+17] = step * (float32(b1>>4) - mj)
-				out[idxBase+k+18] = step * (float32(b2>>4) - mj)
-				out[idxBase+k+19] = step * (float32(b3>>4) - mj)
+				out[idxBase+k+16] = dj*float32(b0>>4) - mj
+				out[idxBase+k+17] = dj*float32(b1>>4) - mj
+				out[idxBase+k+18] = dj*float32(b2>>4) - mj
+				out[idxBase+k+19] = dj*float32(b3>>4) - mj
 			}
 		}
 	}

@@ -94,37 +94,49 @@ func DequantizeQ4K(data []byte, numElements int) []float32 {
 		blockData := data[blockOffset : blockOffset+blockSizeBytes]
 
 		d := Float16ToFloat32(binary.LittleEndian.Uint16(blockData[0:2]))
-		// dmin is not used in the updated group-level scaling math
-		_ = Float16ToFloat32(binary.LittleEndian.Uint16(blockData[2:4]))
+		dmin := Float16ToFloat32(binary.LittleEndian.Uint16(blockData[2:4]))
 
 		scales := blockData[4:16]
 		qs := blockData[16:144]
 
+		// The scales and the mins are packed six bits each. This is the
+		// GGML layout, the one llama.cpp writes and the one the CUDA
+		// kernel reads. The unpacking here used a different convention,
+		// so the CPU and the GPU decoded the same Q4_K model
+		// differently.
 		sc := [8]uint8{
 			scales[0] & 63, scales[1] & 63, scales[2] & 63, scales[3] & 63,
-			scales[8] & 0x0F, scales[9] & 0x0F, scales[10] & 0x0F, scales[11] & 0x0F,
+			(scales[8] & 0x0F) | ((scales[0] >> 6) << 4),
+			(scales[9] & 0x0F) | ((scales[1] >> 6) << 4),
+			(scales[10] & 0x0F) | ((scales[2] >> 6) << 4),
+			(scales[11] & 0x0F) | ((scales[3] >> 6) << 4),
 		}
 		m := [8]uint8{
 			scales[4] & 63, scales[5] & 63, scales[6] & 63, scales[7] & 63,
-			scales[8] >> 4, scales[9] >> 4, scales[10] >> 4, scales[11] >> 4,
+			(scales[8] >> 4) | ((scales[4] >> 6) << 4),
+			(scales[9] >> 4) | ((scales[5] >> 6) << 4),
+			(scales[10] >> 4) | ((scales[6] >> 6) << 4),
+			(scales[11] >> 4) | ((scales[7] >> 6) << 4),
 		}
 
 		var D [8]float32
+		var M [8]float32
 
 		for j := 0; j < 8; j++ {
-			D[j] = d * float32(sc[j]) / 225.0
+			D[j] = d * float32(sc[j])
+			M[j] = dmin * float32(m[j])
 		}
 
 		baseIdx := i * BlockSizeQ4K
 		for j := 0; j < 8; j++ {
-			step := D[j]
-			mj := float32(m[j])
+			dj := D[j]
+			mj := M[j]
 			qsOffset := j * 16
 			idxBase := baseIdx + j*32
 			for k := 0; k < 16; k++ {
 				b := qs[qsOffset+k]
-				out[idxBase+k] = step * (float32(b&0xF) - mj)
-				out[idxBase+k+16] = step * (float32(b>>4) - mj)
+				out[idxBase+k] = dj*float32(b&0xF) - mj
+				out[idxBase+k+16] = dj*float32(b>>4) - mj
 			}
 		}
 	}

@@ -30,75 +30,18 @@ func QuantizeToFP8E5M2(data []float32) ([]byte, error) {
 	return result, nil
 }
 
+// quantizeToE4M3 encodes a value in the E4M3 format.
+//
+// The body used to be a second, incompatible implementation of the
+// conversion: it used a different exponent bias and a different mantissa
+// convention from the decoder next to it, so the pair did not round-trip.
 func quantizeToE4M3(f float64) byte {
-	if mathx.IsInf(f, 0) || mathx.IsNaN(f) {
-		return 0x7F
-	}
-
-	absF := mathx.Abs(f)
-
-	maxVal := float64(240.0)
-	if absF >= maxVal {
-		if f > 0 {
-			return 0x7B
-		} else if f < 0 {
-			return 0xFB
-		}
-	}
-
-	sign := uint8(0)
-	if f < 0 {
-		sign = 0x80
-	}
-
-	exp := int(mathx.Floor(mathx.Log2(absF)))
-	if exp < -6 {
-		exp = -6
-	}
-
-	mantissa := absF / mathx.Pow(2, float64(exp))
-	mantissa = mantissa * 8
-
-	rounded := uint8(mathx.Round(mantissa))
-	if rounded > 14 {
-		rounded = 14
-	}
-
-	return sign | uint8((exp+7)<<3) | rounded
+	return Float32ToFP8E4M3(float32(f))
 }
 
+// quantizeToE5M2 encodes a value in the E5M2 format.
 func quantizeToE5M2(f float64) byte {
-	if mathx.IsInf(f, 0) || mathx.IsNaN(f) {
-		return 0x7F
-	}
-
-	absF := mathx.Abs(f)
-
-	maxVal := float64(57344.0)
-	if absF >= maxVal {
-		if f > 0 {
-			return 0x7B
-		} else if f < 0 {
-			return 0xFB
-		}
-	}
-
-	sign := uint8(0)
-	if f < 0 {
-		sign = 0x80
-	}
-
-	exp := int(mathx.Floor(mathx.Log2(absF)))
-	if exp < -16 {
-		exp = -16
-	}
-
-	mantissa := absF / mathx.Pow(2, float64(exp))
-	mantissa = mantissa * 4
-
-	rounded := uint8(mathx.Round(mantissa))
-
-	return sign | uint8((exp+16)<<2) | rounded
+	return Float32ToFP8E5M2(float32(f))
 }
 
 func DequantizeFromFP8E4M3(data []byte) ([]float32, error) {
@@ -117,44 +60,14 @@ func DequantizeFromFP8E5M2(data []byte) ([]float32, error) {
 	return result, nil
 }
 
+// dequantizeE4M3 decodes an E4M3 value.
 func dequantizeE4M3(b byte) float64 {
-	sign := (b & 0x80) != 0
-	exp := int((b >> 3) & 0x1F)
-	mantissa := float64(b & 0x07)
-
-	actualExp := exp - 7 - 3
-	mantissa = mantissa / 8.0
-
-	if mantissa == 0 && exp == 0 {
-		return 0
-	}
-	mantissa += 1.0
-
-	result := mantissa * mathx.Pow(2, float64(actualExp))
-	if sign {
-		result = -result
-	}
-	return result
+	return float64(FP8E4M3ToFloat32(b))
 }
 
+// dequantizeE5M2 decodes an E5M2 value.
 func dequantizeE5M2(b byte) float64 {
-	sign := (b & 0x80) != 0
-	exp := int((b >> 2) & 0x3F)
-	mantissa := float64(b & 0x03)
-
-	actualExp := exp - 16 - 2
-	mantissa = mantissa / 4.0
-
-	if mantissa == 0 && exp == 0 {
-		return 0
-	}
-	mantissa += 1.0
-
-	result := mantissa * mathx.Pow(2, float64(actualExp))
-	if sign {
-		result = -result
-	}
-	return result
+	return float64(FP8E5M2ToFloat32(b))
 }
 
 func QuantizeWeightsToFP8(weights []float32, numElements int, fp8Type FP8Type) ([]byte, error) {

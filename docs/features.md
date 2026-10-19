@@ -20,6 +20,7 @@ A high-performance, memory-efficient LLM inference engine written in Go with nat
 - **Streaming Output** — Real-time token streaming via Server-Sent Events (SSE) and WebSocket.
 - **Jinja2 Chat Template Rendering** — Auto-applies `tokenizer.chat_template` from GGUF KV metadata with lightweight Jinja2 subset renderer (`{% for %}`, `{% if %}`, `{% set %}`, `{{ var }}`). Falls back to simple template when not available.
 - **PromptCache (Radix-Tree Prefix Caching)** — Shared prompt prefix caching across requests for reduced TTFT. Populated after sequence completion in CPU, CUDA, and Metal engines.
+- **Model Quantization** — `cmd/quantize` reads a GGUF model and writes a quantized one (`q4_k`, `q6_k`, `q8_0`, `f16`, `f32`), keeping the metadata and the token embedding.
 - **Engine Health Audit** — Every forward pass audits its own logit distribution and reports NaNs, infinities, extreme values and flat distributions, in the log and in the Prometheus metrics.
 - **Activation Logging** — `quarrel -activation-log <path>` writes the embedding, the per-layer activations (with NaN and Inf counts) and the final logits as JSON.
 - **Speculative Decoding** — Multi-token draft forward pass with real logit output (not stubs). The standard `min(1, p_target/p_draft)` acceptance test, with a residual-distribution correction for rejected tokens. Enabled with `-draft-model <path>`, or per request through the REST API's `"speculative"` / `"draft_k"` fields.

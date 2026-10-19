@@ -246,6 +246,30 @@ func (ctx *Context) NewTensorI32(rows, cols int) *Tensor {
 	return t
 }
 
+// NewRawTensor allocates a device buffer that holds the given bytes
+// verbatim.
+//
+// It is how the already-quantized weights are kept on the device: a Q4_K
+// tensor is 144 bytes per 256 values, which no element type describes.
+func (ctx *Context) NewRawTensor(data []byte) (*Tensor, error) {
+	if len(data) == 0 {
+		return nil, fmt.Errorf("cannot allocate an empty raw tensor")
+	}
+
+	var ptr unsafe.Pointer
+	if err := C.cudaMalloc(&ptr, C.size_t(len(data))); err != 0 {
+		return nil, fmt.Errorf("cudaMalloc failed for a %d byte raw tensor: %v", len(data), int(err))
+	}
+	C.cudaMemcpy(ptr, unsafe.Pointer(&data[0]), C.size_t(len(data)), C.cudaMemcpyHostToDevice)
+
+	return &Tensor{
+		devPtr:    ptr,
+		dataType:  DataTypeQ4_K,
+		ctx:       ctx,
+		sizeBytes: len(data),
+	}, nil
+}
+
 func (ctx *Context) NewTensor(rows, cols int, dtype DataType) (*Tensor, error) {
 	size := rows * cols
 	var bytes int

@@ -7,6 +7,7 @@ package device
 import (
 	"unsafe"
 
+	"github.com/23skdu/longbow-quarrel/internal/gguf"
 	"github.com/23skdu/longbow-quarrel/internal/mathx"
 )
 
@@ -104,78 +105,27 @@ func Float32SliceToBytes(s []float32) []byte {
 }
 
 // Float32ToFP8E4M3 converts a float32 into an 8-bit float (1 sign, 4 exponent, 3 mantissa).
+//
+// The conversion lives in internal/gguf, so that the GGUF reader and the
+// device layer agree on the format. It used to exist here as well, and
+// the two copies were not the same function.
 func Float32ToFP8E4M3(f float32) uint8 {
-	bits := mathx.Float32bits(f)
-	sign := uint8((bits >> 31) & 0x1)
-	exp := int((bits>>23)&0xff) - 127 + 7 // bias 7
-	mant := (bits >> 20) & 0x7            // 3 mantissa bits
-
-	if exp <= 0 {
-		return sign << 7 // Subnormal / zero flush
-	}
-	if exp >= 15 {
-		// Clamp to max representable normal value
-		return (sign << 7) | 0x7e
-	}
-	return (sign << 7) | (uint8(exp) << 3) | uint8(mant) // #nosec G115
+	return gguf.Float32ToFP8E4M3(f)
 }
 
 // FP8E4M3ToFloat32 converts an 8-bit float (E4M3) back into float32.
 func FP8E4M3ToFloat32(b uint8) float32 {
-	sign := uint32(b>>7) & 0x1
-	exp := uint32(b>>3) & 0xf
-	mant := uint32(b) & 0x7
-
-	if exp == 0 {
-		if mant == 0 {
-			return mathx.Float32frombits(sign << 31)
-		}
-		// Subnormal
-		return mathx.Float32frombits((sign << 31) | ((127 - 7) << 23) | (mant << 20))
-	}
-	if exp == 15 && mant == 0x7 {
-		return mathx.Float32frombits((sign << 31) | 0x7fc00000) // NaN
-	}
-
-	newExp := exp - 7 + 127
-	return mathx.Float32frombits((sign << 31) | (newExp << 23) | (mant << 20))
+	return gguf.FP8E4M3ToFloat32(b)
 }
 
 // Float32ToFP8E5M2 converts a float32 into an 8-bit float (1 sign, 5 exponent, 2 mantissa).
 func Float32ToFP8E5M2(f float32) uint8 {
-	bits := mathx.Float32bits(f)
-	sign := uint8((bits >> 31) & 0x1)
-	exp := int((bits>>23)&0xff) - 127 + 15 // bias 15
-	mant := (bits >> 21) & 0x3             // 2 mantissa bits
-
-	if exp <= 0 {
-		return sign << 7
-	}
-	if exp >= 31 {
-		return (sign << 7) | 0x7c // Infinity
-	}
-	return (sign << 7) | (uint8(exp) << 2) | uint8(mant) // #nosec G115
+	return gguf.Float32ToFP8E5M2(f)
 }
 
 // FP8E5M2ToFloat32 converts an 8-bit float (E5M2) back into float32.
 func FP8E5M2ToFloat32(b uint8) float32 {
-	sign := uint32(b>>7) & 0x1
-	exp := uint32(b>>2) & 0x1f
-	mant := uint32(b) & 0x3
-
-	if exp == 0 {
-		if mant == 0 {
-			return mathx.Float32frombits(sign << 31)
-		}
-		// Subnormal
-		return mathx.Float32frombits((sign << 31) | ((127 - 15) << 23) | (mant << 21))
-	}
-	if exp == 31 {
-		return mathx.Float32frombits((sign << 31) | 0x7f800000 | (mant << 21))
-	}
-
-	newExp := exp - 15 + 127
-	return mathx.Float32frombits((sign << 31) | (newExp << 23) | (mant << 21))
+	return gguf.FP8E5M2ToFloat32(b)
 }
 
 // QuantizeBlockQ8_0 quantizes a slice of float32 into signed 8-bit integers with scale.
