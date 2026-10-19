@@ -500,9 +500,9 @@ Based on deep profiling of autoregressive decode loops, CUDA kernel execution pr
 >
 > **Batch 1 (Steps 28, 31, 32, 34), Batch 2 (Steps 29, 30, 41, 42, 43,
 > 44, 45, 48), Batch 3 (Steps 33, 49), Batch 4 (Steps 37, 38, 39, 40, 46,
-> 47), Batch 5 (Steps 31, 35, 36, 44, 48), Batch 6 (Steps 35, 44) and
-> Batch 7 (Steps 44, 47) are DONE** — see the status markers on each step.
-> Verified locally after the change:
+> 47), Batch 5 (Steps 31, 35, 36, 44, 48), Batch 6 (Steps 35, 44), Batch 7
+> (Steps 44, 47) and Batch 8 (Step 40) are DONE** — see the status markers
+> on each step. Verified locally after the change:
 >
 > | Check | Command | Result |
 > |---|---|---|
@@ -528,6 +528,7 @@ Based on deep profiling of autoregressive decode loops, CUDA kernel execution pr
 > | Chat templates | `internal/engine/chat_template_render_test.go` | **renders** (produced only "<s>") |
 > | Metrics reference | `internal/metrics/docs_test.go` | **verified both ways** (73 metrics were wrong) |
 > | Browser e2e | `go test -run TestPlaywrightE2E ./internal/api/` | **runs** (the driver could not be downloaded) |
+> | Paged KV batch | `go test -run TestPagedKVCacheUpdateBatch ./internal/engine/` | **works** (it panicked on every backend) |
 
 #### Diagnostic Summary (as found, before Batch 1)
 
@@ -976,10 +977,38 @@ permanent zero. The kernels are now instrumented, guarded by
 a kernel costs a timestamp pair plus a histogram observation, and these
 kernels run thousands of times per generated token.
 
+**Batch 8 found a live bug in the paged KV cache.** Writing the first test
+for `PagedKVCache.UpdateBatch` (the batched KV update, used by the Metal
+engine) immediately panicked. The function was broken on **all three**
+backends:
+
+- **CPU**: the physical positions were read from `physicalPositions.rawData`,
+  which is only populated for the quantized formats, so the CPU path always
+  panicked with an index-out-of-range.
+- **CUDA and Metal**: the store kernels take the positions as `const int*`,
+  but the Go side allocated the tensor as **float32**. The kernels therefore
+  read the float bits as integers and wrote to a garbage physical slot --
+  silently corrupting the KV cache.
+
+The positions are now carried as floats on every backend (the values are
+small non-negative integers, exactly representable in float32), the CUDA and
+Metal kernels cast them to `int` themselves, and the CPU reads them from the
+tensor's float data. `internal/engine/kv_cache_batch_test.go` verifies that
+the K and V values actually land in the physical slot the sequence was
+assigned, on both the CPU and the CUDA build.
+
 **Still open:** the distributed/Arrow Flight stack, speculative decoding, CUDA
 Graphs, the multi-GPU TP/PP engine, the quantization tooling and the
 activation/audit logging. Each needs to be either wired behind a documented
 flag or removed.
+
+A related inconsistency is *not* fixed: the CUDA and Metal paged-KV pools are
+declared float32 but the store and attention kernels treat them as packed
+half-precision arrays. The two kernels agree with each other, so the cache
+works, but the pool is allocated at twice the size it needs and a host-side
+read of the pool has to decode the halves by hand. Aligning the declared type
+with the stored type is a separate change, because it affects the whole
+paged-attention path.
 
 **Plan.** For each row, choose one: wire it behind a documented flag, or delete it. The volume here (~3,500 LOC) makes "delete" the better default for anything without a near-term plan — dead code in an inference engine is a correctness liability, not just clutter.
 
@@ -1325,6 +1354,11 @@ Only `engine` and `device` are still below 80%, so `README.md:145`'s framing ("p
 - The README table was regenerated from the measured values, and now includes `internal/mathx` and `internal/promtest`. It also carries the default-build-only caveat.
 - The ratchet lists in `.github/workflows/ci.yml` and `scripts/run_all_tests.sh` were reduced to the two packages that are actually below 80%, and their comment now records the measurement. The stale `config:75.0`, `arrow_client:75.0` and `ollama:87.0` entries are gone — keeping a floor for a package that is already held by the ≥80% gate only hides regressions.
 - The floors are now raised to `engine: 58.0` and `device: 72.0` (the measured values are 62.8% and 76.2%).
+
+**Batch 8 also closed the last of the paged-KV coverage gaps**: `ForkSequence`,
+`UpdateBatch`, `GetBlockScales`, `OffloadLRU` and `Size` now have tests, and
+the first of them found a live bug in `UpdateBatch` (see Step 35). The
+`internal/engine` package is now at 66.6%.
 
 **Still open:** raising `internal/engine` above 80%, and generating the README table from a script so it cannot drift apart from the floors again.
 

@@ -49,7 +49,7 @@ extern void cudaFusedRoPEPrecomputed(cudaStream_t stream, float* tensor, const i
 extern void cudaFusedQKVRope(cudaStream_t stream, const void* input, const void* qWeight, const void* kWeight, const void* vWeight, void* qOut, void* kOut, void* vOut, const void* ropeCos, const void* ropeSin, const int* posIds, int batch, int dim, int qDim, int kvDim, int headDim, int maxSeqLen, int isF16);
 extern void cudaFusedMLP(cudaStream_t stream, const void* input, const void* gateWeight, const void* upWeight, const void* downWeight, void* output, int batch, int dim, int hiddenDim);
 extern void cudaFusedRMSNormAdd(cudaStream_t stream, const void* input, const void* hidden, const void* weight, void* output, int batch, int dim, float eps);
-extern void cudaStoreKVPagedBatch(cudaStream_t stream, const float* k, const float* v, void* kPool, void* vPool, const int* physicalPositions, int kvDim, int numTokens);
+extern void cudaStoreKVPagedBatch(cudaStream_t stream, const float* k, const float* v, void* kPool, void* vPool, const float* physicalPositions, int kvDim, int numTokens);
 extern void cudaPagedAttentionBatch(cudaStream_t stream, const float* q, const void* kPool, const void* vPool, float* output, const int* tokenPositions, const int* blockTables, const int* tokenToSeq, int maxBlocks, int heads, int kvHeads, int headDim, int blockSize, int numTokens, float scale);
 extern void cudaPagedAttentionTurboQuant(cudaStream_t stream, const float* q, const void* kPool, const void* vPool, float* output, const int* tokenPositions, const int* blockTables, const int* tokenToSeq, int maxBlocks, int heads, int kvHeads, int headDim, int blockSize, int numTokens, float scale, int qjlRows);
 
@@ -1558,7 +1558,7 @@ func (c *Context) QKNormRMSNorm(q, k, qWeight, kWeight *Tensor, numTokens, numQH
 
 // StoreKVPagedBatch stores K and V projections into their respective physical blocks in the GPU cache pool.
 func (c *Context) StoreKVPagedBatch(k, v, kCache, vCache, physicalPositions *Tensor, kvDim, batchSize int) {
-	C.cudaStoreKVPagedBatch(c.Ctx, (*C.float)(k.devPtr), (*C.float)(v.devPtr), kCache.devPtr, vCache.devPtr, (*C.int)(physicalPositions.devPtr), C.int(kvDim), C.int(k.rows))
+	C.cudaStoreKVPagedBatch(c.Ctx, (*C.float)(k.devPtr), (*C.float)(v.devPtr), kCache.devPtr, vCache.devPtr, (*C.float)(physicalPositions.devPtr), C.int(kvDim), C.int(batchSize))
 }
 
 // StoreKVTurboQuant stores K and V in TurboQuant format to paged KV cache.

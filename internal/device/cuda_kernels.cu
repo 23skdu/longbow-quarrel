@@ -1644,7 +1644,7 @@ __global__ void store_kv_paged_batch_kernel(
     const float* __restrict__ v,      // [numTokens, kvDim]
     __half* __restrict__ kPool,        // [numPhysicalBlocks, blockSize, kvDim]
     __half* __restrict__ vPool,        // [numPhysicalBlocks, blockSize, kvDim]
-    const int* __restrict__ physicalPositions, // [numTokens] mapping token to absolute slot in pool
+    const float* __restrict__ physicalPositions, // [numTokens] mapping token to absolute slot in pool
     int kvDim, int numTokens) {
 
     int tokenIdx = blockIdx.x;
@@ -1652,7 +1652,9 @@ __global__ void store_kv_paged_batch_kernel(
 
     if (tokenIdx >= numTokens) return;
 
-    int slotIdx = physicalPositions[tokenIdx];
+    // The positions are small non-negative integers carried in a float
+    // tensor, which is what the Go side can allocate on every backend.
+    int slotIdx = (int)physicalPositions[tokenIdx];
     
     // Each token maps to a single slot (row) in the flattened pool: [totalSlots, kvDim]
     // where totalSlots = numPhysicalBlocks * blockSize
@@ -2140,8 +2142,8 @@ void cudaStoreKVTurboQuant(cudaStream_t stream, const float* k, const float* v,
         k, v, kCache, vCache, physicalPositions, blockSize, qjlRows, numHeads, numTokens);
 }
 
-void cudaStoreKVPagedBatch(cudaStream_t stream, const float* k, const float* v, 
-                             __half* kPool, __half* vPool, const int* physicalPositions,
+void cudaStoreKVPagedBatch(cudaStream_t stream, const float* k, const float* v,
+                             __half* kPool, __half* vPool, const float* physicalPositions,
                              int kvDim, int numTokens) {
     if (numTokens == 0) return;
     int threads = 256;

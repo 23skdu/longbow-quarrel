@@ -2350,14 +2350,16 @@ kernel void store_kv_paged_batch_f16(device const half *k [[ buffer(0) ]],
                                     device const half *v [[ buffer(1) ]],
                                     device half *k_cache [[ buffer(2) ]],
                                     device half *v_cache [[ buffer(3) ]],
-                                    device const int *physical_positions [[ buffer(4) ]],
+                                    device const float *physical_positions [[ buffer(4) ]],
                                     constant int &kv_dim [[ buffer(5) ]],
                                     uint2 gid [[ thread_position_in_grid ]]) {
     uint row = gid.y; // batch index
     uint col = gid.x; // kv_dim index
     if (col >= (uint)kv_dim) return;
-    
-    int phys_pos = physical_positions[row];
+
+    // The positions are small non-negative integers carried in a float
+    // tensor, which is what the Go side can allocate on every backend.
+    int phys_pos = (int)physical_positions[row];
     k_cache[phys_pos * kv_dim + col] = k[row * kv_dim + col];
     v_cache[phys_pos * kv_dim + col] = v[row * kv_dim + col];
 }

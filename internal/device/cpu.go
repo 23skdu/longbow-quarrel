@@ -738,7 +738,12 @@ func (c *Context) QKNormRMSNorm(q, k, qWeight, kWeight *Tensor, numTokens, numQH
 func (c *Context) StoreKVPagedBatch(k, v, kCache, vCache, physicalPositions *Tensor, kvDim, batchSize int) {
 	for b := 0; b < batchSize; b++ {
 		// physicalPosition is absolute token index in the block pool: blockID * blockSize + offset
-		pPos := int(getFloat32(physicalPositions.rawData[b*4:]))
+		//
+		// The positions live in the tensor's float data. The previous code
+		// read them from rawData, which is only populated for the quantized
+		// formats, so the CPU path always panicked with an index out of
+		// range.
+		pPos := int(physicalPositions.data[b])
 
 		offSrc := b * kvDim
 		offDst := pPos * kvDim
