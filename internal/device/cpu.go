@@ -750,8 +750,10 @@ func (c *Context) QKNormRMSNorm(q, k, qWeight, kWeight *Tensor, numTokens, numQH
 }
 
 // StoreKVPagedBatch stores K and V projections into their respective physical blocks in the CPU cache pool.
-func (c *Context) StoreKVPagedBatch(k, v, kCache, vCache, physicalPositions *Tensor, kvDim, batchSize int) {
-	for b := 0; b < batchSize; b++ {
+// The last argument is the number of *tokens*, not the number of
+// sequences.
+func (c *Context) StoreKVPagedBatch(k, v, kCache, vCache, physicalPositions *Tensor, kvDim, numTokens int) {
+	for b := 0; b < numTokens; b++ {
 		// physicalPosition is absolute token index in the block pool: blockID * blockSize + offset
 		//
 		// The positions live in the tensor's float data. The previous code

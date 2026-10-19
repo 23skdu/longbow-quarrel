@@ -503,8 +503,8 @@ Based on deep profiling of autoregressive decode loops, CUDA kernel execution pr
 > 47), Batch 5 (Steps 31, 35, 36, 44, 48), Batch 6 (Steps 35, 44), Batch 7
 > (Steps 44, 47), Batch 8 (Step 40), Batch 9 (Step 40), Batch 10 (Step 35)
 > and Batch 11 (Step 35), Batch 12 (Step 35), Batch 13 (Step 35),
-> Batch 14 (Step 35), Batch 15 (Step 35), Batch 16 (Step 35) are
-> DONE** — see the status markers on each step.
+> Batch 14 (Step 35), Batch 15 (Step 35), Batch 16 (Step 35),
+> Batch 17 (Step 35) are DONE** — see the status markers on each step.
 > Verified locally after the change:
 >
 > | Check | Command | Result |
@@ -1367,6 +1367,82 @@ The new tests are in `internal/engine/engine_interface_test.go`,
 `internal/api/flight_roundtrip_test.go` for the server and the client
 talking to each other.
 
+**Batch 17 made the GPU and the CPU agree, and the agreement was six
+defects deep.**
+
+The GGUF writer from batch 15 made it possible to build a model *in a
+test*, and with one the CUDA engine could finally be exercised end to end.
+The first thing the parity test showed was that the CPU and the GPU
+produced completely different numbers, and that the GPU produced `NaN`.
+
+The GPU's batched forward — the path the inference loop uses — was broken
+in six independent ways.
+
+**The activations were half precision and the kernels are float32.** The
+element-wise kernels — the normalisation, the activation function, the
+residual add, the attention — all read and write `float`, and the model's
+weights are half precision because that is what the loader stores. The
+*activations* were half precision too, so every one of those kernels read
+its input with the wrong element size. The matrix multiplication declared
+its activation as half precision as well, so the projections read the
+normalised activations as halves.
+
+The convention is now: the activations are float32, the weights are half
+precision. The activation is converted to half precision for the
+multiplication — cuBLAS cannot multiply a float32 activation by a
+half-precision weight — and the result is float32 again. Two conversion
+kernels were added for it.
+
+**The tensor pool was not keyed by type.** It was keyed by the element
+count alone, so a caller asking for a float32 tensor could be handed a
+half-precision one of the same size, and the kernels then read the buffer
+with the wrong element size. The result depended on the order the buffers
+happened to be returned in: the same model produced correct numbers in one
+test and `NaN` in another, depending on what had been allocated before.
+
+**The KV store was called with the batch size instead of the token
+count.** The kernel walks the tokens and their physical positions, so only
+the first token of each sequence ever reached the cache and the rest of it
+stayed uninitialised. Every prefill of more than one token read
+uninitialised memory.
+
+**The scratch was sized for one token.** The normalised activations, the
+attention output and the feed-forward buffers are all sized by the token
+count, so a batch with more than one token made the kernels write past the
+end of them.
+
+**The block table could be zero wide.** A sequence without a maximum token
+count left it at zero, and the packing below then wrote past the end of
+the buffer and took the engine down.
+
+**The embedding lookup used the vocabulary count where the dimension
+belongs.** The embedding matrix holds one row per token and a row is the
+model's dimension, so the row length — and the stride between the tokens —
+is the column count. The code used the row count, so the single-token
+forward produced a hidden state of the wrong size. The batched lookup next
+to it used the right one, and the two disagreed.
+
+**The CPU-offload path lost the attention history.** The layers that run on
+the CPU in the single-token forward were given no KV cache, so they
+attended to the current token only, while the GPU layers saw the whole
+history. The batched path got it right.
+
+The parity test compares the two backends on the same model, and it caught
+all of them. It also caught a bug *in the test*: the comparison was
+`if diff > tolerance`, and a NaN never compares greater than anything, so
+the test passed with a NaN on the GPU. The comparison now checks for a NaN
+explicitly.
+
+**Still open on the GPU:** the single-token forward is still broken. It
+uses the model's legacy KV cache, which the path never wrote, and the
+fused attention's cache stride does not match the cache's layout. The
+right fix is to use the paged cache, like the batched path does, and that
+is a change to the single-token forward rather than a fix. The speculative
+decoding uses that path for its verification, so on the GPU the
+speculative step falls back to the target's own sampling — the acceptance
+test now rejects a draft token whose target distribution is not finite, so
+a `NaN` can no longer turn into an arbitrary token.
+
 **Still open:** the distributed/Arrow Flight stack and CUDA Graphs. The
 first needs a worker-side sharded forward, the second needs a decode path
 with static device buffers.
@@ -1794,6 +1870,9 @@ and found that the Q4_K and FP8 codecs did not round-trip and that the CPU
 and the GPU decoded Q4_K differently (see Step 35). **Batch 16** raised the
 engine coverage to 80% and found six more bugs, among them the Arrow
 Flight server and client disagreeing on the wire format (see Step 35).
+**Batch 17** used the GGUF writer to build a model in a test, and the CPU
+and the GPU parity test it made possible found six defects in the GPU's
+batched forward (see Step 35).
 
 **Still open:** raising `internal/engine` above 80%, and generating the README table from a script so it cannot drift apart from the floors again.
 

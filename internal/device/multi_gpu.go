@@ -174,7 +174,7 @@ func (t *TensorParallelManager) GetContext(device int) (*Context, error) {
 		Ctx:    stream,
 		Cublas: handle,
 		pool: &tensorPool{
-			free: make(map[int][]*Tensor),
+			free: make(map[tensorPoolKey][]*Tensor),
 		},
 	}
 

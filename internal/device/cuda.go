@@ -36,6 +36,8 @@ extern void cudaDequantQ6_KToBF16(cudaStream_t stream, void* src, void* dst, int
 
 // Basic math kernels
 extern void cudaAdd(float* a, float* b, float* out, int size, cudaStream_t stream);
+extern void cudaF32ToF16(cudaStream_t stream, const void* src, void* dst, int n);
+extern void cudaF16ToF32(cudaStream_t stream, const void* src, void* dst, int n);
 extern void cudaRMSNorm(float* input, float* weight, float* output, int rows, int cols, float eps, cudaStream_t stream);
 extern void cudaSoftmax(float* input, float* output, int rows, int cols, cudaStream_t stream);
 extern void cudaSwiGLU(float* gate, float* up, float* output, int size, cudaStream_t stream);
@@ -150,9 +152,21 @@ type Tensor struct {
 	qjlRows   int
 }
 
+// tensorPoolKey identifies a pooled tensor.
+//
+// The element count alone is not enough: the pool used to key on it, so a
+// caller asking for a float32 tensor could be handed a half-precision one
+// of the same size, and the kernels then read the buffer with the wrong
+// element size. The result depended on the order the buffers happened to
+// be returned in.
+type tensorPoolKey struct {
+	size  int
+	dtype DataType
+}
+
 type tensorPool struct {
 	mu   sync.Mutex
-	free map[int][]*Tensor
+	free map[tensorPoolKey][]*Tensor
 }
 
 // NewContextOnDevice creates a context on a specific CUDA device.
@@ -183,7 +197,7 @@ func NewContext() *Context {
 		Ctx:    stream,
 		Cublas: handle,
 		pool: &tensorPool{
-			free: make(map[int][]*Tensor),
+			free: make(map[tensorPoolKey][]*Tensor),
 		},
 	}
 	C.cudaMalloc(&ctx.dPosIds, 4096)
@@ -340,18 +354,31 @@ func (ctx *Context) NewTurboTensor(rows, cols int, dt DataType, blockSize, qjlRo
 	}
 }
 
+// NewTensorPooled returns a pooled tensor of the requested type.
+//
+// The activations are float32: the element-wise kernels -- the
+// normalisation, the activation function, the residual add and the
+// attention -- all read and write float32. The weights are the half
+// precision ones, and they are read by the matrix multiplication, which
+// takes a float32 activation and a half-precision weight.
 func (ctx *Context) NewTensorPooled(rows, cols int) *Tensor {
+	return ctx.NewTensorPooledWithType(rows, cols, DataTypeF32)
+}
+
+// NewTensorPooledWithType returns a pooled tensor of the given type.
+func (ctx *Context) NewTensorPooledWithType(rows, cols int, dtype DataType) *Tensor {
 	size := rows * cols
+	key := tensorPoolKey{size: size, dtype: dtype}
 	ctx.pool.mu.Lock()
 	defer ctx.pool.mu.Unlock()
 
-	if lp, ok := ctx.pool.free[size]; ok && len(lp) > 0 {
+	if lp, ok := ctx.pool.free[key]; ok && len(lp) > 0 {
 		t := lp[len(lp)-1]
-		ctx.pool.free[size] = lp[:len(lp)-1]
+		ctx.pool.free[key] = lp[:len(lp)-1]
 		return t
 	}
 
-	t, _ := ctx.NewTensor(rows, cols, DataTypeF16)
+	t, _ := ctx.NewTensor(rows, cols, dtype)
 	t.pooled = true
 	return t
 }
@@ -361,8 +388,9 @@ func (t *Tensor) ReturnToPool() {
 		return
 	}
 	size := t.rows * t.cols
+	key := tensorPoolKey{size: size, dtype: t.dataType}
 	t.ctx.pool.mu.Lock()
-	t.ctx.pool.free[size] = append(t.ctx.pool.free[size], t)
+	t.ctx.pool.free[key] = append(t.ctx.pool.free[key], t)
 	t.ctx.pool.mu.Unlock()
 }
 
@@ -720,13 +748,22 @@ func (ctx *Context) SampleTopKTopP(logits *Tensor, prevTokens []int32, repetitio
 }
 
 func (ctx *Context) Add(a, b, out *Tensor, size int) {
+	if a == nil || b == nil || out == nil {
+		panic(fmt.Sprintf("cuda add: a nil tensor (a=%v b=%v out=%v)", a == nil, b == nil, out == nil))
+	}
 	C.cudaAdd((*C.float)(a.devPtr), (*C.float)(b.devPtr), (*C.float)(out.devPtr), C.int(size), ctx.Ctx)
 }
 
 func (ctx *Context) MatmulF16(a, b *Tensor) (*Tensor, error) {
+	if a == nil || b == nil {
+		return nil, fmt.Errorf("cuda matmul: a nil tensor (a=%v b=%v)", a == nil, b == nil)
+	}
 	m := a.rows
 	k := a.cols
 	n := b.rows
+	// The result is float32: the kernels that consume it -- the
+	// attention, the activation function, the residual add -- all work
+	// in float32.
 	out := ctx.NewTensorPooled(m, n)
 
 	if b.dataType == DataTypeQ8_0 {
@@ -744,19 +781,38 @@ func (ctx *Context) MatmulF16(a, b *Tensor) (*Tensor, error) {
 
 	alpha := C.float(1.0)
 	beta := C.float(0.0)
+	// The weight is half precision, and so is the activation: cuBLAS
+	// cannot multiply a float32 activation by a half-precision weight.
+	// The activation is converted first, and the result is float32,
+	// because the element-wise kernels that consume it are float32.
+	//
+	// The activation used to be read as half precision straight out of a
+	// float32 buffer, which read it with the wrong element size.
+	activation := a
+	if a.dataType != DataTypeF16 {
+		converted := ctx.NewTensorPooledWithType(m, k, DataTypeF16)
+		if converted == nil {
+			return nil, fmt.Errorf("failed to allocate the half-precision activation")
+		}
+		C.cudaF32ToF16(ctx.Ctx, a.devPtr, converted.devPtr, C.int(m*k))
+		activation = converted
+		defer converted.ReturnToPool()
+	}
+
 	res := C.cublasGemmEx(ctx.Cublas,
 		C.CUBLAS_OP_T, C.CUBLAS_OP_N,
 		C.int(n), C.int(m), C.int(k),
 		unsafe.Pointer(&alpha),
 		b.devPtr, C.CUDA_R_16F, C.int(k),
-		a.devPtr, C.CUDA_R_16F, C.int(k),
+		activation.devPtr, C.CUDA_R_16F, C.int(k),
 		unsafe.Pointer(&beta),
-		out.devPtr, C.CUDA_R_16F, C.int(n),
+		out.devPtr, C.CUDA_R_32F, C.int(n),
 		C.CUBLAS_COMPUTE_32F,
 		C.CUBLAS_GEMM_DEFAULT_TENSOR_OP)
 	if res != 0 {
 		out.ReturnToPool()
-		return nil, fmt.Errorf("cublasGemmEx failed: %v", res)
+		fmt.Printf("DEBUG gemm: res=%v a=%v(%d,%d) b=%v(%d,%d)\n", int(res), a.dataType, a.rows, a.cols, b.dataType, b.rows, b.cols)
+		return nil, fmt.Errorf("cublasGemmEx failed: %v (a type=%v rows=%d cols=%d, b type=%v rows=%d cols=%d)", res, a.dataType, a.rows, a.cols, b.dataType, b.rows, b.cols)
 	}
 	return out, nil
 }
@@ -1434,10 +1490,25 @@ func (m *CUDAModel) GetEmbeddingTensor(token int) (*Tensor, error) {
 	if !ok {
 		return nil, fmt.Errorf("embedding weight not found")
 	}
-	tokenEmb := m.Ctx.NewTensorPooled(1, embWeight.rows)
-	offset := uintptr(token) * uintptr(embWeight.rows) * 2
+	// The embedding matrix holds one row per token, and a row is the
+	// model's dimension. The weight tensor's columns are the dimension
+	// and its rows are the vocabulary, so the row length -- and the
+	// stride between the tokens -- is the column count.
+	//
+	// The code used the row count, so it read the vocabulary's worth of
+	// values from the wrong offset: the single-token forward path
+	// produced a hidden state of the wrong size, and the batched path
+	// next to it produced the right one.
+	dim := embWeight.cols
+	if dim == 0 {
+		dim = embWeight.rows
+	}
+	tokenEmb := m.Ctx.NewTensorPooled(1, dim)
+	offset := uintptr(token) * uintptr(dim) * 2
 	srcPtr := unsafe.Pointer(uintptr(embWeight.devPtr) + offset)
-	C.cudaMemcpy(tokenEmb.devPtr, srcPtr, C.size_t(embWeight.rows*2), C.cudaMemcpyDeviceToDevice)
+	// The weight is half precision and the hidden state is float32, so
+	// the row is converted on the device.
+	C.cudaF16ToF32(m.Ctx.Ctx, srcPtr, tokenEmb.devPtr, C.int(dim))
 	return tokenEmb, nil
 }
 
@@ -1458,10 +1529,12 @@ func (m *CUDAModel) GetBatchEmbedding(tokens []int, vocabSize int) (*Tensor, err
 			tIdx = 0
 		}
 		offsetSrc := uintptr(tIdx) * uintptr(dim) * 2
-		offsetDst := uintptr(i) * uintptr(dim) * 2
+		offsetDst := uintptr(i) * uintptr(dim) * 4
 		srcPtr := unsafe.Pointer(uintptr(embWeight.devPtr) + offsetSrc)
 		dstPtr := unsafe.Pointer(uintptr(out.devPtr) + offsetDst)
-		C.cudaMemcpyAsync(dstPtr, srcPtr, C.size_t(dim*2), C.cudaMemcpyDeviceToDevice, m.Ctx.Ctx)
+		// The weight is half precision and the hidden state is
+		// float32, so the row is converted on the device.
+		C.cudaF16ToF32(m.Ctx.Ctx, srcPtr, dstPtr, C.int(dim))
 	}
 	return out, nil
 }
@@ -1499,11 +1572,12 @@ type LayerScratch struct {
 }
 
 func (ctx *Context) NewLayerScratch(batch, dim, hiddenDim, heads, kvHeads, headDim, seqLen, vocabSize, qNormDim, kNormDim int) *LayerScratch {
-	normed, _ := ctx.NewTensor(batch, dim, DataTypeF16)
-	attn, _ := ctx.NewTensor(batch*heads, headDim, DataTypeF16)
-	gate, _ := ctx.NewTensor(batch, hiddenDim, DataTypeF16)
-	up, _ := ctx.NewTensor(batch, hiddenDim, DataTypeF16)
-	down, _ := ctx.NewTensor(batch, dim, DataTypeF16)
+	// The scratch holds activations, and the activations are float32.
+	normed, _ := ctx.NewTensor(batch, dim, DataTypeF32)
+	attn, _ := ctx.NewTensor(batch*heads, headDim, DataTypeF32)
+	gate, _ := ctx.NewTensor(batch, hiddenDim, DataTypeF32)
+	up, _ := ctx.NewTensor(batch, hiddenDim, DataTypeF32)
+	down, _ := ctx.NewTensor(batch, dim, DataTypeF32)
 
 	return &LayerScratch{
 		Normed: normed,
@@ -1520,6 +1594,45 @@ func (s *LayerScratch) Free() {
 	s.Gate.Free()
 	s.Up.Free()
 	s.Down.Free()
+}
+
+// Grow makes sure the scratch can hold the given number of tokens.
+//
+// The scratch is created for a single token, but the batched forward
+// needs a row per token: the normed activations, the attention output
+// and the feed-forward buffers are all sized by the token count. With a
+// smaller scratch the kernels wrote past the end of the buffers, and
+// the projections read back whatever was there.
+//
+// The scratch only ever grows, so a forward that fits in the current
+// buffers costs nothing.
+func (ctx *Context) GrowLayerScratch(s *LayerScratch, tokens, dim, hiddenDim, heads, kvHeads, headDim, seqLen, vocabSize int) {
+	if s == nil || tokens <= 0 {
+		return
+	}
+	if s.Normed != nil && s.Normed.rows >= tokens && s.Down != nil && s.Down.rows >= tokens {
+		return
+	}
+	if s.Gate != nil && s.Gate.rows < tokens {
+		s.Gate.Free()
+		s.Gate, _ = ctx.NewTensor(tokens, hiddenDim, DataTypeF16)
+	}
+	if s.Up != nil && s.Up.rows < tokens {
+		s.Up.Free()
+		s.Up, _ = ctx.NewTensor(tokens, hiddenDim, DataTypeF16)
+	}
+	if s.Normed != nil && s.Normed.rows < tokens {
+		s.Normed.Free()
+		s.Normed, _ = ctx.NewTensor(tokens, dim, DataTypeF16)
+	}
+	if s.Down != nil && s.Down.rows < tokens {
+		s.Down.Free()
+		s.Down, _ = ctx.NewTensor(tokens, dim, DataTypeF16)
+	}
+	if s.Attn != nil && s.Attn.rows < tokens*heads {
+		s.Attn.Free()
+		s.Attn, _ = ctx.NewTensor(tokens*heads, headDim, DataTypeF16)
+	}
 }
 
 func Float32SliceToFloat16(data []float32) []uint16 {
@@ -1623,8 +1736,10 @@ func (c *Context) QKNormRMSNorm(q, k, qWeight, kWeight *Tensor, numTokens, numQH
 }
 
 // StoreKVPagedBatch stores K and V projections into their respective physical blocks in the GPU cache pool.
-func (c *Context) StoreKVPagedBatch(k, v, kCache, vCache, physicalPositions *Tensor, kvDim, batchSize int) {
-	C.cudaStoreKVPagedBatch(c.Ctx, (*C.float)(k.devPtr), (*C.float)(v.devPtr), kCache.devPtr, vCache.devPtr, (*C.float)(physicalPositions.devPtr), C.int(kvDim), C.int(batchSize))
+// The last argument is the number of *tokens*, not the number of
+// sequences: the kernel walks the tokens and their physical positions.
+func (c *Context) StoreKVPagedBatch(k, v, kCache, vCache, physicalPositions *Tensor, kvDim, numTokens int) {
+	C.cudaStoreKVPagedBatch(c.Ctx, (*C.float)(k.devPtr), (*C.float)(v.devPtr), kCache.devPtr, vCache.devPtr, (*C.float)(physicalPositions.devPtr), C.int(kvDim), C.int(numTokens))
 }
 
 // StoreKVTurboQuant stores K and V in TurboQuant format to paged KV cache.
@@ -1698,6 +1813,40 @@ func polarQuant(in []float32, bits int) ([]int8, float32) {
 		result[i] = int8(float32(v) * scale)
 	}
 	return result, 1.0 / scale
+}
+
+// StoreKVLinear stores one token's keys and values in the model's KV
+// cache.
+//
+// The cache is laid out head-major -- [head][position][headDim] -- which
+// is what the fused attention reads. The ring-shaped StoreKV writes
+// position-major, which is the layout the sliding window cache uses, so
+// the two are not interchangeable.
+func (t *Tensor) StoreKVLinear(v *Tensor, kCache, vCache *Tensor, pos, heads, headDim, kvLen int) {
+	if t == nil || v == nil || kCache == nil || vCache == nil || heads <= 0 || headDim <= 0 || kvLen <= 0 {
+		return
+	}
+	if pos < 0 || pos >= kvLen {
+		return
+	}
+
+	kHost := t.ToHostF32()
+	vHost := v.ToHostF32()
+	if len(kHost) < heads*headDim || len(vHost) < heads*headDim {
+		return
+	}
+
+	for h := 0; h < heads; h++ {
+		src := h * headDim
+		dst := (h*kvLen + pos) * headDim
+
+		kTarget := unsafe.Pointer(uintptr(kCache.devPtr) + uintptr(dst*2))
+		vTarget := unsafe.Pointer(uintptr(vCache.devPtr) + uintptr(dst*2))
+		kHalf := Float32SliceToFloat16(kHost[src : src+headDim])
+		vHalf := Float32SliceToFloat16(vHost[src : src+headDim])
+		C.cudaMemcpy(kTarget, unsafe.Pointer(&kHalf[0]), C.size_t(len(kHalf)*2), C.cudaMemcpyHostToDevice)
+		C.cudaMemcpy(vTarget, unsafe.Pointer(&vHalf[0]), C.size_t(len(vHalf)*2), C.cudaMemcpyHostToDevice)
+	}
 }
 
 // StoreKVQuantized stores KV cache in TurboQuant format.

@@ -66,6 +66,22 @@ __device__ __forceinline__ float blockReduceMax(float val) {
     return val;
 }
 
+// Conversions between the two element sizes the engine uses: the
+// activations are float32, because every element-wise kernel reads and
+// writes float32, and the weights are half precision, because that is
+// what the loader stores them as.
+__global__ void f32_to_f16_kernel(const float* src, __half* dst, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    dst[i] = __float2half(src[i]);
+}
+
+__global__ void f16_to_f32_kernel(const __half* src, float* dst, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    dst[i] = __half2float(src[i]);
+}
+
 __global__ void rmsnorm_kernel(float* input, float* weight, float* output, int rows, int cols, float eps) {
     __shared__ float s_rms;
     bool aligned = (((uintptr_t)input % 16 == 0) &&
@@ -496,6 +512,20 @@ __global__ void dequant_q6_k_to_bf16_kernel(const unsigned char* __restrict__ sr
 // =============================================================================
 
 extern "C" {
+    void cudaF32ToF16(cudaStream_t stream, const void* src, void* dst, int n) {
+        if (n <= 0) return;
+        int threads = 256;
+        int blocks = (n + threads - 1) / threads;
+        f32_to_f16_kernel<<<blocks, threads, 0, stream>>>((const float*)src, (__half*)dst, n);
+    }
+
+    void cudaF16ToF32(cudaStream_t stream, const void* src, void* dst, int n) {
+        if (n <= 0) return;
+        int threads = 256;
+        int blocks = (n + threads - 1) / threads;
+        f16_to_f32_kernel<<<blocks, threads, 0, stream>>>((const __half*)src, (float*)dst, n);
+    }
+
     void cudaRMSNormF16(cudaStream_t stream, void* input, void* weight, void* output, int rows, int cols, float eps) {
         int blocks = (rows > 65535) ? 65535 : (rows > 0 ? rows : 1);
         rmsnorm_kernel<<<blocks, 256, 0, stream>>>((float*)input, (float*)weight, (float*)output, rows, cols, eps);
@@ -566,13 +596,25 @@ extern "C" {
 // Fused Attention Kernel (Q @ K^T, softmax, @ V in one pass)
 // =============================================================================
 
+// The KV cache is half precision, because that is what the model loader
+// allocates it as, and the current token's keys and values are float32.
+// The two are read through these helpers.
+__device__ __forceinline__ float loadCacheVal(const __half* cache, const float* fallback, int offset) {
+    return cache == nullptr ? fallback[offset] : __half2float(cache[offset]);
+}
+
+__device__ __forceinline__ float loadCacheVal(const float* cache, const float* fallback, int offset) {
+    return cache == nullptr ? fallback[offset] : cache[offset];
+}
+
+template <typename KT, typename VT>
 __global__ void fused_attention_kernel(
     const float* __restrict__ q,      // [batch, heads, seqLen, headDim]
     const float* __restrict__ k,      // [batch, heads, seqLen, headDim]
     const float* __restrict__ v,      // [batch, heads, seqLen, headDim]
     float* __restrict__ output,        // [batch, heads, seqLen, headDim]
-    const float* __restrict__ kCache,  // [batch, heads, seqLen, headDim] or nullptr
-    const float* __restrict__ vCache,  // [batch, heads, seqLen, headDim] or nullptr
+    const KT* __restrict__ kCache,  // [batch, heads, seqLen, headDim] or nullptr
+    const VT* __restrict__ vCache,  // [batch, heads, seqLen, headDim] or nullptr
     int batch, int heads, int seqLen, int kvSeqLen, int headDim,
     float scale, int useCache, int windowSize) {
 
@@ -611,7 +653,7 @@ __global__ void fused_attention_kernel(
         }
 
         for (int d = tid; d < headDim; d += blockDim.x) {
-            score += s_q[d] * k[kOffset + d];
+            score += s_q[d] * loadCacheVal(kCache, k, kOffset + d);
         }
         score *= scale;
 
@@ -636,7 +678,7 @@ __global__ void fused_attention_kernel(
         }
 
         for (int d = tid; d < headDim; d += blockDim.x) {
-            score += s_q[d] * k[kOffset + d];
+            score += s_q[d] * loadCacheVal(kCache, k, kOffset + d);
         }
         score *= scale;
         float attn = expf(score - maxScore);
@@ -666,7 +708,7 @@ __global__ void fused_attention_kernel(
             }
             float score = 0.0f;
             for (int dd = 0; dd < headDim; dd++) {
-                score += s_q[dd] * k[vOffset + dd];  // Use k as temp
+                score += s_q[dd] * loadCacheVal(vCache, v, vOffset + dd);
             }
             score *= scale;
             float attnVal = expf(score - maxScore);
@@ -1167,9 +1209,9 @@ extern "C" {
         dim3 block(256, 1);
         size_t sharedSize = (headDim + 256) * sizeof(float);
 
-        fused_attention_kernel<<<grid, block, sharedSize, stream>>>(
+        fused_attention_kernel<__half, __half><<<grid, block, sharedSize, stream>>>(
             (const float*)q, (const float*)k, (const float*)v,
-            (float*)output, (const float*)kCache, (const float*)vCache,
+            (float*)output, (const __half*)kCache, (const __half*)vCache,
             batch, heads, seqLen, kvSeqLen, headDim, scale, useCache, windowSize);
     }
 

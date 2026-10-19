@@ -466,6 +466,12 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 	batchSize := len(desc.Sequences)
 	numTokens := len(desc.Tokens)
 
+	// The scratch holds one row per token. It was created for a single
+	// token, so a batch with more than one token made the kernels write
+	// past the end of its buffers.
+	ctx.GrowLayerScratch(e.scratch, numTokens, e.config.Dim, e.config.HiddenDim,
+		e.config.Heads, e.config.KVHeads, e.config.HeadDim, e.config.SeqLen, e.config.VocabSize)
+
 	// 1. Prepare Metadata Tensors
 	tokenPosTensor := ctx.NewTensorI32(1, numTokens)
 	tokenPositions := make([]int32, numTokens)
@@ -475,6 +481,11 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 			end = desc.Offsets[i+1]
 		}
 		for j := 0; j < end-start; j++ {
+			// The index is the token's, and the position is the
+			// sequence's context length plus the token's offset within
+			// it. The index used to be the token's offset added to the
+			// sequence's start, which put the positions of the second
+			// sequence past the end of the tensor.
 			tokenPositions[start+j] = int32(desc.ContextLens[i] + j)
 		}
 	}
@@ -505,10 +516,20 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 		}
 	}
 
-	// Pack block tables
-	maxBlocks := 0
+	// Pack block tables.
+	//
+	// The width has to cover both the blocks the sequences were asked
+	// for and the blocks they were actually given, and it has to be at
+	// least one: a sequence without a maximum token count used to leave
+	// it at zero, and the packing below then wrote past the end of the
+	// buffer and took the engine down.
+	maxBlocks := 1
 	for _, seq := range desc.Sequences {
 		if nt := (seq.MaxTokens + e.cache.blockSize - 1) / e.cache.blockSize; nt > maxBlocks {
+			maxBlocks = nt
+		}
+		seqID := fmt.Sprintf("seq-%d", seq.ID)
+		if nt := len(e.cache.blockTables[seqID]); nt > maxBlocks {
 			maxBlocks = nt
 		}
 	}
@@ -519,6 +540,9 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 		seqID := fmt.Sprintf("seq-%d", seq.ID)
 		table := e.cache.blockTables[seqID]
 		for j, bidx := range table {
+			if j >= maxBlocks {
+				break
+			}
 			btData[i*maxBlocks+j] = bidx
 		}
 	}
@@ -785,7 +809,11 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 			return nil, err
 		}
 
-		ctx.StoreKVPagedBatch(k, v, kCache, vCache, physPosTensor, kvHeads*headDim, batchSize)
+		// The number of tokens, not the number of sequences: the kernel
+		// walks the tokens and their physical positions. The batch size
+		// was passed instead, so only the first token of each sequence
+		// ever reached the cache and the rest of it stayed uninitialised.
+		ctx.StoreKVPagedBatch(k, v, kCache, vCache, physPosTensor, kvHeads*headDim, numTokens)
 		physPosTensor.ReturnToPool()
 
 		// Attention — use quantized path if cache is FP8/Q8_0
@@ -812,7 +840,11 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 
 		// Output Projection
 		oW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_output.weight", layer))
-		attnProj, _ := ctx.MatmulF16(attnOut, oW)
+		attnProj, mErr := ctx.MatmulF16(attnOut, oW)
+		fmt.Printf("DEBUG matmul: err=%v proj=%v oW=%v attnOut=%v\n", mErr, attnProj != nil, oW != nil, attnOut != nil)
+		if mErr != nil {
+			fmt.Printf("DEBUG matmul: %v\n", mErr)
+		}
 		attnOut.ReturnToPool()
 
 		// Residual Add
@@ -961,7 +993,13 @@ func (e *cudaEngine) inferInternal(inputTokens []int, tokensToGenerate int, samp
 	}
 }
 
-func (e *cudaEngine) forward(token int, pos int, _ []int) ([]float32, error) {
+// forward runs one token through the model.
+//
+// cpuKV is the KV cache of the layers that run on the CPU. It has to be
+// supplied by the caller: the attention of an offloaded layer has to see
+// the same history the GPU layers see, and the cache is per sequence and
+// per call.
+func (e *cudaEngine) forward(token int, pos int, _ []int, cpuKV *CPUKVCache) ([]float32, error) {
 	ctx := e.cuda.Ctx
 	dim := e.config.Dim
 	hiddenDim := e.config.HiddenDim
@@ -1102,7 +1140,22 @@ func (e *cudaEngine) forward(token int, pos int, _ []int) ([]float32, error) {
 		if q.Rows() > 1 {
 			ctx.FlashAttentionPrefill(q, k, v, attnOut, 1, heads, kvHeads, q.Rows(), pos+q.Rows(), headDim, scale, windowSize)
 		} else {
-			ctx.FusedAttention(q, k, v, attnOut, kCache, vCache, 1, heads, 1, pos+1, headDim, scale, 1, windowSize)
+			// Store the token's keys and values in the cache before
+			// the attention reads it. The path never wrote the cache,
+			// so the attention read uninitialised memory and the
+			// forward pass produced NaNs.
+			//
+			// The cache is laid out head-major with the full capacity
+			// as the stride, so the attention has to be told the
+			// capacity and not the number of positions in use.
+			kvLen := 0
+			if kCache != nil && heads > 0 {
+				kvLen = kCache.Rows() / heads
+			}
+			if kvLen > 0 {
+				k.StoreKVLinear(v, kCache, vCache, pos, heads, headDim, kvLen)
+			}
+			ctx.FusedAttention(q, k, v, attnOut, kCache, vCache, 1, heads, 1, kvLen, headDim, scale, 1, windowSize)
 		}
 
 		// Cleanup intermediate projections
@@ -1185,7 +1238,15 @@ func (e *cudaEngine) forward(token int, pos int, _ []int) ([]float32, error) {
 
 		startCPU := time.Now()
 		for layer := gpuLayers; layer < e.config.Layers; layer++ {
-			hiddenHost = ApplyLayerCPU(e.cpuWeights, hiddenHost, layer, e.config)
+			if cpuKV != nil {
+				// The offloaded layers attend over the history in the
+				// cache, exactly as the GPU layers do. Without it they
+				// saw only the current token, and the model produced
+				// different results on the CPU and on the GPU.
+				hiddenHost = ApplyLayerCPUKV(e.cpuWeights, hiddenHost, layer, pos, cpuKV, e.config)
+			} else {
+				hiddenHost = ApplyLayerCPU(e.cpuWeights, hiddenHost, layer, e.config)
+			}
 		}
 		metrics.RecordLayerOffloadCPUDuration(e.config.Architecture, time.Since(startCPU))
 
@@ -1214,8 +1275,17 @@ func (e *cudaEngine) forward(token int, pos int, _ []int) ([]float32, error) {
 
 func (e *cudaEngine) forwardInternal(tokens []int, cacheOnly bool) []float32 {
 	var lastLogits []float32
+
+	// The layers that run on the CPU need a KV cache of their own. It
+	// lives for the duration of this forward, because the forward covers
+	// the whole prompt and the position of a token is its index.
+	var cpuKV *CPUKVCache
+	if e.config.Layers > e.numGPULayers && e.cpuWeights != nil {
+		cpuKV = NewCPUKVCache(e.config.Layers)
+	}
+
 	for i, token := range tokens {
-		logits, err := e.forward(token, i, tokens[:i+1])
+		logits, err := e.forward(token, i, tokens[:i+1], cpuKV)
 		if err != nil {
 			return nil
 		}

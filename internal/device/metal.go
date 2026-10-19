@@ -2852,10 +2852,12 @@ func (ctx *Context) QKNormRMSNorm(q, k, qWeight, kWeight *Tensor, numTokens, num
 }
 
 // StoreKVPagedBatch stores K and V projections for a batch of sequences into their respective physical blocks
-func (ctx *Context) StoreKVPagedBatch(k, v, kCache, vCache, physicalPositions *Tensor, kvDim, batchSize int) {
+// The last argument is the number of *tokens*, not the number of
+// sequences.
+func (ctx *Context) StoreKVPagedBatch(k, v, kCache, vCache, physicalPositions *Tensor, kvDim, numTokens int) {
 	ctx.ExecMu.Lock()
 	defer ctx.ExecMu.Unlock()
-	C.Metal_StoreKVPagedBatch_F16(ctx.ref, k.buf, C.int(k.Offset), v.buf, C.int(v.Offset), kCache.buf, C.int(kCache.Offset), vCache.buf, C.int(vCache.Offset), physicalPositions.buf, C.int(physicalPositions.Offset), C.int(kvDim), C.int(batchSize))
+	C.Metal_StoreKVPagedBatch_F16(ctx.ref, k.buf, C.int(k.Offset), v.buf, C.int(v.Offset), kCache.buf, C.int(kCache.Offset), vCache.buf, C.int(vCache.Offset), physicalPositions.buf, C.int(physicalPositions.Offset), C.int(kvDim), C.int(numTokens))
 }
 
 // MLADecompressKV decompresses compressed latent KV cache into separate key and value tensors

@@ -187,6 +187,12 @@ func (sm *SpeculativeManager) GenerateSpeculativeMultiPath(ctx context.Context, 
 				}
 				continue
 			}
+			if correctedToken < 0 {
+				// The target's distribution is not usable, so there is
+				// no correction to make. The path falls back to the
+				// target's own sampling.
+				break
+			}
 			// The draft token was rejected. The correction is the token
 			// that replaces it, and it has to be emitted: it is the
 			// target's own sample for this position.
@@ -511,6 +517,18 @@ func sampleFrom(probs []float64, rng *rand.Rand) int {
 func rejectSample(targetLogits []float32, draftLogits []float32, draftToken int, rng *rand.Rand) (accepted bool, correctedToken int) {
 	if draftToken < 0 || draftToken >= len(targetLogits) {
 		return false, 0
+	}
+
+	// A distribution with a NaN in it cannot be compared: every
+	// comparison against a NaN is false, so the acceptance test would
+	// silently reject the token and the correction would be drawn from
+	// a NaN-weighted distribution. The token is rejected instead, and
+	// the caller falls back to the target's own sampling.
+	for _, l := range targetLogits {
+		if mathx.IsNaN(float64(l)) || mathx.IsInf(float64(l), 0) {
+			metrics.SpeculativeTokensRejected.Add(1)
+			return false, -1
+		}
 	}
 
 	p := softmax(targetLogits)
