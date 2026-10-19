@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-Longbow-Quarrel is a high-performance, multi-backend inference engine in Go, CGo, CUDA, and Apple Metal. The latest git tag is **`0.3.0`**; the milestones named v0.4.0 through v0.8.0 in commit messages all landed on `main` without a release tag. This document tracks the remaining work toward **v1.0.0**, including distributed execution (Phase 2), math backends (Phase 3), serving/DX (Phase 4), and deep kernel/engine optimizations (Phase 5: Steps 8–17).
+Longbow-Quarrel is a high-performance, multi-backend inference engine in Go, CGo, CUDA, and Apple Metal. The latest git tag is **`0.3.0`**; the milestones named v0.4.0 through v0.8.0 in commit messages all landed on `main` without a release tag. This document tracks the remaining work toward **v1.0.0**, including distributed execution (Phase 2), math backends (Phase 3), serving/DX (Phase 4), and deep kernel/engine optimizations (Phase 5: Steps 8–27).
 
 ---
 
@@ -37,26 +37,18 @@ Longbow-Quarrel is a high-performance, multi-backend inference engine in Go, CGo
 - **Objective**: Replace the Go standard library `math` package in inference hot paths with [`emlgo`](https://github.com/23skdu/emlgo) (the EML — Exp-Minus-Log — operator library), gated behind a build flag so both backends can be A/B benchmarked from a single tree.
 - **Why**: `math.*` appears **~700 times across ~100 files**, concentrated in the sampler (softmax, entropy, repetition penalty), RoPE, RMSNorm / SwiGLU / GELU activations, dequantization, and vector distance. emlgo ships SIMD batch equivalents (AVX-512 / AVX2+FMA / NEON / SVE / WASM SIMD128) that could vectorize these per-token scalar loops. This is an **evaluation**: adopt only if parity holds and a measurable win is demonstrated.
 
-##### Step 7.1 — Resolve the module-path blocker first (P0, prerequisite)
+##### Step 7.1 — Resolve the module-path blocker first (P0, prerequisite) — [RESOLVED]
 
-`emlgo` **cannot be required as-is**. Its `go.mod` declares `module github.com/emlgo/eml`, but the repository is hosted at `github.com/23skdu/emlgo` and every internal import uses the `github.com/emlgo/eml/...` path. Requesting it under the host path fails:
+`emlgo`'s `go.mod` declares `module github.com/emlgo/eml`, while the repository is hosted at `github.com/23skdu/emlgo`.
+This has been resolved cleanly in both the root `go.mod` and `cmd/webui/go.mod` using Go module `replace`:
+```go
+require (
+    github.com/emlgo/eml v0.0.0-00010101000000-000000000000
+)
 
+replace github.com/emlgo/eml => github.com/23skdu/emlgo v0.0.0-20261015062852-39bcca0c1034
 ```
-$ go get github.com/23skdu/emlgo@0.5
-go: github.com/23skdu/emlgo@0.5 (v0.0.0-20261003213601-b3d1a425cdd5) requires ...:
-	module declares its path as: github.com/emlgo/eml
-	        but was required as: github.com/23skdu/emlgo
-```
-
-There is **no `v0.5.0` semver tag** — the tag is `0.5`, which Go does not treat as semver — so the version is the pseudo-version **`v0.0.0-20261003213601-b3d1a425cdd5`** (commit `b3d1a425cdd5e8956b45593ce98bb96f06075507`, tag `0.5`, "latest 0.5").
-
-**Do this before any code lands:**
-
-1. Fork `github.com/23skdu/emlgo` at tag `0.5` and correct the module path: `module github.com/emlgo/eml` → `module github.com/23skdu/emlgo` in `go.mod`, then rewrite every `github.com/emlgo/eml/...` import to `github.com/23skdu/emlgo/...` (mechanical). Tag the fork `v0.5.0`.
-2. In the root `go.mod`, add `require github.com/23skdu/emlgo v0.5.0` (or pin the pseudo-version until the fork tags `v0.5.0`).
-3. `go mod tidy` and confirm `go build ./...` is green against the fork.
-
-> **Alternative if a fork is undesirable:** `go mod vendor` the dependency and rewrite the import paths under `vendor/`. This pins the code but forfeits upstream updates; the fork is preferred.
+Pinned to the latest commit **`39bcca0c1034c51cd7e054daa60b9059f0c3846d`** (corresponding to upstream tag **`0.7`** and tag **`latest`**). Verified with `go mod verify` and unit parity tests in `internal/mathx/`.
 
 ##### Step 7.2 — Compatibility & accuracy audit
 
@@ -328,7 +320,144 @@ Based on deep profiling of autoregressive decode loops, CUDA kernel execution pr
 - **Files**: `.vscode/settings.json`, `internal/device/`, `internal/simd/`, `internal/engine/engine_cuda.go`, `internal/engine/engine_cpu.go`
 - **Acceptance Criteria**: Zero gopls warnings or diagnostic exclusions across all files in the workspace; clean compile-time dispatch with zero runtime branching penalties; 100% CI pass rate.
 
----
+#### Part 18 (Step 18): On-Device GPU Top-P / Top-K Sampling & Penalty Kernel
+- **Objective**: Eliminate device-to-host (D2H) PCIe transfer of vocabulary logits and offload repetitive CPU sorting to parallel GPU warps.
+- **Bottleneck Analysis**:
+  - In `internal/engine/engine_cuda.go:356-357` and `sampler.go:31-60`, generating each token copies the entire unnormalized logit tensor ($V \approx 32\text{k} - 152\text{k}$ floats, up to 600 KB per sequence) over PCIe to host RAM.
+  - On the host CPU, `NewSampler` instantiates a new sampler struct, allocates `make([]tokenProb, len(logits))`, and invokes `sort.Slice` ($O(V \log V)$), burning hundreds of microseconds of CPU time per token and serializing GPU execution behind host synchronization.
+- **Design & Kernel Architecture**:
+  - Implement a fused CUDA kernel `cuda_sample_topk_topp` in `internal/device/cuda_sampling.cu`:
+    1. **Penalty Phase**: Apply repetition, frequency, presence, and temperature scaling in parallel across vocab warps directly on device VRAM.
+    2. **Warp-Level RadixSelect / Bitonic Filter**: Partition the top $K$ candidates (e.g. $K=50$) using warp shuffle primitives without a global sort of all $V$ items.
+    3. **Softmax & Cumulative Sum**: Perform a cooperative block scan across the top $K$ candidates, filter tokens beyond cumulative threshold $P$ (Top-P), and sample using curand / Philox RNG.
+    4. Write only the single sampled token ID (int32, 4 bytes) to pinned host memory (or retain it on device for direct embedding lookup in CUDA Graph capture loops).
+- **Files**: `internal/device/cuda_sampling.cu`, `internal/device/cuda.go`, `internal/engine/sampler.go`, `internal/engine/engine_cuda.go`
+- **Acceptance Criteria**: Logit D2H PCIe bandwidth reduced by $>99.9\%$; token sampling latency drops from $\sim 350$ μs to $<15$ μs; 0 heap allocations per sampling step.
+
+#### Part 19 (Step 19): Fused Warp-Shuffle Reductions for RMSNorm and Softmax CUDA Kernels
+- **Objective**: Maximize memory bandwidth saturation in normalization layers by replacing serial per-thread loops with register-level cooperative warp shuffles.
+- **Bottleneck Analysis**:
+  - In `internal/device/cuda_kernels.cu:12-27` (`rmsnorm_kernel`) and `:40-58` (`softmax_kernel`), reductions loop sequentially over all columns (e.g. $D=4096$) within single threads or thread blocks without warp reduction primitives.
+  - This results in low SIMD lane occupancy, thread stall cycles waiting on global memory latency, and $<25\%$ memory bandwidth utilization during activation normalization.
+- **Design & Kernel Architecture**:
+  - Modernize `rmsnorm_kernel`:
+    - Assign one warp (32 threads) or cooperative block per row.
+    - Each thread loads contiguous `float4` vectors (128-bit memory transactions) and computes partial sum of squares:
+      $$\sum x_i^2 = \text{\_\_shfl\_down\_sync}(0\text{xffffffff}, \text{sum}, \text{offset})$$
+    - Reduce across warp lanes in 5 shuffle steps without shared memory bank conflicts.
+    - Broadcast reciprocal RMS ($\text{rsqrtf}$) to all threads and store normalized output using vectorized `float4` stores.
+  - Modernize `softmax_kernel` using online two-pass Flash-style softmax with register max tracking.
+- **Files**: `internal/device/cuda_kernels.cu`, `internal/device/rmsnorm_test.go`, `internal/device/softmax_test.go`
+- **Acceptance Criteria**: RMSNorm kernel runtime on $4096$-dim hidden states drops by $\ge 4.5\times$; kernel achieves $\ge 85\%$ of peak theoretical VRAM bandwidth.
+
+#### Part 20 (Step 20): Fused W4A16 & W8A16 Direct Quantized GEMV without Intermediate Weight Materialization
+- **Objective**: Eliminate intermediate global memory buffers by dequantizing weights directly in registers during GEMV computation.
+- **Bottleneck Analysis**:
+  - Autoregressive decode is strictly memory-bandwidth bound ($M=1$). In `cuda_kernels.cu:145-165` (`dequant_q8_0_kernel`, `dequant_q4_k_kernel`), quantized weights are first unpacked into full FP32/FP16 tensors in VRAM before cuBLAS GEMM executes.
+  - This forces a two-pass memory round-trip: write dequantized weights to VRAM, then immediately read them back into Tensor Cores, doubling memory bus pressure and inflating peak VRAM usage.
+- **Design & Kernel Architecture**:
+  - Implement direct fused GEMV kernels in `internal/device/cuda_quant_gemv.cu`:
+    - Load quantized weights (`uint8_t` nibbles for Q4_K / Q8_0) directly into 32-bit registers.
+    - Unpack 4-bit / 8-bit integer weights on-the-fly using bit-manipulation intrinsics (`__byte_perm`, `lop3.b32`).
+    - Cache the activation vector $\mathbf{x} \in \mathbb{R}^K$ in shared memory once per thread block.
+    - Execute fused multiply-accumulate via `__dp4a` (for int8 dot products) or `mma.sync.aligned.m16n8k16` Tensor Core fragments.
+    - Apply FP16 block scales and min offsets at the warp reduction boundary before accumulating into FP32 output registers.
+- **Files**: `internal/device/cuda_quant_gemv.cu`, `internal/device/cuda.go`, `internal/engine/engine_cuda.go`
+- **Acceptance Criteria**: VRAM read traffic during token generation drops by $50\%$ (Q8_0) and $75\%$ (Q4_K); single-token decode latency improves by $\ge 2.2\times$.
+
+#### Part 21 (Step 21): Pinned Zero-Copy Memory & Asynchronous Double-Buffered Batch Pipeline
+- **Objective**: Overlap host batch preparation with device execution and eliminate GC overhead in continuous batching.
+- **Bottleneck Analysis**:
+  - In `internal/engine/engine_cuda.go:414-438` (`ForwardBatch`), slice allocations `make([]int32, numTokens)` are created on every generation step for `tokenPositions` and `tokenToSeq`, triggering Go runtime GC pauses.
+  - Synchronous `LoadFrom` calls stall the CUDA stream waiting for PCIe host-to-device transfers before kernel launches can begin.
+- **Design & Implementation**:
+  - Pre-allocate dual-buffered pinned host memory (`cudaHostAllocMapped` / `cudaHostAllocWriteCombined`) inside `DeviceContext`.
+  - Implement double-buffered asynchronous stream execution:
+    - Stream 0: executes Layer $L$ forward pass kernels on GPU.
+    - Stream 1: asynchronously prefetches Layer $L+1$ descriptors and writes batch metadata into mapped host pointers without CPU-GPU synchronization.
+  - Replace dynamic slice allocation with pre-allocated circular descriptor ring buffers.
+- **Files**: `internal/device/memory.go`, `internal/device/cuda.go`, `internal/engine/engine_cuda.go`, `internal/engine/continuous_batching.go`
+- **Acceptance Criteria**: Zero Go heap allocations in `ForwardBatch`; GPU compute utilization in continuous batching increases from $\sim 65\%$ to $>90\%$.
+
+#### Part 22 (Step 22): Sliding Window Attention with Attention Sink Tokens (StreamingLLM)
+- **Objective**: Enable infinite-length streaming generation with constant memory footprint and zero perplexity degradation.
+- **Bottleneck Analysis**:
+  - KV cache grows linearly $O(N)$ with sequence length. Long-running conversational agents or document streams eventually exhaust VRAM, forcing request preemption or expensive full-context re-prefills.
+  - Naive FIFO cache eviction drops initial prompt tokens, causing immediate attention collapse and loss of generation coherence.
+- **Design & Kernel Architecture**:
+  - Implement the StreamingLLM protocol in `PagedKVCache`:
+    - Dedicate the first 4 physical page blocks to **Attention Sinks** (initial prompt tokens $[0, 1, 2, 3]$), which absorb disproportionate attention mass.
+    - Maintain a rolling FIFO ring buffer of $W$ recent tokens (e.g. $W=4096$) in the remaining paged blocks.
+    - When context length exceeds $4 + W$, recycle intermediate blocks while preserving attention sinks and the active window.
+    - Update `cudaPagedAttentionBatch` to apply relative RoPE offsets dynamically matching the sliding window index.
+- **Files**: `internal/engine/kv_cache_paged.go`, `internal/device/cuda_kernels.cu`, `internal/engine/continuous_batching.go`
+- **Acceptance Criteria**: Engine streams $>100,000$ consecutive tokens per sequence with strictly constant VRAM usage; perplexity remains stable without degradation.
+
+#### Part 23 (Step 23): Native FP8 (E4M3FN / E5M2) Quantized Paged KV Cache with Per-Head Dynamic Scaling
+- **Objective**: Halve KV cache VRAM footprint and double maximum serving concurrency on modern GPUs.
+- **Bottleneck Analysis**:
+  - Storing KV caches in FP16/BF16 consumes 2 bytes per element. For large-context serving (e.g. 32k tokens), a 70B model requires $\sim 10.4\text{ GB}$ of VRAM per concurrent request, severely limiting batch size.
+- **Design & Kernel Architecture**:
+  - Implement native FP8 KV cache support in `PagedKVCache`:
+    - Support both `E4M3FN` (higher precision for attention weights) and `E5M2` (higher dynamic range for deep layers).
+    - Quantize Key and Value projections during write using dynamic per-head scale factors $s = \frac{\max(|x|)}{448.0}$.
+    - Modify `cudaPagedAttentionBatch` and Split-K FlashDecoding kernels to read 8-bit bytes directly from VRAM into shared memory, unpack via `__nv_cvt_fp8_to_halfraw2`, and multiply in half-precision Tensor Cores.
+- **Files**: `internal/engine/kv_cache_paged.go`, `internal/device/cuda_kernels.cu`, `internal/device/cuda.go`
+- **Acceptance Criteria**: KV cache memory footprint reduced by $50\%$ vs FP16; serving batch concurrency doubles with $<0.03$ perplexity delta on standard benchmarks.
+
+#### Part 24 (Step 24): Intel AMX (Advanced Matrix Extensions) TILE Acceleration for CPU Inference
+- **Objective**: Leverage dedicated hardware matrix tiles on modern Intel Xeon processors (Sapphire Rapids, Emerald Rapids, Granite Rapids) for order-of-magnitude CPU prefill acceleration.
+- **Bottleneck Analysis**:
+  - On modern server CPUs, AVX-512 VNNI reaches $\sim 2\text{ TFLOPS}$ on INT8, but Intel AMX provides dedicated hardware tile registers supporting up to $2048$ INT8 MACs or $1024$ BF16 MACs per cycle per core ($>30\text{ TFLOPS}$ per socket).
+- **Design & Kernel Architecture**:
+  - Implement AMX Tile matrix multiplication in `internal/simd/kernels_amx.c`:
+    - Request AMX permission via Linux system call `arch_prctl(ARCH_REQ_XCOMP_PERM, XFEATURE_XTILECFG)`.
+    - Configure tile registers (8 tiles of $16\times 64$ bytes) using `_tile_loadconfig`.
+    - Implement blocked GEMM inner loop with `_tile_dpbusd` (INT8) and `_tile_dpbf16ps` (BF16).
+    - Add AMX capability flags (`amx_tile`, `amx_int8`, `amx_bf16`) to CPU feature detector in `cpuinfo.go`.
+- **Files**: `internal/simd/kernels_amx.c`, `internal/simd/cpuinfo.go`, `internal/simd/simd.go`
+- **Acceptance Criteria**: CPU GEMM prefill speedup on AMX-capable Xeon hardware improves by $\ge 3.5\times$ over AVX-512 baseline.
+
+#### Part 25 (Step 25): Multi-LoRA Batch Fusion & Grouped Low-Rank Scatter-Gather Dispatch
+- **Objective**: Serve heterogeneous multi-tenant requests with distinct LoRA adapters in a single continuous batch with zero throughput penalty.
+- **Bottleneck Analysis**:
+  - Currently in `internal/engine/lora.go`, requests requiring different LoRA adapters either cannot be batched together or must execute separate sequential kernel launches per adapter, destroying Tensor Core parallelism.
+- **Design & Kernel Architecture**:
+  - Implement Batched Multi-LoRA Fusion in `cuda_lora.cu`:
+    - Pack active sequence adapter IDs into a compact batch mapping: `adapter_ids[B]`.
+    - Execute the base model projection GEMM $\mathbf{Y}_{\text{base}} = \mathbf{X} \mathbf{W}_{\text{base}}$ as a single unified batch for all sequences.
+    - Dispatch a grouped fused scatter-gather kernel for the low-rank projections:
+      $$\mathbf{Y}_i = \mathbf{Y}_{\text{base}, i} + \frac{\alpha_k}{r_k} (\mathbf{X}_i \mathbf{A}_k) \mathbf{B}_k$$
+      where $\mathbf{A}_k \in \mathbb{R}^{D \times r_k}$ and $\mathbf{B}_k \in \mathbb{R}^{r_k \times D_{\text{out}}}$ are gathered from adapter pointer arrays in parallel thread blocks.
+- **Files**: `internal/engine/lora.go`, `internal/device/cuda_lora.cu`, `internal/engine/continuous_batching.go`
+- **Acceptance Criteria**: Batching 8 distinct LoRA adapters incurs $<5\%$ latency overhead compared to a homogeneous batch with no adapters.
+
+#### Part 26 (Step 26): Persistent Grouped GEMM for Mixture of Experts (MoE)
+- **Objective**: Eliminate kernel launch overhead and warp divergence in MoE routing by fusing expert execution into a persistent work-queue grid.
+- **Bottleneck Analysis**:
+  - In `internal/device/cuda_moe.cu`, expert execution loops sequentially over active experts or launches small individual kernels per expert. For models with 8 to 64 experts (e.g. Mixtral, Qwen MoE), small per-expert token counts cause low SM occupancy and excessive launch overhead.
+- **Design & Kernel Architecture**:
+  - Implement a persistent Grouped GEMM kernel in `internal/device/cuda_moe_grouped.cu`:
+    - Sort tokens by expert ID using warp-level prefix sums into contiguous expert buckets.
+    - Launch a single persistent CUDA grid of thread blocks that pull dynamic tiles from an atomic global task queue:
+      $$\text{TaskDescriptor}\{e, \text{tile\_m}, \text{tile\_n}, \text{tile\_k}\}$$
+    - Eliminate intermediate expert barrier synchronizations; stream outputs directly into top-$k$ weighted sum accumulation.
+- **Files**: `internal/device/cuda_moe.cu`, `internal/device/cuda_moe_grouped.cu`, `internal/engine/layer_moe.go`
+- **Acceptance Criteria**: MoE forward pass latency on Mixtral 8x7B drops by $\ge 40\%$; SM compute occupancy exceeds $80\%$ across all expert counts.
+
+#### Part 27 (Step 27): Self-Speculative Early Exit with Confidence-Gated Verification
+- **Objective**: Achieve $1.8\times - 2.2\times$ speculative decoding speedup without hosting an external draft model.
+- **Bottleneck Analysis**:
+  - External speculative drafting requires loading a second model into VRAM, maintaining dual KV caches, and coordinating separate model topologies.
+- **Design & Architecture**:
+  - Implement Layer-Skip Self-Speculative Decoding in `internal/engine/speculative_self.go`:
+    - Attach an early-exit linear head to an intermediate transformer layer (e.g. Layer 8 of 32).
+    - **Draft Pass**: Forward through layers 0–8, evaluate early-exit logits, and draft $K=4$ candidate tokens with low latency.
+    - **Verification Pass**: Forward candidate tokens through the full model layers (9–31) in a single batched shot using tree attention.
+    - If early-exit confidence exceeds threshold $\tau$ ($\text{entropy}(p_{\text{early}}) < \tau$), verify and accept tokens without full model execution.
+    - Share the identical `PagedKVCache` blocks between draft and verification passes.
+- **Files**: `internal/engine/speculative_self.go`, `internal/engine/engine_cuda.go`, `internal/engine/engine_cpu.go`
+- **Acceptance Criteria**: Autoregressive decode speedup of $\ge 1.75\times$ on standard benchmarks without requiring external draft model weights or extra VRAM.
 
 ## Milestone History & Completed Work
 
