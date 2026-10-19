@@ -78,7 +78,7 @@ services:
               capabilities: [gpu]
     command: >
       --model /data/models/${MODEL:-smollm2.gguf}
-      --interactive
+      --stream
       --prompt "You are a helpful AI assistant. "
 
 networks:

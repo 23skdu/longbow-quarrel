@@ -1,4 +1,4 @@
-//go:build darwin && metal
+//go:build darwin && metal && cgo
 
 package engine
 
@@ -56,6 +56,9 @@ type metalEngine struct {
 	// Lifespan Control
 	stopChan chan struct{}
 	doneChan chan struct{}
+
+	// stopTokens is the configured stop-token set, built once at construction.
+	stopTokens map[int]struct{}
 }
 
 func (e *metalEngine) Ctx() *device.Context {

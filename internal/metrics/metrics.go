@@ -20,14 +20,26 @@ var (
 		Help: "The total number of tokens generated",
 	})
 
-	InferenceDuration = promauto.NewSummary(prometheus.SummaryOpts{
-		Name: "inference_duration_seconds",
-		Help: "Duration of inference steps",
+	// InferenceDuration is a Histogram, not a Summary: the Grafana dashboard
+	// computes P50/P95/P99 with histogram_quantile(), which needs the
+	// _bucket series that only a Histogram exposes. A Summary without
+	// explicit Objectives exports no quantile series at all, so those panels
+	// could never have returned a value. The _sum and _count series keep
+	// their names, so existing consumers are unaffected.
+	InferenceDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "inference_duration_seconds",
+		Help:    "Duration of inference steps",
+		Buckets: prometheus.DefBuckets,
 	})
 
 	GPUMemoryAllocated = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "gpu_memory_allocated_bytes",
 		Help: "Current bytes allocated on GPU",
+	})
+
+	HostMemoryAllocated = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "host_memory_allocated_bytes",
+		Help: "Current bytes allocated in host (system) memory by the inference engine",
 	})
 
 	KernelDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
@@ -404,6 +416,11 @@ func RecordInference(tokens int, duration time.Duration) {
 
 func RecordGPUMemory(bytes int64) {
 	GPUMemoryAllocated.Set(float64(bytes))
+}
+
+// RecordHostMemory publishes the engine's current host-memory usage.
+func RecordHostMemory(bytes int64) {
+	HostMemoryAllocated.Set(float64(bytes))
 }
 
 func RecordKernelDuration(name string, duration time.Duration) {

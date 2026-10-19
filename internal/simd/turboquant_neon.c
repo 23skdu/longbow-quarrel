@@ -9,6 +9,35 @@ static float horizontal_max_f32(float32x4_t v) {
     return vmaxvq_f32(v);
 }
 
+// round_half_away_neon rounds to nearest with ties going away from zero,
+// which is what C's roundf(), Go's math.Round and CUDA's roundf() all do.
+//
+// vrndnq_f32 rounds ties to EVEN, so 2.5 would become 2 while Go and CUDA
+// produce 3. That made the quantized value differ from the GPU path for
+// inputs that land exactly on a .5 boundary, and it disagreed with the
+// scalar tail of this very function, which uses roundf(). Ties are detected
+// and corrected explicitly.
+static inline float32x4_t round_half_away_neon(float32x4_t v) {
+    const float32x4_t abs_mask = vdupq_n_f32(0x7FFFFFFF);
+    const float32x4_t sign_mask = vdupq_n_f32(-0.0f);
+
+    float32x4_t v_even = vrndnq_f32(v);
+
+    // Truncate toward zero to recover the integral part and the fraction.
+    float32x4_t v_trunc = vcvtq_f32_s32(vcvtq_s32_f32(v));
+    float32x4_t v_frac = vsubq_f32(v, v_trunc);
+    float32x4_t v_absfrac = vandq_f32(v_frac, abs_mask);
+
+    // A tie is a fraction of exactly 0.5.
+    uint32x4_t v_is_tie = vceqq_f32(v_absfrac, vdupq_n_f32(0.5f));
+
+    // Away from zero is trunc + sign(v).
+    float32x4_t v_sign = vorrq_f32(vandq_f32(v, sign_mask), vdupq_n_f32(1.0f));
+    float32x4_t v_away = vaddq_f32(v_trunc, v_sign);
+
+    return vbslq_f32(v_is_tie, v_away, v_even);
+}
+
 void polar_quant_neon(const float* input, const float* rotation_matrix, int8_t* quantized, float* scale_out, float* residual, int n, int bits) {
     if (n <= 0) return;
 
@@ -54,15 +83,9 @@ void polar_quant_neon(const float* input, const float* rotation_matrix, int8_t* 
     for (; i <= n - 4; i += 4) {
         float32x4_t v_y = vld1q_f32(&rotated[i]);
         float32x4_t v_qf = vmulq_f32(v_y, v_inv_scale);
-        
-        // Round to nearest (Neon doesn't have a direct round intrinsic in ARMv7, but ARM64 has vrndnq_f32)
-#if defined(__aarch64__)
-        v_qf = vrndnq_f32(v_qf);
-#else
-        // Fallback or just round manually
-        for(int k=0; k<4; k++) rotated[i+k] = roundf(rotated[i+k] * inv_scale); 
-        // Better to just stay in generic code for tail/AVX
-#endif
+
+        v_qf = round_half_away_neon(v_qf);
+
         v_qf = vmaxq_f32(v_qf, v_min_q);
         v_qf = vminq_f32(v_qf, v_max_q);
         

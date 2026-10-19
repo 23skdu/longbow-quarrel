@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/23skdu/longbow-quarrel/internal/config"
+	"github.com/23skdu/longbow-quarrel/internal/device"
 )
 
 func TestEngine_CPUKVCache_And_MathHelpers(t *testing.T) {
@@ -95,7 +96,7 @@ func TestEngine_BatchManager_Preempt(t *testing.T) {
 }
 
 func TestEngine_Types_FreeSafety(t *testing.T) {
-	// Weights Free() safety
+	// Free() must be safe on zero values (no nil-pointer dereference) ...
 	var lw LlamaWeights
 	lw.Free()
 
@@ -116,4 +117,56 @@ func TestEngine_Types_FreeSafety(t *testing.T) {
 
 	var mlw MOELayerWeights
 	mlw.Free()
+
+	// ... and must actually release the tensors it owns. device.Tensor.Free()
+	// drops the backing slices, so a populated tensor must come back empty.
+	//
+	// The element count is read with Rows()*Cols() rather than len(Data()):
+	// Tensor.Data() returns []float32 in the CPU and Metal builds but an
+	// unsafe.Pointer in the CUDA build, so len() on it does not compile
+	// everywhere.
+	devCtx := device.NewContext()
+	defer devCtx.Free()
+
+	newT := func(rows, cols int) *device.Tensor {
+		tensor := devCtx.NewTensorFP32(rows, cols)
+		if tensor == nil {
+			t.Fatalf("NewTensorFP32(%d,%d) returned nil", rows, cols)
+		}
+		if got := tensor.Rows() * tensor.Cols(); got != rows*cols {
+			t.Fatalf("expected %d elements before Free, got %d", rows*cols, got)
+		}
+		return tensor
+	}
+
+	// Per-layer tensor lists.
+	lw2 := LlamaWeights{AttnQ: []*device.Tensor{newT(2, 2)}}
+	lw2.Free()
+	if got := releasedElementCount(lw2.AttnQ[0]); got != 0 {
+		t.Errorf("LlamaWeights.Free: expected released tensor, still holds %d elements", got)
+	}
+
+	// Scalar tensor fields.
+	mr := MOERouterWeights{GateInput: newT(2, 2)}
+	mr.Free()
+	if got := releasedElementCount(mr.GateInput); got != 0 {
+		t.Errorf("MOERouterWeights.Free: expected released tensor, still holds %d elements", got)
+	}
+
+	// Nested aggregate: MOELayerWeights frees its owned sub-structures.
+	ml := MOELayerWeights{
+		Experts: &MOEExpertWeights{FfnGateExperts: newT(2, 2)},
+		Router:  &MOERouterWeights{GateInput: newT(2, 2)},
+	}
+	ml.Free()
+	if got := releasedElementCount(ml.Experts.FfnGateExperts); got != 0 {
+		t.Errorf("MOELayerWeights.Free: expert tensor not released, holds %d elements", got)
+	}
+	if got := releasedElementCount(ml.Router.GateInput); got != 0 {
+		t.Errorf("MOELayerWeights.Free: router tensor not released, holds %d elements", got)
+	}
+
+	// Double Free must not panic or corrupt state.
+	lw2.Free()
+	ml.Free()
 }

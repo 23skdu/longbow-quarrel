@@ -340,4 +340,3 @@ func TestTokenizer_BOS_ByteBPE_Decode(t *testing.T) {
 		t.Error("expected non-empty decoded string")
 	}
 }
-

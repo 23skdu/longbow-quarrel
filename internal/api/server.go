@@ -11,6 +11,7 @@ import (
 	"github.com/23skdu/longbow-quarrel/internal/device"
 	"github.com/23skdu/longbow-quarrel/internal/engine"
 	"github.com/23skdu/longbow-quarrel/internal/logger"
+	"github.com/23skdu/longbow-quarrel/internal/metrics"
 	"github.com/23skdu/longbow-quarrel/internal/sampler"
 	"github.com/23skdu/longbow-quarrel/internal/telemetry"
 	"github.com/23skdu/longbow-quarrel/internal/vlm"
@@ -75,7 +76,15 @@ func (s *Server) HealthzEndpoint(w http.ResponseWriter, r *http.Request) {
 // Global server instance tracking memory utilization directly from the engine runtime.
 var globalServer *Server
 
-func InitServer(maxMemory int64, memCallback func() int64, e engine.Engine, t TokenizerShim) {
+// InitServer creates the REST API server and returns a mux with every
+// endpoint registered.
+//
+// It deliberately returns an *http.ServeMux instead of registering on
+// http.DefaultServeMux: mutating the global default mux makes the server
+// impossible to start more than once in a process, leaks registrations
+// between tests, and is one reason the API was never wired into any binary.
+// Callers own the returned mux and decide where to serve it.
+func InitServer(maxMemory int64, memCallback func() int64, e engine.Engine, t TokenizerShim) *http.ServeMux {
 	globalServer = &Server{
 		MaxMemory:  maxMemory,
 		UsedMemory: memCallback,
@@ -86,20 +95,23 @@ func InitServer(maxMemory int64, memCallback func() int64, e engine.Engine, t To
 	// Start resource monitor background loop
 	go globalServer.runResourceMonitor()
 
-	http.HandleFunc("/healthz", globalServer.HealthzEndpoint)
-	http.HandleFunc("/v1/completions", globalServer.CompletionsHandler)
-	http.HandleFunc("/v1/chat/completions", globalServer.ChatCompletionsHandler)
-	http.HandleFunc("/v1/adapters/load", globalServer.LoadAdapterHandler)
-	http.HandleFunc("/v1/adapters/list", globalServer.ListAdaptersHandler)
-	http.HandleFunc("/readyz", globalServer.ReadyzEndpoint)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", globalServer.HealthzEndpoint)
+	mux.HandleFunc("/v1/completions", globalServer.CompletionsHandler)
+	mux.HandleFunc("/v1/chat/completions", globalServer.ChatCompletionsHandler)
+	mux.HandleFunc("/v1/adapters/load", globalServer.LoadAdapterHandler)
+	mux.HandleFunc("/v1/adapters/list", globalServer.ListAdaptersHandler)
+	mux.HandleFunc("/readyz", globalServer.ReadyzEndpoint)
+	return mux
 }
 
+// runResourceMonitor samples engine memory usage once a second and publishes
+// it to Prometheus so the value is observable rather than discarded.
 func (s *Server) runResourceMonitor() {
 	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
 	for range ticker.C {
-		// Peak-load logging is intentionally omitted to avoid spamming the
-		// log at high load; live memory metrics are reported by Healthz.
-		_ = s.getUsedMemory()
+		metrics.RecordHostMemory(s.getUsedMemory())
 	}
 }
 

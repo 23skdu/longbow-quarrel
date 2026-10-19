@@ -83,43 +83,6 @@ func TestCPUEngine_ForwardBatch(t *testing.T) {
 	}
 }
 
-func TestCPUEngine_Sampling(t *testing.T) {
-	logits := []float32{1.0, 2.0, 5.0, 2.0, 1.0}
-
-	// Test applyTemp
-	temp := float64(0.5)
-	res := ApplyTempCPU(logits, temp)
-	if res[2] != 10.0 {
-		t.Errorf("applyTemp failed, expected 10.0, got %f", res[2])
-	}
-
-	// Test TopK
-	res = ApplyTopKCPU(logits, 2)
-	// After TopK=2, only index 2 and (one of 1,3) should be non-zero
-	count := 0
-	for _, v := range res {
-		if v > -1e9 {
-			count++
-		}
-	}
-	if count != 2 {
-		t.Errorf("applyTopK failed, expected 2 non-zero, got %d", count)
-	}
-}
-
-func TestCPUEngine_Softmax(t *testing.T) {
-	logits := []float32{0, 0, 2.0} // exp(0)=1, exp(2)=7.38
-	res := softmaxCPU(logits)
-
-	sum := float32(0)
-	for _, v := range res {
-		sum += v
-	}
-	if sum < 0.99 || sum > 1.01 {
-		t.Errorf("Softmax sum should be 1.0, got %f", sum)
-	}
-}
-
 func TestCPUEngine_Lifecycle(t *testing.T) {
 	ctx := device.NewContext()
 	e := &CPUEngine{ctx: ctx, cache: &PagedKVCache{}}

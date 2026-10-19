@@ -37,12 +37,19 @@ func RegisterEngine(name string, creator EngineCreator) {
 	engineCreators[name] = creator
 }
 
-// NewRegisteredEngine creates the best available engine implementation
+// NewRegisteredEngine creates the best available engine implementation.
+//
+// The mock engine is deliberately NOT part of the fallback chain. It used to
+// be, and because MockEngine.Infer returns `count` copies of token 42 with a
+// nil error, any engine-construction failure on a host without CUDA or Metal
+// produced confident, plausible-looking garbage instead of an error. The
+// mock remains available for tests via NewMockEngine, but it can no longer
+// be selected implicitly by a shipped binary.
 func NewRegisteredEngine(modelPath string, cfg config.Config) (Engine, error) {
 	// Priority order
-	order := []string{"metal", "cuda", "cpu", "mock"}
+	order := []string{"metal", "cuda", "cpu"}
 	if cfg.NumGPULayers == 0 {
-		order = []string{"cpu", "metal", "cuda", "mock"}
+		order = []string{"cpu", "metal", "cuda"}
 	}
 
 	var lastErr error

@@ -4,7 +4,9 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"time"
@@ -116,6 +118,44 @@ func ModelsHandler(cfg config.Config) http.HandlerFunc {
 	}
 }
 
+// maxRequestBodyBytes bounds the JSON body a client may send. Prompts are
+// small in practice, so anything larger is either a mistake or an attempt to
+// exhaust server memory. The limit is applied before decoding so an oversized
+// body is never fully read into memory.
+const maxRequestBodyBytes = 1 << 20 // 1 MiB
+
+// decodeJSONBody reads a size-limited JSON body into v. It distinguishes an
+// oversized body (413) from a malformed one (400) so clients get an
+// actionable status code.
+//
+// encoding/json.Decoder delays read errors and surfaces them as a generic
+// *json.SyntaxError, so the *http.MaxBytesError from MaxBytesReader is not
+// always recoverable with errors.As. A decode error therefore falls back to
+// checking whether ContentLength alone already exceeds the limit, and any
+// MaxBytesError still propagating is honoured directly.
+func decodeJSONBody(w http.ResponseWriter, r *http.Request, v any) error {
+	limited := http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+	dec := json.NewDecoder(limited)
+
+	err := dec.Decode(v)
+	if err == nil {
+		return nil
+	}
+
+	var maxErr *http.MaxBytesError
+	tooLarge := errors.As(err, &maxErr) ||
+		(r.ContentLength > maxRequestBodyBytes && errors.Is(err, io.EOF)) ||
+		r.ContentLength > maxRequestBodyBytes
+
+	if tooLarge {
+		http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
+		return err
+	}
+
+	http.Error(w, "Invalid request body", http.StatusBadRequest)
+	return err
+}
+
 func GenerateHandler(cfg config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -124,8 +164,7 @@ func GenerateHandler(cfg config.Config) http.HandlerFunc {
 		}
 
 		var req GenerateRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid request body", http.StatusBadRequest)
+		if err := decodeJSONBody(w, r, &req); err != nil {
 			return
 		}
 
@@ -180,6 +219,14 @@ func GenerateHandler(cfg config.Config) http.HandlerFunc {
 		startTime := time.Now()
 
 		for resp := range responseChan {
+			if resp.Error != "" {
+				// The request could not be served (the model failed to
+				// load, for example). Report it instead of returning an
+				// empty but successful completion.
+				log.Printf("Inference failed: %s", resp.Error)
+				http.Error(w, resp.Error, http.StatusInternalServerError)
+				return
+			}
 			tokensGenerated++
 			generatedText += resp.Token
 			if resp.Complete {
@@ -209,6 +256,14 @@ func StreamHandler(cfg config.Config) http.HandlerFunc {
 			return
 		}
 
+		// Read and validate the body before committing to SSE headers, so an
+		// oversized or malformed request still gets a plain JSON error status
+		// rather than a 200 with a text/event-stream body.
+		var req GenerateRequest
+		if err := decodeJSONBody(w, r, &req); err != nil {
+			return
+		}
+
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
@@ -216,12 +271,6 @@ func StreamHandler(cfg config.Config) http.HandlerFunc {
 		flusher, ok := w.(http.Flusher)
 		if !ok {
 			http.Error(w, "Streaming not supported", http.StatusInternalServerError)
-			return
-		}
-
-		var req GenerateRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid request body", http.StatusBadRequest)
 			return
 		}
 

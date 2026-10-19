@@ -45,7 +45,7 @@ COPY . .
 # Build with CGO for Metal (darwin/arm64)
 # Requires CC=o64-clang from osxcross; plain clang cannot target darwin.
 RUN if ! command -v o64-clang >/dev/null 2>&1; then echo "ERROR: o64-clang not found. Install osxcross or build natively on macOS (see header)." >&2; exit 1; fi && \
-    CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 CC=o64-clang go build -o quarrel-metal ./cmd/quarrel
+    CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 CC=o64-clang go build -tags "metal,darwin" -o quarrel-metal ./cmd/quarrel
 
 # -----------------------------------------------------------------------------
 # Runtime Stage: Artifact carrier (darwin binary cannot execute on Linux)
@@ -58,7 +58,7 @@ WORKDIR /app
 # Copy binary
 COPY --from=metal-builder /app/quarrel-metal ./quarrel
 
-CMD ["./quarrel", "--help"]
+CMD ["./quarrel", "--version"]
 
 # =============================================================================
 # Native macOS Build Instructions

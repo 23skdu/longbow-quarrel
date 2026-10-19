@@ -144,13 +144,23 @@ func (a *CUDAEngineAdapter) handleRequest(req *InferenceRequest) {
 	}()
 }
 
+// sendError delivers a completed response to the caller.
+//
+// It must *deliver* a finished inner channel on the outer channel the
+// caller is waiting on, not take one out of it: the caller does
+// `inner := <-outer` and then ranges over `inner`. The previous
+// implementation received from the outer channel, which meant the caller
+// never received anything and blocked forever.
 func (a *CUDAEngineAdapter) sendError(responseChanChan chan chan InferenceResponse, code, message string) {
+	log.Printf("[%s] %s", code, message)
+	if responseChanChan == nil {
+		return
+	}
+	inner := make(chan InferenceResponse, 1)
+	inner <- InferenceResponse{Complete: true, Error: message}
+	close(inner)
 	select {
-	case responseChan := <-responseChanChan:
-		responseChan <- InferenceResponse{
-			Complete: true,
-		}
-		close(responseChan)
+	case responseChanChan <- inner:
 	default:
 	}
 }
@@ -225,11 +235,19 @@ func (a *CUDAEngineAdapter) Close() {
 func (a *CUDAEngineAdapter) Infer(ctx context.Context, req *InferenceRequest) (<-chan chan InferenceResponse, error) {
 	responseChan := make(chan chan InferenceResponse, 1)
 
+	// The adapter delivers the inner (per-token) channel on this outer
+	// channel, so the request has to carry it. The caller waits on exactly
+	// this channel, which is why the assignment has to happen before the
+	// request is queued.
+	req.ResponseChan = responseChan
+
 	select {
 	case a.requests <- req:
 		return responseChan, nil
 	default:
-		return nil, nil
+		// The queue is full. Return an explicit error rather than a nil
+		// channel, which a caller cannot distinguish from success.
+		return nil, ErrQueueFull
 	}
 }
 

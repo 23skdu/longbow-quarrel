@@ -1,0 +1,46 @@
+# Keep the Docker build context small and reproducible. Without this, every
+# `COPY . .` ships .git, the stale 138 MB of binaries in bin/, the 29 MB
+# engine.test binary and the coverage dumps into the build context.
+#
+# NOTE: .git is excluded here, but Dockerfile.cpu stamps the version with
+# `git rev-parse --short HEAD`. That build therefore needs the repository
+# checked out with its .git directory, or the version argument passed in as
+# a build arg.
+
+.git
+.github
+.vscode
+.gitignore
+.dockerignore
+
+# Build outputs
+bin/
+dist/
+out/
+*.test
+*.exe
+quarrel
+quarrel-*
+*.so
+*.a
+*.o
+
+# Test and coverage artifacts
+*.cov.out
+cov.out
+coverage.out
+performance_profiles/
+coherence_results_*/
+coherence_verification_results.json
+testdata/
+*.bak
+
+# Python caches
+__pycache__/
+*.pyc
+
+# Editor and OS noise
+.idea/
+.vs/
+.DS_Store
+*.swp

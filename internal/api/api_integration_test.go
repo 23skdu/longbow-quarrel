@@ -34,7 +34,10 @@ func TestAPIIntegration_FailureModes(t *testing.T) {
 
 func TestInitServer_Coverage(t *testing.T) {
 	// hit the global initialization path
-	InitServer(1024, func() int64 { return 0 }, &mockEngine{}, &mockTokenizer{})
+	mux := InitServer(1024, func() int64 { return 0 }, &mockEngine{}, &mockTokenizer{})
+	if mux == nil {
+		t.Fatal("InitServer returned nil mux")
+	}
 	if globalServer == nil {
 		t.Fatal("globalServer not initialized")
 	}

@@ -66,6 +66,17 @@ jobs:
             exit 1
           fi
 
+      - name: Lint the workflow files with actionlint
+        # .github/actionlint.yaml has existed but was never invoked, so the
+        # workflows were never checked for the mistakes actionlint finds
+        # (a `needs:` entry that names a job which does not exist, an
+        # expression that references an undefined context, ...).
+        run: |
+          go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 \
+            -config-file .github/actionlint.yaml \
+            -color \
+            .github/workflows/*.yml
+
       - name: Run go vet
         run: go vet ./...
 
@@ -73,6 +84,16 @@ jobs:
         # Fails when a test that is not on scripts/vacuous_tests_allowlist.txt
         # has no assertion at all. The allowlist only ever shrinks.
         run: go run ./scripts/vacuous_tests
+
+      - name: Check for duplicate package-level declarations
+        # A duplicate top-level declaration only breaks the build when two
+        # files that declare the same name land in the same package. With
+        # build-tag-selected files that can hide in a configuration nobody
+        # builds locally -- the darwin+metal combination had a duplicate
+        # ErrModelSwapped, and a `!amd64` clause in internal/device/cpu.go
+        # pulled that file in alongside metal.go on Apple Silicon, breaking
+        # the macOS Metal build while every Linux build stayed green.
+        run: ./scripts/dupcheck.sh
 
   # ===== BUILD AND BASIC TESTS =====
   build:
@@ -108,6 +129,16 @@ jobs:
           GOMEMLIMIT: 1GiB
         run: go test -race -timeout 600s -count=1 ./internal/engine/... ./internal/api/... ./internal/metrics/... ./internal/sampler/... ./internal/tokenizer/...
 
+      - name: Race detector on the remaining internal packages
+        # The job above only covered 5 of the 19 internal packages, so a race
+        # introduced in arrow_client, device, simd, vlm, vector, gguf,
+        # ollama, mathx, config, cpu, logger, models, telemetry or promtest
+        # would not be caught. README and docs/features.md claim "0 data
+        # races across all packages", so the whole tree is gated here.
+        env:
+          GOMEMLIMIT: 2GiB
+        run: go test -race -timeout 900s -count=1 ./internal/arrow_client/... ./internal/device/... ./internal/simd/... ./internal/vlm/... ./internal/vector/... ./internal/gguf/... ./internal/ollama/... ./internal/mathx/... ./internal/config/... ./internal/cpu/... ./internal/logger/... ./internal/models/... ./internal/telemetry/... ./internal/promtest/...
+
   # ===== NESTED WEBUI MODULE =====
   # cmd/webui is its own Go module, so `go build ./...` at the repo root never
   # touches it. Without this job it has no CI coverage at all.
@@ -131,12 +162,11 @@ jobs:
           go build -tags webui ./...
           go vet ./...
           go test -count=1 ./...
-          # Most of cmd/webui/handlers is behind `//go:build webui`, so the
-          # default-tag run above would not type-check it. Also vet/test with
-          # the tag, excluding tests/e2e: that package references
-          # handlers.Config / handlers.ModelInfo, which no longer exist and
-          # make it fail to compile (pre-existing, owner-owned).
-          pkgs=$(go list ./... | grep -v '/tests/e2e')
+          # Most of cmd/webui is behind `//go:build webui`, so the package
+          # list MUST be computed with the same tag: `go list ./...` without
+          # it returns only cmd/webui/engine, which has no test files, and
+          # the whole job silently tests nothing.
+          pkgs=$(go list -tags webui ./...)
           go vet -tags webui $pkgs
           go test -count=1 -tags webui $pkgs
 
@@ -284,7 +314,56 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: fuzz-corpus-${{ matrix.target }}-${{ matrix.duration }}
-          path: testdata/fuzz/
+          # The corpus is written next to the fuzz target, i.e.
+          # internal/engine/testdata/fuzz/<Target>/. The previous path
+          # (testdata/fuzz/ at the repository root) did not exist, so
+          # nothing was ever uploaded.
+          path: internal/engine/testdata/fuzz/
+          if-no-files-found: warn
+
+  # ===== AVX-512 COMPILE & TEST GATE =====
+  # The AVX-512 kernels live behind `//go:build ... && avx512`. No build
+  # target, Dockerfile or job used to pass that tag, so ~1,100 lines of
+  # intrinsics were never compiled, vetted or tested -- and `make
+  # simd-avx512` produced a byte-identical binary to the default build.
+  #
+  # The job compiles and vets the tag everywhere, and runs the simd tests
+  # under it. The tests are skipped on a runner without AVX-512 (the Go
+  # runtime would otherwise SIGILL), but the compile is what matters most:
+  # it catches a broken intrinsic immediately.
+  avx512:
+    name: AVX-512 Compile & Test
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Compile and vet with the avx512 tag
+        run: |
+          go build -tags avx512 ./...
+          go vet -tags avx512 ./...
+
+      - name: Check the AVX-512 kernels are actually linked in
+        run: |
+          go build -tags avx512 -o "${RUNNER_TEMP}/quarrel-avx512" ./cmd/quarrel
+          if ! go tool nm "${RUNNER_TEMP}/quarrel-avx512" | grep -q "dot_q4_k_vnni\|dot_q8_0_vnni"; then
+            echo "::error::the AVX-512/VNNI kernels are not present in the -tags avx512 binary"
+            exit 1
+          fi
+          echo "AVX-512/VNNI kernels are linked in."
+
+      - name: Run the simd tests under the avx512 tag
+        # The intrinsics raise SIGILL on a CPU without AVX-512, so the
+        # tests are only meaningful on a capable runner. The compile above
+        # is the gate; this is a bonus when the hardware allows it.
+        if: runner.arch == 'X64'
+        continue-on-error: true
+        run: go test -tags avx512 -count=1 ./internal/simd/...
 
   # ===== BENCHMARK REGRESSION GATE =====
   # Runs the same benchmarks on the base commit and on this commit, back to
@@ -308,13 +387,24 @@ jobs:
         run: |
           BASE_SHA="${{ github.event.pull_request.base.sha || github.event.before }}"
           if [ -z "${BASE_SHA}" ] || [ "${BASE_SHA}" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
-            echo "No usable base commit for this event; skipping the gate."
+            echo "::warning::No usable base commit for this event; the benchmark gate cannot run."
             echo "run=false" >> "${GITHUB_OUTPUT}"
           else
             echo "Comparing against ${BASE_SHA}"
             echo "run=true" >> "${GITHUB_OUTPUT}"
             echo "sha=${BASE_SHA}" >> "${GITHUB_OUTPUT}"
           fi
+
+      - name: Report a skipped benchmark gate
+        # Previously the whole job was skipped silently when there was no
+        # base commit (a first push to a branch, a force push, some
+        # schedules), and the job still reported success. A gate that
+        # cannot run is not a gate, so the job now says so explicitly.
+        if: steps.base.outputs.run != 'true'
+        run: |
+          echo "::warning::The benchmark regression gate was SKIPPED because no base commit was available."
+          echo "::warning::Performance regressions are NOT being detected for this event."
+          echo "SKIPPED (no base commit)"
 
       - name: Measure base benchmarks
         if: steps.base.outputs.run == 'true'
@@ -420,76 +510,13 @@ jobs:
           flags: unittests
           name: codecov-umbrella
 
-      - name: Verify Core Package Coverage Threshold (80%)
-        run: |
-          set -euo pipefail
-          echo "Validating minimum 80% coverage on core packages..."
-          PKGS=(
-            "./internal/sampler/..."
-            "./internal/simd/..."
-            "./internal/tokenizer/..."
-            "./internal/metrics/..."
-            "./internal/vlm/..."
-            "./internal/gguf/..."
-            "./internal/api/..."
-            "./internal/vector/..."
-          )
-          FAILED=0
-          for pkg in "${PKGS[@]}"; do
-            COV=$(go test -cover -timeout 180s -count=1 "${pkg}" 2>&1 | grep -o 'coverage: [0-9.]*%' | awk '{print $2}' | tr -d '%' || true)
-            if [ -z "${COV}" ]; then
-              echo "::error::${pkg} produced no coverage result"
-              FAILED=1
-              continue
-            fi
-            echo "Package ${pkg}: ${COV}%"
-            if [ "$(awk -v c="${COV}" 'BEGIN { print (c < 80.0) }')" = "1" ]; then
-              echo "::error::Package ${pkg} coverage (${COV}%) is below required 80% threshold!"
-              FAILED=1
-            fi
-          done
-          if [ "${FAILED}" -ne 0 ]; then
-            echo "Coverage verification failed."
-            exit 1
-          fi
-          echo "All core packages meet or exceed the 80% coverage threshold."
-
-      - name: Verify coverage ratchet floors
-        # Packages below 80% are held to a floor instead: coverage may rise
-        # freely but may not drop. Floors sit a few points under the measured
-        # baseline so runner noise cannot flip the gate red.
-        # Measured 2026-09 (must stay in sync with scripts/run_all_tests.sh):
-        #   engine 50.1, device 73.5, config 78.0, arrow_client 78.8, ollama 91.1
-        run: |
-          set -euo pipefail
-          ENTRIES=(
-            "./internal/engine/...:47.0"
-            "./internal/device/...:70.0"
-            "./internal/config/...:75.0"
-            "./internal/arrow_client/...:75.0"
-            "./internal/ollama/...:87.0"
-          )
-          FAILED=0
-          for entry in "${ENTRIES[@]}"; do
-            pkg="${entry%:*}"
-            floor="${entry##*:}"
-            COV=$(go test -cover -timeout 240s -count=1 "${pkg}" 2>&1 | grep -o 'coverage: [0-9.]*%' | awk '{print $2}' | tr -d '%' || true)
-            if [ -z "${COV}" ]; then
-              echo "::error::${pkg} produced no coverage result"
-              FAILED=1
-              continue
-            fi
-            if [ "$(awk -v c="${COV}" -v f="${floor}" 'BEGIN { print (c < f) }')" = "1" ]; then
-              echo "::error::Package ${pkg} coverage (${COV}%) fell below its floor (${floor}%)"
-              FAILED=1
-            else
-              echo "Package ${pkg}: ${COV}% (floor ${floor}%)"
-            fi
-          done
-          if [ "${FAILED}" -ne 0 ]; then
-            exit 1
-          fi
-          echo "All ratchet floors satisfied."
+      - name: Verify the coverage gates
+        # Both the 80% threshold and the ratchet floors are derived from the
+        # coverage profile that was already produced above, so the test suite
+        # is not run a second and third time, and no threshold depends on
+        # parsing "go test -cover" output (which silently took only the first
+        # match, and turned a failed test run into an empty string).
+        run: ./scripts/coverage_gate.sh coverage.out
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v7
@@ -684,7 +711,7 @@ jobs:
   notify:
     name: Notify Results
     runs-on: ubuntu-latest
-    needs: [lint, build, webui, metal-build, metal-tests, coverage, bench-gate, benchmarks, security]
+    needs: [lint, build, webui, metal-build, metal-tests, coverage, bench-gate, benchmarks, security, avx512, cuda-compile, docker, compose-lint, ghcr-publish, build-artifacts, release-candidate, fuzz-tests]
     if: always()
 
     steps:

@@ -21,26 +21,44 @@ import (
 )
 
 var (
-	port           = flag.Int("port", 8080, "HTTP server port")
-	metricsPort    = flag.Int("metrics-port", 9090, "Prometheus metrics port")
-	host           = flag.String("host", "0.0.0.0", "Host to bind to")
-	apiKey         = flag.String("api-key", "", "API key for authentication")
-	allowedOrigins = flag.String("allowed-origins", "", "Comma-separated list of allowed CORS origins")
+	port           = flag.Int("port", 0, "HTTP server port (default 8080, or $WEBUI_PORT)")
+	metricsPort    = flag.Int("metrics-port", 0, "Prometheus metrics port (default 9090, or $WEBUI_METRICS_PORT)")
+	host           = flag.String("host", "", "Host to bind to (default 0.0.0.0, or $WEBUI_HOST)")
+	apiKey         = flag.String("api-key", "", "API key for authentication (or $WEBUI_API_KEY)")
+	allowedOrigins = flag.String("allowed-origins", "", "Comma-separated list of allowed CORS origins (or $WEBUI_ALLOWED_ORIGINS)")
 )
 
 func main() {
 	flag.Parse()
 
-	cfg := config.Config{
-		Port:           *port,
-		MetricsPort:    *metricsPort,
-		Host:           *host,
-		APIKey:         *apiKey,
-		AllowedOrigins: parseOrigins(*allowedOrigins),
-	}
+	// Flags win over the environment; the environment wins over the
+	// defaults. Dockerfile.webui and docker-compose.webui.yml set
+	// WEBUI_* variables, but nothing read them, so WEBUI_API_KEY silently
+	// produced an unauthenticated server.
+	cfg := config.DefaultConfig()
+	cfg.ApplyEnv()
 
-	log.Printf("Starting Longbow-Quarrel WebUI v%s on %s:%d", handlers.Version, cfg.Host, *port)
-	log.Printf("Metrics available at http://%s:%d/metrics", cfg.Host, *metricsPort)
+	// A flag that was explicitly provided overrides the environment.
+	flag.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "port":
+			cfg.Port = *port
+		case "metrics-port":
+			cfg.MetricsPort = *metricsPort
+		case "host":
+			cfg.Host = *host
+		case "api-key":
+			cfg.APIKey = *apiKey
+		case "allowed-origins":
+			cfg.AllowedOrigins = config.SplitOrigins(*allowedOrigins)
+		}
+	})
+
+	log.Printf("Starting Longbow-Quarrel WebUI v%s on %s:%d", handlers.Version, cfg.Host, cfg.Port)
+	log.Printf("Metrics available at http://%s:%d/metrics", cfg.Host, cfg.MetricsPort)
+	if cfg.APIKey == "" {
+		log.Printf("WARNING: no API key configured (set -api-key or $%s); the API is unauthenticated", config.EnvAPIKey)
+	}
 
 	if err := templates.InitTemplates(); err != nil {
 		log.Fatalf("Failed to initialize templates: %v", err)
@@ -88,7 +106,7 @@ func main() {
 	mux.Handle("/ws", handlers.WebSocketHandler(cfg))
 
 	server := &http.Server{
-		Addr:    fmt.Sprintf("%s:%d", cfg.Host, *port),
+		Addr:    fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
 		Handler: mux,
 	}
 
@@ -107,42 +125,4 @@ func main() {
 
 	<-ctx.Done()
 	log.Println("Server stopped")
-}
-
-func parseOrigins(origins string) []string {
-	if origins == "" {
-		return []string{}
-	}
-	var result []string
-	for _, origin := range splitString(origins, ',') {
-		if trimmed := trimSpace(origin); trimmed != "" {
-			result = append(result, trimmed)
-		}
-	}
-	return result
-}
-
-func splitString(s string, sep byte) []string {
-	var result []string
-	start := 0
-	for i := 0; i < len(s); i++ {
-		if s[i] == sep {
-			result = append(result, s[start:i])
-			start = i + 1
-		}
-	}
-	result = append(result, s[start:])
-	return result
-}
-
-func trimSpace(s string) string {
-	start := 0
-	end := len(s)
-	for start < end && (s[start] == ' ' || s[start] == '\t' || s[start] == '\n' || s[start] == '\r') {
-		start++
-	}
-	for end > start && (s[end-1] == ' ' || s[end-1] == '\t' || s[end-1] == '\n' || s[end-1] == '\r') {
-		end--
-	}
-	return s[start:end]
 }

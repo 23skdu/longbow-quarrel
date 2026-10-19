@@ -420,4 +420,3 @@ func TestResolveModelPath_UnreadableManifest(t *testing.T) {
 		t.Fatal("expected error reading directory as file")
 	}
 }
-

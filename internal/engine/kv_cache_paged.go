@@ -1362,4 +1362,3 @@ func (c *PagedKVCache) RegisterMemoryGovernor(gov *device.MemoryGovernor) {
 		_, _ = c.OffloadLRU()
 	})
 }
-

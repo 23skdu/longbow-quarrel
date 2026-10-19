@@ -38,8 +38,12 @@ func TestPagedKVCache_StreamingLLM_AttentionSinksAndWindow(t *testing.T) {
 
 	k := ctx.NewTensorFP32(1, 2*64)
 	v := ctx.NewTensorFP32(1, 2*64)
-	k.LoadFrom(make([]float32, 2*64))
-	v.LoadFrom(make([]float32, 2*64))
+	if err := k.LoadFrom(make([]float32, 2*64)); err != nil {
+		t.Fatalf("failed to seed key tensor: %v", err)
+	}
+	if err := v.LoadFrom(make([]float32, 2*64)); err != nil {
+		t.Fatalf("failed to seed value tensor: %v", err)
+	}
 
 	var initialSinkBlocks []int32
 
@@ -113,8 +117,12 @@ func TestPagedKVCache_StreamingLLM_InfiniteStreamStability(t *testing.T) {
 
 	k := ctx.NewTensorFP32(1, 32)
 	v := ctx.NewTensorFP32(1, 32)
-	k.LoadFrom(make([]float32, 32))
-	v.LoadFrom(make([]float32, 32))
+	if err := k.LoadFrom(make([]float32, 32)); err != nil {
+		t.Fatalf("failed to seed key tensor: %v", err)
+	}
+	if err := v.LoadFrom(make([]float32, 32)); err != nil {
+		t.Fatalf("failed to seed value tensor: %v", err)
+	}
 
 	// Stream 2,000 consecutive tokens without OOM
 	for pos := 0; pos < 2000; pos++ {

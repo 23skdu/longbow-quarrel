@@ -60,12 +60,41 @@ Parallel outer-row goroutines used when `rowsA * colsB >= 1024`.
 
 ## 5. TurboQuant SIMD Acceleration (AVX-512, AVX2 & NEON)
 
-| Operation | Dimension | Pure Go Scalar | Vectorized SIMD | Speedup |
-|-----------|-----------|----------------|-----------------|---------|
-| **PolarQuant** | $d = 128$ | 144.1 μs | 22.4 μs | **6.4x** |
-| **Inverse Rotation ($R^T \cdot \mathbf{r}_y$)** | $d = 128$ | 98.6 μs | 8.1 μs | **12.1x** |
-| **QJL Transform** | $m=32, d=128$ | 13.4 μs | 2.1 μs | **6.3x** |
-| **Full TurboQuant Encode** | $d = 128$ | 256.1 μs | 32.6 μs | **7.8x** |
+> **Status: rewritten October 2026.** The table previously published here was
+> not reproducible: the vectorized path did not exist. The three Go
+> implementations of `PolarQuantSIMD` were pure Go, and the C kernels
+> (`polar_quant_avx512`, `polar_quant_avx2`, `polar_quant_neon`,
+> `qjl_transform_*`) were never referenced from any Go file. The numbers
+> below are the actual measured ones; see
+> [nextsteps.md](nextsteps.md) Step 33.
+
+The C kernels are now dispatched at runtime from
+`internal/simd/turboquant_simd_{amd64,arm64,generic}.go`, guarded by CPU
+feature detection (`HasAVX512()`, `HasAVX2()`), with a canonical pure-Go
+reference in `internal/simd/turboquant.go` as the fallback.
+
+Measured with `go test -bench PolarQuant -benchmem ./internal/simd/` on a
+12th Gen Intel Core i7-12650H (AVX2, no AVX-512), $n = 256$, 4-bit:
+
+| Operation | Pure Go reference | Vectorized SIMD | Speedup |
+|-----------|-------------------|-----------------|---------|
+| **PolarQuant (rotate + quantize + residual)** | 85,848 ns/op | 11,377 ns/op | **7.5x** |
+
+Allocations drop from 4 to 3 per call (3,328 B/op → 1,284 B/op).
+
+Two caveats:
+
+- The AVX-512 kernel is **not** exercised on this host (the CPU lacks
+  `avx512f`), so no AVX-512 figure is published. `HasAVX512()` gates the call
+  because the kernel is compiled with `#pragma GCC target("avx512f,...")` and
+  would raise SIGILL otherwise.
+- The accelerated kernels use fused multiply-add, so their last-ULP results
+  differ slightly from the pure-Go reference. The quantized output can
+  therefore differ by one level where the pre-rounding value lands exactly on
+  a `.5` boundary. `internal/simd/turboquant_parity_test.go` and
+  `internal/device/turboquant_parity_test.go` pin the semantics that matter
+  (the clamp, and the residual being in the original space, matching the CUDA
+  `turboquant_encode_kernel`).
 
 ---
 

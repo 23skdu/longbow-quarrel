@@ -4,37 +4,12 @@ package engine
 
 import (
 	"math"
-	"math/rand"
 	"os"
 	"testing"
 
 	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
 )
-
-func TestRMSNormCPUWrapper(t *testing.T) {
-	input := []float32{1, 2, 3, 4}
-	weight := []float32{1, 1, 1, 1}
-	result := RMSNormCPU(input, weight, 1e-5)
-	if len(result) != 4 {
-		t.Fatalf("expected 4, got %d", len(result))
-	}
-	sum := float32(0)
-	for _, v := range result {
-		sum += v * v
-	}
-	meanSq := sum / 4
-	if math.Abs(float64(meanSq-1)) > 1e-4 {
-		t.Errorf("RMSNorm output mean^2=%f, expected ~1", meanSq)
-	}
-}
-
-func TestRMSNormCPUEmpty(t *testing.T) {
-	result := RMSNormCPU(nil, nil, 1e-5)
-	if len(result) != 0 {
-		t.Error("expected empty result")
-	}
-}
 
 func TestMatMulVecWrapper(t *testing.T) {
 	matrix := []float32{1, 2, 3, 4}
@@ -65,88 +40,6 @@ func TestMatMulVecEmpty(t *testing.T) {
 	result := matMulVec([]float32{}, []float32{1})
 	if len(result) != 0 {
 		t.Error("expected empty result")
-	}
-}
-
-func TestSigmoid(t *testing.T) {
-	tests := []struct {
-		input    float32
-		expected float32
-	}{
-		{0, 0.5},
-		{1, 0.7310586},
-		{-1, 0.2689414},
-		{30, 1},
-		{-30, 0},
-		{100, 1},
-		{-100, 0},
-	}
-	for _, tc := range tests {
-		got := Sigmoid(tc.input)
-		if math.Abs(float64(got-tc.expected)) > 1e-5 {
-			t.Errorf("sigmoid(%f) = %f, want %f", tc.input, got, tc.expected)
-		}
-	}
-}
-
-func TestApplyTopPCPU(t *testing.T) {
-	logits := []float32{1.0, 2.0, 3.0, 4.0}
-	result := ApplyTopPCPU(logits, 0.9)
-	if len(result) != 4 {
-		t.Fatalf("expected 4, got %d", len(result))
-	}
-	for _, v := range result {
-		if math.IsNaN(float64(v)) {
-			t.Errorf("NaN in result: %v", result)
-		}
-	}
-	if math.IsInf(float64(result[0]), 1) || math.IsInf(float64(result[1]), 1) || math.IsInf(float64(result[2]), 1) || math.IsInf(float64(result[3]), 1) {
-		t.Errorf("unexpected +Inf in first entries: %v", result)
-	}
-}
-
-func TestApplyTopPCPUEmpty(t *testing.T) {
-	result := ApplyTopPCPU([]float32{}, 0.9)
-	if len(result) != 0 {
-		t.Error("expected empty")
-	}
-}
-
-func TestApplyTopPCPUSingle(t *testing.T) {
-	logits := []float32{5.0}
-	result := ApplyTopPCPU(logits, 0.9)
-	if len(result) != 1 {
-		t.Fatalf("expected 1, got %d", len(result))
-	}
-	// Single element's probability (1.0) exceeds p=0.9 immediately, so it gets masked
-	if !math.IsInf(float64(result[0]), -1) {
-		t.Log("single-element top-p: element is masked when prob exceeds p threshold")
-	}
-}
-
-func TestSampleFromDistCPU(t *testing.T) {
-	probs := []float32{0.1, 0.2, 0.3, 0.4}
-	rng := rand.New(rand.NewSource(42))
-	idx := SampleFromDistCPU(probs, rng)
-	if idx < 0 || idx >= 4 {
-		t.Errorf("sample index %d out of range", idx)
-	}
-}
-
-func TestSampleFromDistCPUDeterministic(t *testing.T) {
-	probs := []float32{1.0, 0.0, 0.0}
-	rng := rand.New(rand.NewSource(0))
-	idx := SampleFromDistCPU(probs, rng)
-	if idx != 0 {
-		t.Errorf("with prob[0]=1.0, expected index 0, got %d", idx)
-	}
-}
-
-func TestSampleFromDistCPUEmpty(t *testing.T) {
-	rng := rand.New(rand.NewSource(0))
-	idx := SampleFromDistCPU([]float32{}, rng)
-	if idx != -1 {
-		t.Errorf("expected -1 for empty, got %d", idx)
 	}
 }
 
@@ -196,70 +89,6 @@ func TestContains(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("contains(%q, %q) = %v, want %v", tc.s, tc.substr, got, tc.want)
 		}
-	}
-}
-
-func TestApplyTempCPU(t *testing.T) {
-	logits := []float32{1.0, 2.0, 3.0}
-	result := ApplyTempCPU(logits, 0.5)
-	if len(result) != 3 {
-		t.Fatalf("expected 3, got %d", len(result))
-	}
-	if result[0] != 2.0 || result[1] != 4.0 || result[2] != 6.0 {
-		t.Errorf("applyTempCPU(0.5) = %v, want [2, 4, 6]", result)
-	}
-}
-
-func TestApplyTopKCPU(t *testing.T) {
-	logits := []float32{1.0, 5.0, 2.0, 4.0, 3.0}
-	orig := make([]float32, len(logits))
-	copy(orig, logits)
-	result := ApplyTopKCPU(logits, 3)
-	// Top 3 values: 5.0(idx1), 4.0(idx3), 3.0(idx4)
-	// Bottom 2: 1.0(idx0), 2.0(idx2) should be -Inf
-	expectedInf := []int{0, 2}
-	for _, idx := range expectedInf {
-		if !math.IsInf(float64(result[idx]), -1) {
-			t.Errorf("element %d should be -Inf after top-3", idx)
-		}
-	}
-	expectedKeep := []int{1, 3, 4}
-	for _, idx := range expectedKeep {
-		if math.IsInf(float64(result[idx]), -1) {
-			t.Errorf("top-3 element %d should not be -Inf", idx)
-		}
-	}
-	_ = orig
-}
-
-func TestApplyTopKCPUFull(t *testing.T) {
-	logits := []float32{1, 2, 3}
-	result := ApplyTopKCPU(logits, 10)
-	if len(result) != 3 {
-		t.Fatalf("expected 3, got %d", len(result))
-	}
-}
-
-func TestApplyTopKCPUZero(t *testing.T) {
-	logits := []float32{1, 2, 3}
-	result := ApplyTopKCPU(logits, 0)
-	if len(result) != 3 {
-		t.Fatalf("expected 3, got %d", len(result))
-	}
-}
-
-func TestSoftmaxCPU(t *testing.T) {
-	logits := []float32{1.0, 2.0, 3.0}
-	probs := softmaxCPU(logits)
-	if len(probs) != 3 {
-		t.Fatalf("expected 3, got %d", len(probs))
-	}
-	sum := float64(0)
-	for _, p := range probs {
-		sum += float64(p)
-	}
-	if math.Abs(sum-1.0) > 1e-5 {
-		t.Errorf("softmax sum = %f, want 1.0", sum)
 	}
 }
 

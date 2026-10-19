@@ -1,4 +1,8 @@
-//go:build darwin && metal
+//go:build darwin && metal && cgo
+
+// This file calls Context.AllReduce, which is defined in metal.go -- a cgo
+// file. The `cgo` constraint is therefore required: without it a darwin build
+// with CGO_ENABLED=0 selects the CPU Context and fails to compile.
 
 package device
 

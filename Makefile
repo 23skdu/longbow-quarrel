@@ -36,7 +36,9 @@ CUDA_PATH ?= /usr/local/cuda
 TPU_PATH ?= /usr/local/tpu
 
 # SIMD options (auto-detect unless specified)
-SIMD_LEVEL ?= auto  # auto, avx512, avx2, scalar
+# SIMD_LEVEL and the SIMD_TAGS_* table live with the simd-* build targets
+# further down; `auto` compiles AVX-512 kernels only when this host reports
+# avx512f.
 
 # =============================================================================
 # Build Targets
@@ -49,8 +51,9 @@ build: cpu
 cpu: cpu-linux-amd64 cpu-linux-arm64
 
 cpu-linux-amd64:
-	@echo "Building $(BINARY_NAME) for linux/amd64 (CPU)..."
-	$(GO) build -ldflags "$(LDFLAGS) -X main.Version=$(VERSION) -X main.BuildTime=$(BUILD_TIME)" \
+	@echo "Building $(BINARY_NAME) for linux/amd64 (CPU, SIMD_LEVEL=$(SIMD_LEVEL))..."
+	CGO_ENABLED=1 $(GO) build -tags "$(SIMD_TAGS)" \
+		-ldflags "$(LDFLAGS) -X main.Version=$(VERSION) -X main.BuildTime=$(BUILD_TIME)" \
 		-o $(BIN_DIR)/$(BINARY_NAME)-linux-amd64 ./cmd/quarrel
 
 cpu-linux-arm64:
@@ -113,21 +116,35 @@ tpu-xla:
 # SIMD-specific builds (x86 with AVX512/AVX2 fallbacks)
 # =============================================================================
 
-# AVX-512 build (will auto-detect and fallback to AVX2 or scalar at runtime)
+# SIMD_LEVEL selects the CPU SIMD kernel set. "auto" enables AVX-512 only
+# when the *build host* advertises avx512f; override to force a level.
+#   auto (default) | avx512 | avx2 | scalar
+SIMD_LEVEL ?= auto
+
+# Resolve the concrete Go build tags for the requested SIMD level.
+# `avx512` is a real constraint in internal/simd: without it the package
+# compiles simd_default.go, which is the scalar reference implementation.
+SIMD_TAGS_avx512 := avx512
+SIMD_TAGS_avx2   :=
+SIMD_TAGS_scalar :=
+SIMD_TAGS_auto   := $(shell grep -qw avx512f /proc/cpuinfo 2>/dev/null && echo avx512)
+SIMD_TAGS        := $(SIMD_TAGS_$(SIMD_LEVEL))
+
+# AVX-512 build. Requires CGO (the kernels are C intrinsics).
 simd-avx512:
-	@echo "Building $(BINARY_NAME) with AVX-512 (auto-fallback to AVX2/scalar)..."
-	CGO_ENABLED=1 GOOS=linux GOARCH=amd64 $(GO) build -tags cgo \
+	@echo "Building $(BINARY_NAME) with AVX-512..."
+	CGO_ENABLED=1 GOOS=linux GOARCH=amd64 $(GO) build -tags "cgo avx512" \
 		-ldflags "$(LDFLAGS) -X main.Version=$(VERSION) -X main.BuildTime=$(BUILD_TIME)" \
-		-o $(BIN_DIR)/$(BINARY_NAME)-linux-amd64-simd ./cmd/quarrel
+		-o $(BIN_DIR)/$(BINARY_NAME)-linux-amd64-avx512 ./cmd/quarrel
 
 # Force AVX2 only (no AVX512)
 simd-avx2:
 	@echo "Building $(BINARY_NAME) with AVX2..."
-	DISABLE_AVX512=1 CGO_ENABLED=1 GOOS=linux GOARCH=amd64 $(GO) build -tags cgo \
+	CGO_ENABLED=1 GOOS=linux GOARCH=amd64 $(GO) build -tags cgo \
 		-ldflags "$(LDFLAGS) -X main.Version=$(VERSION) -X main.BuildTime=$(BUILD_TIME)" \
 		-o $(BIN_DIR)/$(BINARY_NAME)-linux-amd64-avx2 ./cmd/quarrel
 
-# Pure scalar (no SIMD)
+# Pure scalar (no SIMD, no CGO)
 simd-scalar:
 	@echo "Building $(BINARY_NAME) with scalar fallbacks only..."
 	CGO_ENABLED=0 $(GO) build -ldflags "$(LDFLAGS) -X main.Version=$(VERSION) -X main.BuildTime=$(BUILD_TIME)" \

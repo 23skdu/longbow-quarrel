@@ -86,7 +86,7 @@ WORKDIR /app
 
 COPY --from=tpu-builder /app/quarrel-tpu ./quarrel
 
-CMD ["./quarrel", "--help"]
+CMD ["./quarrel", "--version"]
 
 # =============================================================================
 # Alternative: Cloud TPU Build

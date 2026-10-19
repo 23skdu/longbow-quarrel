@@ -6,6 +6,33 @@
 unreleased engine, CI and dependency work — see [docs/nextsteps.md](docs/nextsteps.md)
 for what has landed and what is still planned.
 
+> ### ⚠️ Known state of `main`
+>
+> A full-tree audit of `main` (October 2026) found that the project did **not**
+> ship a working CPU binary, its CI `lint` job was **red**, the
+> OpenAI-compatible REST API was **never started**, and the macOS Metal build
+> was **broken by a duplicate declaration**. All of that has now been fixed —
+> see
+> [docs/nextsteps.md — Phase 6 (Steps 28–48)](docs/nextsteps.md#phase-6-ship-it-audit--wiring-dead-code--correctness-gaps-target-v040--priority-p0)
+> for the full list and what is still outstanding.
+>
+> **Fixed so far:** `make cpu` builds a working CPU binary; `golangci-lint` is
+> clean; `go test -tags avx512` passes (it used to SIGILL); `go vet -tags cuda`
+> passes (it used to be a compile error); the WebUI test suite (including e2e)
+> runs in CI instead of being silently skipped; the WebUI's inference
+> endpoints work (they used to hang on every backend); the REST API is served
+> on `-api-addr`; the `WEBUI_*` environment variables are honoured; the macOS
+> Metal build compiles again; stop tokens are actually honoured; the prefix
+> cache no longer attaches empty KV blocks; and the TurboQuant SIMD kernels
+> are actually called (7.5x faster) — which also surfaced a CPU/GPU
+> divergence in the KV-cache encoder.
+>
+> **Still outstanding:** `internal/engine` coverage is ~63% (up from 51%), a
+> number of implemented features are still not wired into any shipped binary
+> (the distributed/Arrow Flight stack, speculative decoding, the Jinja2 prompt
+> templates, OTEL, CUDA Graphs and the multi-GPU TP/PP engine), and several
+> documented performance numbers remain unreproducible.
+
 High-performance, memory-efficient LLM inference engine written in Go with native GPU acceleration (Apple Silicon Metal, NVIDIA CUDA) and optimized CPU SIMD vectorization (AVX-512, AVX2, ARM NEON).
 
 ---
@@ -14,7 +41,7 @@ High-performance, memory-efficient LLM inference engine written in Go with nativ
 
 | Component | Version | Notes |
 |---|---|---|
-| Go | 1.27+ | `go.mod` declares `go 1.27.0` |
+| Go | 1.27+ | `go.mod` declares `go 1.27.2` |
 | CUDA (NVIDIA path) | 12.9 | Driver ≥ 575.51.03, or ≥ 525.60.13 with minor-version compatibility |
 | cuDNN | 9 | Package name `libcudnn9-cuda-12` tracks the CUDA 12 series |
 | Alpine (CPU/metal images) | 3.24 | |
@@ -36,12 +63,12 @@ see [docs/dependencies.md](docs/dependencies.md).
 
 - **Zero-Copy Quantized Inference (RAM Exhaustion & OOM Elimination):** Direct matrix-vector dot products over memory-mapped quantized weights (`Q8_0`, `Q4_K`, `Q6_K`) and on-demand token embedding lookups. Slashes CPU heap memory by **99.9%** (from 17.9 GB down to < 20 MB for a 4B parameter model), allowing large models to run smoothly without disk swapping or OOM crashes.
 - **Partial GPU Layer Offloading (`-ngl` / `-gpu-layers`):** Seamlessly split transformer layers across GPU VRAM and CPU host RAM with automatic activation roundtripping. Run models that exceed your GPU's dedicated VRAM.
-- **Universal Multi-Engine Model Resolver:** Automatically discovers and fuzzy-matches models from `~/.cache/llmfit/models/`, `~/.cache/llama.cpp/`, `~/.cache/huggingface/hub/`, `~/.ollama/models/`, and local files. Pass `--model Qwen3.5` or `--model mistral` and Quarrel locates it instantly.
+- **Universal Multi-Engine Model Resolver:** Automatically discovers and fuzzy-matches models from `~/.cache/llmfit/models/`, `~/.cache/llama.cpp/`, `~/.cache/huggingface/hub/`, `~/.cache/quarrel/models/`, `~/.local/share/nomic.ai/GPT4All/`, and local files. Ollama tags (`mistral:latest`) are resolved through the Ollama manifest store (`~/.ollama/models/` or `$OLLAMA_MODELS`). Pass `--model Qwen3.5` or `--model mistral` and Quarrel locates it instantly.
 - **Qwen 3.5 Hybrid Architecture Support:** Native support for hybrid GatedDeltaNet linear State Space Models (SSM) and full self-attention with per-head Q/K RMSNorm.
-- **Vectorized TurboQuant Kernels:** Full AVX-512, AVX2, and ARM NEON SIMD implementations for PolarQuant and QJL transforms with 16-lane fused multiply-accumulate operations.
+- **Vectorized TurboQuant Kernels:** AVX-512, AVX2 and ARM NEON implementations of the PolarQuant and QJL transforms, dispatched at runtime by CPU feature detection, with a canonical pure-Go fallback.
 - **SIMD GGUF Dequantization Kernels:** Vectorized batch dequantization and zero-copy matrix-vector multiplication (`MatVecMulQ4_K`, `MatVecMulQ6_K`).
-- **Comprehensive Verification:** Clean `go vet`, 0 `gosec` security vulnerabilities, 0 data races (`go test -race`), and 600,000+ continuous fuzz test executions.
-- **Distributed Inference (Arrow Flight):** Tensor and pipeline parallelism over Apache Arrow Flight RPC. Note: the `DoPutTensor` round trip is currently non-functional — see the caveat in [docs/nextsteps.md](docs/nextsteps.md#known-defects).
+- **Comprehensive Verification:** Clean `go vet`, 0 `gosec` security vulnerabilities, 0 data races (`go test -race`), a `vacuous_tests` gate that fails any test which cannot fail, and a `dupcheck` gate that fails on duplicate package-level declarations in any build configuration.
+- **Distributed Inference (Arrow Flight):** Tensor and pipeline parallelism over Apache Arrow Flight RPC. The `DoPutTensor` round trip is implemented and verified by `TestDoPutTensor_RoundTrip` against an in-process Flight server.
 
 ---
 
@@ -91,7 +118,8 @@ go run -tags darwin,metal ./cmd/simple/main.go -model Llama-3.2-3B -prompt "Hell
 
 No need to pass long file paths:
 ```bash
-# Resolves from ~/.cache/llmfit/models/, ~/.cache/llama.cpp/, ~/.ollama/models/, or Hugging Face hub
+# Resolves from ~/.cache/llmfit/models/, ~/.cache/llama.cpp/,
+# ~/.cache/huggingface/hub/, or an Ollama tag (mistral:latest)
 ./quarrel -model Qwen3.5
 ./quarrel -model mistral
 ./quarrel -model llama3
@@ -142,29 +170,38 @@ go run ./scripts/vacuous_tests
 
 ### Current test coverage
 
-Packages below 80% are pinned to a ratchet floor in CI so coverage may rise
-freely but never regress. The floors live in
-`.github/workflows/ci.yml` and `scripts/run_all_tests.sh` and must be kept in sync.
+Measured with `go test -cover ./internal/...` on the **default (no build tag)
+build**. Packages below 80% are pinned to a ratchet floor in CI so coverage may
+rise freely but never regress. The floors live in `.github/workflows/ci.yml`
+and `scripts/run_all_tests.sh` and must be kept in sync.
+
+> **Note.** These numbers cover the default build only. `internal/device` has
+> 88 `.go` files but only 9 compile without a build tag, and `internal/engine`
+> has 88 files of which 20 compile — all CUDA, Metal, TPU and AVX-512 code is
+> excluded from both the numerator and the denominator. The percentages
+> therefore say nothing about the GPU backends.
 
 | Package | Coverage |
 |---|---|
 | `internal/cpu` | 100.0% |
 | `internal/logger` | 100.0% |
-| `internal/metrics` | 98.7% |
-| `internal/telemetry` | 98.1% |
-| `internal/ollama` | 91.1% |
-| `internal/models` | 92.5% |
-| `internal/tokenizer` | 92.2% |
-| `internal/vector` | 91.2% |
-| `internal/vlm` | 85.5% |
-| `internal/simd` | 85.5% |
-| `internal/gguf` | 83.4% |
-| `internal/api` | 82.9% |
-| `internal/sampler` | 80.3% |
-| `internal/arrow_client` | 78.8% |
-| `internal/config` | 78.0% |
-| `internal/device` | 73.5% |
-| `internal/engine` | 50.1% |
+| `internal/config` | 100.0% |
+| `internal/gguf` | 100.0% |
+| `internal/mathx` | 100.0% |
+| `internal/metrics` | 99.5% |
+| `internal/models` | 100.0% |
+| `internal/ollama` | 100.0% |
+| `internal/promtest` | 100.0% |
+| `internal/sampler` | 100.0% |
+| `internal/telemetry` | 100.0% |
+| `internal/tokenizer` | 100.0% |
+| `internal/vector` | 100.0% |
+| `internal/vlm` | 100.0% |
+| `internal/simd` | 97.0% |
+| `internal/api` | 91.7% |
+| `internal/arrow_client` | 88.3% |
+| `internal/device` | 75.7% |
+| `internal/engine` | 62.8% |
 
 ---
 
@@ -175,7 +212,7 @@ cmd/
   simple/          # Minimal CLI inference with universal resolver & offload
   quarrel/         # High-performance CUDA CLI & server (Linux)
   benchmark/       # SIMD & inference benchmarking
-  webui/           # Templ-based web UI with WebSocket streaming
+  webui/           # Server-rendered web UI with WebSocket streaming (stdlib html/template)
 internal/
   engine/          # Core inference engine, continuous batching, layer offload
   device/          # GPU backends (Metal, CUDA, CPU, multi-GPU)

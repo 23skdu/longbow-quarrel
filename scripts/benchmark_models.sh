@@ -26,6 +26,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+QUARREL_BIN=""
+# shellcheck source=scripts/quarrel_bin.sh
+source "$REPO_ROOT/scripts/quarrel_bin.sh"
+resolve_quarrel_bin || exit 1
+
 # Defaults
 MODEL_LIST=""
 N_TOKENS=128
@@ -137,9 +142,11 @@ calc_stats() {
 # ── Bench quarrel ─────────────────────────────────────────────────────────
 bench_quarrel_model() {
     local model_path="$1"
-    local bin="$REPO_ROOT/bin/quarrel-cuda"
-    [[ -x "$bin" ]] || bin="$REPO_ROOT/bin/quarrel-simple"
-    [[ -x "$bin" ]] || { echo "0 0 0 0"; return; }
+    local bin="$QUARREL_BIN"
+    if [[ -z "$bin" || ! -x "$bin" ]]; then
+        echo "0 0 0 0"
+        return
+    fi
 
     local tps_values=()
     # Warmup

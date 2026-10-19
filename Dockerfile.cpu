@@ -32,8 +32,15 @@ ENV CGO_ENABLED=1 \
     CGO_CPPFLAGS="-D_FORTIFY_SOURCE=2" \
     CGO_CFLAGS="-O3 -fstack-protector-strong"
 
+# Build version metadata. These map onto the main.Version / main.BuildTime
+# variables in cmd/quarrel/version.go. The previous `-X main.version=...`
+# spelling targeted variables that do not exist, so the linker silently
+# dropped the value and every image reported "dev".
+ARG QUARREL_VERSION=dev
+ARG QUARREL_BUILD_TIME=unknown
+
 RUN go build -trimpath \
-    -ldflags="-s -w -X main.version=1.0.0-dev -X main.commit=$(git rev-parse --short HEAD 2>/dev/null || echo 'release')" \
+    -ldflags="-s -w -X main.Version=${QUARREL_VERSION} -X main.BuildTime=${QUARREL_BUILD_TIME}" \
     -o /out/quarrel ./cmd/quarrel
 
 # -----------------------------------------------------------------------------
@@ -69,7 +76,7 @@ USER 10001:10001
 
 # Healthcheck to verify binary integrity
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-    CMD ["/app/quarrel", "--help"]
+    CMD ["/app/quarrel", "--version"]
 
 ENTRYPOINT ["/app/quarrel"]
-CMD ["--help"]
+CMD ["--version"]

@@ -64,24 +64,45 @@ For each index $j$:
 
 ## 4. Hardware Backend Implementations
 
+> **Updated October 2026.** The C kernels below were previously written but
+> never called from Go: `grep -rn "polar_quant\|qjl_transform" --include=*.go .`
+> returned nothing, and every build used a pure-Go fallback. They are now
+> dispatched at runtime from
+> `internal/simd/turboquant_simd_{amd64,arm64,generic}.go`, with a single
+> canonical reference implementation in `internal/simd/turboquant.go`.
+> See [nextsteps.md](nextsteps.md) Step 33.
+
 | Backend | Location | Supported Transforms |
 |---------|----------|----------------------|
-| **AVX-512 (x86_64)** | `internal/simd/turboquant_avx512.c` | PolarQuant, QJL, Inverse Rotation |
-| **AVX2 (x86_64)** | `internal/simd/turboquant_avx2.c` | PolarQuant, QJL, Inverse Rotation |
-| **ARM NEON (arm64)** | `internal/simd/turboquant_neon.c` | PolarQuant, QJL, Inverse Rotation |
+| **AVX-512 (x86_64)** | `internal/simd/turboquant_avx512.c` (dispatched from `turboquant_simd_amd64.go`) | PolarQuant, QJL, Inverse Rotation |
+| **AVX2 (x86_64)** | `internal/simd/turboquant_avx2.c` (dispatched from `turboquant_simd_amd64.go`) | PolarQuant, QJL, Inverse Rotation |
+| **ARM NEON (arm64)** | `internal/simd/turboquant_neon.c` (dispatched from `turboquant_simd_arm64.go`) | PolarQuant, QJL, Inverse Rotation |
 | **NVIDIA CUDA** | `internal/device/cuda.go` | Fused PolarQuant + QJL GPU kernel |
 | **Apple Metal** | `internal/device/metal.go` | Fused MSL compute pipeline |
-| **Generic Pure Go** | `internal/simd/simd_default.go` | Architecture-independent portable fallback |
+| **Generic Pure Go** | `internal/simd/turboquant.go` | Architecture-independent portable fallback |
+
+The AVX-512 kernel is compiled with `#pragma GCC target("avx512f,avx512bw,fma")`,
+so it is gated on the **runtime** `HasAVX512()` check; calling it on a CPU
+without AVX-512 would raise SIGILL. The AVX2 kernel is gated on
+`HasAVX2()`. NEON is part of the ARMv8-A baseline and needs no check.
+
+All three C kernels reproduce the semantics of the CUDA
+`turboquant_encode_kernel` exactly: the quantized value is clamped to
+±maxQuantVal, and the residual is returned in the **original (un-rotated)
+space**. `internal/device/turboquant_parity_test.go` asserts this against a
+Go transcription of the CUDA kernel.
 
 ---
 
 ## 5. Verification & Testing
 
 1. **Unit & Mathematical Parity Testing**:
+   - `internal/simd/turboquant_parity_test.go`: pins the quantization clamp, pins the residual convention, and compares the accelerated path against the canonical reference.
+   - `internal/device/turboquant_parity_test.go`: asserts the CPU encoder matches a Go transcription of the CUDA kernel.
    - `internal/simd/turboquant_neon_test.go`: Validates outputs across standard dimensions (16, 32, 64, 128, 256) and unaligned odd lengths (67, 125).
    - Validated ARM64 cross-compilation: `GOARCH=arm64 go test -c ./internal/simd`.
 2. **Continuous Fuzz Testing**:
    - `internal/simd/turboquant_fuzz_test.go`:
-     - `FuzzPolarQuant`: Validates codebook quantization, norm bounds, and reconstructions against random inputs.
+     - `FuzzPolarQuant`: Validates codebook quantization, norm bounds, and reconstructions against random inputs, and asserts parity with the reference implementation.
      - `FuzzQJLTransform`: Validates sign projection, scale derivation, and residual bounds against arbitrary byte streams.
-   - Tested over 218,000+ iterations with 0 memory errors or numerical instability.
+   - A single 45 s run reached 3.6 M executions with 0 failures. The fuzzer found the round-half-to-even tie-breaking mismatch between the C kernels and the GPU path during development.

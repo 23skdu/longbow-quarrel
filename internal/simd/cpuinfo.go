@@ -40,7 +40,12 @@ func detectCPU() {
 
 	hasAVX2 = containsFlag(flags, "avx2")
 	hasAVX512 = containsFlag(flags, "avx512f") && containsFlag(flags, "avx512bw")
-	hasAVXVNNI = containsFlag(flags, "avx_vnni") || containsFlag(flags, "avx512_vnni")
+	// hasAVXVNNI gates the AVX-512/VNNI kernels in avx512.go, which use
+	// EVEX-encoded (0x62-prefixed) instructions. Plain "avx_vnni" (VEX-encoded
+	// VNNI, e.g. Alder Lake / Sapphire Rapids' AVX-VNNI extension) does NOT
+	// imply AVX-512 and would fault with SIGILL if dispatched to them, so it
+	// must not be treated as sufficient here.
+	hasAVXVNNI = containsFlag(flags, "avx512_vnni")
 	hasAMXTile = containsFlag(flags, "amx_tile")
 	hasAMXInt8 = containsFlag(flags, "amx_int8")
 	hasAMXBF16 = containsFlag(flags, "amx_bf16")
@@ -204,6 +209,18 @@ func HasAVX2() bool {
 		detectCPU()
 	}
 	return hasAVX2
+}
+
+// HasAVX512 returns whether the AVX-512F + AVX-512BW instruction sets are
+// available.
+//
+// It gates the kernels compiled with `#pragma GCC target("avx512f,...")`,
+// which raise SIGILL when executed on a CPU without AVX-512.
+func HasAVX512() bool {
+	if !cpuInitDone {
+		detectCPU()
+	}
+	return hasAVX512
 }
 
 func useAVX2() bool {

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 
@@ -20,6 +21,7 @@ type LoRAWeight struct {
 // LoRAAdapter holds a collection of weights for various layers in a model.
 type LoRAAdapter struct {
 	ID      string
+	Path    string                 // source GGUF path the adapter was loaded from
 	Weights map[string]*LoRAWeight // key is layer/projection name
 }
 
@@ -52,6 +54,7 @@ func (lm *LoRAManager) LoadAdapter(ctx *device.Context, path string, id string) 
 
 	adapter := &LoRAAdapter{
 		ID:      id,
+		Path:    path,
 		Weights: make(map[string]*LoRAWeight),
 	}
 
@@ -127,4 +130,26 @@ func (lm *LoRAManager) GetWeights(adapterID, layerName string) (*LoRAWeight, boo
 	}
 	w, ok := adapter.Weights[layerName]
 	return w, ok
+}
+
+// AdapterInfo describes a loaded LoRA adapter.
+type AdapterInfo struct {
+	ID         string
+	Path       string
+	NumWeights int
+}
+
+// ListAdapters returns metadata for every currently loaded adapter, sorted
+// by ID so the result is stable across calls.
+func (lm *LoRAManager) ListAdapters() []AdapterInfo {
+	lm.mu.RLock()
+	defer lm.mu.RUnlock()
+
+	out := make([]AdapterInfo, 0, len(lm.adapters))
+	for id, a := range lm.adapters {
+		info := AdapterInfo{ID: id, Path: a.Path, NumWeights: len(a.Weights)}
+		out = append(out, info)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
 }

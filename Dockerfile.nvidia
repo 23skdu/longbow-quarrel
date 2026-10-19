@@ -41,6 +41,11 @@ ENV PATH=/usr/local/go/bin:/usr/local/cuda/bin:$PATH \
     CGO_LDFLAGS="-L/usr/local/cuda/lib64 -L/usr/lib/x86_64-linux-gnu -lcudart -lcublas -lcudnn -lnccl" \
     CGO_CFLAGS="-I/usr/local/cuda/include -O3 -fstack-protector-strong"
 
+# Build version metadata, mapped onto main.Version / main.BuildTime in
+# cmd/quarrel/version.go.
+ARG QUARREL_VERSION=dev
+ARG QUARREL_BUILD_TIME=unknown
+
 WORKDIR /src
 
 # Cache dependencies
@@ -57,7 +62,7 @@ RUN nvcc -c -O3 -Xcompiler -fPIC internal/device/cuda_kernels.cu -o internal/dev
 
 # Build binary with CUDA and NCCL features
 RUN go build -trimpath -tags "cuda,nccl" \
-    -ldflags="-s -w -X main.version=1.0.0-dev" \
+    -ldflags="-s -w -X main.Version=${QUARREL_VERSION} -X main.BuildTime=${QUARREL_BUILD_TIME}" \
     -o /out/quarrel ./cmd/quarrel
 
 # -----------------------------------------------------------------------------
@@ -88,7 +93,8 @@ WORKDIR /app
 COPY --from=cuda-builder /usr/local/cuda/lib64/libcudart.so* /usr/local/cuda/lib64/
 COPY --from=cuda-builder /usr/lib/x86_64-linux-gnu/libnccl.so* /usr/lib/x86_64-linux-gnu/
 COPY --from=cuda-builder --chown=10001:10001 /out/quarrel /app/quarrel
-COPY --from=cuda-builder /app/internal/device/libcuda_kernels.a /usr/local/lib/libcuda_kernels.a
+# The builder stage uses WORKDIR /src, so the archive is at /src/..., not /app/...
+COPY --from=cuda-builder /src/internal/device/libcuda_kernels.a /usr/local/lib/libcuda_kernels.a
 
 # Set library path
 ENV LD_LIBRARY_PATH=/usr/local/lib:/usr/local/cuda/lib64:/usr/lib/x86_64-linux-gnu \
@@ -103,7 +109,7 @@ USER 10001:10001
 
 # Healthcheck
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD ["/app/quarrel", "--help"]
+    CMD ["/app/quarrel", "--version"]
 
 ENTRYPOINT ["/app/quarrel"]
-CMD ["--help"]
+CMD ["--version"]

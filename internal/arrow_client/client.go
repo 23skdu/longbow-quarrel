@@ -61,14 +61,16 @@ func NewFlightClient(dataHost string, dataPort int, metaHost string, metaPort in
 }
 
 var (
-	flightNewClient         = flight.NewFlightClient
+	// flightNewClient is bound to the non-deprecated ClientAuthHandler-aware
+	// constructor. flight.NewFlightClient is deprecated (SA1019); with a nil
+	// auth handler and no middleware this is an exact behavioural match.
+	flightNewClient         = flight.NewClientWithMiddlewareCtx
 	flightDeserializeSchema = flight.DeserializeSchema
 )
 
 // Connect establishes connection to Flight server
 func (fc *FlightClient) Connect(ctx context.Context) error {
-	//nolint:staticcheck // SA1019: flight.NewFlightClient is deprecated but no suitable replacement in current arrow version
-	client, err := flightNewClient(fc.dataAddr, nil, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	client, err := flightNewClient(ctx, fc.dataAddr, nil, nil, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return fmt.Errorf("failed to create Flight client: %w", err)
 	}

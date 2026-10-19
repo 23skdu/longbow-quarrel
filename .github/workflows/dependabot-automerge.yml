@@ -20,11 +20,51 @@ jobs:
         with:
           github-token: "${{ secrets.GITHUB_TOKEN }}"
 
+      - name: Check the CI run for the current head
+        id: ci
+        # Auto-merge must not happen before the checks have run. Without
+        # this, `gh pr merge --auto` merges straight away whenever the
+        # repository has no required status checks configured.
+        run: |
+          SHA="${{ github.event.pull_request.head.sha }}"
+          echo "sha=${SHA}" >> "${GITHUB_OUTPUT}"
+          # The check run for the head commit; the conclusion is empty while
+          # the run is still in progress.
+          CONCLUSION=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${SHA}/check-runs" \
+            --jq '[.check_runs[] | select(.name == "Code Quality" or .name == "Build and Test" or .name == "Coverage") | .conclusion] | join(",")')
+          echo "conclusions=${CONCLUSION}" >> "${GITHUB_OUTPUT}"
+          if [ -z "${CONCLUSION}" ]; then
+            echo "No CI check runs found for ${SHA}; not auto-merging."
+            echo "ok=false" >> "${GITHUB_OUTPUT}"
+            return 0
+          fi
+          if echo "${CONCLUSION}" | grep -qvE '^(success|,)*$'; then
+            echo "A required check did not succeed (${CONCLUSION}); not auto-merging."
+            echo "ok=false" >> "${GITHUB_OUTPUT}"
+            return 0
+          fi
+          echo "ok=true" >> "${GITHUB_OUTPUT}"
+
       - name: Auto-approve & enable auto-merge for safe updates
-        if: steps.metadata.outputs.update-type != 'version-update:semver-major'
+        # Three guards:
+        #  1. semver-major updates are never auto-merged.
+        #  2. The dependencies that are deliberately pinned are never
+        #     auto-merged. google.golang.org/grpc in particular is pinned to
+        #     the exact commit that fixes GO-2026-6443 (CVE-2026-84445);
+        #     no tagged release contains the fix yet, so an automatic bump
+        #     would reintroduce the vulnerability. See docs/dependencies.md.
+        #  3. --match-head-sha makes the merge apply to exactly the commit
+        #     that was reviewed, so a push during the review cannot slip an
+        #     unreviewed change into the merge.
+        if: >-
+          steps.metadata.outputs.update-type != 'version-update:semver-major'
+          && steps.ci.outputs.ok == 'true'
+          && !contains('grpc', steps.metadata.outputs.dependency-name)
+          && !contains('eml', steps.metadata.outputs.dependency-name)
         run: |
           gh pr review --approve "$PR_URL"
-          gh pr merge --auto --squash "$PR_URL"
+          gh pr merge --auto --squash --match-head-sha "$PR_SHA" "$PR_URL"
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_SHA: ${{ steps.ci.outputs.sha }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

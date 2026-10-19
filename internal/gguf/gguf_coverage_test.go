@@ -510,8 +510,10 @@ func TestQuantizeFP8Coverage(t *testing.T) {
 	if quantizeToE4M3(-300.0) != 0xFB {
 		t.Errorf("expected 0xFB for < -240")
 	}
-	if quantizeToE4M3(1e-10) == 0 {
-		// Just ensure it executes exp < -6
+	// A value far below the normal range clamps to the smallest subnormal
+	// encoding (exp=-6, mantissa=0 => 0x08) rather than flushing to zero.
+	if got := quantizeToE4M3(1e-10); got != 0x08 {
+		t.Errorf("expected min-subnormal 0x08 for 1e-10, got 0x%02X", got)
 	}
 
 	// quantizeToE5M2 Inf/NaN, > 57344, < -57344, exp < -16
@@ -527,8 +529,10 @@ func TestQuantizeFP8Coverage(t *testing.T) {
 	if quantizeToE5M2(-60000.0) != 0xFB {
 		t.Errorf("expected 0xFB for < -57344")
 	}
-	if quantizeToE5M2(1e-20) == 0 {
-		// Just ensure it executes exp < -16
+	// E5M2 clamps the exponent to its -15 subnormal floor, so 1e-20 encodes to
+	// zero (sign 0, exp field 0, mantissa 0).
+	if got := quantizeToE5M2(1e-20); got != 0x00 {
+		t.Errorf("expected zero encoding for 1e-20, got 0x%02X", got)
 	}
 
 	// DequantizeFromFP8E4M3 zero and negative
@@ -914,7 +918,7 @@ func TestReaderCoverage(t *testing.T) {
 		buf := make([]byte, 2048)
 		binary.LittleEndian.PutUint32(buf[0:4], GGUFMagic)
 		binary.LittleEndian.PutUint32(buf[4:8], 3)
-		binary.LittleEndian.PutUint64(buf[8:16], 1) // 1 tensor
+		binary.LittleEndian.PutUint64(buf[8:16], 1)  // 1 tensor
 		binary.LittleEndian.PutUint64(buf[16:24], 2) // 2 KV pairs
 
 		off := 24
@@ -965,7 +969,6 @@ func TestReaderCoverage(t *testing.T) {
 		binary.LittleEndian.PutUint32(buf[off:off+4], uint32(GGMLTypeF32))
 		off += 4
 		binary.LittleEndian.PutUint64(buf[off:off+8], tensorOffset)
-		off += 8
 
 		return buf
 	}
@@ -1014,8 +1017,8 @@ func TestReaderCoverage(t *testing.T) {
 
 	// Test readValue all types
 	testData := make([]byte, 1024)
-	testData[0] = 5                                                     // uint8
-	testData[1] = 0xFE                                                  // int8 (-2)
+	testData[0] = 5                                    // uint8
+	testData[1] = 0xFE                                 // int8 (-2)
 	binary.LittleEndian.PutUint16(testData[2:4], 1000) // uint16
 	var i16Val int16 = -1000
 	binary.LittleEndian.PutUint16(testData[4:6], uint16(i16Val)) // int16

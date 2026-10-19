@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/23skdu/longbow-quarrel/internal/engine"
 	"github.com/23skdu/longbow-quarrel/internal/logger"
 	"github.com/23skdu/longbow-quarrel/internal/telemetry"
 )
@@ -75,10 +76,23 @@ func (s *Server) ListAdaptersHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// This assumes the engine or LoRAManager can list adapters.
-	// For now, we'll return a placeholder or implement List in Engine.
-	resp := ListAdaptersResponse{
-		Adapters: []AdapterInfo{},
+	resp := ListAdaptersResponse{Adapters: []AdapterInfo{}}
+
+	// Engines that support LoRA can report what is currently loaded.
+	type adapterLister interface {
+		ListAdapters() []engine.AdapterInfo
+	}
+	if lister, ok := s.Engine.(adapterLister); ok {
+		for _, a := range lister.ListAdapters() {
+			resp.Adapters = append(resp.Adapters, AdapterInfo{
+				ID:   a.ID,
+				Path: a.Path,
+			})
+		}
+	} else if s.Engine != nil {
+		// The engine exists but cannot list adapters.
+		http.Error(w, "Engine does not support adapter listing", http.StatusNotImplemented)
+		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")

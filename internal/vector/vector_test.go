@@ -640,4 +640,3 @@ func TestVector_CoverageEdgeCases(t *testing.T) {
 	}
 	_ = flatBadType
 }
-

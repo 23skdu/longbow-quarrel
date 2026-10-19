@@ -150,4 +150,3 @@ func BenchmarkWorkerPool_RawGoroutines(b *testing.B) {
 		wg.Wait()
 	}
 }
-

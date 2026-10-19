@@ -458,4 +458,3 @@ func TestPrefillChunkAndSIMDDispatch(t *testing.T) {
 	promtest.RequireValue(t, "quarrel_active_prefill_tokens", ActivePrefillTokens, 128)
 	promtest.RequireDelta(t, "simd_dispatch_total", SIMDDispatchTotal.WithLabelValues("test_kernel"), dispatchBefore, 1)
 }
-

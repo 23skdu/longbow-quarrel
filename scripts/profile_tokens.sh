@@ -50,8 +50,10 @@ fi
 
 mkdir -p "$OUTPUT_DIR"
 
-QUARREL_BIN="$REPO_ROOT/bin/quarrel-cuda"
-[[ -x "$QUARREL_BIN" ]] || QUARREL_BIN="$REPO_ROOT/bin/quarrel-simple"
+QUARREL_BIN=""
+# shellcheck source=scripts/quarrel_bin.sh
+source "$REPO_ROOT/scripts/quarrel_bin.sh"
+resolve_quarrel_bin || exit 1
 
 if [[ ! -x "$QUARREL_BIN" ]]; then
     echo "Error: quarrel binary not found"

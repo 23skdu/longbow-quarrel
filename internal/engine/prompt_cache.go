@@ -44,29 +44,48 @@ func NewPromptCache() *PromptCache {
 }
 
 // MatchPrefix finds the longest matching cached prompt prefix for the incoming token sequence.
+//
+// It returns the number of tokens that can be skipped and the physical KV
+// blocks backing them.
+//
+// The blocks are stored on the *last* node of an inserted prompt; the
+// intermediate nodes hold none. A partial prefix match therefore has no
+// blocks to offer, and reporting it as a hit would make the caller advance
+// the sequence position without any KV state attached -- the model would
+// then generate from a prefix whose KV was never computed. So the match is
+// only reported when the matched node actually carries blocks.
 func (pc *PromptCache) MatchPrefix(prompt []int) (matchedTokens int, cachedBlocks []int32) {
 	pc.mu.RLock()
 	defer pc.mu.RUnlock()
 
 	curr := pc.root
-	matchedTokens = 0
+	depth := 0
 
-	for matchedTokens < len(prompt) {
-		token := prompt[matchedTokens]
-		if child, ok := curr.Children[token]; ok {
-			curr = child
-			matchedTokens++
-			// In a true Radix, we'd check if child.Tokens matches a sub-slice
-			// For this implementation, we assume children are single-token keyed
-		} else {
+	// The deepest node on the path that actually carries cached blocks.
+	var hitNode *RadixNode
+	hitDepth := 0
+
+	for depth < len(prompt) {
+		token := prompt[depth]
+		child, ok := curr.Children[token]
+		if !ok {
 			break
+		}
+		curr = child
+		depth++
+		if len(child.PhysicalBlocks) > 0 {
+			hitNode = child
+			hitDepth = depth
 		}
 	}
 
-	if curr != pc.root {
-		cachedBlocks = make([]int32, len(curr.PhysicalBlocks))
-		copy(cachedBlocks, curr.PhysicalBlocks)
+	if hitNode == nil {
+		return 0, nil
 	}
+
+	matchedTokens = hitDepth
+	cachedBlocks = make([]int32, len(hitNode.PhysicalBlocks))
+	copy(cachedBlocks, hitNode.PhysicalBlocks)
 
 	return matchedTokens, cachedBlocks
 }

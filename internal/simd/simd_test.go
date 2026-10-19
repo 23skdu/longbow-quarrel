@@ -1024,4 +1024,3 @@ func BenchmarkFusedMLP(b *testing.B) {
 		FusedMLP(in, gate, up, down, out, 1, dim, hiddenDim)
 	}
 }
-

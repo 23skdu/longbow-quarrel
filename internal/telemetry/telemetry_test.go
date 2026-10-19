@@ -85,4 +85,3 @@ func TestTelemetry_InitTracer_ResourceError(t *testing.T) {
 		t.Fatal("expected nil return when resource creation fails")
 	}
 }
-

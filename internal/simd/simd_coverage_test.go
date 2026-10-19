@@ -45,9 +45,9 @@ func TestCPUInfo_Coverage(t *testing.T) {
 	}
 	t.Setenv("DISABLE_SIMD", "")
 
-	// 2. Flags with AVX512, AMX, AVX-VNNI
+	// 2. Flags with AVX512, AMX, AVX-512-VNNI
 	readCPUFlagsCustom = func() string {
-		return "avx2 avx512f avx512bw amx_tile amx_int8 avx_vnni"
+		return "avx2 avx512f avx512bw amx_tile amx_int8 avx512_vnni"
 	}
 	resetCPUInitForTesting()
 	detectCPU()
@@ -58,7 +58,18 @@ func TestCPUInfo_Coverage(t *testing.T) {
 		t.Error("expected HasAMX to be true")
 	}
 	if !HasAVXVNNI() {
-		t.Error("expected HasAVXVNNI to be true")
+		t.Error("expected HasAVXVNNI to be true with avx512_vnni")
+	}
+
+	// 2b. VEX-encoded avx_vnni alone must NOT enable the AVX-512 kernels:
+	// the EVEX-encoded intrinsics in avx512.go would raise SIGILL.
+	readCPUFlagsCustom = func() string {
+		return "avx2 avx512f avx512bw avx_vnni"
+	}
+	resetCPUInitForTesting()
+	detectCPU()
+	if HasAVXVNNI() {
+		t.Error("HasAVXVNNI must require avx512_vnni, not the VEX-encoded avx_vnni")
 	}
 
 	// 3. DISABLE_AVX512

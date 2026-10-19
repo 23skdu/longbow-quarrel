@@ -1,4 +1,14 @@
-//go:build (!cuda && !metal && !tpu) || !amd64 || !cgo || (!linux && !darwin)
+//go:build (!cuda && !metal && !tpu) || !cgo || (!linux && !darwin)
+
+// The CPU backend is the fallback: it is compiled when no GPU backend is
+// selected, or when cgo is unavailable (in which case the cgo-only backends
+// cannot be compiled either).
+//
+// The tag must NOT contain an `!amd64` clause. `!amd64` is true on arm64, so
+// it pulled this file in alongside metal.go on Apple Silicon, and the two
+// files both declared Context, Tensor, NewContext and AllocatedBytes -- a
+// "redeclared in this block" compile error that broke the macOS Metal build
+// while every Linux build stayed green.
 
 package device
 
@@ -723,7 +733,6 @@ func (c *Context) QKNormRMSNorm(q, k, qWeight, kWeight *Tensor, numTokens, numQH
 		}
 	}
 }
-
 
 // StoreKVPagedBatch stores K and V projections into their respective physical blocks in the CPU cache pool.
 func (c *Context) StoreKVPagedBatch(k, v, kCache, vCache, physicalPositions *Tensor, kvDim, batchSize int) {

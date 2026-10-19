@@ -190,6 +190,10 @@ internal/
   models/
     resolver.go    # Universal multi-engine cache resolver
   simd/
+    turboquant.go         # Canonical TurboQuant reference + public API
+    turboquant_simd_amd64.go # Runtime dispatch: AVX-512, then AVX2
+    turboquant_simd_arm64.go # Runtime dispatch: NEON
+    turboquant_simd_generic.go # No accelerator (pure Go fallback)
     turboquant_avx512.c # AVX-512 TurboQuant kernel
     turboquant_avx2.c   # AVX2 TurboQuant kernel
     turboquant_neon.c   # ARM NEON TurboQuant kernel

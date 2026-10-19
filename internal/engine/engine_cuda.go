@@ -63,6 +63,9 @@ type cudaEngine struct {
 	governor     *device.MemoryGovernor
 	seqTTFTStart map[uint64]time.Time
 	ttftMu       sync.Mutex
+
+	// stopTokens is the configured stop-token set, built once at construction.
+	stopTokens map[int]struct{}
 }
 
 func NewcudaEngine(modelPath string, cfg config.Config) (Engine, error) {
@@ -130,6 +133,11 @@ func NewcudaEngine(modelPath string, cfg config.Config) (Engine, error) {
 			log.Printf("Warning: failed to load tokenizer: %v", err)
 		}
 	}
+	// Register the EOS token declared by the model metadata so the decode
+	// loop only has to consult the tokenizer.
+	if tok != nil && cfg.EOSTokenID > 0 {
+		tok.AddEOSTokenID(cfg.EOSTokenID)
+	}
 
 	vocabSize := cfg.VocabSize
 	heads := cfg.Heads
@@ -156,6 +164,7 @@ func NewcudaEngine(modelPath string, cfg config.Config) (Engine, error) {
 		doneChan:     make(chan struct{}),
 		governor:     device.GetMemoryGovernor(),
 		seqTTFTStart: make(map[uint64]time.Time),
+		stopTokens:   stopTokenSet(cfg.StopTokens),
 	}
 
 	// Initialize scratch space
@@ -219,6 +228,15 @@ func (e *cudaEngine) LoadAdapter(path, id string) error {
 		e.lora = NewLoRAManager()
 	}
 	return e.lora.LoadAdapter(e.ctx, path, id)
+}
+
+// ListAdapters returns metadata for the LoRA adapters loaded into the CUDA
+// backend, sorted by ID.
+func (e *cudaEngine) ListAdapters() []AdapterInfo {
+	if e.lora == nil {
+		return []AdapterInfo{}
+	}
+	return e.lora.ListAdapters()
 }
 
 func (e *cudaEngine) SwapModel(newModelPath string, newConfig config.Config) error {
@@ -399,8 +417,9 @@ func (e *cudaEngine) runBatchLoop() {
 			}
 
 			// Termination
-			isEOS := (e.tok != nil && e.tok.IsEOS(token)) || token == e.config.EOSTokenID || token == 2
-			if isEOS || len(seq.Tokens) >= seq.MaxTokens {
+			// The tokenizer knows every EOS id the model declares.
+			isEOS := e.tok != nil && e.tok.IsEOS(token)
+			if isEOS || isStopToken(e.stopTokens, token) || len(seq.Tokens) >= seq.MaxTokens {
 				select {
 				case seq.Result <- seq.Tokens:
 				default:
@@ -535,8 +554,7 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 	gpuLayers := e.numGPULayers
 	for layer := 0; layer < e.config.Layers; layer++ {
 		qW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_q.weight", layer))
-		needsCPU := (layer >= gpuLayers) || (e.cpuWeights != nil && (
-			qW == nil ||
+		needsCPU := (layer >= gpuLayers) || (e.cpuWeights != nil && (qW == nil ||
 			(layer < len(e.cpuWeights.SSMA) && len(e.cpuWeights.SSMA[layer]) > 0)))
 
 		if needsCPU && e.cpuWeights != nil {
@@ -544,8 +562,7 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 			endLayer := layer + 1
 			for endLayer < e.config.Layers {
 				eqW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_q.weight", endLayer))
-				eNeedsCPU := (endLayer >= gpuLayers) || (
-					eqW == nil ||
+				eNeedsCPU := (endLayer >= gpuLayers) || (eqW == nil ||
 					(endLayer < len(e.cpuWeights.SSMA) && len(e.cpuWeights.SSMA[endLayer]) > 0))
 				if !eNeedsCPU {
 					break

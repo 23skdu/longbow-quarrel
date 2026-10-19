@@ -28,7 +28,6 @@ func dotQ4KAVX2C(data []byte, vector []float32, n int) float32 {
 	return float32(C.dot_q4_k_avx2((*C.uint8_t)(unsafe.Pointer(&data[0])), (*C.float)(unsafe.Pointer(&vector[0])), C.int(n)))
 }
 
-
 func init() {
 	if useAVX2() {
 		dotQ8_0VNNI = dotQ8_0AVX2C
@@ -41,7 +40,6 @@ func SoftmaxAVX2(x []float32) {
 	if len(x) == 0 {
 		return
 	}
-
 
 	if useAVX2() && len(x) >= 16 {
 		C.softmax_avx2((*C.float)(unsafe.Pointer(&x[0])), C.long(len(x)))

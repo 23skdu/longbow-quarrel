@@ -160,77 +160,35 @@ fi
 # ------------------------------------------------------------------------------
 # 8. Code Coverage Gate (Threshold >= 80% on Core Packages)
 # ------------------------------------------------------------------------------
-log_header "8. Validating Code Coverage Thresholds (>= 80%)"
-COVERAGE_PKGS=(
-    "./internal/sampler/..."
-    "./internal/simd/..."
-    "./internal/tokenizer/..."
-    "./internal/metrics/..."
-    "./internal/vlm/..."
-    "./internal/gguf/..."
-    "./internal/api/..."
-    "./internal/vector/..."
-)
-
-# Packages that are not yet at 80% are held to a ratchet floor instead: coverage
-# may rise freely but may not drop. Floor values are a few points under the
-# measured baseline so environment noise cannot flip the gate red.
-#   measured 2026-09: engine 50.1, device 73.5, config 78.0, arrow_client 78.8, ollama 91.1
-RATCHET_PKGS=(
-    "./internal/engine/...:47.0"
-    "./internal/device/...:70.0"
-    "./internal/config/...:75.0"
-    "./internal/arrow_client/...:75.0"
-    "./internal/ollama/...:87.0"
-)
-
-COVERAGE_FAILED=0
-for pkg in "${COVERAGE_PKGS[@]}"; do
-    COV_OUT=$(go test -cover -timeout 120s -count=1 "${pkg}" 2>&1 | grep -o 'coverage: [0-9.]*%' | awk '{print $2}' | tr -d '%')
-    if [ -n "${COV_OUT}" ]; then
-        IS_SUFFICIENT=$(awk -v cov="${COV_OUT}" 'BEGIN { if (cov >= 80.0) print "1"; else print "0" }')
-        if [ "${IS_SUFFICIENT}" -eq 1 ]; then
-            echo -e "${GREEN}✓ ${pkg}:${NC} ${COV_OUT}% (>= 80%)"
-        else
-            echo -e "${RED}✗ ${pkg}:${NC} ${COV_OUT}% (< 80%)"
-            COVERAGE_FAILED=1
-        fi
-    fi
-done
-
-if [ "${COVERAGE_FAILED}" -eq 0 ]; then
-    log_pass "Core Package Coverage Gate (>= 80%)"
-else
-    log_fail "Core Package Coverage Gate (< 80%)"
-fi
-
-# ------------------------------------------------------------------------------
-# 9. Coverage Ratchet (must not drop below the recorded floor)
-# ------------------------------------------------------------------------------
-log_header "9. Validating Coverage Ratchet Floors"
-RATCHET_FAILED=0
-for entry in "${RATCHET_PKGS[@]}"; do
-    pkg="${entry%:*}"
-    floor="${entry##*:}"
-    COV_OUT=$(go test -cover -timeout 180s -count=1 "${pkg}" 2>&1 | grep -o 'coverage: [0-9.]*%' | awk '{print $2}' | tr -d '%')
-    if [ -z "${COV_OUT}" ]; then
-        echo -e "${RED}✗ ${pkg}:${NC} no coverage result reported"
-        RATCHET_FAILED=1
-        continue
-    fi
-    MEETS=$(awk -v cov="${COV_OUT}" -v floor="${floor}" 'BEGIN { if (cov >= floor) print "1"; else print "0" }')
-    if [ "${MEETS}" -eq 1 ]; then
-        echo -e "${GREEN}✓ ${pkg}:${NC} ${COV_OUT}% (>= floor ${floor}%)"
+# Both the 80% threshold and the ratchet floors are computed from a single
+# coverage profile by scripts/coverage_gate.sh, which is the same script the
+# CI coverage job uses. The previous implementation ran the test suite once
+# per package (twice more in total) and parsed "go test -cover" output with
+# a grep that silently took only the first match.
+log_header "8. Validating Code Coverage Gates (>= 80% + ratchet floors)"
+COVERAGE_PROFILE="${TMPDIR:-/tmp}/quarrel-coverage.out"
+if go test -coverprofile="${COVERAGE_PROFILE}" -covermode=atomic ./... >/dev/null 2>&1; then
+    if "${SCRIPT_DIR}/coverage_gate.sh" "${COVERAGE_PROFILE}"; then
+        log_pass "Coverage Gates (>= 80% + ratchet floors)"
     else
-        echo -e "${RED}✗ ${pkg}:${NC} ${COV_OUT}% (< floor ${floor}%)"
-        RATCHET_FAILED=1
+        log_fail "Coverage Gates (>= 80% + ratchet floors)"
     fi
-done
-
-if [ "${RATCHET_FAILED}" -eq 0 ]; then
-    log_pass "Coverage Ratchet Floors"
 else
-    log_fail "Coverage Ratchet Floors"
+    log_fail "Coverage Gates (could not produce a coverage profile)"
+fi
+rm -f "${COVERAGE_PROFILE}"
+
+# ------------------------------------------------------------------------------
+# 9. Duplicate declaration check
+# ------------------------------------------------------------------------------
+# A duplicate package-level declaration only breaks the build when two files
+# that declare the same name land in the same package, which with build-tag
+# selected files can hide in a configuration nobody builds locally.
+log_header "9. Checking for duplicate package-level declarations"
+if "${SCRIPT_DIR}/dupcheck.sh"; then
+    log_pass "Duplicate Declaration Check"
+else
+    log_fail "Duplicate Declaration Check"
 fi
 
 # ------------------------------------------------------------------------------

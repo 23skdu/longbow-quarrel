@@ -101,6 +101,9 @@ type tpuEngine struct {
 	stopChan     chan struct{}
 	doneChan     chan struct{}
 	mu           sync.RWMutex
+
+	// stopTokens is the configured stop-token set, built once at construction.
+	stopTokens map[int]struct{}
 }
 
 func NewTPUEngine(modelPath string, cfg config.Config) (Engine, error) {
@@ -145,6 +148,11 @@ func NewTPUEngine(modelPath string, cfg config.Config) (Engine, error) {
 	tok, err := tokenizer.New(modelPath)
 	if err != nil {
 		log.Printf("Warning: failed to load tokenizer: %v", err)
+	}
+	// Register the EOS token declared by the model metadata so the decode
+	// loop only has to consult the tokenizer.
+	if tok != nil && cfg.EOSTokenID > 0 {
+		tok.AddEOSTokenID(cfg.EOSTokenID)
 	}
 
 	layers := 1
@@ -229,6 +237,7 @@ func NewTPUEngine(modelPath string, cfg config.Config) (Engine, error) {
 		tok:          tok,
 		cache:        cache,
 		BatchManager: NewContinuousBatchManager(),
+		stopTokens:   stopTokenSet(cfg.StopTokens),
 		stopChan:     make(chan struct{}),
 		doneChan:     make(chan struct{}),
 	}
@@ -371,7 +380,7 @@ func (e *tpuEngine) runBatchLoop() {
 				seq.TokenCallback(token)
 			}
 
-			if token == 2 || len(seq.Tokens) >= seq.MaxTokens {
+			if token == 2 || isStopToken(e.stopTokens, token) || len(seq.Tokens) >= seq.MaxTokens {
 				select {
 				case seq.Result <- seq.Tokens:
 				default:

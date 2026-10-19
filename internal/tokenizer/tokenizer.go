@@ -97,10 +97,12 @@ func NewFromGGUF(f *gguf.GGUFFile) (*Tokenizer, error) {
 		}
 	}
 
-	// 3. Fallback to 2 (Llama 2 default) if none found
-	if len(eosMap) == 0 {
-		eosMap[2] = true
-	}
+	// 3. Token ID 2 is the conventional </s> for the Llama 2 family, and
+	//    every engine in this repo has always treated it as EOS
+	//    unconditionally. Making the tokenizer agree removes the duplicated
+	//    `token == 2` special case from the decode loops and makes
+	//    GetEOSTokenIDs report the real set.
+	eosMap[2] = true
 
 	var bosTokenID = -1
 	if bosVal, ok := f.KV["tokenizer.ggml.bos_token_id"]; ok {

@@ -164,4 +164,3 @@ func TestResolveModelPath_SubstringScan(t *testing.T) {
 		t.Errorf("expected %s, got %s", target, resolved)
 	}
 }
-

@@ -2,7 +2,15 @@ package engine
 
 import (
 	"context"
+	"errors"
 )
+
+// ErrQueueFull is returned by an adapter when the request queue is saturated.
+//
+// The adapters used to return a nil channel and a nil error in that case,
+// which a caller cannot distinguish from a successful submission: the request
+// simply never completed.
+var ErrQueueFull = errors.New("request queue is full")
 
 type InferenceRequest struct {
 	Prompt       string
@@ -19,6 +27,10 @@ type InferenceResponse struct {
 	Token    string
 	TokenID  int
 	Complete bool
+	// Error is set when the request could not be served. Without it a
+	// failure was indistinguishable from a model that produced no tokens:
+	// the client got HTTP 200 and an empty completion.
+	Error string
 }
 
 type ModelInfo struct {

@@ -230,9 +230,17 @@ func asserted(b *ast.BlockStmt) bool {
 		if direct {
 			return false
 		}
-		if _, ok := n.(*ast.FuncLit); ok {
-			// Subtests are evaluated separately below.
+		if call, ok := n.(*ast.CallExpr); ok && isTRun(call) && len(call.Args) == 2 {
+			// Subtests are evaluated separately below; skip their bodies here
+			// so a t.Run-wrapped assertion is not double counted.
 			return false
+		}
+		if _, ok := n.(*ast.FuncLit); ok {
+			// A bare closure (a goroutine body, a deferred func, a callback
+			// passed to ParallelFor, ...) can still assert. Descend into it
+			// rather than treating it as opaque. Only t.Run closures are
+			// excluded, and those are handled above.
+			return true
 		}
 		if isAssertCall(n) {
 			direct = true

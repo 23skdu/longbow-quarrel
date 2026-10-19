@@ -10,23 +10,30 @@ PROMPT="The capital of France is"
 N_TOKENS=32
 PROFILE="false"
 
-if [[ -z "$MODEL" ]]; then
-    echo "error: set MODEL to the GGUF file to benchmark, e.g." >&2
-    echo "  MODEL=/path/to/model.gguf $0" >&2
-    exit 2
-fi
-
-# Parse arguments
+# Parse arguments FIRST.
+#
+# The MODEL check used to run before argv was parsed, so the documented
+# invocation
+#   ./scripts/benchmark_compare.sh -m /path/to/model.gguf -p "..." -n 32
+# always exited 2 -- the script could never be run with flags. CI called it
+# exactly that way, so the benchmarks job failed.
 while [[ "$#" -gt 0 ]]; do
     case $1 in
         -m|--model) MODEL="$2"; shift ;;
         -p|--prompt) PROMPT="$2"; shift ;;
         -n|--tokens) N_TOKENS="$2"; shift ;;
         --profile) PROFILE="true" ;;
-        *) echo "Unknown parameter passed: $1"; exit 1 ;;
+        *) echo "Unknown parameter passed: $1" >&2; exit 1 ;;
     esac
     shift
 done
+
+if [[ -z "$MODEL" ]]; then
+    echo "error: set MODEL to the GGUF file to benchmark, e.g." >&2
+    echo "  MODEL=/path/to/model.gguf $0" >&2
+    echo "  $0 -m /path/to/model.gguf -p 'prompt' -n 32" >&2
+    exit 2
+fi
 
 echo "===================================================="
 echo "Benchmarking: longbow-quarrel vs llama.cpp"
@@ -60,11 +67,28 @@ if [[ "$PROFILE" == "true" ]]; then
     rm -f quarrel.log
     echo "Profile saved to cpu.pprof"
 else
-    QUARREL_OUT=$( go run -tags=darwin,metal ./cmd/quarrel/main.go -model "$MODEL" -n "$N_TOKENS" -prompt "$PROMPT" 2>&1 )
+    # Build the package, not a single file: cmd/quarrel/main.go is gated
+    # `linux && amd64 && cuda && cgo`, so `go run ./cmd/quarrel/main.go`
+    # fails to build on macOS. Building the package lets Go pick the right
+    # main for the host.
+    QUARREL_OUT=$( go run -tags=darwin,metal ./cmd/quarrel -model "$MODEL" -n "$N_TOKENS" -prompt "$PROMPT" 2>&1 )
 fi
 
-QUARREL_TPS=$( echo "$QUARREL_OUT" | grep "Inference complete" | sed -E 's/.*\(([0-9.]+) t\/s\).*/\1/' )
-QUARREL_TEXT=$( echo "$QUARREL_OUT" | grep "Decoded Text:" | sed 's/.*Decoded Text: //' )
+# The binaries print:
+#   === Complete ===
+#   32 tokens in 1.23s (26.0 t/s)
+#   <decoded text>
+QUARREL_TPS=$( echo "$QUARREL_OUT" | grep -oE '\([0-9.]+ t/s\)' | tail -n 1 | tr -d '()' | awk '{print $1}' )
+if [ -z "$QUARREL_TPS" ]; then
+    QUARREL_TPS="N/A"
+    echo "warning: could not parse throughput from the quarrel output:" >&2
+    echo "$QUARREL_OUT" | tail -n 5 >&2
+fi
+QUARREL_TEXT=$( echo "$QUARREL_OUT" | awk '
+    /^=== Complete ===$/ { found=1; next }
+    found && /tokens in .*t\/s/ { next }   # the throughput line
+    found && NF { print; exit }
+' )
 
 echo ""
 echo "RESULTS:"

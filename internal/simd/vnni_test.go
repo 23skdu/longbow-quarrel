@@ -231,4 +231,3 @@ func BenchmarkMatVecMulQ4_K_VNNI(b *testing.B) {
 		_ = MatVecMulQ4_K_VNNI(data, vec, rows, cols)
 	}
 }
-

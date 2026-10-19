@@ -70,7 +70,10 @@ func TestRemoteWorkerEngine_FaultInjectionAndFailover(t *testing.T) {
 		t.Fatalf("Failed to listen for dead primary: %v", err)
 	}
 	deadPort := deadListener.Addr().(*net.TCPAddr).Port
-	deadListener.Close() // Close immediately to simulate total worker crash / fault injection
+	// Close immediately to simulate total worker crash / fault injection.
+	if err := deadListener.Close(); err != nil {
+		t.Fatalf("failed to close dead listener: %v", err)
+	}
 
 	cfg := config.Config{
 		Layers: 1,
@@ -95,7 +98,9 @@ func TestRemoteWorkerEngine_FaultInjectionAndFailover(t *testing.T) {
 
 	inTensor := devCtx.NewTensorFP32(1, 4)
 	defer inTensor.Free()
-	inTensor.LoadFrom([]float32{1.0, 2.0, 3.0, 4.0})
+	if err := inTensor.LoadFrom([]float32{1.0, 2.0, 3.0, 4.0}); err != nil {
+		t.Fatalf("failed to seed input tensor: %v", err)
+	}
 
 	ctx := context.Background()
 	outTensor, err := engine.ForwardShardedLayer(ctx, 0, 0, 4, inTensor)

@@ -2,7 +2,7 @@ package engine
 
 import (
 	"fmt"
-	"math/rand"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -28,6 +28,15 @@ type CPUEngine struct {
 	PromptCache *PromptCache
 	seqKVCaches map[string]*CPUKVCache
 	kvMu        sync.Mutex
+
+	// adapters tracks LoRA adapters merged into the CPU weights. The CPU
+	// backend fuses the delta into the base weights at load time, so it keeps
+	// its own registry rather than using LoRAManager.
+	adapters   []AdapterInfo
+	adaptersMu sync.Mutex
+
+	// stopTokens is the configured stop-token set, built once at construction.
+	stopTokens map[int]struct{}
 
 	BatchManager *ContinuousBatchManager
 	stopChan     chan struct{}
@@ -134,6 +143,13 @@ func NewCPUEngine(modelPath string, cfg config.Config) (Engine, error) {
 		_ = f.Close()
 		return nil, fmt.Errorf("failed to load tokenizer: %w", err)
 	}
+	// Register the EOS token declared by the model metadata, so the decode
+	// loop only has to consult the tokenizer. The engines used to hardcode
+	// `token == cfg.EOSTokenID` here, which ignored any additional EOS ids
+	// the model declares.
+	if cfg.EOSTokenID > 0 {
+		tok.AddEOSTokenID(cfg.EOSTokenID)
+	}
 
 	ctx := device.NewContext()
 	cache := &PagedKVCache{}
@@ -155,6 +171,7 @@ func NewCPUEngine(modelPath string, cfg config.Config) (Engine, error) {
 		PromptCache:  NewPromptCache(),
 		seqKVCaches:  make(map[string]*CPUKVCache),
 		BatchManager: NewContinuousBatchManager(),
+		stopTokens:   stopTokenSet(cfg.StopTokens),
 		stopChan:     make(chan struct{}),
 		doneChan:     make(chan struct{}),
 	}
@@ -261,9 +278,11 @@ func (e *CPUEngine) runBatchLoop() {
 				seq.TokenCallback(token)
 			}
 
-			// Dynamic EOS & termination handling
-			isEOS := (e.tok != nil && e.tok.IsEOS(token)) || token == e.config.EOSTokenID || token == 2
-			if isEOS || len(seq.Tokens) >= seq.MaxTokens {
+			// Dynamic EOS & termination handling. The tokenizer knows every
+			// EOS id the model declares (including the conventional 2 and
+			// the one from the model metadata).
+			isEOS := e.tok != nil && e.tok.IsEOS(token)
+			if isEOS || isStopToken(e.stopTokens, token) || len(seq.Tokens) >= seq.MaxTokens {
 				select {
 				case seq.Result <- seq.Tokens:
 				default:
@@ -511,21 +530,13 @@ func (e *CPUEngine) Forward(tokens []int) []float32 {
 	return logits
 }
 
-func RMSNormCPU(input, weight []float32, eps float32) []float32 {
-	result := make([]float32, len(input))
-	simd.RMSNorm(input, weight, result, 1, len(input), eps)
-	return result
-}
-
-func Sigmoid(x float32) float32 {
-	if x < -30 {
-		return 0
-	}
-	if x > 30 {
-		return 1
-	}
-	return float32(1.0 / (1.0 + mathx.Exp(-float64(x))))
-}
+// The CPU backend used to carry a second, parallel sampler here
+// (RMSNormCPU, Sigmoid, ApplyTempCPU, ApplyTopKCPU, ApplyTopPCPU,
+// softmaxCPU, SampleFromDistCPU). Every backend samples through
+// internal/engine/sampler.go instead, so the copies had no production
+// caller and could silently diverge from the implementation that is
+// actually used. They have been removed; the shared Sampler is the single
+// implementation.
 
 func (e *CPUEngine) Close() {
 	if e.stopChan != nil {
@@ -551,110 +562,6 @@ func (e *CPUEngine) Close() {
 	e.seqKVCaches = nil
 	e.kvMu.Unlock()
 	logger.Log.Info("CPU engine closed")
-}
-
-func ApplyTempCPU(logits []float32, temp float64) []float32 {
-	result := make([]float32, len(logits))
-	for i, l := range logits {
-		result[i] = float32(float64(l) / temp)
-	}
-	return result
-}
-
-func ApplyTopKCPU(logits []float32, k int) []float32 {
-	if k >= len(logits) || k <= 0 {
-		return logits
-	}
-
-	indices := make([]int, len(logits))
-	for i := range indices {
-		indices[i] = i
-	}
-
-	for i := 0; i < k; i++ {
-		maxIdx := i
-		maxVal := logits[indices[i]]
-		for j := i + 1; j < len(logits); j++ {
-			if logits[indices[j]] > maxVal {
-				maxIdx = j
-				maxVal = logits[indices[j]]
-			}
-		}
-		indices[i], indices[maxIdx] = indices[maxIdx], indices[i]
-	}
-
-	for i := k; i < len(logits); i++ {
-		logits[indices[i]] = float32(-mathx.Inf(1))
-	}
-
-	return logits
-}
-
-// ApplyTopPCPU applies Top-P (nucleus) filtering: sorts tokens by softmax probability,
-// accumulates the CDF, and sets logits[i] = -Inf for all tokens outside the nucleus.
-func ApplyTopPCPU(logits []float32, p float64) []float32 {
-	if p >= 1.0 || len(logits) == 0 {
-		return logits
-	}
-
-	// Compute softmax probabilities
-	probs := softmaxCPU(logits)
-
-	// Build index-sorted list by descending probability
-	type idxProb struct {
-		idx  int
-		prob float32
-	}
-	sorted := make([]idxProb, len(probs))
-	for i, prob := range probs {
-		sorted[i] = idxProb{idx: i, prob: prob}
-	}
-	// Partial insertion sort (efficient for large vocab with skewed distributions)
-	for i := 1; i < len(sorted); i++ {
-		for j := i; j > 0 && sorted[j].prob > sorted[j-1].prob; j-- {
-			sorted[j], sorted[j-1] = sorted[j-1], sorted[j]
-		}
-	}
-
-	// Mark tokens inside nucleus
-	cumSum := float64(0)
-	inNucleus := make([]bool, len(logits))
-	for _, ip := range sorted {
-		cumSum += float64(ip.prob)
-		inNucleus[ip.idx] = true
-		if cumSum >= p {
-			break
-		}
-	}
-
-	// Zero out tokens outside nucleus
-	result := make([]float32, len(logits))
-	copy(result, logits)
-	for i := range result {
-		if !inNucleus[i] {
-			result[i] = float32(mathx.Inf(-1))
-		}
-	}
-	return result
-}
-
-func softmaxCPU(logits []float32) []float32 {
-	probs := make([]float32, len(logits))
-	copy(probs, logits)
-	simd.SoftmaxAVX2(probs)
-	return probs
-}
-
-func SampleFromDistCPU(probs []float32, r *rand.Rand) int {
-	cumSum := float32(0)
-	threshold := float32(r.Float32())
-	for i, p := range probs {
-		cumSum += p
-		if cumSum >= threshold {
-			return i
-		}
-	}
-	return len(probs) - 1
 }
 
 // ForwardDraft performs a multi-token speculative forward pass on the CPU engine,
@@ -831,7 +738,24 @@ func (e *CPUEngine) LoadAdapter(path, id string) error {
 		e.mergeLoRADelta(layer, layerKey, delta)
 	}
 
+	// Record the adapter so ListAdapters can report it.
+	e.adaptersMu.Lock()
+	e.adapters = append(e.adapters, AdapterInfo{ID: id, Path: path, NumWeights: len(typeA)})
+	e.adaptersMu.Unlock()
+
 	return nil
+}
+
+// ListAdapters returns metadata for the LoRA adapters merged into the CPU
+// weights, sorted by ID.
+func (e *CPUEngine) ListAdapters() []AdapterInfo {
+	e.adaptersMu.Lock()
+	defer e.adaptersMu.Unlock()
+
+	out := make([]AdapterInfo, len(e.adapters))
+	copy(out, e.adapters)
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
 }
 
 // mergeLoRADelta adds a LoRA delta matrix into the corresponding CPUWeights slice.

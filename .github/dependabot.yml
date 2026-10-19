@@ -53,26 +53,32 @@ updates:
           - "patch"
 
   # npm packages (WebUI tests)
-  - package-ecosystem: "npm"
-    directory: "/cmd/webui/tests"
-    schedule:
-      interval: "weekly"
-      day: "sunday"
-      time: "01:00"
-    open-pull-requests-limit: 10
-    labels:
-      - "dependencies"
-      - "npm"
-      - "javascript"
-    commit-message:
-      prefix: "npm"
-    groups:
-      testing-libraries:
-        patterns:
-          - "@playwright/*"
-          - "playwright"
-        update-types:
-          - "minor"
+  # The WebUI has no JavaScript package manifest: its only front-end
+  # dependency is a CDN-loaded script, and the Playwright driver is a Go
+  # module (github.com/playwright-community/playwright-go), which is already
+  # covered by the gomod ecosystem entry above. This npm entry used to point
+  # at a directory with no package.json, so Dependabot errored on every run.
+  #
+  # - package-ecosystem: "npm"
+  #   directory: "/cmd/webui/tests"
+  #   schedule:
+  #     interval: "weekly"
+  #     day: "sunday"
+  #     time: "01:00"
+  #   open-pull-requests-limit: 10
+  #   labels:
+  #     - "dependencies"
+  #     - "npm"
+  #     - "javascript"
+  #   commit-message:
+  #     prefix: "npm"
+  #   groups:
+  #     testing-libraries:
+  #       patterns:
+  #         - "@playwright/*"
+  #         - "playwright"
+  #       update-types:
+  #         - "minor"
           - "patch"
 
   # Docker images (Root Dockerfiles: CPU, NVIDIA, WebUI)

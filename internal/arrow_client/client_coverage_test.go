@@ -22,14 +22,14 @@ import (
 
 type testFlightServer struct {
 	flight.BaseFlightServer
-	mu            sync.Mutex
-	records       []arrow.Record
-	schema        *arrow.Schema
-	hasEndpoint   bool
-	sendPutRes    bool
-	doGetRecords  []arrow.Record
-	doPutErr      error
-	doGetErr      error
+	mu                  sync.Mutex
+	records             []arrow.RecordBatch
+	schema              *arrow.Schema
+	hasEndpoint         bool
+	sendPutRes          bool
+	doGetRecords        []arrow.RecordBatch
+	doPutErr            error
+	doGetErr            error
 	flightInfoErr       error
 	schemaErr           error
 	doGetErrAfterRecord error
@@ -45,7 +45,7 @@ func (s *testFlightServer) DoPut(stream flight.FlightService_DoPutServer) error 
 	}
 	defer reader.Release()
 	for reader.Next() {
-		rec := reader.Record()
+		rec := reader.RecordBatch()
 		if rec != nil {
 			rec.Retain()
 			s.mu.Lock()
@@ -67,7 +67,7 @@ func (s *testFlightServer) DoGet(ticket *flight.Ticket, stream flight.FlightServ
 		return s.doGetErr
 	}
 	s.mu.Lock()
-	records := make([]arrow.Record, len(s.doGetRecords))
+	records := make([]arrow.RecordBatch, len(s.doGetRecords))
 	copy(records, s.doGetRecords)
 	s.mu.Unlock()
 
@@ -214,7 +214,7 @@ func TestFlightClient_Connect_Error(t *testing.T) {
 	orig := flightNewClient
 	defer func() { flightNewClient = orig }()
 
-	flightNewClient = func(addr string, auth flight.ClientAuthHandler, opts ...grpc.DialOption) (flight.Client, error) {
+	flightNewClient = func(_ context.Context, _ string, _ flight.ClientAuthHandler, _ []flight.ClientMiddleware, _ ...grpc.DialOption) (flight.Client, error) {
 		return nil, errors.New("mock dial failure")
 	}
 
@@ -290,9 +290,12 @@ func TestFlightClient_DoPutTensor_ServerInteractions(t *testing.T) {
 	}
 
 	// 5. Padding: rows=[2], data=[1, 2, 3] -> rowsCount=1, colsCount=3. rowLen=2, so offset=2, pads 1 zero.
-	res, err = client.DoPutTensor(ctx, []float32{1.0, 2.0, 3.0}, []int32{2}, nil)
+	paddedRes, err := client.DoPutTensor(ctx, []float32{1.0, 2.0, 3.0}, []int32{2}, nil)
 	if err != nil {
 		t.Fatalf("DoPutTensor failed with padded row: %v", err)
+	}
+	if len(paddedRes) != 0 {
+		t.Errorf("expected empty result for ack-less padded put, got %v", paddedRes)
 	}
 
 	// 6. With server sending PutResult response
@@ -302,6 +305,11 @@ func TestFlightClient_DoPutTensor_ServerInteractions(t *testing.T) {
 	res, err = client.DoPutTensor(ctx, []float32{1.0, 2.0}, []int32{2}, nil)
 	if err != nil {
 		t.Fatalf("DoPutTensor failed with response: %v", err)
+	}
+	// A bare PutResult carries no AppMetadata, so the ack completes cleanly
+	// with an empty payload rather than an error.
+	if len(res) != 0 {
+		t.Errorf("expected empty payload from bare PutResult ack, got %v", res)
 	}
 }
 
@@ -357,7 +365,7 @@ func TestFlightClient_StreamEmbeddings_ServerInteractions(t *testing.T) {
 	}
 }
 
-func createTestRecord(alloc memory.Allocator, ids []string, hasNullId bool, vectors [][]float32) arrow.Record {
+func createTestRecord(alloc memory.Allocator, ids []string, hasNullId bool, vectors [][]float32) arrow.RecordBatch {
 	vecDim := len(vectors[0])
 	schema := arrow.NewSchema([]arrow.Field{
 		{Name: "id", Type: arrow.BinaryTypes.String, Nullable: true},
@@ -385,17 +393,17 @@ func createTestRecord(alloc memory.Allocator, ids []string, hasNullId bool, vect
 			vecValBuilder.Append(val)
 		}
 	}
-	return builder.NewRecord()
+	return builder.NewRecordBatch()
 }
 
-func createRecordNoVector(alloc memory.Allocator) arrow.Record {
+func createRecordNoVector(alloc memory.Allocator) arrow.RecordBatch {
 	schema := arrow.NewSchema([]arrow.Field{
 		{Name: "id", Type: arrow.BinaryTypes.String, Nullable: true},
 	}, nil)
 	builder := array.NewRecordBuilder(alloc, schema)
 	defer builder.Release()
 	builder.Field(0).(*array.StringBuilder).Append("only_id")
-	return builder.NewRecord()
+	return builder.NewRecordBatch()
 }
 
 func TestFlightClient_DoGet_ServerInteractions(t *testing.T) {
@@ -417,7 +425,7 @@ func TestFlightClient_DoGet_ServerInteractions(t *testing.T) {
 	srv.mu.Lock()
 	srv.hasEndpoint = true
 	recWithData := createTestRecord(client.allocator, []string{"doc1", "doc2"}, true, [][]float32{{1.0, 2.0}, {3.0, 4.0}})
-	srv.doGetRecords = []arrow.Record{recWithData}
+	srv.doGetRecords = []arrow.RecordBatch{recWithData}
 	srv.mu.Unlock()
 
 	batch, err := client.DoGet(ctx, []string{"doc1"})
@@ -434,7 +442,7 @@ func TestFlightClient_DoGet_ServerInteractions(t *testing.T) {
 	// 3. Record without vector column (vectorIdx < 0)
 	srv.mu.Lock()
 	recNoVec := createRecordNoVector(client.allocator)
-	srv.doGetRecords = []arrow.Record{recNoVec}
+	srv.doGetRecords = []arrow.RecordBatch{recNoVec}
 	srv.mu.Unlock()
 	batch, err = client.DoGet(ctx, []string{"doc1"})
 	if err != nil {
@@ -447,7 +455,7 @@ func TestFlightClient_DoGet_ServerInteractions(t *testing.T) {
 	// 4. Server stream error after sending records (triggers reader.Err())
 	srv.mu.Lock()
 	recWithData2 := createTestRecord(client.allocator, []string{"doc1"}, false, [][]float32{{1.0, 2.0}})
-	srv.doGetRecords = []arrow.Record{recWithData2}
+	srv.doGetRecords = []arrow.RecordBatch{recWithData2}
 	srv.doGetErrAfterRecord = errors.New("simulated error after record")
 	srv.mu.Unlock()
 	if _, err := client.DoGet(ctx, []string{"doc1"}); err == nil || !strings.Contains(err.Error(), "error reading records") {

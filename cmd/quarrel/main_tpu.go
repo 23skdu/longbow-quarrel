@@ -1,4 +1,4 @@
-//go:build linux && tpu
+//go:build linux && tpu && !cuda
 
 package main
 
@@ -29,6 +29,7 @@ var (
 	prompt       = flag.String("prompt", "Hello world", "Prompt to generate from")
 	numTokens    = flag.Int("n", 20, "Number of tokens to generate")
 	metricsAddr  = flag.String("metrics", ":9090", "Address to serve Prometheus metrics")
+	apiAddr      = flag.String("api-addr", ":8080", "Address to serve the OpenAI-compatible REST API (empty disables it)")
 	kvCacheSize  = flag.Int("kv-cache-size", 2048, "KV cache max sequence length")
 	maxBatchSize = flag.Int("max-batch-size", 16, "Maximum number of sequences in a batch")
 	blockSize    = flag.Int("block-size", 16, "Paged attention block size")
@@ -43,7 +44,15 @@ var (
 )
 
 func main() {
+	// -help / -version are handled before flag.Parse so that the container
+	// HEALTHCHECK (`quarrel --help`) exits 0 instead of 2.
+	if handleHelpFlag() {
+		return
+	}
 	flag.Parse()
+	if handleVersionFlag() {
+		return
+	}
 
 	if *modelPath == "" {
 		fmt.Println("Error: --model flag is required")
@@ -136,6 +145,17 @@ func main() {
 			logger.Log.Error("Flight server failed", "error", err)
 		}
 	}()
+
+	// OpenAI-compatible REST API. This is the surface documented in README.md
+	// and docs/api.md; it was previously never started by any binary.
+	apiSrv, err := startAPIServer(*apiAddr, func() int64 { return int64(device.TPUAllocatedBytes()) }, e, tok)
+	if err != nil {
+		logger.Log.Error("failed to start REST API", "error", err)
+	}
+	if apiSrv != nil {
+		defer apiSrv.Close()
+		fmt.Println(apiSrv.describe())
+	}
 
 	promptTokens := tok.Encode(*prompt)
 	fmt.Printf("Prompt tokens: %d\n", len(promptTokens))

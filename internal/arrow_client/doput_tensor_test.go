@@ -164,6 +164,7 @@ func connectFlightClient(t *testing.T, addr string) *FlightClient {
 //   - The `result == nil` branch in DoPutTensor (which returns an empty slice
 //     and would make remote.go skip LoadFrom and hand back a zero-filled
 //     tensor) is unreachable dead code.
+//
 // TestDoPutTensor_RoundTrip verifies that DoPutTensor completes an end-to-end
 // round trip over Arrow Flight, correctly decoding result tensor data from
 // PutResult.AppMetadata when present, or returning empty on ack-less completion.

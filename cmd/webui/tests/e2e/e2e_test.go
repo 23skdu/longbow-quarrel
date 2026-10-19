@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/23skdu/longbow-quarrel/cmd/webui/config"
+	"github.com/23skdu/longbow-quarrel/cmd/webui/engine"
 	"github.com/23skdu/longbow-quarrel/cmd/webui/handlers"
 )
 
@@ -100,7 +102,7 @@ func TestAPIEndpointsIntegration(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/api/models", nil)
 		w := httptest.NewRecorder()
 
-		handlers.ModelsHandler(handlers.Config{})(w, req)
+		handlers.ModelsHandler(config.Config{})(w, req)
 		res := w.Result()
 		defer res.Body.Close()
 
@@ -108,29 +110,28 @@ func TestAPIEndpointsIntegration(t *testing.T) {
 			t.Errorf("Expected status 200, got %d", res.StatusCode)
 		}
 
-		var models []handlers.ModelInfo
+		var models []engine.ModelInfo
 		if err := json.NewDecoder(res.Body).Decode(&models); err != nil {
 			t.Fatalf("Failed to decode models: %v", err)
 		}
 	})
 
-	t.Run("Generate endpoint accepts JSON", func(t *testing.T) {
+	t.Run("Generate endpoint reports a failure when no model is loaded", func(t *testing.T) {
+		// The WebUI used to answer every generate request with HTTP 200 and
+		// an empty completion, because the adapter was a stub that returned
+		// an empty-but-successful response for anything. A request that
+		// cannot be served has to say so.
 		body := `{"prompt": "Hello", "max_tokens": 10}`
 		req := httptest.NewRequest(http.MethodPost, "/api/generate", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
 
-		handlers.GenerateHandler(handlers.Config{})(w, req)
+		handlers.GenerateHandler(config.Config{})(w, req)
 		res := w.Result()
 		defer res.Body.Close()
 
-		if res.StatusCode != http.StatusOK {
-			t.Errorf("Expected status 200, got %d", res.StatusCode)
-		}
-
-		var response handlers.GenerateResponse
-		if err := json.NewDecoder(res.Body).Decode(&response); err != nil {
-			t.Fatalf("Failed to decode response: %v", err)
+		if res.StatusCode != http.StatusInternalServerError {
+			t.Errorf("Expected status 500 when no model is available, got %d", res.StatusCode)
 		}
 	})
 
@@ -140,7 +141,7 @@ func TestAPIEndpointsIntegration(t *testing.T) {
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
 
-		handlers.StreamHandler(handlers.Config{})(w, req)
+		handlers.StreamHandler(config.Config{})(w, req)
 		res := w.Result()
 		defer res.Body.Close()
 
@@ -173,7 +174,7 @@ func TestConcurrentAPIRequests(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, "/api/models", nil)
 			w := httptest.NewRecorder()
 
-			handlers.ModelsHandler(handlers.Config{})(w, req)
+			handlers.ModelsHandler(config.Config{})(w, req)
 			results <- w.Code
 		}(i)
 	}
@@ -194,7 +195,7 @@ func TestStreamingResponseFormat(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 
-	handlers.StreamHandler(handlers.Config{})(w, req)
+	handlers.StreamHandler(config.Config{})(w, req)
 
 	reader := bufio.NewReader(w.Body)
 	lineCount := 0
@@ -346,7 +347,7 @@ func TestGenerateRequestFormat(t *testing.T) {
 }
 
 func TestModelInfoFormat(t *testing.T) {
-	info := handlers.ModelInfo{
+	info := engine.ModelInfo{
 		Name:         "smollm2",
 		Path:         "/models/smollm2.gguf",
 		Parameters:   "1.7B",
@@ -359,7 +360,7 @@ func TestModelInfoFormat(t *testing.T) {
 		t.Fatalf("Failed to marshal: %v", err)
 	}
 
-	var decoded handlers.ModelInfo
+	var decoded engine.ModelInfo
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		t.Fatalf("Failed to unmarshal: %v", err)
 	}
@@ -374,24 +375,45 @@ func TestModelInfoFormat(t *testing.T) {
 }
 
 func TestHTTPMethodsEnforcement(t *testing.T) {
-	endpoints := []string{"/api/models", "/api/generate", "/api/stream"}
+	// Each endpoint must reject every method except its own. /api/models is a
+	// read-only GET endpoint; /api/generate and /api/stream are POST.
+	cases := []struct {
+		endpoint string
+		wrong    string
+		invoke   func(config.Config, http.ResponseWriter, *http.Request)
+	}{
+		{
+			endpoint: "/api/models",
+			wrong:    http.MethodPost,
+			invoke: func(c config.Config, w http.ResponseWriter, r *http.Request) {
+				handlers.ModelsHandler(c)(w, r)
+			},
+		},
+		{
+			endpoint: "/api/generate",
+			wrong:    http.MethodGet,
+			invoke: func(c config.Config, w http.ResponseWriter, r *http.Request) {
+				handlers.GenerateHandler(c)(w, r)
+			},
+		},
+		{
+			endpoint: "/api/stream",
+			wrong:    http.MethodGet,
+			invoke: func(c config.Config, w http.ResponseWriter, r *http.Request) {
+				handlers.StreamHandler(c)(w, r)
+			},
+		},
+	}
 
-	for _, endpoint := range endpoints {
-		t.Run(endpoint+" with wrong method", func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, endpoint, nil)
+	for _, tc := range cases {
+		t.Run(tc.endpoint+" with wrong method "+tc.wrong, func(t *testing.T) {
+			req := httptest.NewRequest(tc.wrong, tc.endpoint, nil)
 			w := httptest.NewRecorder()
 
-			switch endpoint {
-			case "/api/models":
-				handlers.ModelsHandler(handlers.Config{})(w, req)
-			case "/api/generate":
-				handlers.GenerateHandler(handlers.Config{})(w, req)
-			case "/api/stream":
-				handlers.StreamHandler(handlers.Config{})(w, req)
-			}
+			tc.invoke(config.Config{}, w, req)
 
 			if w.Code != http.StatusMethodNotAllowed {
-				t.Errorf("Expected status 405, got %d", w.Code)
+				t.Errorf("Expected status 405 for %s %s, got %d", tc.wrong, tc.endpoint, w.Code)
 			}
 		})
 	}
@@ -412,7 +434,7 @@ func BenchmarkModelsEndpoint(b *testing.B) {
 	w := httptest.NewRecorder()
 
 	for i := 0; i < b.N; i++ {
-		handlers.ModelsHandler(handlers.Config{})(w, req)
+		handlers.ModelsHandler(config.Config{})(w, req)
 		w.Body.Reset()
 	}
 }
@@ -423,7 +445,7 @@ func BenchmarkConcurrentRequests(b *testing.B) {
 		w := httptest.NewRecorder()
 
 		for pb.Next() {
-			handlers.ModelsHandler(handlers.Config{})(w, req)
+			handlers.ModelsHandler(config.Config{})(w, req)
 			w.Body.Reset()
 		}
 	})
@@ -439,7 +461,7 @@ func TestRequestBodySizeLimits(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 
-	handlers.GenerateHandler(handlers.Config{})(w, req)
+	handlers.GenerateHandler(config.Config{})(w, req)
 	res := w.Result()
 	defer res.Body.Close()
 
@@ -456,9 +478,19 @@ func TestCORSHeadersPresent(t *testing.T) {
 		expectCORS  bool
 	}{
 		{
-			name:        "No CORS configured",
+			// NewCORSMiddleware defaults an empty allow-list to "*" so a
+			// freshly started server is usable from a browser at any origin.
+			// The permissive default is reflected in the header, not its absence.
+			name:        "No CORS configured (defaults to wildcard)",
 			origin:      "http://example.com",
 			allowedOrig: nil,
+			expectCORS:  true,
+		},
+		{
+			// An explicit allow-list must reject anything not on it.
+			name:        "Explicit allow-list rejects other origins",
+			origin:      "http://evil.example",
+			allowedOrig: []string{"http://localhost:3000"},
 			expectCORS:  false,
 		},
 		{

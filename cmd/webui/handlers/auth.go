@@ -110,15 +110,27 @@ func (m *APIKeyManager) ValidateKey(key string) (*APIKey, error) {
 	return apiKey, nil
 }
 
+// defaultRateLimit is applied to keys that were registered without an
+// explicit limit (RateLimit <= 0).
+const defaultRateLimit = 100
+
+// CheckRateLimit reports whether key may make another request in the current
+// minute window, incrementing the counter when it may. The per-key limit set
+// at AddKey time is honoured; unknown keys fall back to defaultRateLimit.
 func (m *APIKeyManager) CheckRateLimit(key string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	limit := defaultRateLimit
+	if apiKey, ok := m.keys[key]; ok && apiKey != nil && apiKey.RateLimit > 0 {
+		limit = apiKey.RateLimit
+	}
 
 	now := time.Now().Unix()
 	minuteKey := key + "_" + strconv.FormatInt(now/60, 10)
 
 	count := m.rateLim[minuteKey]
-	if count >= 100 {
+	if count >= limit {
 		return false
 	}
 

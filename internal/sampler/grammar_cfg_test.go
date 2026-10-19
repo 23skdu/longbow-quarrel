@@ -320,4 +320,3 @@ func TestGrammar_ExhaustiveCoverage(t *testing.T) {
 	}
 	gUnknown.recomputeBitmask()
 }
-

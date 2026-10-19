@@ -1,4 +1,4 @@
-//go:build metal
+//go:build darwin && metal && cgo
 
 package engine
 
@@ -21,9 +21,10 @@ import (
 	"github.com/23skdu/longbow-quarrel/internal/tokenizer"
 )
 
-var (
-	ErrModelSwapped = errors.New("inference interrupted: engine model was swapped")
-)
+// ErrModelSwapped is declared in sampler.go, which is compiled in every
+// build. Declaring it here as well collided with that copy in any build that
+// includes both files (notably darwin + metal), and the duplicate made the
+// Metal backend fail to compile.
 
 func init() {
 	RegisterEngine("metal", NewMetalEngine)
@@ -33,12 +34,13 @@ func NewMetalEngine(modelPath string, config config.Config) (Engine, error) {
 	ctx := device.NewContext()
 
 	e := &metalEngine{
-		ctx:       ctx,
-		config:    config,
-		weights:   &LlamaWeights{},
-		ActLogger: NewActivationLogger(),
-		SeqMgr:    NewSequenceManager(),
-		LoRA:      NewLoRAManager(),
+		ctx:        ctx,
+		config:     config,
+		weights:    &LlamaWeights{},
+		ActLogger:  NewActivationLogger(),
+		SeqMgr:     NewSequenceManager(),
+		LoRA:       NewLoRAManager(),
+		stopTokens: stopTokenSet(config.StopTokens),
 	}
 
 	e.TraceTracker = NewActivationTraceTracker(e.config.Layers)
@@ -81,6 +83,11 @@ func (e *metalEngine) loadModel(path string) error {
 	if err != nil {
 		logger.Log.Warn("Failed to initialize tokenizer from GGUF", "error", err)
 	} else {
+		// Register the EOS token declared by the model metadata so the
+		// decode loop only has to consult the tokenizer.
+		if e.config.EOSTokenID > 0 {
+			tok.AddEOSTokenID(e.config.EOSTokenID)
+		}
 		e.Tokenizer = tok
 	}
 
@@ -1287,7 +1294,14 @@ func (e *metalEngine) runBatchLoop() {
 				seq.PrefillCompleted = false
 			}
 
-			if token == 2 || len(seq.Tokens) >= seq.MaxTokens {
+			// The tokenizer knows every EOS id the model declares.
+			isEOS := false
+			if e.Tokenizer != nil {
+				if t, ok := e.Tokenizer.(*tokenizer.Tokenizer); ok {
+					isEOS = t.IsEOS(token)
+				}
+			}
+			if isEOS || isStopToken(e.stopTokens, token) || len(seq.Tokens) >= seq.MaxTokens {
 				select {
 				case seq.Result <- seq.Tokens:
 				default:
@@ -1605,4 +1619,13 @@ func (e *metalEngine) RollbackKV(seqID string, newPos int) error {
 
 func (e *metalEngine) LoadAdapter(path, id string) error {
 	return e.LoRA.LoadAdapter(e.ctx, path, id)
+}
+
+// ListAdapters returns metadata for the LoRA adapters loaded into the Metal
+// backend, sorted by ID.
+func (e *metalEngine) ListAdapters() []AdapterInfo {
+	if e.LoRA == nil {
+		return []AdapterInfo{}
+	}
+	return e.LoRA.ListAdapters()
 }

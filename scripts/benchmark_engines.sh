@@ -39,8 +39,11 @@ TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 # ── Paths ────────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-QUARREL_BIN="$REPO_ROOT/bin/quarrel-cuda"
-QUARREL_SIMPLE="$REPO_ROOT/bin/quarrel-simple"
+QUARREL_BIN=""
+# shellcheck source=scripts/quarrel_bin.sh
+source "$REPO_ROOT/scripts/quarrel_bin.sh"
+resolve_quarrel_bin || exit 1
+QUARREL_SIMPLE="$QUARREL_BIN"
 LLAMA_BENCH="$(which llama-bench 2>/dev/null || true)"
 OLLAMA_BIN="$(which ollama 2>/dev/null || true)"
 

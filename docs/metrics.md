@@ -13,7 +13,7 @@ Comprehensive Prometheus metrics reference for monitoring inference performance,
 | Metric | Type | Description |
 |--------|------|-------------|
 | `inference_tokens_total` | Counter | Total tokens generated across all inference requests. |
-| `inference_duration_seconds` | Summary | Total latency spent in the token generation loop. |
+| `inference_duration_seconds` | Histogram | Total latency spent in the token generation loop. |
 | `gpu_memory_allocated_bytes` | Gauge | Current bytes allocated in GPU VRAM. |
 | `gpu_kernel_duration_seconds` | HistogramVec (kernel) | Execution latency per individual GPU kernel. |
 | `context_length_tokens` | Histogram | Distribution of sequence context lengths processed. |

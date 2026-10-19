@@ -1,4 +1,4 @@
-//go:build darwin && metal
+//go:build darwin && metal && cgo
 
 package engine
 

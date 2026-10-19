@@ -1,4 +1,4 @@
-//go:build darwin && metal
+//go:build darwin && metal && !cuda && !tpu
 
 package main
 
@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/23skdu/longbow-quarrel/internal/config"
+	"github.com/23skdu/longbow-quarrel/internal/device"
 	"github.com/23skdu/longbow-quarrel/internal/engine"
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
 	"github.com/23skdu/longbow-quarrel/internal/logger"
@@ -27,6 +28,7 @@ var (
 	prompt       = flag.String("prompt", "Hello world", "Prompt to generate from")
 	numTokens    = flag.Int("n", 20, "Number of tokens to generate")
 	metricsAddr  = flag.String("metrics", ":9090", "Address to serve Prometheus metrics")
+	apiAddr      = flag.String("api-addr", ":8080", "Address to serve the OpenAI-compatible REST API (empty disables it)")
 	kvCacheSize  = flag.Int("kv-cache-size", 2048, "KV cache max sequence length")
 	maxBatchSize = flag.Int("max-batch-size", 16, "Maximum number of sequences in a batch")
 	blockSize    = flag.Int("block-size", 16, "Paged attention block size")
@@ -40,7 +42,15 @@ var (
 )
 
 func main() {
+	// -help / -version are handled before flag.Parse so that the container
+	// HEALTHCHECK (`quarrel --help`) exits 0 instead of 2.
+	if handleHelpFlag() {
+		return
+	}
 	flag.Parse()
+	if handleVersionFlag() {
+		return
+	}
 
 	if *modelPath == "" {
 		fmt.Println("Error: --model flag is required")
@@ -116,6 +126,17 @@ func main() {
 		log.Fatalf("Failed to initialize engine: %v", err)
 	}
 	defer e.Close()
+
+	// OpenAI-compatible REST API. This is the surface documented in README.md
+	// and docs/api.md; it was previously never started by any binary.
+	apiSrv, err := startAPIServer(*apiAddr, device.AllocatedBytes, e, tok)
+	if err != nil {
+		logger.Log.Error("failed to start REST API", "error", err)
+	}
+	if apiSrv != nil {
+		defer apiSrv.Close()
+		fmt.Println(apiSrv.describe())
+	}
 
 	inputTokens := tok.Encode(*prompt)
 	inputTokens = append([]int{1}, inputTokens...)
