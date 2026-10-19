@@ -1,473 +1,186 @@
-# Templ WebUI Service Plan
+# WebUI
 
-## Overview
+> **This document used to be a forward-looking plan** (473 lines, every
+> checkbox unchecked) that proposed a stack the code does not use: it
+> proposed `github.com/a-h/templ` for templating, `github.com/gin-gonic/gin`
+> for routing and `github.com/markbates/grift` for CLI tooling. None of them
+> are dependencies of `cmd/webui`, and the plan was never updated after the
+> feature was built.
+>
+> It has been rewritten to describe the implementation that actually exists.
+> The remaining ideas are listed under [Not implemented](#not-implemented).
 
-Add a responsive web-based UI for interacting with the Quarrel inference engine via WebSockets, enabling service access to the LLM from any browser or client.
+## 1. Overview
 
----
+`cmd/webui` is a small HTTP server that exposes the inference engine over a
+browser UI and a JSON API. It is a **separate Go module** (`cmd/webui/go.mod`)
+so it can be built and deployed independently of the engine.
 
-## Part 1: Project Setup & Dependencies
+The stack is deliberately minimal:
 
-**Objective:** Initialize Templ project structure and dependencies
+| Concern | Implementation |
+|---|---|
+| HTTP routing | `net/http` (`http.ServeMux`) |
+| Templating | `html/template` (stdlib) |
+| WebSocket | `github.com/gorilla/websocket` |
+| Metrics | `github.com/prometheus/client_golang` |
+| Front-end | Plain HTML, CSS and JavaScript served from `cmd/webui/static/` |
 
-### 1.1 Initialize Go Module
-- [ ] Create `cmd/webui/` directory structure
-- [ ] Initialize Go module with required dependencies:
-  - `github.com/a-h/templ` - Templ templating engine
-  - `github.com/gorilla/websocket` - WebSocket support
-  - `github.com/gin-gonic/gin` - HTTP routing (optional, for REST endpoints)
-  - `github.com/prometheus/client_golang` - Metrics endpoint
+## 2. Build and run
 
-### 1.2 Project Structure
-```
-cmd/webui/
-├── main.go                 # Entry point
-├── handlers/
-│   ├── websocket.go       # WebSocket handler
-│   ├── inference.go       # Inference API handler
-│   └── metrics.go        # Prometheus metrics
-├── templates/
-│   ├── base.templ        # Base template
-│   ├── index.templ       # Chat interface
-│   └── components/
-│       ├── chat.templ    # Chat message component
-│       ├── sidebar.templ # Model selection sidebar
-│       └── settings.templ # Settings panel
-├── static/
-│   ├── css/              # Stylesheets
-│   └── js/               # Client-side JavaScript
-└── config/
-    └── config.go         # WebUI configuration
+```bash
+# From inside cmd/webui (it is a separate module).
+cd cmd/webui
+go build -tags webui ./...
+go run -tags webui .
+
+# Or with the Docker image.
+docker compose -f docker-compose.webui.yml up
 ```
 
-### 1.3 Build Configuration
-- [ ] Add build tag `//go:build webui` to webui-specific files
-- [ ] Update `Dockerfile` with multi-stage build for webui
-- [ ] Add `docker-compose.webui.yml` for local development
+Every file in the module is behind `//go:build webui`, so the tag is
+required.
 
-**Deliverable:** Project structure ready for component development
+## 3. Configuration
 
----
+Flags take precedence over the environment, and the environment over the
+built-in defaults.
 
-## Part 2: WebSocket Infrastructure
+| Flag | Environment variable | Default |
+|---|---|---|
+| `-port` | `WEBUI_PORT` | `8080` |
+| `-metrics-port` | `WEBUI_METRICS_PORT` | `9090` |
+| `-host` | `WEBUI_HOST` | `0.0.0.0` |
+| `-api-key` | `WEBUI_API_KEY` | *(empty — unauthenticated)* |
+| `-allowed-origins` | `WEBUI_ALLOWED_ORIGINS` | *(empty — permissive)* |
+| — | `WEBUI_MODEL_PATH` | *(empty)* |
 
-**Objective:** Implement bidirectional communication between browser and inference engine
+`cmd/webui/config/config.go` implements the overlay;
+`config_test.go` covers both directions, including that an unset variable
+never clobbers an explicitly set value.
 
-### 2.1 WebSocket Handler
-- [ ] Create `cmd/webui/handlers/websocket.go`
-- [ ] Implement `HandleWebSocket()`:
-  - Upgrade HTTP to WebSocket connection
-  - Manage connection lifecycle (connect/disconnect)
-  - Handle ping/pong for connection health
-  - Implement reconnection logic
+> **Security note.** With no API key configured the API is unauthenticated.
+> The server logs a warning at startup when that is the case.
 
-### 2.2 Message Protocol
-Define JSON message format:
+## 4. Routes
+
+Registered in `cmd/webui/main.go`.
+
+### Unauthenticated
+
+| Route | Purpose |
+|---|---|
+| `GET /` | The single-page UI |
+| `GET /static/…` | CSS and JavaScript |
+| `GET /health`, `GET /healthz`, `GET /readyz` | Liveness and readiness probes |
+| `GET /version` | Build version |
+| `GET /metrics` | Prometheus metrics |
+| `GET /debug/pprof/…` | Profiling endpoints |
+| `GET /ws` | WebSocket streaming |
+
+### Under `/api/`, API-key protected
+
+| Route | Purpose |
+|---|---|
+| `GET /api/models` | List the loaded models |
+| `POST /api/generate` | Generate a completion |
+| `POST /api/stream` | Stream a completion (SSE) |
+| `POST /api/hotswap` | Swap the loaded model |
+| `POST /api/v1/chat/completions` | OpenAI-compatible chat |
+| `POST /api/v1/completions` | OpenAI-compatible completion |
+| `GET /api/v1/models` | OpenAI-compatible model list |
+
+The OpenAI-compatible routes are mounted under `/api/`, so the full path is
+`/api/v1/chat/completions`. The engine's own REST API
+(`internal/api`, served by `cmd/quarrel` on `-api-addr`) serves the same
+paths **without** the `/api` prefix.
+
+## 5. Backends
+
+`cmd/webui/engine` selects an adapter by build tag:
+
+| Adapter | Build tag | Backend |
+|---|---|---|
+| `adapter_cuda.go` | `linux && amd64 && cuda && cgo` | CUDA |
+| `adapter_metal.go` | `darwin && metal` | Apple Metal |
+| `adapter_cpu.go` | everything else | CPU |
+
+All three run real inference. The CPU adapter loads a model with
+`engine.NewEngine` and streams tokens the same way the GPU adapters do.
+
+### The inference protocol
+
+The caller does:
+
 ```go
-type WSMessage struct {
-    Type    string      `json:"type"`    // "inference", "status", "error", "metrics"
-    Payload interface{} `json:"payload"`
-}
-
-type InferenceRequest struct {
-    Prompt      string            `json:"prompt"`
-    Model       string            `json:"model,omitempty"`
-    Temperature float64           `json:"temperature,omitempty"`
-    TopK        int               `json:"topk,omitempty"`
-    TopP        float64           `json:"topp,omitempty"`
-    MaxTokens   int               `json:"max_tokens,omitempty"`
-    Stream      bool              `json:"stream"`
-}
-
-type InferenceResponse struct {
-    Token       string            `json:"token"`
-    TokenID     int               `json:"token_id"`
-    Stream      bool              `json:"stream"`
-    Complete    bool              `json:"complete"`
-    TokensPerSec float64          `json:"tokens_per_sec"`
-}
+outer, err := adapter.Infer(ctx, req)
+inner := <-outer
+for resp := range inner { … }
 ```
 
-### 2.3 Connection Manager
-- [ ] Implement `ConnectionManager`:
-  - Track active connections by model
-  - Broadcast messages to connected clients
-  - Rate limiting per connection
-  - Max concurrent connections per model
-
-### 2.4 Error Handling
-- [ ] Define error codes:
-  - `INVALID_REQUEST`, `MODEL_NOT_FOUND`, `INFERENCE_ERROR`, `CONNECTION_LOST`
-- [ ] Implement graceful degradation
-- [ ] Log errors with request IDs for debugging
-
-**Deliverable:** Functional WebSocket infrastructure with JSON protocol
-
----
-
-## Part 3: Inference Engine Integration
-
-**Objective:** Connect WebSocket handler to existing Quarrel inference engine
-
-### 3.1 Engine Adapter
-- [ ] Create `cmd/webui/engine/adapter.go`
-- [ ] Implement `InferenceAdapter`:
-  - Wrap `engine.NewEngine()` for concurrent requests
-  - Manage engine lifecycle (load/unload models)
-  - Handle model hot-swapping
-  - Implement model caching
-
-### 3.2 Streaming Response
-- [ ] Implement streaming token generation:
-  - Yield tokens as they're generated
-  - Track tokens-per-second in real-time
-  - Support early termination (stop generation)
-
-### 3.3 Request Queue
-- [ ] Implement request prioritization:
-  - High priority: Interactive requests
-  - Low priority: Batch/generation requests
-- [ ] Add backpressure handling when queue full
-- [ ] Implement request timeout (default 5 minutes)
-
-### 3.4 KV Cache Sharing
-- [ ] Support KV cache persistence between requests:
-  - Cache prefix prompts for faster completion
-  - Implement cache invalidation
-  - Add cache size limits per model
-
-**Deliverable:** Integration layer connecting WebSocket to inference engine
-
----
-
-## Part 4: Base UI Components (Templ)
-
-**Objective:** Create reusable Templ components for the web interface
-
-### 4.1 Base Template
-- [ ] Create `cmd/webui/templates/base.templ`
-- [ ] Include:
-  - HTML5 doctype
-  - Meta tags for responsiveness
-  - CSP headers for security
-  - Preload critical assets
-
-### 4.2 Layout Components
-- [ ] Create layout components in `templates/components/`:
-  - `header.templ` - Title, connection status
-  - `footer.templ` - Version, links
-  - `container.templ` - Main content wrapper
-
-### 4.3 Chat Interface
-- [ ] Create `cmd/webui/templates/components/chat.templ`:
-  - Message list (user/assistant distinction)
-  - Streaming token display
-  - Typing indicator
-  - Auto-scroll on new messages
-
-### 4.4 Responsive Design
-- [ ] Implement mobile-first CSS:
-  - Sidebar collapses on mobile
-  - Touch-friendly message input
-  - Portrait/landscape optimizations
-  - Dark/light theme toggle
-
-**Deliverable:** Responsive base UI components in Templ
-
----
-
-## Part 5: Interactive Features
-
-**Objective:** Add interactive elements for model control
-
-### 5.1 Model Selection Sidebar
-- [ ] Create `cmd/webui/templates/components/sidebar.templ`:
-  - List available models
-  - Show model status (loaded/unloaded)
-  - Model info (parameters, quantization)
-  - Memory usage indicator
-
-### 5.2 Settings Panel
-- [ ] Create `cmd/webui/templates/components/settings.templ`:
-  - Temperature slider (0.0-2.0)
-  - TopK input (1-100)
-  - TopP slider (0.0-1.0)
-  - Max tokens input
-  - Reset to defaults button
-
-### 5.3 Conversation History
-- [ ] Implement conversation management:
-  - Save conversation to localStorage
-  - Load previous conversations
-  - Clear history
-  - Export conversation as JSON/Markdown
-
-### 5.4 Prompt Templates
-- [ ] Add preset prompts:
-  - "Summarize", "Translate", "Code", "Explain"
-  - Custom prompt input
-  - System prompt configuration
-
-**Deliverable:** Full-featured interactive sidebar and settings panel
-
----
-
-## Part 6: Client-Side JavaScript
-
-**Objective:** Implement WebSocket client and DOM manipulation
-
-### 6.1 WebSocket Client
-- [ ] Create `cmd/webui/static/js/websocket.js`:
-  - Connection establishment
-  - Message serialization/deserialization
-  - Reconnection with exponential backoff
-  - Heartbeat mechanism
-
-### 6.2 UI State Management
-- [ ] Implement state machine:
-  - States: `disconnected`, `connecting`, `connected`, `generating`
-  - Visual feedback for each state
-  - Disable inputs during generation
-
-### 6.3 DOM Updates
-- [ ] Create `cmd/webui/static/js/ui.js`:
-  - Efficient DOM updates (avoid reflows)
-  - Virtual scrolling for long conversations
-  - Markdown rendering (use `marked.js`)
-  - Syntax highlighting for code blocks
-
-### 6.4 Local Storage
-- [ ] Implement persistence:
-  - Save conversations
-  - Persist settings
-  - Store API keys (encrypted)
-  - History search functionality
-
-**Deliverable:** Client-side JavaScript for full interactivity
-
----
-
-## Part 7: Styling (CSS)
-
-**Objective:** Create modern, responsive styles
-
-### 7.1 CSS Architecture
-- [ ] Create `cmd/webui/static/css/main.css`:
-  - CSS variables for theming
-  - Mobile-first breakpoints
-  - BEM naming convention
-  - Minified production build
-
-### 7.2 Theme Support
-- [ ] Implement dark/light themes:
-  - System preference detection
-  - Manual toggle
-  - Smooth transitions
-  - Consistent color palette
-
-### 7.3 Component Styles
-- [ ] Style key components:
-  - Chat bubbles (user: blue, assistant: gray)
-  - Sidebar (collapsible on mobile)
-  - Settings panel (modal/slide-out)
-  - Loading indicators (spinners, typing animation)
-
-### 7.4 Animations
-- [ ] Add micro-interactions:
-  - Message fade-in
-  - Typing indicator
-  - Button hover effects
-  - Connection status pulse
-
-**Deliverable:** Complete CSS styling with dark mode support
-
----
-
-## Part 8: REST API Endpoints
-
-**Objective:** Provide REST endpoints for non-WebSocket clients
-
-### 8.1 API Routes
-Implement REST endpoints in `cmd/webui/handlers/`:
-```
-GET  /api/models              - List available models
-GET  /api/models/:name        - Get model info
-POST /api/generate            - Single-shot generation
-POST /api/stream              - Streaming generation (SSE)
-GET  /api/health              - Health check
-GET  /api/metrics             - Prometheus metrics
-```
-
-### 8.2 Authentication
-- [ ] Add API key authentication:
-  - Generate API keys via CLI
-  - Validate keys on each request
-  - Rate limiting per key
-  - Key rotation support
-
-### 8.3 OpenAPI Spec
-- [ ] Create `cmd/webui/api/openapi.yaml`:
-  - Document all endpoints
-  - Generate client SDKs
-  - Interactive API documentation
-
-### 8.4 CORS Support
-- [ ] Configure CORS for cross-origin requests
-- [ ] Support preflight OPTIONS requests
-- [ ] Configurable allowed origins
-
-**Deliverable:** REST API with OpenAPI documentation
-
----
-
-## Part 9: Metrics & Observability
-
-**Objective:** Add comprehensive monitoring
-
-### 9.1 Prometheus Metrics
-Create metrics in `cmd/webui/handlers/metrics.go`:
-- `quarrel_webui_connections_active` - Active WebSocket connections
-- `quarrel_webui_requests_total` - Total requests by model
-- `quarrel_webui_inference_duration_seconds` - Inference latency
-- `quarrel_webui_tokens_total` - Total tokens generated
-- `quarrel_webui_errors_total` - Error count by type
-
-### 9.2 Structured Logging
-- [ ] Implement structured logging:
-  - JSON format for log aggregation
-  - Request IDs for tracing
-  - Log levels (DEBUG, INFO, WARN, ERROR)
-  - Sensitive data redaction
-
-### 9.3 Health Endpoints
-- [ ] Add health checks:
-  - `/healthz` - Liveness probe
-  - `/readyz` - Readiness probe (checks engine status)
-  - `/version` - Version info
-
-### 9.4 Tracing
-- [ ] Add distributed tracing:
-  - Trace inference requests
-  - Span for WebSocket message processing
-  - Export to Jaeger/Zipkin (optional)
-
-**Deliverable:** Complete observability stack
-
----
-
-## Part 10: Deployment & Testing
-
-**Objective:** Production-ready deployment and test coverage
-
-### 10.1 Docker Configuration
-- [ ] Create `Dockerfile.webui`:
-  - Multi-stage build
-  - Non-root user
-  - Health checks
-  - Resource limits
-
-### 10.2 Docker Compose
-- [ ] Create `docker-compose.webui.yml`:
-  - WebUI service
-  - Prometheus + Grafana dashboard
-  - Optional: Nginx reverse proxy
-
-### 10.3 Unit Tests
-Create test files:
-- [ ] `handlers/websocket_test.go` - WebSocket handler tests
-- [ ] `handlers/inference_test.go` - API handler tests
-- [ ] `engine/adapter_test.go` - Engine adapter tests
-- [ ] `templates/components_test.go` - Template rendering tests
-
-### 10.4 Integration Tests
-- [ ] Create `cmd/webui/test/e2e/`:
-  - WebSocket full-duplex test
-  - Multi-client concurrent connections
-  - Model hot-swap test
-  - Failure recovery test
-  - Load test (100+ concurrent connections)
-
-### 10.5 Load Testing
-- [ ] Benchmark script:
-  - Measure throughput (tokens/second)
-  - Latency percentiles (p50, p95, p99)
-  - Memory footprint
-  - Connection scalability
-
-**Deliverable:** Production deployment with comprehensive test coverage
-
----
-
-## Implementation Order
-
-| Phase | Focus | Duration |
-|-------|-------|----------|
-| 1 | Project setup & WebSocket | Week 1 |
-| 2 | Engine integration & REST API | Week 1-2 |
-| 3 | Templ components & styling | Week 2-3 |
-| 4 | Client JavaScript & interactivity | Week 3 |
-| 5 | Metrics, deployment & testing | Week 4 |
-
-**Target Completion:** 4-5 weeks for production-ready WebUI service
-
----
-
-## Quick Start
+so the adapter must **deliver** the inner channel on the outer one. This is
+easy to get wrong: an adapter that returns an outer channel nothing writes
+to makes the request hang forever, and one that *takes* the inner channel
+back out of the outer one starves the caller.
+
+`cmd/webui/engine/adapter_protocol_test.go` is the regression guard: it
+asserts that the inner channel is delivered, that the response is marked
+complete, and that a failure carries an error rather than looking like an
+empty completion.
+
+## 6. Observability
+
+`cmd/webui/handlers/metrics.go` exports five metrics:
+
+| Metric | Type |
+|---|---|
+| `quarrel_webui_requests_total` | Counter |
+| `quarrel_webui_errors_total` | Counter |
+| `quarrel_webui_tokens_total` | Counter |
+| `quarrel_webui_inference_duration_seconds` | Histogram |
+| `quarrel_webui_connections_active` | Gauge |
+
+They are listed in `docs/metrics.md`, which is checked against the source
+by `internal/metrics/docs_test.go`.
+
+## 7. Testing
 
 ```bash
-# Run webui locally
-go run -tags webui ./cmd/webui/
-
-# With custom port
-WEBUI_PORT=8080 go run -tags webui ./cmd/webui/
-
-# Docker
-docker build -f Dockerfile.webui -t quarrel-webui .
-docker run -p 8080:8080 quarrel-webui
-
-# Open browser
-# http://localhost:8080
+cd cmd/webui
+go vet  -tags webui ./...
+go test -tags webui ./...
 ```
 
----
+| Suite | What it covers |
+|---|---|
+| `config/config_test.go` | The environment overlay |
+| `engine/adapter_protocol_test.go` | The inference protocol |
+| `handlers/handlers_test.go` | The HTTP handlers |
+| `handlers/fuzz_test.go` | Fuzzing of the request parsing |
+| `tests/e2e/e2e_test.go` | End-to-end HTTP behaviour |
 
-## API Usage Examples
+The e2e suite used to be excluded from CI because it did not compile — it
+referenced `handlers.Config` and `handlers.ModelInfo`, which had moved to
+`cmd/webui/config` and `cmd/webui/engine`. It now compiles, runs, and is
+part of the CI `webui` job. It found three latent defects when it was
+enabled: a missing request body size limit, a rate limiter that ignored its
+configured value, and the broken inference protocol.
 
-### WebSocket (JavaScript)
-```javascript
-const ws = new WebSocket('ws://localhost:8080/ws');
+## 8. Not implemented
 
-ws.onopen = () => {
-    ws.send(JSON.stringify({
-        type: 'inference',
-        payload: { prompt: 'Hello,', stream: true }
-    }));
-};
+Ideas that were in the original plan and are still open:
 
-ws.onmessage = (event) => {
-    const data = JSON.parse(event.data);
-    if (data.type === 'inference') {
-        console.log(data.payload.token);
-    }
-};
-```
+- A component framework (the plan proposed React, and separately Svelte or
+  Vue; the implementation uses plain JavaScript).
+- Server-side template composition (the plan proposed templ; the
+  implementation uses one `html/template` file).
+- A model gallery and a LoRA adapter browser in the UI.
+- Playwright browser tests. The Go module is a dependency, but the driver is
+  not installed in CI, so the test always skips.
 
-### REST API (cURL)
-```bash
-# Generate response
-curl -X POST http://localhost:8080/api/generate \
-  -H "Content-Type: application/json" \
-  -d '{"prompt": "Explain quantum computing", "max_tokens": 100}'
-```
+## 9. See also
 
----
-
-## Dependencies
-
-| Package | Purpose |
-|---------|---------|
-| `github.com/a-h/templ` | HTML templating |
-| `github.com/gorilla/websocket` | WebSocket handling |
-| `github.com/prometheus/client_golang` | Metrics |
-| `github.com/gin-gonic/gin` | HTTP routing |
-| `github.com/markbates/grift` | CLI tools |
+- [architecture.md](architecture.md) — the whole repository
+- [api.md](api.md) — the OpenAI-compatible API
+- [metrics.md](metrics.md) — the metric reference
+- [nextsteps.md](nextsteps.md) — the roadmap

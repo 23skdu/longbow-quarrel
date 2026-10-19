@@ -8,6 +8,18 @@ import (
 )
 
 func FuzzPagedKVCache_TurboQuant(f *testing.F) {
+	// Seed corpus. Without it the fuzzer starts from nothing on every run,
+	// and the seeds are also executed by the ordinary test run, so they act as
+	// regression cases.
+	//
+	// The sizes are deliberately modest: the cache allocates on the order of
+	// heads*headDim*layers*windowSize, and a large seed needs hundreds of
+	// megabytes of device memory, which not every GPU has.
+	f.Add(8, 64, 4, 256)   // a typical configuration
+	f.Add(1, 16, 1, 16)    // the smallest useful configuration
+	f.Add(16, 128, 8, 512) // a larger one
+	f.Add(2, 32, 2, 64)
+
 	f.Fuzz(func(t *testing.T, heads, headDim, layers, windowSize int) {
 		if heads <= 0 || heads > 64 {
 			t.Skip("Invalid heads")

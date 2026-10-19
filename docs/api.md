@@ -174,7 +174,12 @@ All endpoints (except /health, /healthz, /metrics) require API key:
 curl -H "Authorization: Bearer YOUR_API_KEY" ...
 ```
 
-Default API key configured via `QUARREL_API_KEY` environment variable.
+Default API key configured via the `-api-key` flag or the `WEBUI_API_KEY`
+environment variable.
+
+> The variable is `WEBUI_API_KEY`, not `QUARREL_API_KEY`: earlier revisions
+> of this document named a variable that does not exist, so the API key was
+> never actually applied.
 
 ## Response Codes
 

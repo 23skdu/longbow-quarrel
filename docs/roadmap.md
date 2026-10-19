@@ -1,4 +1,13 @@
-# Longbow-Quarrel Engineering Roadmap & Performance Benchmarks
+# Vector Search Roadmap & Performance Benchmarks
+
+> **Scope.** This document covers the **vector search** subsystem
+> (`internal/vector`, `cmd/vector_benchmark`) only. The roadmap for the
+> inference engine — the shipped product — is
+> [nextsteps.md](nextsteps.md), and the architecture is described in
+> [architecture.md](architecture.md).
+>
+> The vector search package is a standalone component: it is not used by the
+> inference path.
 
 ## Executive Summary
 
@@ -189,8 +198,8 @@ flowchart TD
 ## 4. Verification & Testing Matrix
 
 All implementations for the roadmap blockers must adhere to:
-1. **Consolidated Test Gates**: `scripts/run_all_tests.sh` must maintain all 8 passing gates.
-2. **Coverage Gate**: Statement coverage on `internal/vector` must remain strictly $\ge 80\%$ (currently **91.1%**).
+1. **Consolidated Test Gates**: `scripts/run_all_tests.sh` must maintain all 10 passing gates.
+2. **Coverage Gate**: Statement coverage on `internal/vector` must remain strictly $\ge 80\%$ (currently **100.0%**).
 3. **Leak Gate**: Zero memory leak threshold ($< 5.0$ MB delta after 100k+ vector iterations with OS memory release).
 4. **CUDA & CPU Parity**: Numerical parity between CPU and CUDA implementations within tolerance $\epsilon \le 10^{-4}$.
 

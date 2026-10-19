@@ -1,7 +1,7 @@
 # Pinned Dependency Versions
 
 Single source of truth for every version pin in the repository. Last reviewed:
-**September 2026**.
+**October 2026**.
 
 Refresh procedure:
 
@@ -10,25 +10,29 @@ go list -m -u all                       # available updates for the root module
 go get <module>@<version> && go mod tidy
 (cd cmd/webui && go mod tidy)           # second module, must be kept in sync
 go run ./scripts/vacuous_tests          # unrelated but part of the gate
+./scripts/dupcheck.sh                   # duplicate top-level declarations
 ```
 
 ---
 
 ## Go module — root (`github.com/23skdu/longbow-quarrel`)
 
-Toolchain: `go 1.27.0`
+Toolchain: `go 1.27.2`
 
-| Module | Version | Update available | Notes |
-|---|---|---|---|
-| `github.com/apache/arrow-go/v18` | v18.8.0 | no | current |
-| `github.com/playwright-community/playwright-go` | v0.6000.0 | yes, but see note | capped, see below |
-| `github.com/prometheus/client_golang` | v1.24.1 | no | current |
-| `github.com/prometheus/client_model` | v0.6.3 | no | current |
-| `github.com/rs/zerolog` | v1.35.1 | no | current |
-| `go.opentelemetry.io/otel` (+ exporters, sdk, trace, metric) | v1.46.0 | v1.47.0-rc.1 | held: RC only |
-| `golang.org/x/image` | v0.46.0 | no | current |
-| `google.golang.org/grpc` | v1.85.0-dev.0.20260825072537-93e31b48545e | yes, but see note | security pin, see below |
-| `github.com/23skdu/emlgo` | v0.5.0 (fork of tag `0.5`) | no | math backend, see below; **optional, `-tags emlgo`** |
+| Module | Version | Notes |
+|---|---|---|
+| `github.com/apache/arrow-go/v18` | v18.8.0 | current |
+| `github.com/mxschmitt/playwright-go` | v0.6201.1 | browser e2e test, see below |
+| `github.com/prometheus/client_golang` | v1.25.0 | current |
+| `github.com/prometheus/client_model` | v0.6.3 | current |
+| `github.com/rs/zerolog` | v1.35.1 | current |
+| `go.opentelemetry.io/otel` (+ exporters, sdk, trace, metric) | v1.47.0 | current |
+| `golang.org/x/image` | v0.47.0 | current |
+| `google.golang.org/grpc` | v1.86.0-dev | security pin, see below |
+| `github.com/emlgo/eml` (replaced by `github.com/23skdu/emlgo`) | v0.0.0-20261015062852-39bcca0c1034 | math backend, see below; **optional, `-tags emlgo`** |
+
+> The versions above are the ones in `go.mod` and `go.sum`. They were
+> regenerated from the module files rather than maintained by hand.
 
 ### Why `grpc` is pinned to a pseudo-version
 
@@ -54,26 +58,35 @@ the fix, but staying on the documented fix commit keeps the pin explainable.
 govulncheck ./...
 ```
 
-### Why `playwright-go` is capped at v0.6000.0
+### Why `playwright-go` uses the upstream import path
 
-Upstream reverted the module path at v0.6100.0. The declared `module` line is:
-
-| Version | Declared module path |
-|---|---|
-| v0.5700.0 – v0.6000.0 | `github.com/playwright-community/playwright-go` |
-| v0.6100.0 and later | `github.com/mxschmitt/playwright-go` |
-
-Requesting v0.6100.0+ under the community path fails:
+The repository previously used the community fork
+`github.com/playwright-community/playwright-go` (v0.6000.0), which was the
+newest release importable under that path: upstream reverted the module path
+at v0.6100.0, so requesting v0.6100.0+ under the community path fails with
 
 ```
 module declares its path as: github.com/mxschmitt/playwright-go
         but was required as: github.com/playwright-community/playwright-go
 ```
 
-v0.6000.0 is therefore the newest release importable under the path this
-repository uses. Adopting v0.6201.1 requires switching the import path to
-`github.com/mxschmitt/playwright-go`, which is a deliberate decision rather
-than a version bump. Playwright is used only by `internal/api/playwright_e2e_test.go`.
+**The fork could no longer download its driver.** The community fork still
+points at the retired `playwright.azureedge.net` CDN, so every driver
+download 404s:
+
+```
+error: got non 200 status code: 404 (Not Found) from
+  https://playwright.azureedge.net/builds/driver/playwright-1.60.0-linux.zip
+```
+
+Because the e2e test skips itself when the driver is missing, the browser
+test had **never run** -- it was silently skipped in every CI run.
+
+The import path is now the maintained upstream,
+`github.com/mxschmitt/playwright-go` v0.6201.1, which downloads its driver
+from the current CDN. The CI `build` job installs the driver so the test
+actually executes. Playwright is used only by
+`internal/api/playwright_e2e_test.go`.
 
 ### Why `golang-set/v2` is held at v2.8.0
 
@@ -101,10 +114,11 @@ replacement. Two things must be understood before adding it:
 
    A fork with a corrected `module` line (and rewritten internal imports) is
    therefore required. The pin above refers to that fork.
-2. **No semver tag.** The latest 0.5 release is tagged `0.5`, which Go does
-   not treat as semver. The version is the pseudo-version
-   `v0.0.0-20261003213601-b3d1a425cdd5` (commit
-   `b3d1a425cdd5e8956b45593ce98bb96f06075507`). The fork should tag this `v0.5.0`.
+2. **No semver tag.** The upstream release is tagged `0.7`, which Go does
+   not treat as semver. The pinned version is the pseudo-version
+   `v0.0.0-20261015062852-39bcca0c1034` (commit
+   `39bcca0c1034c51cd7e054daa60b9059f0c3846d`), which corresponds to the
+   upstream tag `0.7` / `latest`.
 
 `emlgo` is only compiled in with `-tags emlgo`; the default build is
 unaffected. Its scalar `pkg/*` functions delegate to stdlib `math` (bit-exact);
@@ -169,7 +183,7 @@ workflow run. The fuzz job satisfies this via `matrix.target`/`matrix.duration`.
 
 | Image | Pinned to | Rationale |
 |---|---|---|
-| `golang` | `1.27.1-alpine3.24` | current 1.27 patch |
+| `golang` | `1.27.2-alpine3.24` | current 1.27 patch |
 | `alpine` | `3.24` | 3.19 is EOL |
 | `nvidia/cuda` | `12.9.2-devel-ubuntu24.04`, `12.9.2-runtime-ubuntu24.04` | latest CUDA 12.x |
 | `ubuntu` | `24.04` (Dockerfile.tpu) | jammy has no modern Python |

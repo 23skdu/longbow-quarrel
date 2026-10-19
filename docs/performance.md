@@ -30,18 +30,26 @@ Tested with `Huihui-Qwen3.5-4B-Claude-4.6-Opus-abliterated.Q8_0.gguf` (4.4 GB on
 
 ## 3. SIMD Dequantization & MatVec Benchmarks
 
-Benchmark executed on Intel Core i7-12650H (AVX2):
+Measured on an Intel Core i7-12650H (AVX2, no AVX-512), with:
 
-| Benchmark Operation | Elements | Latency (μs) | Throughput (M elem/s) |
-|---------------------|----------|--------------|-----------------------|
-| `BenchmarkDequantizeQ4K_SIMD_256` | 256 | 0.28 μs | 914 M/s |
-| `BenchmarkDequantizeQ4K_SIMD_1024` | 1024 | 1.05 μs | 975 M/s |
-| `BenchmarkDequantizeQ4K_SIMD_4096` | 4096 | 4.12 μs | 994 M/s |
-| `BenchmarkDequantizeQ6K_SIMD_256` | 256 | 0.35 μs | 731 M/s |
-| `BenchmarkDequantizeQ6K_SIMD_1024` | 1024 | 1.38 μs | 742 M/s |
-| `BenchmarkDequantizeQ6K_SIMD_4096` | 4096 | 5.30 μs | 772 M/s |
-| `BenchmarkMatVecMulQ4_K` (1024×1024) | 1,048,576 | 412 μs | 2,545 M/s |
-| `BenchmarkMatVecMulQ8_0` (1024×1024) | 1,048,576 | 285 μs | 3,679 M/s |
+```bash
+go test -run '^$' -bench 'BenchmarkDequantizeQ4K_(256|1024|4096)$' -benchmem ./internal/gguf/
+go test -run '^$' -bench 'BenchmarkMatVecMulQ[48]_' -benchmem ./internal/simd/
+```
+
+| Benchmark Operation | Elements | Latency | Throughput |
+|---------------------|----------|---------|-----------|
+| `BenchmarkDequantizeQ4K_256` | 256 | 318 ns | 805 M elem/s |
+| `BenchmarkDequantizeQ4K_1024` | 1024 | 1.31 μs | 781 M elem/s |
+| `BenchmarkDequantizeQ4K_4096` | 4096 | 4.76 μs | 860 M elem/s |
+| `BenchmarkMatVecMulQ8_0_VNNI` (1024×1024) | 1,048,576 | 17.6 μs | 59.6 G elem/s |
+| `BenchmarkMatVecMulQ4_K_VNNI` (1024×1024) | 1,048,576 | 20.3 μs | 51.7 G elem/s |
+
+> The benchmark names in the previous revision of this table
+> (`BenchmarkDequantizeQ4K_SIMD_*`, `BenchmarkDequantizeQ6K_SIMD_*`) do not
+> exist: the benchmarks are named `BenchmarkDequantizeQ4K_*`, and the Q6_K
+> path is exercised through `BenchmarkDequantizeQ6K_Comparison`. Every row
+> above is reproducible with the commands shown.
 
 ---
 
@@ -182,6 +190,19 @@ Otherwise keep stdlib `math` and record the negative result here.
 Validated and certified on Google Cloud `c2-standard-4` instance (`tf-testbed-e4fdb8`, Intel Xeon Cascade Lake @ 3.10GHz, 4 vCPUs, flags: `avx512f`, `avx512bw`, `avx512dq`, `avx512cd`, `avx512vl`, `avx512_vnni`, `avx2`, `fma`, `f16c`):
 
 ### 9.1 Microbenchmarks (Go 1.27, `-tags avx512`)
+
+> **Reproducing these numbers requires AVX-512 hardware.** The `-tags avx512`
+> build selects the AVX-512 kernels at *runtime*, via `simdLevel`; on a CPU
+> without `avx512f` it falls back to the scalar implementation, so the same
+> command produces very different numbers. The command is:
+>
+> ```bash
+> go test -tags avx512 -run '^$' -bench 'BenchmarkRMSNorm_AVX512|BenchmarkMatmul_AVX512|BenchmarkVecDotQ[48]_' -benchmem ./internal/simd/
+> ```
+>
+> The CI `avx512` job compiles and vets the tag and asserts that the VNNI
+> kernels are linked into the binary; the benchmark itself is only meaningful
+> on a runner with AVX-512.
 
 | Kernel Operation | Vector Size | Latency (ns/op) | Memory (B/op) | Allocs/op |
 |------------------|-------------|----------------:|--------------:|----------:|

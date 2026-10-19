@@ -102,7 +102,7 @@ make nvidia
 -n int              Tokens to generate (default: 20)
 -ngl int            Number of GPU layers to offload (default: -1 for all)
 -gpu-layers int     Alias for -ngl
--kv-cache int       Context window / KV cache capacity in tokens (default: 2048)
+-kv-cache-size int Context window / KV cache capacity in tokens (default: 2048)
 -temp float         Sampling temperature (default: 0.7)
 -topk int           Top-K sampling (default: 40)
 -topp float         Top-P nucleus sampling (default: 0.95)
@@ -122,7 +122,7 @@ make nvidia
 
 ### Example
 ```bash
-./bin/quarrel-linux-amd64-cuda -model Qwen3.5 -ngl 20 -kv-cache 4096
+./bin/quarrel-linux-amd64-cuda -model Qwen3.5 -ngl 20 -kv-cache-size 4096
 ```
 
 ---
@@ -222,6 +222,13 @@ readinessProbe:
 When memory pressure exceeds 95% of `MaxMemory`, the engine returns `503` for new requests while keeping `/healthz` alive to prevent pod restarts. Normal operation resumes automatically when memory is freed.
 
 ### Distributed Sharding (Arrow Flight)
-For multi-GPU sharding, configure:
-- `QUARREL_SHARD_ROLE`: `master` or `worker`
-- `QUARREL_WORKER_ADDRS`: Comma-separated list of worker Flight endpoints
+> **Not available.** The distributed stack (`internal/arrow_client`,
+> `internal/engine/remote.go`, `internal/engine/distributed_master.go`) is
+> implemented and unit-tested, but it is not reachable from any binary: no
+> flag or environment variable selects it. The `QUARREL_SHARD_ROLE` and
+> `QUARREL_WORKER_ADDRS` variables that earlier revisions of this document
+> described do not exist in the code.
+>
+> Until the stack is wired behind a flag, use a single process with
+> `-devices`, `-tp-size` and `-pp-stages` for multi-GPU, and run separate
+> processes behind your own load balancer for scale-out.

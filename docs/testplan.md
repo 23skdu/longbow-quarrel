@@ -25,7 +25,7 @@ This test plan defines the formal, statistically sound methodology for A/B testi
 | **Host CPU** | Intel Core i7-12650H (10 Cores: 6 P-Cores, 4 E-Cores / 16 Threads) | AVX, AVX2, FMA3, F16C, BMI1/2, **AVX_VNNI** | **No AVX-512**. Heterogeneous P/E core architecture requires thread pinning. |
 | **Host RAM** | 24 GB DDR5 | L1: 48KB/core, L2: 1.25MB/core, L3: 24MB shared | GOMEMLIMIT=2GiB enforced in CI/CD to prevent OOM. |
 | **GPU** | NVIDIA GeForce RTX 4060 Laptop GPU | 8 GB GDDR6, 24 SMs (3072 CUDA Cores), 96 4th-Gen Tensor Cores, FP8/BF16/FP16 | Max VRAM ~7.5 GB usable; PCIe 4.0 x8 interface. |
-| **Compiler / Toolchain** | GCC 13+ / Clang 17+, NVCC 12.4, Go 1.24+ | CGo, `#pragma GCC target("avx2,fma,f16c,avxvnni")`, `-O3` | Strict CGo boundary overhead (~5μs per call) during decode. |
+| **Compiler / Toolchain** | GCC 13+ / Clang 17+, NVCC 12.4, Go 1.27+ | CGo, `#pragma GCC target("avx2,fma,f16c,avxvnni")`, `-O3` | Strict CGo boundary overhead (~5μs per call) during decode. |
 
 ---
 
@@ -146,7 +146,7 @@ A candidate change (Branch B) is accepted against baseline (Branch A) if and onl
 - **Goal**: Eliminate host CGo kernel launch latency (~5μs per kernel across 30 kernels = 150μs) by replaying captured graphs.
 - **Test Command**:
   ```bash
-  go test -v -tags cuda -run 'TestCUDA_GraphManager' ./internal/device
+  go test -v -tags cuda -run 'TestCUDA_GraphManager_' ./internal/device
   ```
 - **Success Criteria**:
   - Graph capture completes without CUDA runtime errors.
@@ -167,10 +167,25 @@ graph TD
     G4 --> G5[Gate 5: Speculative & Cache Tests]
     G5 --> G6[Gate 6: CUDA Compilation & Kernels]
     G6 --> G7[Gate 7: Concurrency Race Detector]
-    G7 --> G8[Gate 8: Code Coverage >= 80%]
-    G8 --> G9[Gate 9: Coverage Ratchet Floors]
+    G7 --> G8[Gate 8: Code Coverage Gates]
+    G8 --> G9[Gate 9: Duplicate Declaration Check]
     G9 --> G10[Gate 10: SIMD AVX2 Zero-Alloc & Perf Gate]
-    G10 --> G11[Gate 11: CUDA Precision & Graph Gate]
+```
+
+### Gate 8: Code Coverage Gates
+Applies the >= 80% threshold to the core packages and a ratchet floor to
+the two that are still below it. Both are derived from a single coverage
+profile, so the test suite is not run again per package:
+```bash
+scripts/coverage_gate.sh coverage.out
+```
+
+### Gate 9: Duplicate Declaration Check
+Fails when two files in the same package declare the same top-level name.
+Such a duplicate only breaks the build when build tags put both files in the
+same package, which is how the darwin+metal build was broken:
+```bash
+scripts/dupcheck.sh
 ```
 
 ### Gate 10: SIMD AVX2 Performance & Zero-Alloc Gate
@@ -179,8 +194,8 @@ Ensures all SIMD dot product and activation kernels execute with zero heap alloc
 scripts/bench_gate.sh check-zero-alloc ./internal/simd
 ```
 
-### Gate 11: CUDA Acceleration & Precision Gate
-Ensures Split-K FlashDecoding, QK-Norm RMSNorm, and CUDA Graph managers compile cleanly, pass numerical tolerance ($\le 10^{-5}$), and incur zero memory leaks.
+> The CUDA precision and graph checks are part of Gate 6, which runs them
+> when a CUDA device is present. They are not a separate gate.
 
 ---
 

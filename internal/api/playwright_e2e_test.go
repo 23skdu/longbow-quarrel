@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/playwright-community/playwright-go"
+	"github.com/mxschmitt/playwright-go"
 )
 
 func TestPlaywrightE2E_API(t *testing.T) {

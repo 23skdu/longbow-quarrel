@@ -500,9 +500,9 @@ Based on deep profiling of autoregressive decode loops, CUDA kernel execution pr
 >
 > **Batch 1 (Steps 28, 31, 32, 34), Batch 2 (Steps 29, 30, 41, 42, 43,
 > 44, 45, 48), Batch 3 (Steps 33, 49), Batch 4 (Steps 37, 38, 39, 40, 46,
-> 47), Batch 5 (Steps 31, 35, 36, 44, 48) and Batch 6 (Steps 35, 44) are
-> DONE** — see the status markers on each step. Verified locally after the
-> change:
+> 47), Batch 5 (Steps 31, 35, 36, 44, 48), Batch 6 (Steps 35, 44) and
+> Batch 7 (Steps 44, 47) are DONE** — see the status markers on each step.
+> Verified locally after the change:
 >
 > | Check | Command | Result |
 > |---|---|---|
@@ -527,6 +527,7 @@ Based on deep profiling of autoregressive decode loops, CUDA kernel execution pr
 > | WebUI inference | `cmd/webui/engine/adapter_protocol_test.go` | **works** (hung on every backend) |
 > | Chat templates | `internal/engine/chat_template_render_test.go` | **renders** (produced only "<s>") |
 > | Metrics reference | `internal/metrics/docs_test.go` | **verified both ways** (73 metrics were wrong) |
+> | Browser e2e | `go test -run TestPlaywrightE2E ./internal/api/` | **runs** (the driver could not be downloaded) |
 
 #### Diagnostic Summary (as found, before Batch 1)
 
@@ -1219,11 +1220,42 @@ false have been corrected:
 - `docs/features.md` claimed "114 verified `#nosec` directives"; the actual
   count is 146.
 
-**Still open:** the false claims in `docs/performance.md`,
-`docs/comparison.md`, `docs/dependencies.md`, `docs/roadmap.md`,
-`docs/testplan.md` and `docs/webui_plan.md`. Most of them are performance
-numbers that cannot be reproduced without a GPU, so they need either a
-corrected methodology or an explicit "unverified" marker.
+**Batch 7 finished the remaining documents.**
+
+- `docs/performance.md`: the dequantization table named benchmarks that do
+  not exist (`BenchmarkDequantizeQ4K_SIMD_*`). The table was regenerated
+  from the real benchmarks (`BenchmarkDequantizeQ4K_*`) with the exact
+  command to reproduce it, and the AVX-512 section now states that its
+  numbers require AVX-512 hardware, because the `-tags avx512` build
+  selects the kernels at *runtime* and falls back to scalar otherwise.
+- `docs/comparison.md`: "144 Prometheus metrics" → 191, the number the code
+  actually declares.
+- `docs/dependencies.md`: every version was stale. The table was
+  regenerated from `go.mod`/`go.sum` (toolchain 1.27.2, prometheus 1.25.0,
+  otel 1.47.0, x/image 0.47.0, grpc 1.86.0-dev, the emlgo pseudo-version
+  and the Go image tag).
+- `docs/roadmap.md`: it documents the **vector search** subsystem, not the
+  inference engine, and was linked from the README's index as if it were the
+  product roadmap. It now says so at the top, and its "8 gates" and
+  "internal/vector is 91.1%" claims were corrected (10 gates, 100.0%).
+- `docs/testplan.md`: it documented an 11th gate that does not exist. The
+  gate list now matches `scripts/run_all_tests.sh` (10 gates), the CUDA
+  graph test command names the tests that exist, and the Go version is
+  corrected.
+- `docs/webui_plan.md`: 473 lines of unchecked boxes proposing a stack the
+  code does not use (`a-h/templ`, `gin-gonic/gin`, `markbates/grift` — none
+  of them are dependencies). It was rewritten to describe the implementation
+  that exists, with the remaining ideas listed as not implemented.
+- `docs/usage.md`: the flag is `-kv-cache-size`, not `-kv-cache`; the
+  `QUARREL_SHARD_ROLE` / `QUARREL_WORKER_ADDRS` variables do not exist and
+  are now marked as not available.
+- `docs/api.md`: the API key variable is `WEBUI_API_KEY`, not
+  `QUARREL_API_KEY` — the latter never existed, so the key was never
+  applied.
+
+**Still open:** the performance numbers in `docs/performance.md` that need a
+GPU to reproduce (the layer-offload table and the emlgo A/B table, which is
+honestly marked as not yet measured).
 
 ---
 
@@ -1382,12 +1414,28 @@ tensor.Data() (value of type unsafe.Pointer) for built-in len
 backend. The test now uses `Rows()*Cols()` plus a build-tagged
 `releasedElementCount` helper, and the CUDA gate is green again.
 
+**Batch 7 closed these.**
+- `gosec` now also runs on the `-tags avx512` build. The default build only
+  covers the code that compiles without a build tag, which is a fraction of
+  the tree.
+- `FuzzPagedKVCache_TurboQuant` had **no seed corpus at all**, so the CI
+  fuzz job started from nothing on every run. It now has seeds, which are
+  also executed by the ordinary test run and therefore act as regression
+  cases. The seed sizes are deliberately modest: the cache allocates on the
+  order of `heads*headDim*layers*windowSize`, and the first attempt at a
+  large seed needed 578 MB of device memory and failed on a smaller GPU.
+- **The Playwright browser e2e test had never run.** It skips itself when
+  the driver is missing, and the driver could not be downloaded: the
+  community fork of `playwright-go` still points at the retired
+  `playwright.azureedge.net` CDN, so every download 404s. The import path
+  is now the maintained upstream, `github.com/mxschmitt/playwright-go`
+  v0.6201.1, which downloads from the current CDN, and the CI `build` job
+  installs the driver. The browser test now executes.
+
 **Still open:**
-- `security` still runs `gosec`/`govulncheck` on the default build only.
-- The three CI fuzz targets have no committed seed corpus, so they start cold
-  on every run.
-- `github.com/playwright-community/playwright-go` is still a dependency used
-  by one test that always skips.
+- `govulncheck` still runs on the default build only; the tagged builds
+  need a different module graph and are left for a job with the right
+  toolchain available.
 
 ---
 
