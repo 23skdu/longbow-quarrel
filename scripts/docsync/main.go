@@ -118,6 +118,46 @@ func main() {
 // from its own directory.
 var repoRoot = findRepoRoot()
 
+// repoFS scopes every file access to the repository. os.Root refuses a
+// path that escapes the root - through "..", an absolute path, or a
+// symbolic link that points outside - so a name that came from a
+// directory listing or a glob can never reach a file the repository does
+// not own.
+var repoFS = openRepoRoot()
+
+// openRepoRoot opens the repository root for scoped access.
+func openRepoRoot() *os.Root {
+	root, err := os.OpenRoot(repoRoot)
+	if err != nil {
+		// The root could not be opened; the checks that use it report the
+		// error. An unopenable root is not a reason to walk the whole
+		// filesystem with plain path joins.
+		return nil
+	}
+	return root
+}
+
+// readRepoFile reads a file relative to the repository root.
+func readRepoFile(name string) ([]byte, error) {
+	if repoFS == nil {
+		return nil, fmt.Errorf("the repository root %s could not be opened", repoRoot)
+	}
+	return repoFS.ReadFile(name)
+}
+
+// readRepoDir lists a directory relative to the repository root.
+func readRepoDir(name string) ([]os.DirEntry, error) {
+	if repoFS == nil {
+		return nil, fmt.Errorf("the repository root %s could not be opened", repoRoot)
+	}
+	dir, err := repoFS.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer dir.Close()
+	return dir.ReadDir(-1)
+}
+
 // findRepoRoot walks up from the working directory to the directory that
 // holds the go.mod.
 func findRepoRoot() string {
@@ -222,7 +262,7 @@ var chartFlagRe = regexp.MustCompile(`^\s*-\s*"(-[a-z0-9-]+)"\s*$`)
 
 // chartFlags reads the flags the chart passes.
 func chartFlags() ([]string, error) {
-	raw, err := os.ReadFile(filepath.Join(repoRoot, chartDeployment))
+	raw, err := readRepoFile(chartDeployment)
 	if err != nil {
 		return nil, err
 	}
@@ -284,7 +324,7 @@ func checkChartFlags(flags map[string]map[string]flagDef, report func(string, ..
 
 // chartValues reads the scalar values of the chart.
 func chartValues() (map[string]string, error) {
-	raw, err := os.ReadFile(filepath.Join(repoRoot, chartValuesPath))
+	raw, err := readRepoFile(chartValuesPath)
 	if err != nil {
 		return nil, err
 	}
@@ -447,7 +487,7 @@ var metricDeclRe = regexp.MustCompile(`promauto\.New(Counter|CounterVec|Gauge|Ga
 func declaredMetrics() (map[string]metricDef, error) {
 	metrics := map[string]metricDef{}
 
-	entries, err := os.ReadDir(filepath.Join(repoRoot, metricsDir))
+	entries, err := readRepoDir(metricsDir)
 	if err != nil {
 		return nil, err
 	}
@@ -456,7 +496,7 @@ func declaredMetrics() (map[string]metricDef, error) {
 		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			continue
 		}
-		raw, err := os.ReadFile(filepath.Join(repoRoot, metricsDir, name))
+		raw, err := readRepoFile(filepath.Join(metricsDir, name))
 		if err != nil {
 			return nil, err
 		}
@@ -498,7 +538,7 @@ var promqlWords = map[string]bool{
 func checkDashboard(metrics map[string]metricDef, report func(string, ...interface{}), verbose bool) int {
 	problems := 0
 
-	raw, err := os.ReadFile(filepath.Join(repoRoot, dashboardPath))
+	raw, err := readRepoFile(dashboardPath)
 	if err != nil {
 		report("failed to read %s: %v", dashboardPath, err)
 		return 1
@@ -603,7 +643,7 @@ func loadNotOnDashboard() map[string]bool {
 // and the blank lines removed.
 func loadAllowed(path string) map[string]bool {
 	allowed := map[string]bool{}
-	raw, err := os.ReadFile(filepath.Join(repoRoot, path))
+	raw, err := readRepoFile(path)
 	if err != nil {
 		return allowed
 	}
@@ -660,7 +700,7 @@ var routeRe = regexp.MustCompile(`mux\.Handle(?:Func)?\("([^"]+)"`)
 func apiServerRoutes() (map[string]bool, error) {
 	routes := map[string]bool{}
 
-	raw, err := os.ReadFile(filepath.Join(repoRoot, "internal/api/server.go"))
+	raw, err := readRepoFile("internal/api/server.go")
 	if err != nil {
 		return nil, err
 	}
@@ -670,7 +710,7 @@ func apiServerRoutes() (map[string]bool, error) {
 
 	// The metrics listener is set up in the command, not in the API
 	// package.
-	entries, err := os.ReadDir(filepath.Join(repoRoot, commandDir))
+	entries, err := readRepoDir(commandDir)
 	if err != nil {
 		return nil, err
 	}
@@ -678,7 +718,7 @@ func apiServerRoutes() (map[string]bool, error) {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") {
 			continue
 		}
-		raw, err := os.ReadFile(filepath.Join(repoRoot, commandDir, entry.Name()))
+		raw, err := readRepoFile(filepath.Join(commandDir, entry.Name()))
 		if err != nil {
 			return nil, err
 		}
@@ -711,7 +751,7 @@ func checkDocumentedEndpoints(report func(string, ...interface{}), verbose bool)
 		return 1
 	}
 
-	raw, err := os.ReadFile(filepath.Join(repoRoot, "docs/api.md"))
+	raw, err := readRepoFile("docs/api.md")
 	if err != nil {
 		report("failed to read docs/api.md: %v", err)
 		return 1
@@ -783,15 +823,15 @@ func checkTheClaimedMetricCount(metrics map[string]metricDef, report func(string
 	// The development logs record the numbers the documents used to
 	// claim, so a count in them is history rather than a claim.
 	docs := []string{
-		filepath.Join(repoRoot, "README.md"),
-		filepath.Join(repoRoot, "docs/comparison.md"),
-		filepath.Join(repoRoot, "docs/features.md"),
-		filepath.Join(repoRoot, "docs/usage.md"),
-		filepath.Join(repoRoot, "docs/api.md"),
+		"README.md",
+		"docs/comparison.md",
+		"docs/features.md",
+		"docs/usage.md",
+		"docs/api.md",
 	}
 
 	for _, doc := range docs {
-		raw, err := os.ReadFile(doc)
+		raw, err := readRepoFile(doc)
 		if err != nil {
 			report("failed to read %s: %v", doc, err)
 			problems++
@@ -830,13 +870,13 @@ func checkTheClaimedMetricCount(metrics map[string]metricDef, report func(string
 func checkTheDocumentIndex(report func(string, ...interface{}), verbose bool) int {
 	problems := 0
 
-	entries, err := os.ReadDir(filepath.Join(repoRoot, "docs"))
+	entries, err := readRepoDir("docs")
 	if err != nil {
 		report("failed to list the documentation: %v", err)
 		return 1
 	}
 
-	index, err := os.ReadFile(filepath.Join(repoRoot, "docs/README.md"))
+	index, err := readRepoFile("docs/README.md")
 	if err != nil {
 		report("docs/README.md is missing: the README links to it as the documentation index", err)
 		return 1
@@ -874,14 +914,14 @@ var replaceRe = regexp.MustCompile(`^replace\s+([a-zA-Z0-9./_-]+)\s+=>\s+([a-zA-
 func checkPinnedVersions(report func(string, ...interface{}), verbose bool) int {
 	problems := 0
 
-	raw, err := os.ReadFile(filepath.Join(repoRoot, "docs/dependencies.md"))
+	raw, err := readRepoFile("docs/dependencies.md")
 	if err != nil {
 		report("failed to read docs/dependencies.md: %v", err)
 		return 1
 	}
 	document := string(raw)
 
-	modules, replaces, err := moduleVersions(filepath.Join(repoRoot, "go.mod"))
+	modules, replaces, err := moduleVersions("go.mod")
 	if err != nil {
 		report("failed to read go.mod: %v", err)
 		return 1
@@ -914,7 +954,7 @@ func checkPinnedVersions(report func(string, ...interface{}), verbose bool) int 
 // moduleVersions reads the requirements and the replace directives of a
 // go.mod.
 func moduleVersions(path string) (map[string]string, map[string]string, error) {
-	raw, err := os.ReadFile(path)
+	raw, err := readRepoFile(path)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -982,7 +1022,7 @@ func checkDocumentedFlags(flags map[string]map[string]flagDef, report func(strin
 	allowed := loadAllowed("scripts/docsync_allowlist.txt")
 
 	for _, doc := range docs {
-		raw, err := os.ReadFile(doc)
+		raw, err := readRepoFile(strings.TrimPrefix(doc, repoRoot+string(filepath.Separator)))
 		if err != nil {
 			report("failed to read %s: %v", doc, err)
 			problems++
