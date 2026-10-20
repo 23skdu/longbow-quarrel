@@ -17,6 +17,23 @@ Longbow-Quarrel is a high-performance, multi-backend inference engine in Go, CGo
 > **Phase 6 (Steps 28–48)** tracks closing that gap. It is P0 and should be
 > completed before any further performance work, because Steps 28–34 gate
 > the trustworthiness of every measurement made in Phases 2–5.
+>
+> ### ⚠️ A second analysis found four P0 defects (Steps 50, 51, 59, 60)
+>
+> A second deep pass over the tree (October 2026, after Steps 28–49 had
+> landed) found four problems that outrank everything else in this
+> document:
+>
+> | Step | The defect | Why it is P0 |
+> |------|------------|--------------|
+> | **50** | The CUDA engine replaces the caller's configuration instead of merging it (`engine_cuda.go:91`), so `-devices` and `-activation-log` are silently ignored **on the primary GPU backend** | Two shipped features do nothing where it matters most |
+> | **51** | 55 of the 133 Prometheus metrics are never written by production code, and the dashboard has a panel over every one of them | The observability surface, and the dashboard, are fiction |
+> | **59** | **The Metal backend does not compile** — four distinct errors, one of them a missing import | A whole advertised backend is broken, and the CI cannot see it because the Metal job only runs on macOS |
+> | **60** | Underneath the compile errors, the Metal layer forward has seven numerical defects of exactly the kind the CUDA backend had | The same bug class, in the backend nobody can run |
+>
+> The TPU backend is in the same condition and is worse: it does not
+> compile, every weight it fetches is `nil`, and its one host-transfer
+> function overflows its buffer (Steps 58 and 61).
 
 ---
 
@@ -903,11 +920,11 @@ Verified by `deadcode -tags cuda -test ./internal/... ./cmd/quarrel` cross-check
 | Speculative decoding | `internal/engine/speculative.go` | 367 | **DONE (Batch 12)** — reachable via `-draft-model` and the API's `speculative` field |
 | Radix prefix cache | `internal/engine/radix_cache.go` | 286 | **DEAD — duplicate of the wired `prompt_cache.go`** |
 | Jinja2 chat templates | `internal/engine/prompt_wrapper.go` | 372 | TEST-ONLY — **no chat template is ever applied** |
-| OTEL tracing | `internal/telemetry/telemetry.go` `InitTracer:29` | 8 fns | DEAD — tracer never initialised |
+| OTEL tracing | `internal/telemetry/telemetry.go` `InitTracer:29` | 8 fns | **DONE** — `InitTracer` is called by all four CLIs (`main.go:206`, `main_cpu.go:146`, `main_metal.go:116`, `main_tpu.go:131`). The *span helpers* (`StartRequestSpan`, `RecordTTFT`, `RecordInterTokenLatency`, `RecordKVPageAlloc`, `RecordMemoryPressure`) are still uncalled (Step 55). |
 | CUDA Graph capture | `internal/device/cuda_graph.go` | 8 fns | TEST-ONLY |
 | Multi-GPU TP/PP | `internal/device/multi_gpu.go` | 1038 | 34 of ~50 methods TEST-ONLY — **the CLI now refuses to pretend** (Batch 13) |
 | Quantization tooling | `internal/gguf/quantize*.go` | 784 | **DONE (Batch 15)** — `cmd/quantize` produces quantized models; the codecs were broken |
-| Activation logging / audits | `internal/engine/activation_logger.go`, `audit.go` | ~750 | **DONE (Batch 14)** — reachable via `-activation-log`; the audits now feed the metrics |
+| Activation logging / audits | `internal/engine/activation_logger.go`, `audit.go` | ~750 | **PARTIAL** — reachable via `-activation-log` on the CPU and Metal builds, but **not on CUDA** (Step 50: the CUDA engine replaces the config, so the path is empty). The audits do **not** feed the metrics: nine of the ten `Audit*` functions are uncalled, and so are the 35 `Record*` helpers they would feed (Steps 51 and 55). |
 | SIMD instrumentation | `internal/simd/metrics.go` `metricsWrapper` | 3 fns | DEAD — never instantiated |
 | Grammar sampling constructors | `internal/sampler/grammar.go:56,70` | 2 fns | Only setter is the never-started API |
 
@@ -1683,7 +1700,7 @@ every real backend fails.
 
 ---
 
-#### Step 40: Headline architectures have 0% coverage — Qwen 3.5 SSM and Gemma 4 — P1
+#### Step 40: Headline architectures have 0% coverage — Qwen 3.5 SSM and Gemma 4 — P1 — [DONE]
 
 `internal/engine` sits at 51.1% overall, but the *architecture-specific* CPU paths that the README leads with are entirely untested:
 
@@ -2198,6 +2215,607 @@ and the `dupcheck` gate that prevents a recurrence.
 > kernels are unwired, `internal/engine` coverage is ~51%, and several
 > documented performance numbers remain unreproducible.
 
+#### Step 50: The CUDA engine throws away the caller's configuration — P0 — [OPEN]
+
+`internal/engine/engine_cuda.go:91` replaces the whole configuration with
+the one extracted from the model file:
+
+```go
+modelCfg := ExtractModelConfig(f)
+if cfg.KVCacheSize > 0 { modelCfg.KVCacheSize = cfg.KVCacheSize; ... }
+if cfg.NumGPULayers != 0 { modelCfg.NumGPULayers = cfg.NumGPULayers }
+cfg = modelCfg            // <- everything the caller set is gone
+```
+
+The CPU engine (`engine_cpu.go:65`) and the Metal engine (`engine.go:332`)
+merge the model's fields *into* the caller's configuration, field by field.
+The CUDA engine replaces it, so every field the caller set is silently
+dropped — and with it every feature that reads one.
+
+**This silently disables two of the features that landed in the last few
+batches, on the primary GPU backend:**
+
+| Feature | Where it is set | What happens on CUDA |
+|----------|-----------------|----------------------|
+| `-devices N` | `cmd/quarrel/main.go:143` | The engine's `cfg.Devices` is empty, so the device is never selected. The CLI validates the index and prints `CUDA device: 0`, and then runs on the default device. |
+| `-activation-log <path>` | `cmd/quarrel/main.go:106` | `cfg.ActivationLogPath` is empty, so no file is written. The README, `docs/usage.md` and `docs/features.md` all advertise the flag unconditionally. |
+
+Verified with `internal/engine/cfg_test.go` (a CUDA-tagged test that builds
+a model and checks the engine's configuration): both fields are gone.
+
+The fix is to use the CPU engine's pattern: keep the caller's configuration
+and patch the model-derived fields into it. The fields that must survive
+are `KVCacheSize`, `NumGPULayers`, `Devices`, `ActivationLogPath`,
+`MaxBatchSize`, `BlockSize`, `TotalBlocks`, `TensorParallelSize`,
+`PipelineStages`, `MaxMemoryMB` and the speculative-decoding settings.
+
+**Acceptance criteria:** a CUDA-tagged test that sets `ActivationLogPath`
+and `Devices` on the configuration and asserts that the engine kept them
+and wrote the activation log; a test that the CPU, CUDA and Metal engines
+keep the same set of caller-set fields.
+
+---
+
+#### Step 51: 55 of the 133 Prometheus metrics are never written — P0 — [OPEN]
+
+The metrics are declared, documented, and have dashboard panels over them.
+**55 of the 133 are never written by production code.** Their only write
+site is a `Record*` helper in `internal/metrics`, and every caller of that
+helper is a `_test.go` file.
+
+35 of the 76 `Record*` helpers have no production caller:
+
+```
+RecordActivationFlowAudit      RecordInference            RecordSamplingAudit
+RecordActivationPrecision      RecordKVCacheAudit         RecordSIMDDispatch
+RecordBufferSizingAudit        RecordKVCacheOutOfBounds   RecordSIMDFallback
+RecordContextLength            RecordLayerOffloadTransfer RecordSIMDLevel
+RecordDequantizationAudit      RecordMOEExpertUtilization RecordSoftmaxMaskingAudit
+RecordGemma4Context            RecordNaNPropagationAudit  RecordTokenizerDecode
+RecordGemma4FullAttentionLayer  RecordRoPEDeviationAudit   RecordTokenizerEncode
+RecordGemma4HeadDims           RecordTurboQuantCompression RecordTokenizerMetrics
+RecordGemma4KNormApplied       RecordTurboQuantLatency     RecordValidationError
+RecordGemma4LayerPattern       RecordVNNIDotProduct        RecordWeightAlignmentAudit
+RecordGemma4QKNorm             RecordHeadDimensionAudit
+RecordGemma4QNormApplied       RecordKVCacheAudit
+RecordGemma4SlidingWindowLayer
+RecordGemma4VNorm
+```
+
+The whole of `internal/metrics/metrics_gemma4.go` is dead: all twelve
+Gemma 4 metrics.
+
+**The Grafana dashboard now has a panel over every one of them**, so 55 of
+its panels read "No data" permanently. The metrics are documented as a real
+observability surface in `docs/metrics.md` and advertised in
+`docs/features.md`.
+
+The existing check, `internal/metrics/docs_test.go`, only compares the
+*names* — it never checks that a metric is written, which is why the whole
+class of defect passed CI.
+
+**Two ways to close it, and the honest one is to wire the recorders:**
+
+1. *Wire them.* Each of the 35 helpers has an obvious call site: the
+   sampler for the sampling audit, the tokenizer for the tokenizer
+   metrics, the SIMD dispatch for the SIMD counters, the Gemma 4 layer for
+   the Gemma 4 metrics, the layer-offload path for the offload counters,
+   `engine.Infer` for the inference counters, and the per-layer hook for
+   the activation-flow and NaN-propagation audits.
+2. *Delete them.* A metric that is never written is a lie in the
+   documentation and an empty panel on the dashboard.
+
+The audit functions in `internal/engine/audit.go` are the other half of
+this: nine of the ten are called from nowhere outside the tests, so even
+the wired recorders have nothing to report. `AuditLogitRange` is the only
+one the engine calls, and it is the one the health audit uses.
+
+**Acceptance criteria:** a test that every declared metric is written by
+production code, or is on an explicit allowlist with a reason; no panel on
+the dashboard reads a metric that is never written.
+
+---
+
+#### Step 52: 19 of the 66 configuration fields are write-only — P1 — [OPEN]
+
+`config.Config` has 66 fields. 19 of them are set by a caller and never
+read by any logic, so setting them is a no-op that looks like a
+configuration.
+
+| Field | What happens |
+|-------|--------------|
+| `MaxBatchSize` | `-max-batch-size` is parsed and assigned, and nothing reads it. The continuous batching manager has its own size. |
+| `BlockSize` | `-block-size` is parsed and assigned; `kv_cache_paged.go:112` hardcodes `c.blockSize = 16` under a comment that says "Configurable block size". |
+| `TotalBlocks` | `-total-blocks` is parsed and assigned; the cache computes its own from the capacity. |
+| `StopTokens` | **Read** by all four engines through `stopTokenSet(cfg.StopTokens)`, but never *populated* by anything: there is no flag, no API field and no GGUF key. The stop-token feature is non-functional everywhere. |
+| `PrecisionMode` | Written from the GGUF metadata and from `cmd/debug_layers`, never read. The precision is not selected from it. |
+| `Devices` | Assigned by the CLI and then discarded by the CUDA engine (Step 50). |
+| `SpeculativeDraftModel` | Assigned by all four CLIs, then *cleared* by `speculative.go:296`; the draft path uses the raw flag. |
+| `QLoRARank` | Written from the GGUF, read only by a `t.Logf`. The MLA math does not use it. |
+| `ExpertGroupCount`, `ExpertGroupUsedCount`, `ExpertWeightsNorm`, `ExpertWeightsScale` | Written from the GGUF, never read. The grouped-expert routing is not implemented. |
+| `DebugDequant`, `DebugActivations`, `DebugEmbedding`, `DebugAttention`, `DebugFFN`, `DebugLayerOutput`, `DebugLogits` | Seven debug switches. Five of them are only ever assigned the literal `false`. |
+| `MaxTokens` | Never written and never read. |
+
+Three of the documented CLI flags — `-max-batch-size`, `-block-size` and
+`-total-blocks` — therefore do nothing on **all four** builds, and the
+Helm chart sets all three.
+
+`internal/engine/stop_tokens.go:5` still says that `config.Config.StopTokens`
+"was declared but never read anywhere in the tree". That comment is now
+wrong in the other direction: it is read, and never written.
+
+**Acceptance criteria:** every field is either read or deleted; every flag
+that sets a field has an effect that a test can observe; the stop tokens
+can be set from the command line and from the API.
+
+---
+
+#### Step 53: The `stream` request field is accepted and ignored — P1 — [OPEN]
+
+`internal/api/server.go:305` declares `"stream": false` in the chat
+completion request, and `docs/api.md` lists it in the request body. The
+handler never reads it: both completion endpoints always run the whole
+generation and return one JSON document.
+
+An OpenAI client that sends `"stream": true` waits for the whole
+completion and then receives a non-streaming body, which it cannot parse as
+a stream. There is no server-sent-events implementation anywhere in the
+repository — the only one is `cmd/webui/handlers/inference.go:252`, behind
+the WebUI's own `/api/stream` route and on the WebUI's port.
+
+The README claims "Streaming Output — Real-time token streaming via
+Server-Sent Events (SSE) and WebSocket" as a feature of the engine.
+
+Either the field has to work, or it has to be removed from the request
+struct and the documentation. The engine already has the plumbing for it:
+`Engine.InferWithCallback` reports every token as it is generated, and the
+WebUI's SSE handler shows how to write the chunks.
+
+**Acceptance criteria:** `"stream": true` on `/v1/chat/completions` returns
+`text/event-stream` chunks of `chat.completion.chunk`, verified against an
+in-process server, or the field and the claim are removed.
+
+---
+
+#### Step 54: The CI builds one command out of sixteen — P2 — [OPEN]
+
+The CI builds `./cmd/quarrel` and the WebUI module. The other fourteen
+commands are never compiled by anything:
+
+```
+cmd/simple           cmd/benchmark      cmd/demo           cmd/dump_metadata
+cmd/quantize         cmd/vector_benchmark
+```
+
+and the eight Metal-only binaries are only built on the Metal job, which
+builds `./cmd/quarrel` and nothing else:
+
+```
+cmd/benchmark_json   cmd/debug_generation  cmd/debug_layers  cmd/dump_tensors
+cmd/gemma4_coherence cmd/gemma4_test       cmd/generate_text  cmd/simple_debug
+```
+
+A command that nobody compiles rots silently: it can stop building and
+nothing notices until someone runs it.
+
+The `emlgo` build is never **tested** either — only vetted. The `mathx`
+package has three backends (stdlib, emlgo, emlfast) and only the default
+one has a test suite, so the two backends that only exist behind a build
+tag are unverified.
+
+**Acceptance criteria:** a CI step that builds every command for the
+platform it targets, and a test job for the `emlgo` build.
+
+---
+
+#### Step 55: ~4,750 lines of dead code, in seventeen clusters — P1 — [OPEN]
+
+A reachability analysis (cross-checked with `golang.org/x/tools/cmd/deadcode`
+over the default, `avx512`, `cuda` and `arm64` builds, and then confirmed by
+grep) found **250 functions and 17 types that no production code path
+reaches**. They are not "unused helpers" — they are whole subsystems that a
+reader would reasonably believe are live.
+
+The largest clusters, with the file that can be deleted outright:
+
+| Cluster | Files | Lines | What it is |
+|---------|-------|-------|------------|
+| **Arrow Flight distributed inference** | `internal/arrow_client/{client,mock_client}.go`, `internal/engine/{remote,distributed_master}.go` | 1,640 | The *client* half of the Flight protocol. The *server* half (`internal/api/flight_server.go`) is live and started by the CLI, so the repository looks like it has a working Flight implementation — it has a server that no client in the repository ever talks to. |
+| **Multi-GPU parallelism** | `internal/device/multi_gpu.go` | 1,037 | Tensor-parallel, pipeline-parallel and hybrid managers plus the cross-GPU communicator. `InitializeMultiGPU` has no caller: since batch 13 the CLI refuses `-tp-size`/`-pp-stages` with an error instead of pretending, so the managers are only reachable from each other. |
+| **GGUF metadata analyzer** | `internal/gguf/metadata.go` | 321 | `MetadataAnalyzer` with `Analyze`, `ValidateTensors`, `FindMissingTensors`, `ComputeStats`. |
+| **Radix prefix cache (second implementation)** | `internal/engine/radix_cache.go` | 286 | A second radix trie next to the one in `prompt_cache.go`. Step 35 already flagged it. |
+| **FP8 quantize/dequantize stack** | `internal/gguf/quantize_fp8.go` | 232 | The whole `FP8Tensor`/`FP8Config`/`FP8Type` API. The FP8 *codec* in `internal/gguf/fp8.go` is live and was fixed in batch 15; this is the separate quantizer that was never wired. |
+| **TurboQuant block codec (gguf side)** | `internal/gguf/quantize_turboquant.go` | 202 | A second TurboQuant implementation next to `internal/simd/turboquant.go`. |
+| **Model and tensor validation** | `internal/device/validation.go` | 202 | `ValidateInputTokens`, `ValidateQ4_0Dimensions`, `DetectNaN`, `CheckNumericalStability` and friends. |
+| **CUDA graph manager** | `internal/device/cuda_graph.go` | 151 | `BeginCapture`/`EndCapture`/`Launch`. See Step 56. |
+| **Mock engine** | `internal/engine/engine_mock.go` | 96 | `MockEngine`. Step 39 removed it from the production registry, so only the tests use it now. |
+| **CPU reference kernels** | `internal/device/cpu_ref.go` | 94 | `CPURMSNorm`, `CPUMatMul`, `CPURoPE`, `CPUSwiGLU` — reference implementations that nothing calls. They are the natural oracle for a parity test, so they are worth keeping and *using* rather than deleting. |
+| **Mock Flight client in a production package** | `internal/arrow_client/mock_client.go` | 142 | A test double compiled into the production package. |
+
+The rest are smaller: the nine uncalled `Audit*` functions in
+`internal/engine/audit.go` (Step 51), the `QualityEvaluator` in
+`internal/engine/engine_utils.go` (~309 lines), the advanced sampler path
+(`Sampler.SampleAdvanced` and its three helpers, ~112 lines), the unused
+`internal/simd` kernels (~383 lines), the `mathx` helpers that no backend
+calls, the OTEL span helpers, and the `Free()` methods on the weight types
+that are never freed.
+
+**The rule this repo has already adopted applies: wire it or delete it.**
+Three of these have an obvious wiring and are worth keeping:
+
+- `internal/device/cpu_ref.go` — use the reference kernels as the oracle in
+  a CPU-vs-reference parity test.
+- `internal/gguf/metadata.go` — use `ValidateTensors` and `FindMissingTensors`
+  at model load, so a model with a missing tensor is rejected with a clear
+  message instead of a nil dereference later.
+- `internal/device/validation.go` — use `ValidateInputTokens` at the API
+  boundary, so an out-of-range token id is a 400 and not a crash.
+
+Everything else should be deleted. `internal/promtest/promtest.go` is a
+different case: it is a test-helper package that lives in a non-test file,
+so it is compiled into the module but linked into no binary. It should move
+to a `_test.go` file or be renamed to make its status obvious.
+
+**Acceptance criteria:** a `deadcode` gate in CI that fails on a new
+unreachable function, and a decision recorded for every one of the
+seventeen clusters.
+
+---
+
+#### Step 56: The CUDA graph manager is not wired, and cannot be as it stands — P2 — [OPEN]
+
+`internal/device/cuda_graph.go` implements a complete graph
+capture/replay manager: `BeginCapture`, `EndCapture`, `Launch`,
+`HasGraph`, `IsCapturing`. Nothing in the repository constructs a
+`CUDAGraphManager` — the only references are the file's own tests.
+
+The blocker is not the manager, it is the *engine*. The CUDA batched
+forward allocates roughly ten tensors per call:
+
+```go
+tokenToSeqTensor := ctx.NewTensorI32(1, numTokens)
+blockTableTensor := ctx.NewTensorI32(batchSize, maxBlocks)
+normed           := ctx.NewTensorFP32(numTokens, dim)
+attnOut          := ctx.NewTensorFP32(numTokens, dim)
+physPosTensor    := ctx.NewTensorFP32(1, numTokens)
+normedFFN        := ctx.NewTensorFP32(numTokens, dim)
+posTensor        := ctx.NewTensorI32(1, len(posIds))
+```
+
+plus the outputs of the seven `MatmulF16` calls. A captured graph bakes in
+the *addresses* of every buffer it touches, so capturing this code as it
+stands would replay into whatever the pool handed out last time — stale
+pointers, silent corruption.
+
+**The integration therefore needs a static decode workspace**: a set of
+persistent buffers, allocated once per (tokens, dim) shape and owned by the
+captured region, that the forward path fills instead of allocating. That
+is a real change to the forward's allocation strategy, not a wiring
+exercise, and it is only worth it once the decode path is the hot path.
+
+**Acceptance criteria:** a persistent workspace type with a test that the
+same buffer addresses are returned across two calls with the same shape; a
+graph capture/replay test that compares the replayed output against the
+eager output bit for bit.
+
+---
+
+#### Step 57: The Arrow Flight sharded forward needs weight sharding, not a client — P1 — [OPEN]
+
+The *client* side of the distributed stack exists and is tested
+(`internal/engine/remote.go`): it connects to a worker, sends an
+activation, and receives the result. What does not exist is the *server*
+side of the same operation. `DistributedEngine.ForwardShardedLayer` asks a
+worker to run "layer `layerIdx`, columns `colStart..colEnd`" — but:
+
+1. There is no engine API that runs a layer over a column range. The CPU
+   engine has `ApplyLayerCPUKVWithScratch`, which runs a whole layer.
+2. There is no weight sharding. A worker would have to hold the *whole*
+   layer's weight matrix for a column slice to be meaningful, which is the
+   opposite of what tensor parallelism is for.
+3. There is no protocol to distribute the shards, and no verification that
+   two workers hold complementary slices.
+
+The current behaviour is honest: the sharded forward returns
+`Unimplemented` rather than computing something wrong. That is the right
+call, but it means the `-tp-size` and `-pp-stages` flags, the
+`RemoteWorkerEngine` and the `MasterDistributedEngine` are all waiting on
+the same unimplemented feature.
+
+**Acceptance criteria:** either implement the weight sharding and the
+column-range layer forward, with a test that a two-worker split produces
+the same result as the single-worker forward, or delete the client half
+and say plainly in the documentation that the repository is a single-device
+engine with a Flight *server* for remote inference.
+
+---
+
+#### Step 58: The TPU backend does not compile, and the CI never noticed — P1 — [OPEN]
+
+The TPU backend is worse than the roadmap records. `docs/nextsteps.md:1583`
+says:
+
+> **Not fixed:** the TPU backend has no `NewTensorFP32`, so the TPU build of
+> `internal/engine` does not compile at all.
+
+That is true, and it is worse. Compiling `internal/device` with the `tpu`
+tag (with stub headers, since `libtpu` is not installed here) produces
+**13 compile errors**, and they are not all in the TPU file:
+
+```
+internal/device/tpu.go:61:11:   undefined: tensorPool
+internal/device/tpu.go:146:59:  undefined: QuantizationType
+internal/device/tpu.go:177:16:  undefined: toF32Slice
+internal/device/tpu.go:205:23:  undefined: tensorPool
+internal/device/tpu.go:282:16:  assignment mismatch: 2 variables but 1 value
+internal/device/arrow_integration.go:39:16:  assignment mismatch: 1 variable but t.ToHostF32 returns 2 values
+internal/device/arrow_integration.go:49:16:  t.RawData undefined
+internal/device/arrow_integration.go:66:16:  assignment mismatch: 1 variable but t.ToHostF32 returns 2 values
+```
+
+`tpu.go` depends on `tensorPool`, `QuantizationType` and `toF32Slice`, which
+are declared in `internal/device/cuda.go` — a file that the `tpu` build tag
+excludes. `arrow_integration.go` has no build tag at all, so it is compiled
+into every backend, and its calls to the TPU `Tensor` do not match the
+TPU `Tensor`'s API.
+
+The reason nobody noticed: **the CI has no TPU job.** `grep -n tpu
+.github/workflows/ci.yml` finds only the `Dockerfile.tpu` in the
+docker-build matrix. The `make tpu` target and `Dockerfile.tpu` both build
+it, but nothing in CI runs them, so the backend has been rotting for as
+long as it has existed.
+
+The Metal backend is in the same position, and is *worse* than the roadmap
+says. The `metal-tests` job on `macos-latest` compiles the Metal build —
+`go build -v -tags "darwin,metal" ./cmd/quarrel` — so the Metal *device*
+and *engine* packages do compile. But `internal/device/arrow_integration.go`
+is not built with the Metal tag here either (it has no tag, so it is built
+into the Metal package as well), and the Metal `Tensor` API differs from
+the CUDA one in the same way the TPU one does.
+
+**Acceptance criteria:** a CI job that at least *type-checks* the TPU build
+(the compile errors above are Go type errors, so `go vet -tags tpu` with
+stub headers is enough — no TPU hardware needed); the `arrow_integration.go`
+file given a build tag or made backend-neutral.
+
+---
+
+#### Step 59: The Metal backend does not compile — P0 — [OPEN]
+
+This is the most serious finding of the audit. **The Metal build has been
+broken for a long time and the CI does not catch it**, because the
+`metal-build` job only runs on `macos-latest` and the repository's own
+history has the Metal code rotting behind a green tick on the Linux
+runners.
+
+Type-checking the Metal build (by copying the tree, stripping only the
+`darwin` token from the build tags, and building with cgo) produces **four
+distinct compile errors**:
+
+```
+internal/device/metal.go:2835:5:   undefined: simd
+internal/device/metal.go:2847:5:   undefined: simd
+internal/engine/engine.go:1027:7:  declared and not used: seqIdx
+internal/engine/engine.go:1250:80: not enough arguments in call to
+    e.SpeculativeMgr.GenerateSpeculativeMultiPath
+        have (context.Context, *Sequence)
+        want (context.Context, *Sequence, func([]float32))
+internal/engine/types_metal.go:87:7:  seq.mu undefined (type *Sequence has no field or method mu)
+internal/engine/types_metal.go:88:13: seq.mu undefined
+internal/engine/types_metal.go:96:7:  seq.mu undefined
+internal/engine/types_metal.go:97:13: seq.mu undefined
+```
+
+Each one is a small, mechanical fix:
+
+| Error | Fix |
+|-------|-----|
+| `undefined: simd` | `metal.go:2835` and `:2847` call `simd.RMSNorm`, but `metal.go`'s import block (`:97-112`) does not import `internal/simd`. The import was dropped in `c6a5f32` when the CUDA split-K work rewrote that file. |
+| `declared and not used: seqIdx` | `engine.go:1027` — `for seqIdx, visionT := range desc.VisionTensors` never uses `seqIdx`. Change it to `for _, visionT := range …`. |
+| `GenerateSpeculativeMultiPath` arity | `engine.go:1250` was written against a two-argument signature; the speculative decoding work in batch 12 added a third `logitsCallback` argument. Pass `nil`. |
+| `seq.mu` undefined | `types_metal.go:87,88,96,97` lock the `Sequence` struct, but the mutex lives on `SequenceManager` (`types.go:163`), not on `Sequence` (`types.go:139-161`). Use the manager's own lock, or add a mutex to `Sequence`. |
+
+**Why the CI missed it:** the `metal-build` job is gated on
+`runs-on: macos-latest` and is *not* a required check for the Linux
+runners, and the `metal-tests` job that would exercise the code is gated
+behind a `run-metal-tests` label. A push that breaks Metal is therefore
+green on every runner that reports to the branch protection.
+
+**Acceptance criteria:** the Metal build compiles; a CI job that builds the
+Metal backend on every push (or at least a `go vet` type check that does
+not need a Mac — see the next step); the four errors are gone.
+
+---
+
+#### Step 60: The Metal backend has the same class of defects the CUDA one had — P0 — [OPEN]
+
+With the compile errors fixed, the audit found **seven numerical defects** in
+the Metal path — the same categories that the CUDA backend had in batches
+10-19. None of them has ever run, because the backend does not compile.
+
+The element-size convention is the recurring one: the Metal layer forward
+allocates F16 activations and then runs F16 kernels over F32 scratch
+buffers.
+
+| # | Location | The engine does | The kernel does | Verdict |
+|---|----------|-----------------|-----------------|---------|
+| 1 | `metal.go:1945-1954` | `GatePart`, `UpPart` and `SwiOut` are allocated **F32** (`metal.go:1566-1568`) | `linear_f16` and `swiglu_f16` (`kernels.metal:56-73`, `:120-148`) read and write `device half *` | The F16 kernels write 2 bytes per element into a 4-byte-per-element buffer. **MISMATCH** |
+| 2 | `metal.go:1953` | `ResFFN` is F16 (`metal.go:1561`) | `linear_f16_f32` (`kernels.metal:1155-1177`) writes `device float *` | 4 bytes into a 2-byte buffer. **MISMATCH** |
+| 3 | `metal.go:1936`, `:1954` | `t.AddInPlace(resAtt)` and `t.AddInPlace(resFFN)`, **and the returned error is discarded** | `AddInPlace` (`metal.go:2143-2154`) refuses anything that is not F32 and returns a validation error | **The residual stream is silently discarded.** The error is thrown away, so the layer output is the attention output with no residual. **MISMATCH** |
+| 4 | `metal.go:2814` → `kernel_flash_attention.metal:19,21,23` | the positions, the block table and the token→sequence map are allocated **float32** (`engine.go:1063,1069`, `kv_cache_paged.go:1020`) | `flash_attention2_f16` reads `device const int *seq_lens`, `*block_table`, `*token_to_seq` | The kernel reads the *bits* of a float as an integer: position `5.0f` becomes `0x40A00000` = 1 084 227 584, so the block count is astronomically large and the kernel reads far outside the KV pool. **This is an out-of-bounds GPU read, not just a wrong number.** Batch 19 fixed exactly this in `kernels.metal` (`att_paged_f16` and `att_paged_batch_f16` already take `float *`) and left `kernel_flash_attention.metal` — the kernel the engine actually calls — on `int *`. **MISMATCH** |
+| 5 | `metal.go:2660` | `Tensor.Slice(startCol, numCols)` slices **columns** | `slice_f16` (`kernels.metal:2507-2517`) implements a column slice | Every call site uses it as a **row** extractor: `engine.go:1112-1113` (the KV store), `engine.go:1147` (the last-token logits), `engine.go:1209-1210` (LoRA). The CUDA backend has a different API for this (`cuda.go:1632`, a row copy). **MISMATCH** |
+| 6 | `engine.go:1147-1150` | `row := logitsAll.Slice(lastTokenIdx, 1)` is `[numTokens, 1]` **F16**; `rowCopy` is `[1, VocabSize]` **F32** | `CopyF32Into` requires matching dimensions and calls `Metal_Copy_F32` | The copy returns a dimension error which the engine **discards**, so `results[i]` stays an uninitialised F32 tensor and the sampler reads garbage. **MISMATCH** |
+| 7 | `engine.go:1128-1134` | `normed` is F16, `logitsAll` is F32 | `linear_f16` writes `device half *output` | The final logits projection writes halves into the F32 logits buffer. **MISMATCH** |
+
+Two more are latent:
+
+- `engine.go:456-457` allows an **F32** weight, but `linearIntoInternal`
+  (`metal.go:1245-1258`) has no `DataTypeF32` case, so it falls into the
+  F16 branch and reads the F32 buffer as halves. `linearF32IntoInternal`
+  (`metal.go:2059-2088`) has no F32 case at all, so it produces **no output
+  and no error**.
+- `metal.go:1110-1123` (`ToHost`) handles F32 and Q6_K only. A **Q4_K**
+  tensor falls through to the F16 branch, and the 144-byte-per-256 Q4_K
+  blob is decoded as raw `uint16`.
+
+**And one that is not a type error at all:** `kernel_flash_attention.metal:57`
+computes `num_logical_blocks` from the token's *position*, so the token does
+not attend to itself. CUDA covers `pos+1` tokens
+(`cuda_kernels.cu:1796-1800`). That is a silent correctness difference
+between the two backends.
+
+**The fix is the same shape as the CUDA fixes:** pick one convention
+(activations F16, weights F16, the paged pool F16, positions and block
+tables float32 — which is what the engine and two of the three kernels
+already do), make the kernels agree, and **check the errors** that
+`AddInPlace` and `CopyF32Into` return instead of discarding them.
+
+**Acceptance criteria:** a Metal-vs-CPU parity test on the same model, in
+the same shape as `internal/engine/engine_cpu_cuda_parity_test.go`, that
+compares the logits element by element. The parity test is what found the
+six CUDA defects; it is the test this backend needs.
+
+---
+
+#### Step 61: The TPU backend is dead code with a host-buffer overflow — P1 — [OPEN]
+
+Step 58 records that the TPU build does not compile. The audit found that
+the TPU code is also *semantically* broken, so "just add the missing
+methods" would not make it work. The findings, in order of severity:
+
+| # | Location | The defect |
+|---|----------|------------|
+| 1 | `tpu.go:296-298` | `GetWeightTensor(name)` **returns `nil` unconditionally.** `engine_tpu.go` fetches every weight through it (`:439,443,445,471,490,495,497`), so every weight is `nil` and the first `ctx.RMSNorm(hidden, attnNormW, …)` dereferences a nil pointer. `LoadTPUModel` (`tpu.go:242-277`) only loads `token_embd.weight` and `output.weight`. |
+| 2 | `tpu.go:187-192` | `ToHostF32` copies `size * cols * 4` bytes into a `size * 4` byte buffer — a **host buffer overflow by a factor of `cols`**. |
+| 3 | `engine_tpu.go:487-508` | The computed `logitsTensor` is **discarded** and `results[i]` is an uninitialised tensor; `hidden.ReturnToPool()` is called twice (`:488` and `:493`). The sampler then reads the uninitialised logits. |
+| 4 | `tpu.go:287` | The weight is loaded as `NewTensor(ne[0], ne[1])` — rows = `ne[0]` — while `MatmulF16` (`tpu.go:300-311`) treats the right-hand side as `[N][K]` with K contiguous. Every other backend uses rows = `ne[1]`. The TPU weight layout is transposed relative to the rest of the repository. |
+| 5 | `engine_tpu.go:425` | `ctx.MatmulF16(inputTokensTensor, e.tpu.TokenEmb)` multiplies the **token IDs** by the embedding matrix. There is no embedding-gather kernel on the TPU backend. |
+| 6 | `engine_tpu.go:452` | `ctx.FusedRoPE(q, []int{posToInt(desc.ContextLens)}, batchSize, …)` passes a **one-element** position array with `batch = batchSize`; the C prototype indexes `posIds[batch]`. |
+| 7 | `engine_tpu.go:459-464` | `StoreKV` writes at **token-index** positions into a paged pool. The slot must be `physBlock*blockSize + offset`. |
+| 8 | `tpu.go:272-273` | The "KV cache" is a `1 × dim` tensor, but `tpuStoreKV(..., numTokens, ...)` writes `numTokens` rows into it. |
+| 9 | `tpu.go:172` | `DataType() int` where every other backend returns `device.DataType`; `arrow_client/client.go:494` switches on it against `device.DataTypeF32`. |
+| 10 | `tpu.go:187` | `ToHostF32() ([]float32, error)` returns **two** values while eight call sites in the repository expect one. |
+
+**This is not a backend that can be repaired by a week's work.** It is a
+sketch: no weight loading, no embedding gather, no paged KV, a transposed
+layout, and a host overflow in the one function everything calls. The
+honest options are to delete it, or to rewrite it from the CUDA engine
+(which now has a working, tested paged path) rather than to patch it.
+
+**Acceptance criteria:** either the TPU backend is deleted along with
+`Dockerfile.tpu`, `make tpu` and the `tpu` build tag, or it is rewritten
+against the CUDA engine's structure with a device-level test that stores a
+known K/V at a known slot and reads it back (the analogue of
+`internal/device/cuda_paged_store_test.go`).
+
+---
+
+#### Step 62: The CUDA hot path is 43% uncovered, and the CPU paged attention has no test at all — P1 — [OPEN]
+
+The coverage numbers look good — `internal/engine` at 80.3 %,
+`internal/device` at 75.3 % — but the numbers that matter are the ones
+*inside* the paths that run.
+
+| Path | Coverage | Why |
+|------|----------|-----|
+| `engine_cuda.go:453` `cudaEngine.ForwardBatch` | **57.3 %** (138 uncovered statements) | The single most important function in the repository: it runs every token on the GPU. |
+| `device/cuda.go:1228` `NewCUDAModel` | **0.0 %** (105 uncovered statements) | The whole GPU model-load path. |
+| `device/cuda.go:757` `MatmulF16` | **0.0 %** | The fundamental GEMM. |
+| `device/cpu.go:655` `Context.AttentionPagedBatch` | **0.0 %**, and **called by no test in the repository** | The CPU reference paged attention — the thing the CUDA kernel is validated against. On a CPU-only machine there is no paged-attention correctness check at all. |
+| `engine/sampler.go:138-158` | **0 %** | The whole Mirostat block. `MirostatTau` and `MirostatEta` are public config fields with no test. |
+| `internal/simd` with `-tags avx512` | **73.2 %** — 22 points *worse* than the default build | The AVX-512 kernels (`SoftmaxAVX2`, `SwiGLUAVX2`, `fusedAttentionScalar`, `fusedMLPScalar`, the VNNI dot products) have no tests. The `avx512_test.go` file exists and does not exercise them. |
+
+**Why the CUDA path is under-covered on a machine that has a GPU:** the
+CUDA engine tests look for the model at the *relative* path
+`"smollm2.gguf"` (`engine_cuda_fuzz_test.go:16`,
+`cmd/integration_cuda_test/cuda_inference_test.go:20`), overridable only
+through `QUARREL_TEST_MODEL`. With the file absent, **ten CUDA tests skip**
+and the hot path stays at 57.3 %.
+
+But the parity work in batch 17 already solved this: `internal/gguf/writer.go`
+can *write* a GGUF, and `internal/engine/engine_cpu_cuda_parity_test.go`
+builds a model in the test. The CUDA tests should do the same instead of
+looking for a file on disk.
+
+**Acceptance criteria:** the CUDA tests build their model with the GGUF
+writer, the same way the parity test does, so they run on any machine with
+a GPU; `device/cpu.go:655` gets a CPU-vs-reference paged-attention test;
+the Mirostat branch gets a test; the AVX-512 kernels get the coverage the
+default build has.
+
+---
+
+#### Step 63: Twenty-six tests still cannot fail, and the checker has a blind spot — P2 — [OPEN]
+
+`scripts/vacuous_tests` reports **26 known vacuous tests, 0 new**. Every
+one of the 26 still has no assertion. Three of them are the dangerous kind
+— they look like a real check and are not:
+
+| Test | What it does |
+|------|--------------|
+| `internal/device/rope_test.go:10` `TestRoPE_Precision` | Computes a CPU reference, runs the kernel, and on a mismatch calls **`t.Logf`**, not `t.Errorf`. The RoPE precision regression this test exists to catch is reported and then ignored. |
+| `internal/simd/simd_test.go:369` `TestFp32ToFp16EdgeCases` | The loop body has two `continue`s and **no `t.Error` at all** — every value passes. |
+| `internal/simd/simd_test.go:853` `TestSwiGLU_Clamping` | Calls both `SwiGLU` and `swigluScalar` and compares nothing. The clamping behaviour the name promises is never verified. |
+
+Two more are named for a comparison that was never written:
+`internal/device/rope_attention_test.go:93` `TestAttention_CausalMask` and
+`internal/device/parity_test.go:9` `TestTurboQuant_NumericalParity_TQ1_0`.
+
+**The checker's blind spot:** `scripts/vacuous_tests/main.go:310-314`
+treats *any* call whose first argument is `t` as an assertion. A test that
+only calls a helper which itself never asserts is therefore counted as
+non-vacuous. Today nothing is hidden by it — a stricter analyser that
+resolves helper bodies transitively finds the same 26 — but five helpers
+take `t` and never assert (`internal/engine/cpu_forward_test.go:12`
+`buildCPUEngine`, `internal/logger/logger_test.go:14` `newCapturingLogger`,
+`internal/metrics/dashboard_test.go:115` `dashboardPath`, and two in
+`internal/metrics/docs_test.go`), so a future regression could hide behind
+it.
+
+**Two related test-suite defects:**
+
+- `internal/simd` does not compile under `CGO_ENABLED=0`:
+  `simd_coverage_test.go:15` references `softmaxScalar`, `simd_test.go:858`
+  references `swigluScalar` and `:877` calls `fp32ToFp16Scalar` with the
+  wrong arity. All three live in `avx2_scalar.go`, which is excluded
+  without cgo. The library builds; only the test suite is broken, so the
+  `!cgo` fallback path is unbuildable-and-untested.
+- The fuzz targets call **`t.Skip`** on invalid input
+  (`engine_cuda_fuzz_test.go:37,68,71,74,77,80,101,104,107,191` and
+  `kv_cache_turboquant_fuzz_test.go:25,28,31,34`). A `t.Skip` inside
+  `f.Fuzz` *discards the seed*, so the corpus never grows for those inputs
+  and a crash in the invalid-input path is never found. It should be a
+  plain `return`.
+
+**Acceptance criteria:** the three look-alike tests assert; the checker
+resolves helper bodies transitively; `internal/simd` compiles and tests
+under `CGO_ENABLED=0`; the fuzz targets return instead of skipping.
+
+---
+
+#### Step 64: The tests that skip can hide real defects — P2 — [OPEN]
+
+The skips are mostly legitimate — a test that needs two GPUs may skip on a
+one-GPU host. But several skip for the *wrong* reason, and a skip that
+hides a real defect is worse than a failing test.
+
+| Site | The skip | Why it is wrong |
+|------|----------|-----------------|
+| `internal/device/multi_gpu_test.go:323` | `NewCrossGPUCommunicator` returns an error → `t.Skipf` | On a two-GPU machine, peer access not being enabled makes this error *legitimate*. So a **broken** multi-GPU path reports green. The skip should be conditional on the peer-access topology, not on the error. |
+| `internal/device/cuda_device_test.go:16` and `internal/device/multi_gpu_test.go:59` | `GetDeviceCount()` returns an error → skip | A driver error is a defect, not a reason to skip. The `count < 1` skip is legitimate; the error skip is not. |
+| `internal/engine/engine_cuda_test.go:22,49,145,172,229,290` and the four CUDA fuzz targets | the model file `smollm2.gguf` is absent → skip | Fixed by building the model with the GGUF writer (Step 62). |
+| `internal/engine/gemma4_test.go:16`, `engine_cpu_test.go:545`, `v5_coherence_test.go:65,124,164,195` | hard-coded absolute paths under `/home/rsd/.cache/llmfit/models/` and `../../models/` | Developer-machine-specific paths that **can never run in CI**. Six of the engine's skips are these. |
+| `internal/tokenizer/tokenizer_mistral_test.go:12,28,41,62,84` | a hard-coded macOS Ollama blob path (`/Users/rsd/.ollama/models/blobs/sha256-f5074b…`) | **Five tokenizer tests are permanently skipped** on any Linux host and in CI. |
+| `internal/gguf/quantization_test.go:26,90` and `quantization_q4k_test.go:24,82,156,201` | `QuantizeWeightsToQ4K` returns an error → `t.Logf` + `t.SkipNow()` | The function is implemented and 91.3 % covered, so an error here is a genuine defect reported as a skip. |
+| `internal/engine/fuzz_kv_test.go:35` | `cache.Init` fails → `t.Skipf("likely OOM or device issue")` | An init failure in the KV cache is a bug; the skip hides it. |
+| `internal/api/playwright_e2e_test.go:17` | the Playwright driver will not start → skip | A broken web-UI end-to-end path reports green. |
+
+**Acceptance criteria:** no test skips because a *function under test*
+returned an error; a skip may only depend on the absence of hardware or of
+an external file.
+
+---
+
 ---
 
 ## Milestone History & Completed Work
@@ -2241,11 +2859,20 @@ and the `dupcheck` gate that prevents a recurrence.
 worker and returns the result tensor data".
 
 **Resolved:**
-- `DoPutTensor` now decodes returned tensor `float32` payloads directly from `PutResult.AppMetadata` when present, and returns cleanly with `[]float32{}` on empty ack-less completion.
+- `DoPutTensor` now decodes returned tensor `float32` payloads directly from `PutResult.AppMetadata` when present.
+- An empty result is an **error**, not a clean return: `client.go:441` returns
+  "the worker returned no result tensor for the request" and `:451` returns
+  "the worker returned an empty result for the request". The earlier
+  behaviour — returning `[]float32{}` on an empty ack-less completion — was
+  the bug: a caller could not tell a successful zero-length result from a
+  worker that never answered.
 - Verified in `internal/arrow_client/doput_tensor_test.go::TestDoPutTensor_RoundTrip` against an in-process Flight server with bit-exact float32 parity.
+
+**Note:** the whole Flight *client* stack is unreachable from any binary
+(Step 55), so this fix is correct but not yet load-bearing.
 
 ---
 
 > For detailed performance benchmarks, pprof profiling data, and vector engine P0 blockers, see [docs/roadmap.md](roadmap.md).
 
-#### Last updated: October 2026 (latest tag `0.3.0`; post-0.3.0 work landed on `main`, unreleased; Phase 6 ship-it audit added)
+#### Last updated: October 2026 (latest tag `0.3.0`; post-0.3.0 work landed on `main`, unreleased; Phase 6 ship-it audit and a second deep analysis added)
