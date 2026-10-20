@@ -504,7 +504,8 @@ Based on deep profiling of autoregressive decode loops, CUDA kernel execution pr
 > (Steps 44, 47), Batch 8 (Step 40), Batch 9 (Step 40), Batch 10 (Step 35)
 > and Batch 11 (Step 35), Batch 12 (Step 35), Batch 13 (Step 35),
 > Batch 14 (Step 35), Batch 15 (Step 35), Batch 16 (Step 35),
-> Batch 17 (Step 35) are DONE** — see the status markers on each step.
+> Batch 17 (Step 35), Batch 18 (Step 35) are DONE** — see the status
+> markers on each step.
 > Verified locally after the change:
 >
 > | Check | Command | Result |
@@ -1433,15 +1434,20 @@ all of them. It also caught a bug *in the test*: the comparison was
 the test passed with a NaN on the GPU. The comparison now checks for a NaN
 explicitly.
 
-**Still open on the GPU:** the single-token forward is still broken. It
-uses the model's legacy KV cache, which the path never wrote, and the
-fused attention's cache stride does not match the cache's layout. The
-right fix is to use the paged cache, like the batched path does, and that
-is a change to the single-token forward rather than a fix. The speculative
-decoding uses that path for its verification, so on the GPU the
-speculative step falls back to the target's own sampling — the acceptance
-test now rejects a draft token whose target distribution is not finite, so
-a `NaN` can no longer turn into an arbitrary token.
+**Batch 18 removed the broken single-token forward and the VRAM it
+wasted.**
+
+The batched forward is the only one left. The single-token forward used
+the model's legacy KV cache, which the path never wrote, and the fused
+attention's cache stride did not match that cache's layout, so it produced
+`NaN`. Nothing in production called it any more once the speculative
+verification went through the batched path, and the model allocated a KV
+buffer per layer whether anything read it or not — about a gigabyte of
+VRAM for a 7B model with a 2048 token cache.
+
+The fused attention kernel still reads a half-precision cache as float32.
+It is only reachable from code that no longer exists, and it is the last
+kernel of that shape.
 
 **Still open:** the distributed/Arrow Flight stack and CUDA Graphs. The
 first needs a worker-side sharded forward, the second needs a decode path
@@ -1872,9 +1878,10 @@ engine coverage to 80% and found six more bugs, among them the Arrow
 Flight server and client disagreeing on the wire format (see Step 35).
 **Batch 17** used the GGUF writer to build a model in a test, and the CPU
 and the GPU parity test it made possible found six defects in the GPU's
-batched forward (see Step 35).
+batched forward (see Step 35). **Batch 18** removed the single-token
+forward it left broken and the gigabyte of VRAM it wasted (see Step 35).
 
-**Still open:** raising `internal/engine` above 80%, and generating the README table from a script so it cannot drift apart from the floors again.
+**Still open:** generating the README table from a script so it cannot drift apart from the floors again. The `internal/engine` coverage is now 80.3% and its floor is 80.0%.
 
 ---
 

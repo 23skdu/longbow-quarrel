@@ -1222,8 +1222,6 @@ type weight struct {
 type CUDAModel struct {
 	Ctx     *Context
 	Weights map[string]*weight
-	KCache  []*Tensor
-	VCache  []*Tensor
 	mu      sync.RWMutex
 }
 
@@ -1415,12 +1413,19 @@ func (ctx *Context) NewCUDAModel(f *gguf.GGUFFile, preDequantize bool, kvCacheSi
 		cacheLayers = gpuLayers
 	}
 
-	m.KCache = make([]*Tensor, cacheLayers)
-	m.VCache = make([]*Tensor, cacheLayers)
-	for i := 0; i < cacheLayers; i++ {
-		m.KCache[i], _ = ctx.NewTensor(kvCacheSize*heads, headDim, DataTypeF16)
-		m.VCache[i], _ = ctx.NewTensor(kvCacheSize*heads, headDim, DataTypeF16)
-	}
+	// The model used to carry its own KV cache, one buffer per layer,
+	// and the engine allocated it whether it was used or not. Only the
+	// single-token forward read it, and that path is gone: the engine
+	// uses the paged cache, which is shared by all the layers and
+	// allocated once.
+	//
+	// The buffers were not small: for a 7B model with a 2048 token
+	// cache they came to about a gigabyte of VRAM that nothing ever
+	// read.
+	_ = kvCacheSize
+	_ = heads
+	_ = headDim
+	_ = cacheLayers
 
 	return m, nil
 }
@@ -1454,12 +1459,6 @@ func getCudaKVInt(kv map[string]interface{}, keys ...string) int {
 func (m *CUDAModel) Free() {
 	for _, w := range m.Weights {
 		C.cudaFree(w.devPtr)
-	}
-	for _, c := range m.KCache {
-		c.Free()
-	}
-	for _, c := range m.VCache {
-		c.Free()
 	}
 }
 
@@ -1539,18 +1538,18 @@ func (m *CUDAModel) GetBatchEmbedding(tokens []int, vocabSize int) (*Tensor, err
 	return out, nil
 }
 
+// GetKCache returns the model's KV cache.
+//
+// The model no longer carries one: the engine uses the paged cache. The
+// accessor is kept so that the code that asks for it gets a clear "there
+// is none" instead of a buffer that was never written.
 func (m *CUDAModel) GetKCache(layer int) *Tensor {
-	if layer < 0 || layer >= len(m.KCache) {
-		return nil
-	}
-	return m.KCache[layer]
+	return nil
 }
 
+// GetVCache returns the model's KV cache. See GetKCache.
 func (m *CUDAModel) GetVCache(layer int) *Tensor {
-	if layer < 0 || layer >= len(m.VCache) {
-		return nil
-	}
-	return m.VCache[layer]
+	return nil
 }
 
 func CUDAAllocatedBytes() int64 {
@@ -1594,45 +1593,6 @@ func (s *LayerScratch) Free() {
 	s.Gate.Free()
 	s.Up.Free()
 	s.Down.Free()
-}
-
-// Grow makes sure the scratch can hold the given number of tokens.
-//
-// The scratch is created for a single token, but the batched forward
-// needs a row per token: the normed activations, the attention output
-// and the feed-forward buffers are all sized by the token count. With a
-// smaller scratch the kernels wrote past the end of the buffers, and
-// the projections read back whatever was there.
-//
-// The scratch only ever grows, so a forward that fits in the current
-// buffers costs nothing.
-func (ctx *Context) GrowLayerScratch(s *LayerScratch, tokens, dim, hiddenDim, heads, kvHeads, headDim, seqLen, vocabSize int) {
-	if s == nil || tokens <= 0 {
-		return
-	}
-	if s.Normed != nil && s.Normed.rows >= tokens && s.Down != nil && s.Down.rows >= tokens {
-		return
-	}
-	if s.Gate != nil && s.Gate.rows < tokens {
-		s.Gate.Free()
-		s.Gate, _ = ctx.NewTensor(tokens, hiddenDim, DataTypeF16)
-	}
-	if s.Up != nil && s.Up.rows < tokens {
-		s.Up.Free()
-		s.Up, _ = ctx.NewTensor(tokens, hiddenDim, DataTypeF16)
-	}
-	if s.Normed != nil && s.Normed.rows < tokens {
-		s.Normed.Free()
-		s.Normed, _ = ctx.NewTensor(tokens, dim, DataTypeF16)
-	}
-	if s.Down != nil && s.Down.rows < tokens {
-		s.Down.Free()
-		s.Down, _ = ctx.NewTensor(tokens, dim, DataTypeF16)
-	}
-	if s.Attn != nil && s.Attn.rows < tokens*heads {
-		s.Attn.Free()
-		s.Attn, _ = ctx.NewTensor(tokens*heads, headDim, DataTypeF16)
-	}
 }
 
 func Float32SliceToFloat16(data []float32) []uint16 {

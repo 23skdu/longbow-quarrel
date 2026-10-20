@@ -138,7 +138,7 @@ func TestCUDAEngineEndToEnd(t *testing.T) {
 	e := created.(*cudaEngine)
 
 	// The forward pass produces finite logits.
-	forward := e.forwardInternal([]int{1, 2, 3}, false)
+	forward := forwardLastLogits(t, e, []int{1, 2, 3})
 	if len(forward) == 0 {
 		t.Fatal("the forward pass produced no logits")
 	}
@@ -181,8 +181,8 @@ func TestCUDAEngineIsDeterministic(t *testing.T) {
 	defer created.Close()
 	e := created.(*cudaEngine)
 
-	first := e.forwardInternal([]int{1, 2, 3}, false)
-	second := e.forwardInternal([]int{1, 2, 3}, false)
+	first := forwardLastLogits(t, e, []int{1, 2, 3})
+	second := forwardLastLogits(t, e, []int{1, 2, 3})
 
 	if len(first) != len(second) {
 		t.Fatalf("the two forwards produced %d and %d logits", len(first), len(second))
@@ -192,4 +192,25 @@ func TestCUDAEngineIsDeterministic(t *testing.T) {
 			t.Fatalf("the logit %d is %v the first time and %v the second", i, first[i], second[i])
 		}
 	}
+}
+
+// forwardLastLogits runs the batched forward over the tokens and returns
+// the logits of the last one.
+func forwardLastLogits(t *testing.T, e *cudaEngine, tokens []int) []float32 {
+	t.Helper()
+
+	tokenToSeq := make([]int, len(tokens))
+	batch := &BatchDescriptor{
+		Sequences:   []*Sequence{{ID: 1, Tokens: tokens, PromptLen: len(tokens)}},
+		Tokens:      tokens,
+		Offsets:     []int{0},
+		ContextLens: []int{0},
+		TokenToSeq:  tokenToSeq,
+	}
+	results, err := e.ForwardBatch(batch)
+	if err != nil {
+		t.Fatalf("the forward failed: %v", err)
+	}
+	defer results[0].Free()
+	return results[0].ToHostF32()
 }

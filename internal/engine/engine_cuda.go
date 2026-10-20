@@ -150,13 +150,8 @@ func NewcudaEngine(modelPath string, cfg config.Config) (Engine, error) {
 		tok.AddEOSTokenID(cfg.EOSTokenID)
 	}
 
-	vocabSize := cfg.VocabSize
 	heads := cfg.Heads
 	kvHeads := cfg.KVHeads
-	dim := cfg.Dim
-	headDim := cfg.HeadDim
-	hiddenDim := cfg.HiddenDim
-	seqLen := cfg.SeqLen
 
 	isGemma4 := arch == "gemma4"
 	e := &cudaEngine{
@@ -177,9 +172,6 @@ func NewcudaEngine(modelPath string, cfg config.Config) (Engine, error) {
 		seqTTFTStart: make(map[uint64]time.Time),
 		stopTokens:   stopTokenSet(cfg.StopTokens),
 	}
-
-	// Initialize scratch space
-	e.scratch = ctx.NewLayerScratch(1, dim, hiddenDim, heads, kvHeads, headDim, seqLen, vocabSize, 0, 0)
 
 	if isGemma4 {
 		e.config.Gemma4SlidingWindowSize = 512
@@ -213,9 +205,6 @@ func (e *cudaEngine) Close() {
 	}
 	if e.doneChan != nil {
 		<-e.doneChan
-	}
-	if e.scratch != nil {
-		e.scratch.Free()
 	}
 	if e.cache != nil {
 		e.cache.Free()
@@ -465,12 +454,6 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 	ctx := e.ctx
 	batchSize := len(desc.Sequences)
 	numTokens := len(desc.Tokens)
-
-	// The scratch holds one row per token. It was created for a single
-	// token, so a batch with more than one token made the kernels write
-	// past the end of its buffers.
-	ctx.GrowLayerScratch(e.scratch, numTokens, e.config.Dim, e.config.HiddenDim,
-		e.config.Heads, e.config.KVHeads, e.config.HeadDim, e.config.SeqLen, e.config.VocabSize)
 
 	// 1. Prepare Metadata Tensors
 	tokenPosTensor := ctx.NewTensorI32(1, numTokens)
@@ -993,321 +976,49 @@ func (e *cudaEngine) inferInternal(inputTokens []int, tokensToGenerate int, samp
 	}
 }
 
-// forward runs one token through the model.
-//
-// cpuKV is the KV cache of the layers that run on the CPU. It has to be
-// supplied by the caller: the attention of an offloaded layer has to see
-// the same history the GPU layers see, and the cache is per sequence and
-// per call.
-func (e *cudaEngine) forward(token int, pos int, _ []int, cpuKV *CPUKVCache) ([]float32, error) {
-	ctx := e.cuda.Ctx
-	dim := e.config.Dim
-	hiddenDim := e.config.HiddenDim
-	heads := e.config.Heads
-	kvHeads := e.config.KVHeads
-	headDim := e.config.HeadDim
-	ropeTheta := e.config.RopeTheta
-	eps := e.config.Eps
-
-	// 1. Initial Embedding (on GPU)
-	hidden, err := e.cuda.GetEmbeddingTensor(token)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get embedding: %w", err)
-	}
-	defer hidden.ReturnToPool()
-
-	// 2. Transformer Layer Loop
-	gpuLayers := e.numGPULayers
-	for layer := 0; layer < gpuLayers; layer++ {
-		// --- Attention Sublayer ---
-		// RMSNorm
-		attnNormW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_norm.weight", layer))
-		normed := e.scratch.Normed
-		ctx.RMSNorm(hidden, attnNormW, normed, 1, dim, eps)
-
-		// Q, K, V Projections & RoPE
-		qW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_q.weight", layer))
-		var q, k, v *device.Tensor
-		if e.config.IsMLA {
-			qkNopeDim := e.config.QKNDim
-			if qkNopeDim <= 0 {
-				qkNopeDim = headDim
-			}
-			qkRopeDim := e.config.QKRopeDim
-			if qkRopeDim <= 0 {
-				qkRopeDim = headDim
-			}
-			vHeadDim := e.config.VHeadDim
-			if vHeadDim <= 0 {
-				vHeadDim = headDim
-			}
-			kvLoraRank := e.config.KVLoRARank
-			if kvLoraRank <= 0 {
-				kvLoraRank = dim / 2
-			}
-
-			qAW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_q_a.weight", layer))
-			qBW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_q_b.weight", layer))
-			var qAll *device.Tensor
-			if qAW != nil && qBW != nil {
-				cQ, _ := ctx.MatmulF16(normed, qAW)
-				qANormW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_q_a_norm.weight", layer))
-				if qANormW != nil {
-					ctx.RMSNorm(cQ, qANormW, cQ, 1, cQ.Cols(), eps)
-				}
-				qAll, _ = ctx.MatmulF16(cQ, qBW)
-				cQ.ReturnToPool()
-			} else {
-				qAll, _ = ctx.MatmulF16(normed, qW)
-			}
-
-			posTensor := ctx.NewTensorI32(1, 1)
-			_ = posTensor.LoadFrom([]int32{int32(pos)})
-			qNope, qRope := ctx.MLAProjectQuerySplitRoPE(qAll, posTensor, 1, heads, qkNopeDim, qkRopeDim, ropeTheta)
-			qAll.ReturnToPool()
-			posTensor.ReturnToPool()
-
-			kvAW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_kv_a_mqa.weight", layer))
-			kvBW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_kv_b.weight", layer))
-			if kvAW != nil && kvBW != nil {
-				kvDown, _ := ctx.MatmulF16(normed, kvAW)
-				kvANormW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_kv_a_norm.weight", layer))
-				if kvANormW != nil {
-					ctx.RMSNorm(kvDown, kvANormW, kvDown, 1, kvLoraRank, eps)
-				}
-				kNope, vVal := ctx.MLADecompressKV(kvDown, kvBW, 1, kvLoraRank, heads, qkNopeDim, vHeadDim)
-				kvDown.ReturnToPool()
-				q = qNope
-				qRope.ReturnToPool()
-				k = kNope
-				v = vVal
-			} else {
-				q = qNope
-				qRope.ReturnToPool()
-				kW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_k.weight", layer))
-				vW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_v.weight", layer))
-				k, _ = ctx.MatmulF16(normed, kW)
-				v, _ = ctx.MatmulF16(normed, vW)
-			}
-		} else {
-			kW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_k.weight", layer))
-			vW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_v.weight", layer))
-			qNormW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_q_norm.weight", layer))
-			kNormW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_k_norm.weight", layer))
-
-			rotaryDim := headDim
-			if e.config.IsGemma4 && e.config.Gemma4PartialRoPEFactor > 0 {
-				rotaryDim = int(float32(headDim) * e.config.Gemma4PartialRoPEFactor)
-			}
-
-			var err error
-			if qNormW != nil || kNormW != nil {
-				q, err = ctx.MatmulF16(normed, qW)
-				if err == nil {
-					k, err = ctx.MatmulF16(normed, kW)
-				}
-				if err == nil {
-					v, err = ctx.MatmulF16(normed, vW)
-				}
-				if err != nil {
-					return nil, err
-				}
-				ctx.QKNormRMSNorm(q, k, qNormW, kNormW, 1, heads, kvHeads, headDim, eps)
-				ctx.EnsureRoPETables(pos+1, headDim, rotaryDim, ropeTheta)
-				ctx.FusedRoPEPrecomputed(q, []int{pos}, 1, heads, 1, headDim)
-				ctx.FusedRoPEPrecomputed(k, []int{pos}, 1, kvHeads, 1, headDim)
-			} else {
-				q, k, v, err = ctx.FusedQKVRope(normed, qW, kW, vW, []int{pos}, 1, dim, heads, kvHeads, headDim, rotaryDim, ropeTheta)
-				if err != nil {
-					return nil, err
-				}
-			}
-		}
-
-		// Fused Attention
-		kCache := e.cuda.GetKCache(layer)
-		vCache := e.cuda.GetVCache(layer)
-		attnOut := e.scratch.Attn
-
-		windowSize := 0
-		if e.config.IsGemma4 && (layer%6) != 5 {
-			windowSize = e.config.Gemma4SlidingWindowSize
-		} else if e.config.WindowSize > 0 {
-			windowSize = e.config.WindowSize
-		}
-
-		scale := float32(1.0 / mathx.Sqrt(float64(headDim)))
-		if q.Rows() > 1 {
-			ctx.FlashAttentionPrefill(q, k, v, attnOut, 1, heads, kvHeads, q.Rows(), pos+q.Rows(), headDim, scale, windowSize)
-		} else {
-			// Store the token's keys and values in the cache before
-			// the attention reads it. The path never wrote the cache,
-			// so the attention read uninitialised memory and the
-			// forward pass produced NaNs.
-			//
-			// The cache is laid out head-major with the full capacity
-			// as the stride, so the attention has to be told the
-			// capacity and not the number of positions in use.
-			kvLen := 0
-			if kCache != nil && heads > 0 {
-				kvLen = kCache.Rows() / heads
-			}
-			if kvLen > 0 {
-				k.StoreKVLinear(v, kCache, vCache, pos, heads, headDim, kvLen)
-			}
-			ctx.FusedAttention(q, k, v, attnOut, kCache, vCache, 1, heads, 1, kvLen, headDim, scale, 1, windowSize)
-		}
-
-		// Cleanup intermediate projections
-		q.ReturnToPool()
-		k.ReturnToPool()
-		v.ReturnToPool()
-
-		// Output Projection
-		oW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_output.weight", layer))
-		attnProj, _ := ctx.MatmulF16(attnOut, oW)
-
-		// Residual Add
-		ctx.Add(hidden, attnProj, hidden, dim)
-		attnProj.ReturnToPool()
-
-		// --- MLP Sublayer ---
-		// RMSNorm
-		ffnNormW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.ffn_norm.weight", layer))
-		ctx.RMSNorm(hidden, ffnNormW, normed, 1, dim, eps)
-
-		// Fused MLP or MoE
-		ffnGateW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.ffn_gate.weight", layer))
-		ffnUpW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.ffn_up.weight", layer))
-		ffnDownW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.ffn_down.weight", layer))
-
-		if ffnGateW != nil && ffnUpW != nil && ffnDownW != nil {
-			mlpOut := e.scratch.Down
-			ctx.FusedMLP(normed, ffnGateW, ffnUpW, ffnDownW, mlpOut, 1, dim, hiddenDim)
-			ctx.Add(hidden, mlpOut, hidden, dim)
-		} else if ffnRouterW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.ffn_gate_inp.weight", layer)); ffnRouterW != nil {
-			topK := e.config.ExpertUsedCount
-			if topK <= 0 {
-				topK = 2
-			}
-			hiddenDimMoE := e.config.ExpertFeedForwardLength
-			if hiddenDimMoE <= 0 {
-				hiddenDimMoE = hiddenDim
-			}
-
-			logits := ctx.MOERouterLogits(normed, ffnRouterW)
-			expertIndices, expertWeights := ctx.MOETopKSelection(logits, topK)
-			logits.ReturnToPool()
-
-			ffnGateExps, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.ffn_gate_exps.weight", layer))
-			ffnUpExps, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.ffn_up_exps.weight", layer))
-			ffnDownExps, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.ffn_down_exps.weight", layer))
-
-			if ffnGateExps != nil && ffnUpExps != nil && ffnDownExps != nil {
-				activated := ctx.MOEExpertGateUpSwiGLU(normed, ffnGateExps, ffnUpExps, expertIndices, expertWeights, hiddenDimMoE)
-				down := ctx.MOEExpertForward(activated, ffnDownExps, expertIndices, expertWeights, dim)
-				activated.ReturnToPool()
-
-				// Check for shared expert
-				ffnGateSh, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.ffn_gate_shexp.weight", layer))
-				ffnUpSh, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.ffn_up_shexp.weight", layer))
-				ffnDownSh, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.ffn_down_shexp.weight", layer))
-				if ffnGateSh != nil && ffnUpSh != nil && ffnDownSh != nil {
-					shGate, _ := ctx.MatmulF16(normed, ffnGateSh)
-					shUp, _ := ctx.MatmulF16(normed, ffnUpSh)
-					ctx.FusedSwiGLU(shGate, shUp, shGate, 1, shGate.Cols())
-					shUp.ReturnToPool()
-					shDown, _ := ctx.MatmulF16(shGate, ffnDownSh)
-					shGate.ReturnToPool()
-					ctx.Add(down, shDown, down, dim)
-					shDown.ReturnToPool()
-				}
-
-				ctx.Add(hidden, down, hidden, dim)
-				down.ReturnToPool()
-			}
-			expertIndices.ReturnToPool()
-			expertWeights.ReturnToPool()
-		}
-	}
-
-	if gpuLayers < e.config.Layers && e.cpuWeights != nil {
-		startTransfer := time.Now()
-		hiddenHost := hidden.ToHostF32()
-		metrics.RecordLayerOffloadTransfer(e.config.Architecture, time.Since(startTransfer))
-
-		startCPU := time.Now()
-		for layer := gpuLayers; layer < e.config.Layers; layer++ {
-			if cpuKV != nil {
-				// The offloaded layers attend over the history in the
-				// cache, exactly as the GPU layers do. Without it they
-				// saw only the current token, and the model produced
-				// different results on the CPU and on the GPU.
-				hiddenHost = ApplyLayerCPUKV(e.cpuWeights, hiddenHost, layer, pos, cpuKV, e.config)
-			} else {
-				hiddenHost = ApplyLayerCPU(e.cpuWeights, hiddenHost, layer, e.config)
-			}
-		}
-		metrics.RecordLayerOffloadCPUDuration(e.config.Architecture, time.Since(startCPU))
-
-		_ = hidden.LoadFrom(hiddenHost)
-	}
-
-	// 3. Final Output Layer
-	outputNormW, _ := e.cuda.GetWeightTensor("output_norm.weight")
-	normedFinal := e.scratch.Normed
-	ctx.RMSNorm(hidden, outputNormW, normedFinal, 1, dim, eps)
-
-	outputW, _ := e.cuda.GetWeightTensor("output.weight")
-	if outputW == nil {
-		outputW, _ = e.cuda.GetWeightTensor("token_embd.weight")
-	}
-
-	logitsTensor, err := ctx.MatmulF16(normedFinal, outputW)
-	if err != nil {
-		return nil, fmt.Errorf("failed to compute logits: %w", err)
-	}
-	defer logitsTensor.ReturnToPool()
-
-	ctx.Synchronize()
-	return logitsTensor.ToHostF32(), nil
-}
-
-func (e *cudaEngine) forwardInternal(tokens []int, cacheOnly bool) []float32 {
-	var lastLogits []float32
-
-	// The layers that run on the CPU need a KV cache of their own. It
-	// lives for the duration of this forward, because the forward covers
-	// the whole prompt and the position of a token is its index.
-	var cpuKV *CPUKVCache
-	if e.config.Layers > e.numGPULayers && e.cpuWeights != nil {
-		cpuKV = NewCPUKVCache(e.config.Layers)
-	}
-
-	for i, token := range tokens {
-		logits, err := e.forward(token, i, tokens[:i+1], cpuKV)
-		if err != nil {
-			return nil
-		}
-		if !cacheOnly {
-			lastLogits = logits
-		}
-	}
-	return lastLogits
-}
-
 func (e *cudaEngine) ForwardDraft(tokens []int) ([][]float32, error) {
 	if e.model == nil || e.cuda == nil {
 		return nil, fmt.Errorf("model not initialized")
 	}
-
-	hidden := e.forwardInternal(tokens, false)
-	if hidden == nil {
-		return nil, fmt.Errorf("forward pass failed")
+	if len(tokens) == 0 {
+		return nil, fmt.Errorf("no tokens to forward")
 	}
 
+	// The batched forward, not the single-token one.
+	//
+	// The single-token forward used the model's legacy KV cache, which
+	// the path never wrote, and the fused attention's cache stride did
+	// not match that cache's layout. It produced NaNs, and the
+	// speculative verification compares the target's distribution
+	// against them. The batched forward uses the paged cache, which
+	// works.
+	seqID := 1
+	tokenToSeq := make([]int, len(tokens))
+	batch := &BatchDescriptor{
+		Sequences:   []*Sequence{{ID: uint64(seqID), Tokens: tokens, PromptLen: len(tokens)}},
+		Tokens:      tokens,
+		Offsets:     []int{0},
+		ContextLens: []int{0},
+		TokenToSeq:  tokenToSeq,
+	}
+
+	results, err := e.ForwardBatch(batch)
+	if err != nil {
+		return nil, err
+	}
+
+	// The draft's blocks are not kept: the next verification starts from
+	// the prompt again.
+	defer e.cache.FreeSequence(fmt.Sprintf("seq-%d", seqID))
+
 	logits := make([][]float32, 1)
-	logits[0] = hidden
+	if len(results) > 0 && results[0] != nil {
+		logits[0] = results[0].ToHostF32()
+		results[0].Free()
+	}
+	if len(logits[0]) == 0 {
+		return nil, fmt.Errorf("forward pass failed")
+	}
 
 	return logits, nil
 }
