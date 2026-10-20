@@ -9,8 +9,27 @@ package device
 #include <stdio.h>
 #include <stdlib.h>
 
+// Every rank of a communicator has to be given the same unique ID. This
+// build creates all the ranks of a communicator inside one process, so
+// one ID is generated once and shared by all of them.
+static ncclUniqueId g_ncclUniqueId;
+static int g_ncclUniqueIdReady = 0;
+
+static void ncclEnsureUniqueId(void) {
+    if (!g_ncclUniqueIdReady) {
+        ncclGetUniqueId(&g_ncclUniqueId);
+        g_ncclUniqueIdReady = 1;
+    }
+}
+
 static ncclResult_t ncclInitComm(ncclComm_t* comm, int nranks, int rank, int device) {
-    return ncclCommInitRank(comm, nranks, rank, device);
+    ncclEnsureUniqueId();
+    // The device the communicator runs on is selected with cudaSetDevice;
+    // ncclCommInitRank does not take one. The signature it does take is
+    // (comm, nranks, commId, rank) - the third argument is the unique ID,
+    // not another rank.
+    cudaSetDevice(device);
+    return ncclCommInitRank(comm, nranks, g_ncclUniqueId, rank);
 }
 
 static ncclResult_t ncclCommAllReduce(ncclComm_t comm, const void* sendbuff, void* recvbuff,

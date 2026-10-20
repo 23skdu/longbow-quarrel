@@ -743,8 +743,12 @@ jobs:
     runs-on: ubuntu-latest
     needs: [lint, build]
     strategy:
+      # Dockerfile.tpu is not in the matrix: the TPU backend does not
+      # compile (see roadmap.md, Steps 58 and 61), and the image's JAX
+      # install fails before it gets that far. It comes back when the
+      # backend is rewritten or deleted.
       matrix:
-        dockerfile: [Dockerfile.cpu, Dockerfile.nvidia, Dockerfile.webui, Dockerfile.tpu]
+        dockerfile: [Dockerfile.cpu, Dockerfile.nvidia, Dockerfile.webui]
         include:
           - dockerfile: Dockerfile.cpu
             tag: cpu
@@ -752,8 +756,6 @@ jobs:
             tag: nvidia
           - dockerfile: Dockerfile.webui
             tag: webui
-          - dockerfile: Dockerfile.tpu
-            tag: tpu
 
     steps:
       - uses: actions/checkout@v7

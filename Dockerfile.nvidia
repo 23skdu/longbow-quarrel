@@ -16,13 +16,13 @@ FROM nvidia/cuda:12.9.2-devel-ubuntu24.04 AS cuda-builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    --allow-change-held-packages \
     git \
     build-essential \
     pkg-config \
     wget \
     ca-certificates \
     libcudnn9-dev-cuda-12 \
-    libnccl2-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Go 1.27.2
@@ -77,10 +77,14 @@ LABEL org.opencontainers.image.title="Longbow-Quarrel (NVIDIA CUDA)" \
       org.opencontainers.image.base.name="nvidia/cuda:12.9.2-runtime-ubuntu24.04"
 
 # Install only necessary runtime shared libraries
+# libnccl2 is already installed in this image and is held, so it is not
+# listed: installing it would upgrade it to the CUDA 13 candidate, which
+# does not match the CUDA 12.9 runtime. cuDNN is not installed, and it
+# is held, so the held-package change has to be allowed explicitly.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    --allow-change-held-packages \
     ca-certificates \
     libcudnn9-cuda-12 \
-    libnccl2 \
     && rm -rf /var/lib/apt/lists/*
 
 # Create unprivileged service user and group

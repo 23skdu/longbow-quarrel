@@ -48,6 +48,7 @@ LABEL version="${WEBUI_VERSION}"
 
 # Install runtime dependencies (align with Dockerfile.nvidia: CUDA 12.4 + cuDNN 9)
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    --allow-change-held-packages \
     ca-certificates \
     curl \
     libcudnn9-cuda-12 \
@@ -56,7 +57,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Create non-root user
 RUN groupadd -r quarrel && useradd -r -g quarrel quarrel && \
-    mkdir /home/quarrel && chown quarrel:quarrel /home/quarrel
+    mkdir -p /home/quarrel && chown quarrel:quarrel /home/quarrel
 
 # Set working directory
 WORKDIR /home/quarrel
@@ -112,8 +113,10 @@ LABEL version="${WEBUI_VERSION}"
 RUN apk add --no-cache ca-certificates curl
 
 # Create non-root user
+# `adduser -S` creates the home directory itself, so the mkdir has to be
+# idempotent: without -p the build failed with "File exists".
 RUN addgroup -S quarrel && adduser -S quarrel -G quarrel && \
-    mkdir /home/quarrel && chown quarrel:quarrel /home/quarrel
+    mkdir -p /home/quarrel && chown quarrel:quarrel /home/quarrel
 
 WORKDIR /home/quarrel
 

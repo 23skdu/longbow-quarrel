@@ -432,6 +432,27 @@ engine with a Flight *server* for remote inference.
 
 #### Step 58: The TPU backend does not compile, and the CI never noticed
 
+Three more things could not be built at all, and the CI had been disabled
+so nothing said so. They are recorded here because the *reason* is the
+same: the configuration was never built by anything that reports a
+result.
+
+| What | The failure | The fix |
+|------|-------------|---------|
+| `Dockerfile.webui` | `adduser -S` creates the home directory itself, so the explicit `mkdir /home/quarrel` failed with "File exists" | The `mkdir` is now idempotent |
+| `Dockerfile.nvidia` | `apt-get install` refused to change the held `libnccl2` and `libcudnn9-cuda-12`, and `libnccl2-dev` is not a package name — the one is `libnccl-dev` | The held-package change is allowed explicitly, and the packages the image already has are not listed |
+| `internal/device/nccl.go` | The cgo wrapper called `ncclCommInitRank(comm, nranks, rank, device)`, but the signature is `(comm, nranks, commId, rank)`: the third argument is the unique ID, and there is no device argument | The wrapper now generates the unique ID once — every rank of a communicator needs the same one, and this build creates them all in one process — and selects the device with `cudaSetDevice` |
+
+The `nccl` build tag is only used by `Dockerfile.nvidia`, so the NCCL
+backend had never compiled either. Its Go side is a stub: `ncclInit` is
+called with rank 0 and no unique ID, so the whole multi-GPU path is the
+dead code of Step 55.
+
+The TPU image is out of the CI matrix: the backend does not compile, and
+the image's JAX install fails before it gets that far. It comes back when
+the backend is rewritten or deleted.
+
+
 *Status: open.*
 
 The TPU backend does not compile. Compiling `internal/device` with the
