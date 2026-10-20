@@ -167,9 +167,12 @@ two build-tagged implementations:
 ```
 internal/
   api/             # HTTP & Arrow Flight RPC servers
+  arrow_client/    # Arrow Flight client: the tensors, the control messages
   config/          # Model and runtime configurations
   device/          # Hardware abstractions (CUDA, Metal, CPU)
   engine/
+    activation_logger.go # The JSON activation log
+    audit.go       # The logit, KV cache and weight diagnostics
     cpu_weights.go # Neutral CPU layer pipeline & zero-copy matvec dispatch
     engine_cpu.go  # Pure CPU inference engine
     engine_cuda.go # CUDA engine with hybrid layer offloading
@@ -185,7 +188,12 @@ internal/
   gguf/
     dequant.go     # Scalar dequant + BF16/F16 + MatVecMulQ8_0
     dequant_simd.go# SIMD dequant + zero-copy MatVecMul for all quant formats
+    fp8.go         # The FP8 E4M3 and E5M2 conversions
+    quantize.go    # The Q4_K encoder
+    quantize_fp8.go, quantize_q6k.go, quantize_q8_0.go # The other encoders
+    quantize_turboquant.go # The TurboQuant encoder
     reader.go      # Binary GGUF parser & tensor mmap indexer
+    writer.go      # The GGUF writer: the other half of the reader
   mathx/           # Pluggable math backend: stdlib `math` vs `emlgo` (`-tags emlgo`)
   models/
     resolver.go    # Universal multi-engine cache resolver
@@ -201,6 +209,25 @@ internal/
 ```
 
 ---
+
+## 8.1 Element Sizes
+
+The two GPU-free backends do not share an element-size convention, and
+mixing them up was the source of a long series of defects:
+
+| Quantity | CPU | CUDA | Metal |
+|----------|-----|------|-------|
+| The weights | float32 | float16 | float16 |
+| The activations | float32 | float32 | float16 |
+| The paged KV pool | float32 | float16 | float16 |
+| The positions and the block tables | float32 | float32 | float32 |
+
+The rule is that the *weights* are the only thing stored in half
+precision, and everything the kernels compute with is in the element size
+the kernels use. The device layer converts at the boundary: a float32
+activation is converted to half precision for the matrix multiplication,
+because cuBLAS cannot multiply a float32 activation by a half-precision
+weight.
 
 ## 9. LoRA Adapter Architecture
 

@@ -52,11 +52,52 @@ Longbow-Quarrel implements **Proactive Fault Tolerance**. When memory pressure e
 2.  Maintain responsiveness of the `/healthz` endpoint to prevent the pod from being restarted.
 3.  Automatically resume normal operations when memory is freed (e.g., after long-running sequences finish).
 
-## 4. Distributed Sharding (Arrow Flight)
+## 4. The Helm Chart
 
-For large models requiring multi-GPU sharding, use the following environment configuration:
+The chart in `helm/quarrel` deploys the server, the API and the metrics
+service, the probes and the ServiceMonitor.
 
-- `QUARREL_SHARD_ROLE`: `master` or `worker`
-- `QUARREL_WORKER_ADDRS`: Comma-separated list of worker Flight endpoints.
+```bash
+helm install quarrel helm/quarrel \
+  --set model.name=smollm2:135m-instruct \
+  --set engine.ngl=32
+```
+
+The values that matter:
+
+| Value | Default | What it does |
+|-------|---------|--------------|
+| `model.name` | `smollm2:135m-instruct` | The model to load |
+| `service.port` | `8080` | The API listener (`-api-addr`) |
+| `service.metricsPort` | `9090` | The metrics listener (`-metrics`) |
+| `engine.ngl` | `-1` | The layers to offload to the GPU |
+| `engine.maxBatchSize` | `16` | The continuous batching size |
+| `engine.kvCache.blockSize` | `16` | The paged attention block size |
+| `engine.speculative.draftModel` | `""` | A draft model for speculative decoding |
+| `engine.activationLog` | `""` | Where to write the activation log |
+
+The API and the metrics are two separate listeners, and the ServiceMonitor
+scrapes the metrics one. A chart that pointed the monitor at the API port
+would have scraped nothing.
+
+## 5. Distributed Sharding (Arrow Flight)
+
+> **Not available as an environment configuration.** Earlier revisions of
+> this document named `QUARREL_SHARD_ROLE` and `QUARREL_WORKER_ADDRS`.
+> Neither variable exists: no part of the code reads them, so setting
+> them did nothing at all.
+>
+> The Arrow Flight server is started with `-flight <addr>` and serves
+> single-request inference over `DoGet`. The *sharded* forward -- the
+> part that would spread a model over several machines -- is not
+> implemented on the worker side: the worker rejects the tensor forward
+> with `Unimplemented` rather than silently returning zeroed
+> activations. See [nextsteps.md](nextsteps.md) (Step 35) for the exact
+> boundary.
+>
+> To spread a model over several machines, run one process per machine
+> behind a load balancer. To spread it over several *devices in one
+> process* is not implemented: `-devices 0,1`, `-tp-size 2` and
+> `-pp-stages 2` exit with an error rather than pretending to shard.
 
 The master will coordinate tensor sharding across workers using zero-copy Arrow Flight streams.

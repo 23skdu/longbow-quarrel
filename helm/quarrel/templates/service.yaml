@@ -11,6 +11,10 @@ spec:
       targetPort: http
       protocol: TCP
       name: http
+    - port: {{ .Values.service.metricsPort }}
+      targetPort: metrics
+      protocol: TCP
+      name: metrics
   selector:
     {{- include "quarrel.selectorLabels" . | nindent 4 }}
 {{- if .Values.monitoring.serviceMonitor.enabled }}
@@ -26,7 +30,10 @@ spec:
     matchLabels:
       {{- include "quarrel.selectorLabels" . | nindent 6 }}
   endpoints:
-    - port: http
+    # The Prometheus endpoint is a separate listener from the API: the API
+    # server serves the completions and the health probes, and the metrics
+    # server serves /metrics. Scraping the API port returned nothing.
+    - port: metrics
       path: {{ .Values.monitoring.metricsPath }}
       interval: {{ .Values.monitoring.serviceMonitor.interval }}
       scrapeTimeout: {{ .Values.monitoring.serviceMonitor.scrapeTimeout }}

@@ -202,6 +202,21 @@ else
 fi
 
 # ------------------------------------------------------------------------------
+# 11. Documentation drift check
+# ------------------------------------------------------------------------------
+# The Helm chart, the Grafana dashboard and the reference documentation all
+# describe the code. They had all drifted: the chart passed flags the
+# command no longer had and scraped the wrong port for the metrics, the
+# dashboard queried 27 of the 133 declared metrics, and the API reference
+# described a set of endpoints that never existed.
+log_header "11. Checking the documentation against the code"
+if (cd "${REPO_ROOT}" && go run ./scripts/docsync); then
+    log_pass "Documentation Drift Check"
+else
+    log_fail "Documentation Drift Check"
+fi
+
+# ------------------------------------------------------------------------------
 # Summary
 # ------------------------------------------------------------------------------
 log_header "Test Suite Execution Summary"

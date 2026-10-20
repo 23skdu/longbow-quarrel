@@ -35,6 +35,10 @@ spec:
             - "-model"
             - "{{ .Values.model.name }}"
             {{- end }}
+            - "-api-addr"
+            - ":{{ .Values.service.port }}"
+            - "-metrics"
+            - ":{{ .Values.service.metricsPort }}"
             - "-ngl"
             - "{{ .Values.engine.ngl }}"
             - "-max-batch-size"
@@ -57,9 +61,24 @@ spec:
             - "-lora"
             - "{{ .Values.engine.lora }}"
             {{- end }}
+            {{- if .Values.engine.speculative.draftModel }}
+            - "-draft-model"
+            - "{{ .Values.engine.speculative.draftModel }}"
+            - "-draft-length"
+            - "{{ .Values.engine.speculative.draftLength }}"
+            - "-draft-paths"
+            - "{{ .Values.engine.speculative.draftPaths }}"
+            {{- end }}
+            {{- if .Values.engine.activationLog }}
+            - "-activation-log"
+            - "{{ .Values.engine.activationLog }}"
+            {{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.service.port }}
+              protocol: TCP
+            - name: metrics
+              containerPort: {{ .Values.service.metricsPort }}
               protocol: TCP
           {{- if .Values.probe.enabled }}
           livenessProbe:

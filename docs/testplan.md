@@ -170,6 +170,7 @@ graph TD
     G7 --> G8[Gate 8: Code Coverage Gates]
     G8 --> G9[Gate 9: Duplicate Declaration Check]
     G9 --> G10[Gate 10: SIMD AVX2 Zero-Alloc & Perf Gate]
+    G10 --> G11[Gate 11: Documentation Drift Check]
 ```
 
 ### Gate 8: Code Coverage Gates
@@ -196,6 +197,32 @@ scripts/bench_gate.sh check-zero-alloc ./internal/simd
 
 > The CUDA precision and graph checks are part of Gate 6, which runs them
 > when a CUDA device is present. They are not a separate gate.
+
+### Gate 11: Documentation Drift Check
+Fails when the documentation, the Helm chart or the Grafana dashboard stops
+describing the code:
+```bash
+go run ./scripts/docsync
+```
+
+It checks four things:
+
+1. every flag the Helm chart passes is a flag the command has, and every
+   value the chart sets matches the default the code uses;
+2. every metric the Grafana dashboard queries is declared, in a query that
+   matches the metric's type, and every declared metric is on the
+   dashboard;
+3. every flag the reference documentation mentions exists;
+4. every endpoint the API reference lists is one the server registers, and
+   every route the server registers is in the reference.
+
+The three things it protects against had all drifted: the chart passed
+flags the command no longer had and scraped the wrong port for the
+metrics, the dashboard queried 27 of the 133 declared metrics, and the API
+reference described a set of endpoints that never existed.
+
+The check runs in the lint job, and `go test ./scripts/docsync/` covers
+it as well.
 
 ---
 

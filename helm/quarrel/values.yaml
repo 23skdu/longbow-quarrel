@@ -12,7 +12,11 @@ model:
 
 service:
   type: ClusterIP
+  # The OpenAI-compatible API and the health probes.
   port: 8080
+  # The Prometheus endpoint. It is a separate listener from the API: the
+  # API server does not serve /metrics.
+  metricsPort: 9090
 
 resources:
   limits:
@@ -60,6 +64,18 @@ engine:
   kvCache:
     blockSize: 16
     totalBlocks: 256
+  # Speculative decoding: a smaller model proposes the next tokens and
+  # the target model verifies them. It is off unless a draft model is
+  # given. The draft model runs on the CPU, so it needs no extra GPU
+  # memory.
+  speculative:
+    draftModel: ""
+    draftLength: 4
+    draftPaths: 2
+  # Writes a JSON activation log -- the embedding, the per-layer
+  # activations and the final logits -- to this path. It is a debugging
+  # aid and is off unless the path is set.
+  activationLog: ""
 
 securityContext:
   runAsNonRoot: true
@@ -68,7 +84,7 @@ securityContext:
 
 podAnnotations: {}
   # prometheus.io/scrape: "true"
-  # prometheus.io/port: "8080"
+  # prometheus.io/port: "9090"
   # prometheus.io/path: "/metrics"
 
 nodeSelector: {}

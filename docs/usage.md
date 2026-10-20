@@ -100,8 +100,11 @@ make nvidia
 -model string       Model name or GGUF path
 -prompt string      Text prompt for single inference
 -n int              Tokens to generate (default: 20)
+-api-addr string    Address of the OpenAI-compatible REST API (default: ":8080")
+-metrics string     Prometheus metrics address (default: ":9090")
 -ngl int            Number of GPU layers to offload (default: -1 for all)
 -gpu-layers int     Alias for -ngl
+-devices string     Comma-separated CUDA device ids (a single device selects it)
 -kv-cache-size int Context window / KV cache capacity in tokens (default: 2048)
 -temp float         Sampling temperature (default: 0.7)
 -topk int           Top-K sampling (default: 40)
@@ -122,7 +125,13 @@ make nvidia
 -draft-model string Path to a smaller GGUF model used for speculative decoding (optional)
 -draft-length int   Tokens the draft model proposes per step (default: 4)
 -draft-paths int    Parallel draft paths per step (default: 2)
+-flight string      Arrow Flight server address (default: ":50051")
 ```
+
+> The API and the metrics are **two separate listeners**. The API server
+> serves the completions, the adapters and the health probes; the metrics
+> server serves `/metrics` and nothing else. A scrape against the API
+> port returns nothing.
 
 ### Model Quantization
 

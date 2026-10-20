@@ -505,7 +505,8 @@ Based on deep profiling of autoregressive decode loops, CUDA kernel execution pr
 > and Batch 11 (Step 35), Batch 12 (Step 35), Batch 13 (Step 35),
 > Batch 14 (Step 35), Batch 15 (Step 35), Batch 16 (Step 35),
 > Batch 17 (Step 35), Batch 18 (Step 35), Batch 19 (Step 35),
-> Batch 20 (Step 35) are DONE** — see the status markers on each step.
+> Batch 20 (Step 35), Batch 21 (Step 35) are DONE** — see the status
+> markers on each step.
 > Verified locally after the change:
 >
 > | Check | Command | Result |
@@ -1434,6 +1435,46 @@ all of them. It also caught a bug *in the test*: the comparison was
 the test passed with a NaN on the GPU. The comparison now checks for a NaN
 explicitly.
 
+**Batch 21 brought the documentation, the Helm chart and the Grafana
+dashboard back in line with the code, and made them stay that way.**
+
+All three had drifted.
+
+The **Helm chart** passed flags the command still had but did not expose
+the options that had been added since, and it scraped the API port for the
+metrics. The API and the metrics are two separate listeners, and the API
+server does not serve `/metrics`, so the ServiceMonitor was scraping
+nothing. The chart now sets both addresses, exposes the speculative
+decoding and the activation log, and the monitor points at the metrics
+port.
+
+The **Grafana dashboard** queried 27 of the 133 declared metrics, and one
+of the panels it had queried a histogram as if it were a gauge, which
+shows the bucket counts rather than the value. It now covers every
+declared metric, with the query form that matches each metric's type.
+
+The **API reference** described a set of endpoints that never existed:
+`/generate`, `/stream`, `/ws`, `/models`, `/hotswap`, `/health`,
+`/version` and `/`. It also put `/metrics` on the API port. It now
+describes the two listeners the server actually has, and lists the
+endpoints that do not exist so that nobody tries them again.
+
+`scripts/docsync` checks all of it, and `go test ./scripts/docsync/`
+covers the checks as well:
+
+1. every flag the chart passes is a flag the command has, and every value
+   the chart sets matches the default the code uses;
+2. every metric the dashboard queries is declared, in a query that matches
+   the metric's type, and every declared metric is on the dashboard;
+3. every flag the reference documentation mentions exists;
+4. every endpoint the API reference lists is one the server registers, and
+   every route the server registers is in the reference;
+5. the pinned versions in `docs/dependencies.md` are the ones the module
+   files hold.
+
+The check runs in the lint job and as the thirteenth gate of
+`scripts/run_all_tests.sh`.
+
 **Batch 20 measured the `emlgo` A/B and the answer was no.**
 
 The performance document had a table of dashes and the instruction not to
@@ -1922,7 +1963,9 @@ batched forward (see Step 35). **Batch 18** removed the single-token
 forward it left broken and the gigabyte of VRAM it wasted (see Step 35).
 **Batch 19** made the position tensors say what they hold, on both the
 CUDA and the Metal side (see Step 35). **Batch 20** measured the `emlgo`
-A/B and kept the standard library (see Step 35).
+A/B and kept the standard library (see Step 35). **Batch 21** brought the
+documentation, the Helm chart and the Grafana dashboard back in line with
+the code, and added the check that keeps them there (see Step 35).
 
 **Still open:** generating the README table from a script so it cannot drift apart from the floors again. The `internal/engine` coverage is now 80.3% and its floor is 80.0%.
 

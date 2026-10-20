@@ -95,6 +95,13 @@ jobs:
         # the macOS Metal build while every Linux build stayed green.
         run: ./scripts/dupcheck.sh
 
+      - name: Check the documentation against the code
+        # The Helm chart passed flags the command no longer had, the
+        # Grafana dashboard queried 27 of the 133 declared metrics, and
+        # the reference documentation listed flags that had changed. The
+        # check fails when any of the three stops describing the code.
+        run: go run ./scripts/docsync
+
   # ===== BUILD AND BASIC TESTS =====
   build:
     name: Build and Test
