@@ -97,7 +97,7 @@ see [docs/dependencies.md](docs/dependencies.md).
 - **TurboQuant KV Cache**: 8x KV cache compression with PolarQuant + QJL residual
 - **Distributed Sharding**: Client, master and worker plumbing via Apache Arrow Flight RPC. The worker-side sharded forward is not implemented yet (it fails loudly, not silently).
 - **Speculative Decoding**: Draft-model token proposals verified by the target model, exposed as `-draft-model` and as the REST API's `"speculative"` / `"draft_k"` fields.
-- **API**: OpenAI-compatible (`/v1/chat/completions`, `/v1/completions`), WebSocket streaming, and Prometheus metrics (`/metrics`)
+- **API**: OpenAI-compatible (`/v1/chat/completions`, `/v1/completions`) on the API listener, and Prometheus metrics (`/metrics`) on a separate metrics listener. The WebSocket streaming lives in the WebUI binary, not in the API server.
 
 ---
 

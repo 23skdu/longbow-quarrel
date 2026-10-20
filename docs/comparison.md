@@ -112,7 +112,7 @@ Comprehensive comparison of Longbow-Quarrel against the top LLM inference engine
 | Arrow Flight RPC | ✅ | ❌ | ❌ | ❌ | ❌ |
 | Docker images | ✅ | ✅ (community) | ✅ | ✅ | ✅ |
 | Kubernetes Helm chart | ✅ | ❌ | ✅ | ❌ | ✅ |
-| Prometheus metrics | ✅ (191 metrics) | ✅ (basic) | ✅ | ❌ | ✅ |
+| Prometheus metrics | ✅ (133 metrics) | ✅ (basic) | ✅ | ❌ | ✅ |
 | Grafana dashboard | ✅ | ❌ | ✅ | ❌ | ❌ |
 | WebUI | ✅ (Templ) | ❌ | ❌ | ✅ | ❌ |
 
@@ -164,7 +164,7 @@ Comprehensive comparison of Longbow-Quarrel against the top LLM inference engine
 
 **Key Takeaways:**
 - **llama.cpp** leads in raw throughput due to years of SIMD optimization and community tuning
-- **Quarrel** leads in memory efficiency (zero-copy) and developer tooling (191 Prometheus metrics, Grafana dashboard, Helm chart)
+- **Quarrel** leads in memory efficiency (zero-copy) and developer tooling (133 Prometheus metrics, Grafana dashboard, Helm chart)
 - **vLLM** leads in GPU throughput via PagedAttention and continuous batching, but requires Python and NVIDIA-only
 - **Quarrel** is the only engine with Go-native implementation, Arrow Flight distributed inference, and WebSocket streaming
 
@@ -174,7 +174,7 @@ Comprehensive comparison of Longbow-Quarrel against the top LLM inference engine
 
 1. **Zero-Copy Inference** — <20 MB heap for 4B models (vs 50+ MB for llama.cpp)
 2. **Go-Native** — No CGO dependency for CPU path; easy cross-compilation
-3. **191 Prometheus Metrics** — Most comprehensive observability of any inference engine
+3. **133 Prometheus Metrics** — Most comprehensive observability of any inference engine
 4. **Grafana Dashboard** — Pre-built dashboards for PromptCache, speculative decoding, MoE, Gemma4
 5. **Kubernetes Helm Chart** — Production-ready K8s deployment with health probes
 6. **Arrow Flight RPC** — Distributed inference across multiple nodes

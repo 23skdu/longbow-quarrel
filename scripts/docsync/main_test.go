@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -295,5 +296,37 @@ func TestTheAPIServerRoutesAreFound(t *testing.T) {
 		if !routes[path] {
 			t.Errorf("the route %s was not found", path)
 		}
+	}
+}
+
+// TestTheDocumentIndexListsEveryDocument checks that the index covers
+// every document.
+func TestTheDocumentIndexListsEveryDocument(t *testing.T) {
+	problems := 0
+	report := func(format string, args ...interface{}) { problems++ }
+
+	problems += checkTheDocumentIndex(report, false)
+	if problems != 0 {
+		t.Errorf("%d document(s) are not in the index", problems)
+	}
+}
+
+// TestCheckTheClaimedMetricCountCatchesAStaleCount checks that the check
+// notices a document that claims the wrong number of metrics.
+func TestCheckTheClaimedMetricCountCatchesAStaleCount(t *testing.T) {
+	// The real documents claim 133 metrics, so the declared count has to
+	// be in the same range for the claim to be checked at all.
+	metrics := map[string]metricDef{}
+	for i := 0; i < 130; i++ {
+		name := fmt.Sprintf("metric_%d_total", i)
+		metrics[name] = metricDef{name: name, kind: "Counter"}
+	}
+
+	problems := 0
+	report := func(format string, args ...interface{}) { problems++ }
+
+	problems += checkTheClaimedMetricCount(metrics, report, false)
+	if problems == 0 {
+		t.Error("the check did not notice the stale metric count")
 	}
 }

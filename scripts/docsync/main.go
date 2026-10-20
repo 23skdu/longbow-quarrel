@@ -103,6 +103,8 @@ func main() {
 	problems += checkDocumentedFlags(flags, report, *verbose)
 	problems += checkDocumentedEndpoints(report, *verbose)
 	problems += checkPinnedVersions(report, *verbose)
+	problems += checkTheClaimedMetricCount(metrics, report, *verbose)
+	problems += checkTheDocumentIndex(report, *verbose)
 
 	if problems > 0 {
 		fmt.Printf("\ndocsync: %d problem(s) found\n", problems)
@@ -765,6 +767,95 @@ func checkDocumentedEndpoints(report func(string, ...interface{}), verbose bool)
 		fmt.Printf("the API server registers %d routes and the reference documents %d\n",
 			len(routes), len(documented))
 	}
+	return problems
+}
+
+// metricCountRe matches a claim about how many metrics there are.
+var metricCountRe = regexp.MustCompile(`(?i)(\d+)\s+(?:prometheus\s+)?metrics`)
+
+// checkTheClaimedMetricCount verifies the number of metrics the documents
+// claim.
+//
+// The comparison table said 191 metrics, and the real number was 133.
+func checkTheClaimedMetricCount(metrics map[string]metricDef, report func(string, ...interface{}), verbose bool) int {
+	problems := 0
+
+	// The development logs record the numbers the documents used to
+	// claim, so a count in them is history rather than a claim.
+	docs := []string{
+		filepath.Join(repoRoot, "README.md"),
+		filepath.Join(repoRoot, "docs/comparison.md"),
+		filepath.Join(repoRoot, "docs/features.md"),
+		filepath.Join(repoRoot, "docs/usage.md"),
+		filepath.Join(repoRoot, "docs/api.md"),
+	}
+
+	for _, doc := range docs {
+		raw, err := os.ReadFile(doc)
+		if err != nil {
+			report("failed to read %s: %v", doc, err)
+			problems++
+			continue
+		}
+		for _, match := range metricCountRe.FindAllStringSubmatch(string(raw), -1) {
+			claimed, err := strconv.Atoi(match[1])
+			if err != nil {
+				continue
+			}
+			// A number that is nowhere near the real one is a count of
+			// something else, and not a claim about the metrics.
+			if claimed < len(metrics)/2 || claimed > len(metrics)*2 {
+				continue
+			}
+			if claimed != len(metrics) {
+				report("%s claims %d metrics, but the code declares %d",
+					filepath.Base(doc), claimed, len(metrics))
+				problems++
+				continue
+			}
+			if verbose {
+				fmt.Printf("%s claims the right number of metrics\n", filepath.Base(doc))
+			}
+		}
+	}
+
+	return problems
+}
+
+// checkTheDocumentIndex verifies that every document is in the index.
+//
+// The README links to the index, and the index used to be a directory
+// listing rather than a document, so a new document could be forgotten
+// without anything noticing.
+func checkTheDocumentIndex(report func(string, ...interface{}), verbose bool) int {
+	problems := 0
+
+	entries, err := os.ReadDir(filepath.Join(repoRoot, "docs"))
+	if err != nil {
+		report("failed to list the documentation: %v", err)
+		return 1
+	}
+
+	index, err := os.ReadFile(filepath.Join(repoRoot, "docs/README.md"))
+	if err != nil {
+		report("docs/README.md is missing: the README links to it as the documentation index", err)
+		return 1
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
+			continue
+		}
+		if !strings.Contains(string(index), entry.Name()) {
+			report("docs/%s is not in the documentation index", entry.Name())
+			problems++
+			continue
+		}
+		if verbose {
+			fmt.Printf("docs/%s is in the index\n", entry.Name())
+		}
+	}
+
 	return problems
 }
 

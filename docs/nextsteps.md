@@ -1470,7 +1470,11 @@ covers the checks as well:
 4. every endpoint the API reference lists is one the server registers, and
    every route the server registers is in the reference;
 5. the pinned versions in `docs/dependencies.md` are the ones the module
-   files hold.
+   files hold, and the number of metrics the documents claim is the real
+   one -- the comparison table said 191 and the code declares 133;
+6. every document is in the index, which the README links to. The index
+   used to be a directory listing rather than a document, so a new
+   document could be forgotten without anything noticing.
 
 The check runs in the lint job and as the thirteenth gate of
 `scripts/run_all_tests.sh`.
