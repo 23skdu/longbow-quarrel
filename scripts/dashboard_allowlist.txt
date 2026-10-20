@@ -1,0 +1,7 @@
+# The metrics that are deliberately not on the Grafana dashboard.
+#
+# Every metric the code declares has to be on the dashboard, so that a new
+# metric is a decision rather than an accident. A metric that is listed
+# here is one that was looked at and left off on purpose.
+#
+# There are none at the moment: the dashboard covers all of them.

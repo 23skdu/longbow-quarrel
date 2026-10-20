@@ -2704,6 +2704,19 @@ word-splitting case has a documented suppression, the CI installs
 shellcheck explicitly, and the check now runs in
 `scripts/run_all_tests.sh` too.
 
+**A third latent CI failure: the allowlists were not in the repository.**
+The `docsync` step then failed with **74 false problems** — every
+deliberately-allowed Go tool flag (`-tags`, `-race`, `-cover`, …) was
+reported as undocumented. The cause: `.gitignore` excludes `*.txt`, and
+while `scripts/vacuous_tests_allowlist.txt` had a `!` negation, the two
+other allowlists did not. They existed on the machine that wrote them and
+nowhere else, so in a fresh checkout the documentation drift check had
+nothing to read.
+
+Verified by cloning the repository and running the check with and without
+the file: 74 problems without it, none with it. Both allowlists are now
+tracked, and the `.gitignore` says why.
+
 **A test for the new locking.** `internal/engine/types_sequence_pos_test.go`
 asserts that the position is read and advanced under the manager's lock,
 that a missing sequence is reported rather than created, and that the two

@@ -55,7 +55,13 @@ cmd/webui/webui
 # Logs, profiles, and outputs
 *.log
 *.txt
+# The allowlists are part of the gate configuration, not build output.
+# Without them in the repository the CI checks that read them fail: the
+# documentation drift check reported 74 false problems, because every
+# deliberately-allowed Go tool flag looked undocumented.
 !scripts/vacuous_tests_allowlist.txt
+!scripts/docsync_allowlist.txt
+!scripts/dashboard_allowlist.txt
 *.prof
 *.pprof
 *.bin

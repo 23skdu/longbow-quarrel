@@ -1,0 +1,56 @@
+# The flags the documentation mentions that are not the command's own.
+#
+# The documents also mention the Go tool's flags, because they describe
+# how the project is built and tested.
+
+# The Go tool.
+pm
+lgc
+tags
+race
+run
+bench
+benchmem
+version
+cover
+coverprofile
+diff
+trimpath
+rn
+help
+count
+test
+func
+fuzz
+fuzztime
+kv-cache
+json
+short
+full
+mod
+x
+ldflags
+gcflags
+asmflags
+toolexec
+modfile
+overlay
+pkgdir
+buildmode
+installsuffix
+n
+race
+msan
+asan
+covermode
+coverpkg
+cpuprofile
+memprofile
+blockprofile
+mutexprofile
+trace
+exec
+o
+output
+C
+tags
