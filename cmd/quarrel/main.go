@@ -160,7 +160,7 @@ func main() {
 			"error: multi-device parallelism is not implemented: the inference engine loads the whole model onto a single device.\n"+
 				"       -devices=%v -tp-size=%d -pp-stages=%d was requested, but no model sharding, no cross-device\n"+
 				"       activation transfer and no collective is performed. The supported way to spread a model\n"+
-				"       across devices is the Arrow Flight distributed path (see docs/nextsteps.md, Step 35).\n",
+				"       across devices is the Arrow Flight distributed path (see docs/roadmap.md, Step 35).\n",
 			devIDs, *tpSizeFlag, *ppStagesFlag)
 		os.Exit(1)
 	}

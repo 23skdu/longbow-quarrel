@@ -3,35 +3,29 @@
 # Longbow-Quarrel
 
 **Latest release: v0.3.0** (`git tag 0.3.0`). `main` is ahead of that tag with
-unreleased engine, CI and dependency work — see [docs/nextsteps.md](docs/nextsteps.md)
+unreleased engine, CI and dependency work — see [docs/roadmap.md](docs/roadmap.md)
 for what has landed and what is still planned.
 
 > ### ⚠️ Known state of `main`
 >
-> A full-tree audit of `main` (October 2026) found that the project did **not**
-> ship a working CPU binary, its CI `lint` job was **red**, the
-> OpenAI-compatible REST API was **never started**, and the macOS Metal build
-> was **broken by a duplicate declaration**. All of that has now been fixed —
-> see
-> [docs/nextsteps.md — Phase 6 (Steps 28–48)](docs/nextsteps.md#phase-6-ship-it-audit--wiring-dead-code--correctness-gaps-target-v040--priority-p0)
-> for the full list and what is still outstanding.
+> Two full-tree audits of `main` (October 2026) found that the project did
+> **not** ship a working CPU binary, that its CI `lint` job was **red**, that
+> the OpenAI-compatible REST API was **never started**, that the macOS Metal
+> build **did not compile**, and that the CI pipeline itself had been
+> **disabled on the repository since 2026-09-04**. All of that is fixed: the
+> CPU binary runs real inference, the REST API is served, the Metal build
+> compiles, and the pipeline is green on every job.
 >
-> **Fixed so far:** `make cpu` builds a working CPU binary; `golangci-lint` is
-> clean; `go test -tags avx512` passes (it used to SIGILL); `go vet -tags cuda`
-> passes (it used to be a compile error); the WebUI test suite (including e2e)
-> runs in CI instead of being silently skipped; the WebUI's inference
-> endpoints work (they used to hang on every backend); the REST API is served
-> on `-api-addr`; the `WEBUI_*` environment variables are honoured; the macOS
-> Metal build compiles again; stop tokens are actually honoured; the prefix
-> cache no longer attaches empty KV blocks; and the TurboQuant SIMD kernels
-> are actually called (7.5x faster) — which also surfaced a CPU/GPU
-> divergence in the KV-cache encoder.
+> **Still outstanding — four P0 items, listed in full in
+> [docs/roadmap.md](docs/roadmap.md):** the CUDA engine discards the
+> caller's configuration, so `-devices` and `-activation-log` do nothing on
+> the GPU build; 55 of the 133 Prometheus metrics are never written, so the
+> dashboard reads "No data" on 55 panels; the Metal layer forward has seven
+> numerical defects of the same class the CUDA one had; and the TPU backend
+> does not compile at all.
 >
-> **Still outstanding:** `internal/engine` coverage is ~68% (up from 51%), a
-> number of implemented features are still not wired into any shipped binary
-> (CUDA Graphs, the multi-GPU TP/PP engine, the
-> quantization tooling and the activation/audit logging), and several
-> documented performance numbers remain unreproducible.
+> The engine also has ~4,750 lines of dead code, and the CUDA hot path is
+> 43% uncovered.
 
 High-performance, memory-efficient LLM inference engine written in Go with native GPU acceleration (Apple Silicon Metal, NVIDIA CUDA) and optimized CPU SIMD vectorization (AVX-512, AVX2, ARM NEON).
 
@@ -74,7 +68,7 @@ see [docs/dependencies.md](docs/dependencies.md).
 - **Engine Health Audit:** Every forward pass audits its own logit distribution. A model that produces NaNs, infinities, extreme values or a flat distribution is reported in the log and in the Prometheus metrics (`logit_nan_count_total`, `logit_flat_distribution_total`, `logit_max_value`, and the rest) — all of which were previously permanently zero.
 - **Activation Logging:** `quarrel -activation-log <path>` writes a JSON file with the embedding, the per-layer activations (peak magnitude, a sample, and the NaN and Inf counts of each tensor) and the final logits, so a broken layer can be found.
 - **Speculative Decoding:** A smaller draft model proposes the next tokens and the target model verifies them in one forward pass, with the standard `min(1, p_target/p_draft)` acceptance test and a residual-distribution correction. Enable it with `-draft-model <path>`; the draft model runs on the CPU so the GPU memory stays with the target.
-- **Distributed Inference (Arrow Flight):** A Flight client, a master engine, a remote worker engine and a Flight server for single-request inference. The **sharded** tensor forward is *not* implemented on the worker side: the worker rejects it with `Unimplemented` rather than silently returning zeroed activations. See `docs/nextsteps.md` (Step 35) for the exact boundary.
+- **Distributed Inference (Arrow Flight):** A Flight client, a master engine, a remote worker engine and a Flight server for single-request inference. The **sharded** tensor forward is *not* implemented on the worker side: the worker rejects it with `Unimplemented` rather than silently returning zeroed activations. See `docs/roadmap.md` (Step 57) for the exact boundary.
 
 ---
 

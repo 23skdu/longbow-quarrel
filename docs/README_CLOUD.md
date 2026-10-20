@@ -92,7 +92,7 @@ would have scraped nothing.
 > part that would spread a model over several machines -- is not
 > implemented on the worker side: the worker rejects the tensor forward
 > with `Unimplemented` rather than silently returning zeroed
-> activations. See [nextsteps.md](nextsteps.md) (Step 35) for the exact
+> activations. See [roadmap.md](roadmap.md) (Step 57) for the exact
 > boundary.
 >
 > To spread a model over several machines, run one process per machine
@@ -100,4 +100,15 @@ would have scraped nothing.
 > process* is not implemented: `-devices 0,1`, `-tp-size 2` and
 > `-pp-stages 2` exit with an error rather than pretending to shard.
 
-The master will coordinate tensor sharding across workers using zero-copy Arrow Flight streams.
+### Multi-Device Parallelism
+
+> **Not available.** The managers in `internal/device/multi_gpu.go` —
+> tensor parallelism (AllReduce, AllGather, Broadcast) and pipeline
+> parallelism — are implemented and unit-tested, but the inference engine
+> does not use them: it loads the whole model onto a single device and
+> never calls a collective.
+>
+> `-devices` with a *single* device id does work: it selects the CUDA
+> device the engine runs on. `-devices 0,1`, `-tp-size 2` and
+> `-pp-stages 2` exit with an error rather than printing a topology that
+> the engine never applies.

@@ -1,14 +1,14 @@
 # WebUI
 
-> **This document used to be a forward-looking plan** (473 lines, every
-> checkbox unchecked) that proposed a stack the code does not use: it
-> proposed `github.com/a-h/templ` for templating, `github.com/gin-gonic/gin`
-> for routing and `github.com/markbates/grift` for CLI tooling. None of them
-> are dependencies of `cmd/webui`, and the plan was never updated after the
-> feature was built.
+> **Scope.** This document describes the WebUI binary: how it is built,
+> how it is configured, what it serves. It used to be a forward-looking
+> plan (473 lines, every checkbox unchecked) that proposed a stack the code
+> does not use: `github.com/a-h/templ` for templating,
+> `github.com/gin-gonic/gin` for routing and `github.com/markbates/grift`
+> for CLI tooling. None of them are dependencies of `cmd/webui`.
 >
-> It has been rewritten to describe the implementation that actually exists.
-> The remaining ideas are listed under [Not implemented](#not-implemented).
+> The ideas that are still open are in
+> [roadmap.md](roadmap.md#webui).
 
 ## 1. Overview
 
@@ -166,21 +166,9 @@ part of the CI `webui` job. It found three latent defects when it was
 enabled: a missing request body size limit, a rate limiter that ignored its
 configured value, and the broken inference protocol.
 
-## 8. Not implemented
-
-Ideas that were in the original plan and are still open:
-
-- A component framework (the plan proposed React, and separately Svelte or
-  Vue; the implementation uses plain JavaScript).
-- Server-side template composition (the plan proposed templ; the
-  implementation uses one `html/template` file).
-- A model gallery and a LoRA adapter browser in the UI.
-- Playwright browser tests. The Go module is a dependency, but the driver is
-  not installed in CI, so the test always skips.
-
-## 9. See also
+## 8. See also
 
 - [architecture.md](architecture.md) — the whole repository
 - [api.md](api.md) — the OpenAI-compatible API
 - [metrics.md](metrics.md) — the metric reference
-- [nextsteps.md](nextsteps.md) — the roadmap
+- [roadmap.md](roadmap.md) — the open work

@@ -2,7 +2,7 @@
 
 > **Version scope.** This document describes release **v0.3.0**, the latest
 > git tag. `main` carries additional unreleased work; see
-> [nextsteps.md](nextsteps.md) for what has landed and what is planned.
+> [roadmap.md](roadmap.md) for what has landed and what is planned.
 
 Comprehensive guide for running inference, configuring GPU layer offloading, loading LoRA adapters, leveraging universal model discovery, and deploying Longbow-Quarrel.
 
@@ -237,65 +237,6 @@ docker run --gpus all -p 8080:8080 -v ~/.cache:/root/.cache \
 
 ## 9. Cloud Deployment (Kubernetes)
 
-### Resource Limits
-Define strict memory limits to prevent OOM kills. The engine engages fault tolerance at 95% of configured limits.
-
-```yaml
-resources:
-  limits:
-    memory: "16Gi"
-    nvidia.com/gpu: 1
-  requests:
-    cpu: "4"
-    memory: "8Gi"
-```
-
-> **Note:** With zero-copy inference, RAM allocations remain `< 50 MB` even for 4B–8B models. Requested memory accommodates OS page cache and the paged KV cache.
-
-### Health & Readiness Probes
-```yaml
-livenessProbe:
-  httpGet:
-    path: /healthz
-    port: 8080
-  initialDelaySeconds: 30
-  periodSeconds: 10
-readinessProbe:
-  httpGet:
-    path: /readyz
-    port: 8080
-  initialDelaySeconds: 60
-  periodSeconds: 5
-```
-
-### Graceful Degradation
-When memory pressure exceeds 95% of `MaxMemory`, the engine returns `503` for new requests while keeping `/healthz` alive to prevent pod restarts. Normal operation resumes automatically when memory is freed.
-
-### Distributed Sharding (Arrow Flight)
-> **Partially available.** The Arrow Flight server is started by
-> `quarrel -flight <addr>` and serves single-request inference: it
-> tokenizes the prompt, runs the engine, and streams the generated tokens
-> back over `DoGet`.
->
-> The *sharded* forward is not. The worker has no engine API that runs a
-> hidden state through a layer range, so the worker rejects the tensor
-> forward with `Unimplemented` instead of silently returning zeroed
-> activations. The distributed master (`internal/engine/distributed_master.go`)
-> therefore has no working peer to talk to. See
-> [nextsteps.md](nextsteps.md) (Step 35) for the exact boundary.
-
-### Multi-Device Parallelism
-> **Not available.** The managers in `internal/device/multi_gpu.go` —
-> tensor parallelism (AllReduce, AllGather, Broadcast) and pipeline
-> parallelism — are implemented and unit-tested, but the inference engine
-> does not use them: it loads the whole model onto a single device and
-> never calls a collective.
->
-> `-devices` with a *single* device id does work: it selects the CUDA
-> device the engine runs on. `-devices 0,1`, `-tp-size 2` and `-pp-stages 2`
-> now exit with an error rather than printing a topology that the engine
-> never applies.
->
-> To spread a model across machines, run one process per machine behind
-> your own load balancer. To spread it across *devices in one process* is
-> not implemented.
+The resource limits, the health and readiness probes, the graceful
+degradation behaviour, the Helm chart and the Arrow Flight boundaries are
+in [README_CLOUD.md](README_CLOUD.md).

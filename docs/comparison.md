@@ -170,29 +170,32 @@ Comprehensive comparison of Longbow-Quarrel against the top LLM inference engine
 
 ---
 
-## 5. Unique Quarrel Advantages
+## 5. What Quarrel does that the others do not
 
-1. **Zero-Copy Inference** — <20 MB heap for 4B models (vs 50+ MB for llama.cpp)
-2. **Go-Native** — No CGO dependency for CPU path; easy cross-compilation
-3. **133 Prometheus Metrics** — Most comprehensive observability of any inference engine
-4. **Grafana Dashboard** — Pre-built dashboards for PromptCache, speculative decoding, MoE, Gemma4
-5. **Kubernetes Helm Chart** — Production-ready K8s deployment with health probes
-6. **Arrow Flight RPC** — Distributed inference across multiple nodes
-7. **WebSocket Streaming** — Real-time token streaming for web applications
-8. **TurboQuant KV Compression** — 8x KV cache compression (unique to Quarrel)
-9. **Security Auditing** — gosec-clean codebase with fuzz testing
-10. **BF16 Zero-Copy** — Native BFloat16 dequantization and MatVec
+The feature-by-feature list is in [features.md](features.md); this is the
+short version of what is different from the other four engines.
 
----
+- **Zero-copy inference** — the weights stay memory-mapped and the dot
+  products run over them directly, so the heap stays under 50 MB for a 4B
+  model.
+- **Go-native** — the CPU path has no CGo dependency, and the whole
+  engine cross-compiles from one tree.
+- **TurboQuant KV compression** — 8× KV cache compression, unique here.
+- **133 Prometheus metrics** with a Grafana dashboard over all of them,
+  and a Kubernetes Helm chart with health probes and a ServiceMonitor.
+- **Fuzzing and a security gate** — `gosec` and `govulncheck` run in CI
+  on two build configurations.
 
-## 6. Unique Quarrel Limitations
+## 6. What the others do that Quarrel does not
 
-1. **No AMD ROCm** — llama.cpp and vLLM support AMD GPUs
-2. **No GPTQ/AWQ** — vLLM supports these popular quantization formats
-3. **Younger SIMD Optimizations** — llama.cpp has more mature AVX-512/NEON kernels
-4. **No Python Bindings** — llama.cpp has extensive Python ecosystem integration
-5. **No Vulkan** — llama.cpp supports Vulkan for Intel/AMD GPUs
-6. **Single-GPU Focus** — Multi-GPU works but vLLM is more mature for large-scale serving
+- **No AMD ROCm** — llama.cpp and vLLM support AMD GPUs.
+- **No GPTQ/AWQ** — vLLM supports these popular quantization formats.
+- **No Vulkan** — llama.cpp supports Vulkan for Intel/AMD GPUs.
+- **No Python bindings** — llama.cpp has a large Python ecosystem.
+- **Younger SIMD work** — llama.cpp has more mature AVX-512 and NEON
+  kernels.
+- **Single-device focus** — the multi-GPU managers exist but the engine
+  loads the whole model onto one device.
 
 ---
 

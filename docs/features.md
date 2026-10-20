@@ -2,7 +2,7 @@
 
 > **Version scope.** This document describes release **v0.3.0**, the latest
 > git tag. `main` carries additional unreleased work; see
-> [nextsteps.md](nextsteps.md) for what has landed and what is planned.
+> [roadmap.md](roadmap.md) for what has landed and what is planned.
 
 A high-performance, memory-efficient LLM inference engine written in Go with native GPU acceleration and advanced SIMD vectorization.
 
@@ -25,7 +25,7 @@ A high-performance, memory-efficient LLM inference engine written in Go with nat
 - **Activation Logging** — `quarrel -activation-log <path>` writes the embedding, the per-layer activations (with NaN and Inf counts) and the final logits as JSON.
 - **Speculative Decoding** — Multi-token draft forward pass with real logit output (not stubs). The standard `min(1, p_target/p_draft)` acceptance test, with a residual-distribution correction for rejected tokens. Enabled with `-draft-model <path>`, or per request through the REST API's `"speculative"` / `"draft_k"` fields.
 - **LoRA Adapter Loading** — CPU merge-on-load strategy fusing A×B×α/r delta weights into CPUWeights at load time. Supports .gguf sidecar format. Also supported on Metal and CUDA.
-- **Pluggable Math Backend** — All `math.*` calls route through `internal/mathx/`, switchable between stdlib `math` (default) and [`emlgo`](https://github.com/23skdu/emlgo) (SIMD batch) via `-tags emlgo`, with `pkg/fastmath` approximations behind `-tags emlfast`. Enables A/B performance testing from a single tree. See [nextsteps.md](nextsteps.md) Phase 3.
+- **Pluggable Math Backend** — All `math.*` calls route through `internal/mathx/`, switchable between stdlib `math` (default) and [`emlgo`](https://github.com/23skdu/emlgo) (SIMD batch) via `-tags emlgo`, with `pkg/fastmath` approximations behind `-tags emlfast`. Enables A/B performance testing from a single tree. See [roadmap.md](roadmap.md#planned-features).
 
 ---
 

@@ -158,7 +158,7 @@ two build-tagged implementations:
 - **Prerequisite:** emlgo's `go.mod` declares `module github.com/emlgo/eml` while
   the repo is hosted at `github.com/23skdu/emlgo`; a fork with a corrected module
   path is required. See [dependencies.md](dependencies.md) and
-  [nextsteps.md](nextsteps.md) Phase 3.
+  [roadmap.md](roadmap.md#planned-features).
 
 ---
 

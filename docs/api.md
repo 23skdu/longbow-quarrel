@@ -1,7 +1,7 @@
 # Longbow-Quarrel API Reference
 
 > **Scope.** This document describes release **v0.3.0**'s API. `main`
-> carries additional unreleased work; see [nextsteps.md](nextsteps.md) for
+> carries additional unreleased work; see [roadmap.md](roadmap.md) for
 > what has landed and what is planned.
 
 The server listens on **two** addresses, and they are separate listeners:
@@ -16,7 +16,7 @@ The API server does **not** serve `/metrics`, and the metrics server does
 nothing.
 
 The WebUI is a separate binary (`cmd/webui`) with its own routes; see
-[webui_plan.md](webui_plan.md).
+[webui.md](webui.md).
 
 ## The API listener
 

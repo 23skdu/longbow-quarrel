@@ -98,7 +98,7 @@ restructures its test dependencies.
 ### Why `emlgo` requires a fork (module-path mismatch)
 
 `emlgo` is consumed as an **optional** math backend (see
-[nextsteps.md](nextsteps.md) Phase 3) and is **not** a drop-in `math`
+[roadmap.md](roadmap.md#planned-features)) and is **not** a drop-in `math`
 replacement. Two things must be understood before adding it:
 
 1. **Module path mismatch.** The repository is hosted at

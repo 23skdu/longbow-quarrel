@@ -54,3 +54,6 @@ o
 output
 C
 tags
+# The actionlint flags.
+config-file
+color

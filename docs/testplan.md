@@ -2,7 +2,7 @@
 
 > **Document Status**: Production Test Plan  
 > **Target Hardware Envelope**: Intel Core i7-12650H (Alder Lake: 16 vCPUs, AVX2 + FMA + AVX_VNNI, no AVX-512) & NVIDIA GeForce RTX 4060 Laptop GPU (8 GB VRAM, Ada Lovelace compute capability 8.9, CUDA 12.4).  
-> **Companion Documents**: [docs/performance.md](performance.md), [docs/nextsteps.md](nextsteps.md), [scripts/bench_gate.sh](../scripts/bench_gate.sh).
+> **Companion Documents**: [docs/performance.md](performance.md), [docs/roadmap.md](roadmap.md), [scripts/bench_gate.sh](../scripts/bench_gate.sh).
 
 ---
 
@@ -157,21 +157,10 @@ A candidate change (Branch B) is accepted against baseline (Branch A) if and onl
 
 ## 7. CI/CD Integration & Automated Regression Gates
 
-The test runner `scripts/run_all_tests.sh` executes the following regression gates in sequence:
-
-```mermaid
-graph TD
-    G1[Gate 1: Core CPU Tests] --> G2[Gate 2: SIMD & VNNI Tests]
-    G2 --> G3[Gate 3: Multiplatform VLM Tests]
-    G3 --> G4[Gate 4: Grammar & Sampler Tests]
-    G4 --> G5[Gate 5: Speculative & Cache Tests]
-    G5 --> G6[Gate 6: CUDA Compilation & Kernels]
-    G6 --> G7[Gate 7: Concurrency Race Detector]
-    G7 --> G8[Gate 8: Code Coverage Gates]
-    G8 --> G9[Gate 9: Duplicate Declaration Check]
-    G9 --> G10[Gate 10: SIMD AVX2 Zero-Alloc & Perf Gate]
-    G10 --> G11[Gate 11: Documentation Drift Check]
-```
+The test runner `scripts/run_all_tests.sh` executes the regression gates
+in sequence. The list and what each one catches is in
+[roadmap.md](roadmap.md#the-gates); the four that need more than a
+command are described here.
 
 ### Gate 8: Code Coverage Gates
 Applies the >= 80% threshold to the core packages and a ratchet floor to
@@ -198,14 +187,34 @@ scripts/bench_gate.sh check-zero-alloc ./internal/simd
 > The CUDA precision and graph checks are part of Gate 6, which runs them
 > when a CUDA device is present. They are not a separate gate.
 
-### Gate 11: Documentation Drift Check
+### Gate 9b: Metal Backend Type Check
+
+The Metal backend is a `darwin && metal` build, so it is normally only
+compiled on a macOS runner. Its compile errors are Go type errors, though,
+and none of them needs the Metal framework — so they can be found from
+Linux by stripping only the `darwin` token from the build tags and
+building with cgo against the plain-C bridge:
+```bash
+scripts/metalcheck.sh
+```
+
+### Gate 11: Workflow Lint
+
+`actionlint` over the workflow files, with `shellcheck` over the `run:`
+blocks:
+```bash
+go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 \
+  -config-file .github/actionlint.yaml .github/workflows/*.yml
+```
+
+### Gate 12: Documentation Drift Check
 Fails when the documentation, the Helm chart or the Grafana dashboard stops
 describing the code:
 ```bash
 go run ./scripts/docsync
 ```
 
-It checks four things:
+It checks six things:
 
 1. every flag the Helm chart passes is a flag the command has, and every
    value the chart sets matches the default the code uses;
@@ -214,7 +223,10 @@ It checks four things:
    dashboard;
 3. every flag the reference documentation mentions exists;
 4. every endpoint the API reference lists is one the server registers, and
-   every route the server registers is in the reference.
+   every route the server registers is in the reference;
+5. the pinned versions in `dependencies.md` are the ones the module files
+   hold, and the number of metrics the documents claim is the real one;
+6. every document is listed in the documentation index.
 
 The three things it protects against had all drifted: the chart passed
 flags the command no longer had and scraped the wrong port for the

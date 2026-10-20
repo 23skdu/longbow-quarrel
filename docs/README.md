@@ -12,15 +12,14 @@
 | [dependencies.md](dependencies.md) | The pinned versions, and why each one is pinned |
 | [testplan.md](testplan.md) | The A/B plan and the CI regression gates |
 | [turboquant.md](turboquant.md) | The TurboQuant format and its kernels |
-| [webui_plan.md](webui_plan.md) | The WebUI binary, its routes and its API |
+| [webui.md](webui.md) | The WebUI binary, its routes and its API |
 | [README_CLOUD.md](README_CLOUD.md) | The cloud deployment: the limits, the probes, the Helm chart |
-| [nextsteps.md](nextsteps.md) | The engineering roadmap: what has landed and what is planned |
-| [roadmap.md](roadmap.md) | The vector search subsystem, which is a separate component |
+| [roadmap.md](roadmap.md) | The engineering roadmap: the open work, the gates, what has landed |
 | [README.md](README.md) | This index |
 
-Two of the documents describe a development log rather than the shipped
-product: `nextsteps.md` is the engineering roadmap, and `roadmap.md`
-covers the vector search package, which the inference path does not use.
+`roadmap.md` is the one document that is not about the shipped product: it
+records the work that is **not** finished, across the engine, the vector
+search package and the WebUI.
 
 The Helm chart lives in `helm/quarrel`, and the Grafana dashboard in
 `grafana/quarrel-dashboard.json`.
@@ -29,7 +28,7 @@ The Helm chart lives in `helm/quarrel`, and the Grafana dashboard in
 
 `scripts/docsync` checks that the documentation, the Helm chart and the
 Grafana dashboard still describe the code, and it runs in the lint job and
-as the thirteenth gate of `scripts/run_all_tests.sh`. It checks that:
+as the twelfth gate of `scripts/run_all_tests.sh`. It checks that:
 
 1. every flag the Helm chart passes is a flag the command has, and every
    value the chart sets matches the default the code uses;
@@ -40,7 +39,8 @@ as the thirteenth gate of `scripts/run_all_tests.sh`. It checks that:
 4. every endpoint the API reference lists is one the server registers, and
    every route the server registers is in the reference;
 5. the pinned versions in `dependencies.md` are the ones the module files
-   hold, and the number of metrics the documents claim is the real one.
+   hold, and the number of metrics the documents claim is the real one;
+6. every document is listed in this index.
 
 ```bash
 go run ./scripts/docsync

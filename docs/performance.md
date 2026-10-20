@@ -2,7 +2,7 @@
 
 > **Version scope.** This document describes release **v0.3.0**, the latest
 > git tag. `main` carries additional unreleased work; see
-> [nextsteps.md](nextsteps.md) for what has landed and what is planned.
+> [roadmap.md](roadmap.md) for what has landed and what is planned.
 
 ## 1. Executive Summary
 
@@ -74,7 +74,7 @@ Parallel outer-row goroutines used when `rowsA * colsB >= 1024`.
 > (`polar_quant_avx512`, `polar_quant_avx2`, `polar_quant_neon`,
 > `qjl_transform_*`) were never referenced from any Go file. The numbers
 > below are the actual measured ones; see
-> [nextsteps.md](nextsteps.md) Step 33.
+> [roadmap.md](roadmap.md) Step 33.
 
 The C kernels are now dispatched at runtime from
 `internal/simd/turboquant_simd_{amd64,arm64,generic}.go`, guarded by CPU
@@ -142,7 +142,7 @@ dequantization, and vector distance. `emlgo` provides SIMD batch equivalents
 (AVX-512 / AVX2+FMA / NEON / SVE / WASM) that could vectorize these per-token
 scalar loops.
 
-### 8.1 Per-operation microbenchmark (to be measured)
+### 8.1 Per-operation microbenchmark (measured)
 
 Run both backends and record `ns/op` and `allocs/op`:
 
@@ -194,7 +194,7 @@ allocation per call), which the engine's hot loops cannot afford either.
 available behind `-tags emlgo` so the comparison can be repeated on
 hardware with AVX-512, but the default build does not use it.
 
-### 8.2 End-to-end inference A/B (to be measured)
+### 8.2 End-to-end inference A/B (not measured)
 
 Build `quarrel` with and without `-tags emlgo` and run
 `scripts/benchmark_models.sh` / `profile_tokens.sh` on a fixed model
