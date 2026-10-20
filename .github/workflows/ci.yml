@@ -49,8 +49,8 @@ jobs:
 
       - name: Install pinned tools
         run: |
-          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${GOLANGCI_LINT_VERSION}
-          go install golang.org/x/tools/cmd/goimports@${GOIMPORTS_VERSION}
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@"${GOLANGCI_LINT_VERSION}"
+          go install golang.org/x/tools/cmd/goimports@"${GOIMPORTS_VERSION}"
 
       - name: Run golangci-lint
         # .golangci.yml sets max-issues-per-linter/max-same-issues to 0, so a
@@ -71,7 +71,14 @@ jobs:
         # workflows were never checked for the mistakes actionlint finds
         # (a `needs:` entry that names a job which does not exist, an
         # expression that references an undefined context, ...).
+        #
+        # actionlint runs shellcheck over the `run:` blocks when shellcheck
+        # is installed, which it is on the GitHub runners. Without it the
+        # check silently covers less, so the pinned version is installed
+        # here first: the SC2086 warnings this found were masked for
+        # months because the pipeline was disabled.
         run: |
+          sudo apt-get update && sudo apt-get install -y shellcheck
           go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 \
             -config-file .github/actionlint.yaml \
             -color \
@@ -195,9 +202,11 @@ jobs:
           # it returns only cmd/webui/engine, which has no test files, and
           # the whole job silently tests nothing.
           pkgs=$(go list -tags webui ./...)
+          # shellcheck disable=SC2086 # $pkgs is a list of package paths;
+          # word splitting is what makes it a list.
           go vet -tags webui $pkgs
+          # shellcheck disable=SC2086 # as above.
           go test -count=1 -tags webui $pkgs
-
   # ===== CUDA COMPILE GATE (opt-in) =====
   # The cuda build tag pulls in cgo + nvcc + cuBLAS/cuDNN, which GitHub-hosted
   # runners do not provide, so this stays opt-in: set the repository variable
@@ -231,7 +240,7 @@ jobs:
         # default build does not, so the vulnerability scan has to run
         # here as well. This job is the only one that has the CUDA
         # toolchain.
-        run: go run golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION} -tags=cuda ./...
+        run: go run golang.org/x/vuln/cmd/govulncheck@"${GOVULNCHECK_VERSION}" -tags=cuda ./...
 
   # ===== METAL BUILD (macOS only) =====
   metal-build:
@@ -575,8 +584,8 @@ jobs:
 
       - name: Install pinned scanners
         run: |
-          go install github.com/securego/gosec/v2/cmd/gosec@${GOSEC_VERSION}
-          go install golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}
+          go install github.com/securego/gosec/v2/cmd/gosec@"${GOSEC_VERSION}"
+          go install golang.org/x/vuln/cmd/govulncheck@"${GOVULNCHECK_VERSION}"
 
       - name: Run Gosec Security Scanner
         run: gosec -quiet ./...

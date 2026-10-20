@@ -2692,6 +2692,18 @@ metalcheck: FAILED - the Metal backend does not type-check
 It runs in the `lint` job (so it runs on every push, on Linux) and in
 `scripts/run_all_tests.sh`.
 
+**A second latent CI failure, found by the same re-enable.** The `lint`
+job's `actionlint` step was also red, on five SC2086 warnings in the
+workflow's own `run:` blocks. They had been masked because the step never
+ran (the pipeline was disabled) and, before that, because the step before
+it failed first. actionlint only runs shellcheck when shellcheck is
+installed, which it is on the GitHub runners but was not on the machine
+that wrote the workflows — so the check covered less locally than it did
+in CI. The version variables are now quoted, the one legitimate
+word-splitting case has a documented suppression, the CI installs
+shellcheck explicitly, and the check now runs in
+`scripts/run_all_tests.sh` too.
+
 **A test for the new locking.** `internal/engine/types_sequence_pos_test.go`
 asserts that the position is read and advanced under the manager's lock,
 that a missing sequence is reported rather than created, and that the two

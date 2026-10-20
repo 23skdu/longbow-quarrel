@@ -216,14 +216,31 @@ else
 fi
 
 # ------------------------------------------------------------------------------
-# 11. Documentation drift check
+# 11. Workflow lint
+# ------------------------------------------------------------------------------
+# actionlint checks the workflow files for the mistakes it finds: a `needs:`
+# entry that names a job which does not exist, an expression that references
+# an undefined context, and - when shellcheck is installed - the shell
+# problems in the `run:` blocks. The GitHub runners have shellcheck, so the
+# check covers more there than it does here; the SC2086 warnings it found
+# were masked for months because the pipeline was disabled.
+log_header "11. Linting the workflow files"
+if (cd "${REPO_ROOT}" && go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 \
+        -config-file .github/actionlint.yaml .github/workflows/*.yml); then
+    log_pass "Workflow Lint (actionlint)"
+else
+    log_fail "Workflow Lint (actionlint)"
+fi
+
+# ------------------------------------------------------------------------------
+# 12. Documentation drift check
 # ------------------------------------------------------------------------------
 # The Helm chart, the Grafana dashboard and the reference documentation all
 # describe the code. They had all drifted: the chart passed flags the
 # command no longer had and scraped the wrong port for the metrics, the
 # dashboard queried 27 of the 133 declared metrics, and the API reference
 # described a set of endpoints that never existed.
-log_header "11. Checking the documentation against the code"
+log_header "12. Checking the documentation against the code"
 if (cd "${REPO_ROOT}" && go run ./scripts/docsync); then
     log_pass "Documentation Drift Check"
 else
