@@ -1,5 +1,11 @@
-# Go build artifacts
-bench*
+# Go build artifacts.
+#
+# The pattern used to be "bench*", which also hid the benchmark sources:
+# internal/mathx/bench_test.go and internal/mathx/bench_emlgo_test.go were
+# never committed, so the A/B harness that docs/performance.md tells the
+# reader to run could not be run from a clean checkout.
+bench
+bench.exe
 !scripts/benchmark_engines.sh
 !scripts/benchmark_models.sh
 !scripts/benchmark_report.py

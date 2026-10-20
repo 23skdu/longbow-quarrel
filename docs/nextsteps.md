@@ -504,8 +504,8 @@ Based on deep profiling of autoregressive decode loops, CUDA kernel execution pr
 > (Steps 44, 47), Batch 8 (Step 40), Batch 9 (Step 40), Batch 10 (Step 35)
 > and Batch 11 (Step 35), Batch 12 (Step 35), Batch 13 (Step 35),
 > Batch 14 (Step 35), Batch 15 (Step 35), Batch 16 (Step 35),
-> Batch 17 (Step 35), Batch 18 (Step 35), Batch 19 (Step 35) are
-> DONE** — see the status markers on each step.
+> Batch 17 (Step 35), Batch 18 (Step 35), Batch 19 (Step 35),
+> Batch 20 (Step 35) are DONE** — see the status markers on each step.
 > Verified locally after the change:
 >
 > | Check | Command | Result |
@@ -1434,6 +1434,22 @@ all of them. It also caught a bug *in the test*: the comparison was
 the test passed with a NaN on the GPU. The comparison now checks for a NaN
 explicitly.
 
+**Batch 20 measured the `emlgo` A/B and the answer was no.**
+
+The performance document had a table of dashes and the instruction not to
+fill it in until the harness had been run. The harness could not be run
+from a clean checkout: the `.gitignore` had a `bench*` rule that hid
+`internal/mathx/bench_test.go` and `internal/mathx/bench_emlgo_test.go`, so
+the benchmark sources were never committed. The rule now only covers the
+built binaries.
+
+With the harness runnable, the measurement says `emlgo` is a **regression**
+on this hardware — every operation the engine calls in a hot loop is
+slower, `Pow` by five to seven times — so the standard library stays and
+the negative result is recorded in `docs/performance.md`. The `emlgo` build
+remains available behind the tag so the comparison can be repeated on
+hardware with AVX-512.
+
 **Batch 19 made the position tensors say what they hold.**
 
 The paged attention needs three things beside the activations: the position
@@ -1905,7 +1921,8 @@ and the GPU parity test it made possible found six defects in the GPU's
 batched forward (see Step 35). **Batch 18** removed the single-token
 forward it left broken and the gigabyte of VRAM it wasted (see Step 35).
 **Batch 19** made the position tensors say what they hold, on both the
-CUDA and the Metal side (see Step 35).
+CUDA and the Metal side (see Step 35). **Batch 20** measured the `emlgo`
+A/B and kept the standard library (see Step 35).
 
 **Still open:** generating the README table from a script so it cannot drift apart from the floors again. The `internal/engine` coverage is now 80.3% and its floor is 80.0%.
 

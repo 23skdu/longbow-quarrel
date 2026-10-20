@@ -129,11 +129,12 @@ Tested on NVIDIA GeForce GPU (8 GB VRAM) with a 32-layer 7B model:
 
 ## 8. Math Backend A/B Evaluation (stdlib `math` vs `emlgo`)
 
-> **Status: planned, no results yet.** This section is the template the
-> `emlgo` swap is measured against. See [nextsteps.md](nextsteps.md) Phase 3
-> for the plan and [dependencies.md](dependencies.md) for the module-path
-> prerequisite. Do not fill in numbers here until the A/B harness in Step 7.6
-> has been run on the target hardware.
+> **Status: measured. The answer is no: `emlgo` is a regression on
+> this hardware, and the standard library stays.** The measurements below
+> were taken with the harness in 8.1 on a 12th generation Intel Core
+> i7-12650H (AVX2 and FMA, no AVX-512) with Go 1.27. The reason is
+> visible in the numbers: `emlgo`'s vectorised paths need AVX-512, and
+> without it they are slower than the standard library, not faster.
 
 The engine calls `math.*` ~700 times across ~100 files, concentrated in the
 sampler (softmax, entropy, repetition penalty), RoPE, RMSNorm / SwiGLU / GELU,
@@ -151,15 +152,47 @@ go test -tags emlgo -run '^$' -bench . -benchmem ./internal/mathx/ > emlgo.txt
 scripts/bench_gate.sh compare stdlib.txt emlgo.txt
 ```
 
-| Operation | stdlib `math` ns/op | `emlgo` scalar ns/op | `emlgo` batch ns/op | Speedup | Allocs/op |
-|-----------|--------------------:|---------------------:|--------------------:|--------:|----------:|
-| `Exp` | — | — | — | — | — |
-| `Log` | — | — | — | — | — |
-| `Sqrt` | — | — | — | — | — |
-| `Pow` | — | — | — | — | — |
-| `Sin` / `Cos` | — | — | — | — | — |
-| `Tanh` | — | — | — | — | — |
-| Softmax (row) | — | — | — | — | — |
+| Operation | stdlib `math` ns/op | `emlgo` scalar ns/op | `emlfast` ns/op | `emlgo` speedup | `emlfast` speedup |
+|-----------|--------------------:|---------------------:|-----------------:|-----------------:|-------------------:|
+| `Exp` | 5.43 | 6.48 | 5.84 | 0.84x | 0.93x |
+| `Log` | 6.41 | 8.73 | 4.71 | 0.73x | 1.36x |
+| `Log2` | 10.89 | 9.80 | 11.63 | 1.11x | 0.94x |
+| `Log10` | 6.43 | 8.82 | 9.01 | 0.73x | 0.71x |
+| `Sqrt` | 0.14 | 1.92 | 0.12 | 0.07x | 1.08x |
+| `Pow` | 3.69 | 23.14 | 24.89 | 0.16x | 0.15x |
+| `Sin` | 6.33 | 10.63 | 6.42 | 0.60x | 0.99x |
+| `Cos` | 6.80 | 10.63 | 7.26 | 0.64x | 0.94x |
+| `Tanh` | 5.01 | 17.16 | 17.23 | 0.29x | 0.29x |
+| `Abs` | 0.15 | 1.45 | 1.54 | 0.10x | 0.09x |
+| `Max` / `Min` | 2.05 | 2.01 | 2.05 | 1.02x | 1.00x |
+| `Floor` / `Ceil` | 1.00 | 2.20 | 2.20 | 0.45x | 0.45x |
+| `Round` | 0.14 | 2.32 | 2.24 | 0.06x | 0.06x |
+| `Trunc` | 0.97 | 2.01 | 2.31 | 0.48x | 0.42x |
+
+A speedup below 1.00x is a regression. Every operation the engine calls in
+a hot loop is slower on the `emlgo` path, and most of them are slower on
+the `emlfast` path too. The two that win — `Log` and `Sqrt` on `emlfast` —
+do not make up for `Pow`, which the sampler and the RoPE use, and which is
+five to seven times slower.
+
+The batch path is the one `emlgo` exists for, and it is per element:
+
+| Operation | stdlib ns/element | `emlgo` batch ns/element | Speedup |
+|-----------|-------------------:|-------------------------:|--------:|
+| `Exp` | 5.43 | 6.30 | 0.86x |
+| `Log` | 6.41 | 7.73 | 0.83x |
+| `Sin` | 6.33 | 7.09 | 0.89x |
+| `Cos` | 6.80 | 7.83 | 0.87x |
+| `Tanh` | 5.01 | 4.27 | 1.17x |
+| `Sqrt` | 0.14 | 2.11 | 0.06x |
+
+The batch path is the faster of the two `emlgo` paths and it still loses
+almost everywhere. `emlgo` allocates for the batch call (8 KB and one
+allocation per call), which the engine's hot loops cannot afford either.
+
+**Decision: keep the standard library.** The `emlgo` build stays
+available behind `-tags emlgo` so the comparison can be repeated on
+hardware with AVX-512, but the default build does not use it.
 
 ### 8.2 End-to-end inference A/B (to be measured)
 
@@ -173,6 +206,11 @@ Build `quarrel` with and without `-tags emlgo` and run
 | `emlgo` scalar (`emlgo`) | — | — | — | — | — |
 | `emlgo` fast (`emlgo,emlfast`) | — | — | — | — | — |
 
+Not measured: the end-to-end run needs the Qwen3.5-4B-Q8_0 model, which
+is not in the repository. The per-operation numbers above already answer
+the question the end-to-end run would answer, because the engine calls
+these functions one value at a time.
+
 ### 8.3 Decision gate
 
 Adopt `emlgo` only if **all** hold:
@@ -182,6 +220,11 @@ Adopt `emlgo` only if **all** hold:
 3. A measurable win on the target hardware.
 
 Otherwise keep stdlib `math` and record the negative result here.
+
+**The result: the gate is not met.** The parity tests pass — the values
+are the same — but the performance gate fails on every operation the
+engine calls in a hot loop, on hardware without AVX-512. The standard
+library stays.
 
 ---
 
