@@ -16,11 +16,11 @@ kernel void flash_attention2_f16(
     constant int &num_heads [[ buffer(4) ]],
     constant int &kv_heads [[ buffer(5) ]],
     constant int &headDim [[ buffer(6) ]],
-    device const int *seq_lens [[ buffer(7) ]],
+    device const float *seq_lens [[ buffer(7) ]],
     constant int &kv_block_size [[ buffer(8) ]], // logical block size (16)
-    device const int *block_table [[ buffer(9) ]],
+    device const float *block_table [[ buffer(9) ]],
     constant int &max_blocks_per_seq [[ buffer(10) ]],
-    device const int *token_to_seq [[ buffer(11) ]],
+    device const float *token_to_seq [[ buffer(11) ]],
     uint3 tg_pos [[ threadgroup_position_in_grid ]],
     uint3 t_pos [[ thread_position_in_threadgroup ]],
     uint3 nt [[ threads_per_threadgroup ]])
@@ -31,8 +31,8 @@ kernel void flash_attention2_f16(
 
     if (head_id >= (uint)num_heads) return;
 
-    int seq_len = seq_lens[batch_id];
-    int logical_seq_id = token_to_seq[batch_id];
+    int pos = int(seq_lens[batch_id]);
+    int logical_seq_id = int(token_to_seq[batch_id]);
     uint kv_head_id = head_id / (num_heads / kv_heads);
     float scale = 1.0f / sqrt((float)headDim);
 
@@ -54,15 +54,19 @@ kernel void flash_attention2_f16(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     // Loop over logical blocks of KV cache
-    uint num_logical_blocks = (seq_len + kv_block_size - 1) / kv_block_size;
-    device const int *seq_block_table = block_table + logical_seq_id * max_blocks_per_seq;
+    // Causal attention covers pos + 1 tokens
+    uint num_logical_blocks = (pos + 1 + kv_block_size - 1) / kv_block_size;
+    if (num_logical_blocks > (uint)max_blocks_per_seq) {
+        num_logical_blocks = max_blocks_per_seq;
+    }
+    device const float *seq_block_table = block_table + logical_seq_id * max_blocks_per_seq;
 
     for (uint b = 0; b < num_logical_blocks; b++) {
-        int physical_block_id = seq_block_table[b];
+        int physical_block_id = int(seq_block_table[b]);
         if (physical_block_id < 0) break;
 
         // Iterate tokens within this physical block
-        uint tokens_in_block = min((uint)kv_block_size, (uint)seq_len - b * kv_block_size);
+        uint tokens_in_block = (b == num_logical_blocks - 1) ? ((pos % kv_block_size) + 1) : kv_block_size;
         
         for (uint t = 0; t < tokens_in_block; t++) {
             // 1. Compute Score S = Q @ K^T

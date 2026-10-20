@@ -2,8 +2,8 @@ package engine
 
 // stopTokenSet builds a lookup set for the configured stop tokens.
 //
-// config.Config.StopTokens was declared but never read anywhere in the tree:
-// a user who configured stop tokens got them silently ignored. The set is
+// config.Config.StopTokens configures additional tokens that terminate generation.
+// It can be populated from the CLI (-stop-tokens) and from the REST API. The set is
 // built once per engine rather than per token, because the decode loop calls
 // this for every generated token.
 func stopTokenSet(stopTokens []int) map[int]struct{} {

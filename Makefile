@@ -39,6 +39,11 @@ CGO_FLAGS ?=
 BIN_DIR ?= bin
 DIST_DIR ?= dist
 
+# Resource bounds to prevent machine lockup / OOM during tests
+QUARREL_TEST_PARALLEL ?= 4
+export GOMAXPROCS ?= $(QUARREL_TEST_PARALLEL)
+export GOMEMLIMIT ?= 2GiB
+
 # CUDA/TPU specific
 CUDA_PATH ?= /usr/local/cuda
 TPU_PATH ?= /usr/local/tpu
@@ -195,24 +200,24 @@ deps:
 
 # Run tests
 test:
-	$(GO) test -v -race -cover ./...
+	$(GO) test -v -race -cover -p $(QUARREL_TEST_PARALLEL) -timeout 10m ./...
 
 # Run tests with specific build tags
 test-cuda:
-	$(GO) test -v -tags cuda ./...
+	$(GO) test -v -tags cuda -p $(QUARREL_TEST_PARALLEL) -timeout 5m ./...
 
 test-metal:
-	$(GO) test -v -tags metal ./...
+	$(GO) test -v -tags metal -p $(QUARREL_TEST_PARALLEL) -timeout 5m ./...
 
 test-tpu:
-	$(GO) test -v -tags tpu ./...
+	$(GO) test -v -tags tpu -p $(QUARREL_TEST_PARALLEL) -timeout 5m ./...
 
 # SIMD tests (AVX-512/AVX-2)
 test-simd:
-	CGO_ENABLED=1 $(GO) test -v -tags cgo ./internal/simd/...
+	CGO_ENABLED=1 $(GO) test -v -tags cgo -p $(QUARREL_TEST_PARALLEL) -timeout 5m ./internal/simd/...
 
 test-simd-quick:
-	CGO_ENABLED=1 $(GO) test -v -tags cgo -run "QuickCheck" ./internal/simd/...
+	CGO_ENABLED=1 $(GO) test -v -tags cgo -p $(QUARREL_TEST_PARALLEL) -timeout 5m -run "QuickCheck" ./internal/simd/...
 
 test-simd-fuzz:
 	@echo "Fuzzing the SIMD kernels..."
@@ -224,7 +229,7 @@ test-simd-fuzz:
 	@for target in FuzzRMSNorm FuzzMatmulDefault FuzzMatMul FuzzMatVecMul \
 	              FuzzAttentionF32 FuzzSoftmaxF32 FuzzPolarQuant FuzzQJLTransform; do \
 		echo "--- $$target"; \
-		CGO_ENABLED=1 $(GO) test -v -tags cgo -fuzz=$$target -fuzztime=10s \
+		CGO_ENABLED=1 $(GO) test -v -tags cgo -fuzz=$$target -fuzztime=10s -parallel=$(QUARREL_TEST_PARALLEL) -timeout 3m \
 			./internal/simd/... || exit 1; \
 	done
 
@@ -232,23 +237,23 @@ test-simd-fuzz:
 bench-simd:
 	@# The AVX-512 benchmarks live behind the `avx512` build tag. Without
 	@# it the filter matched nothing and the target reported no data.
-	CGO_ENABLED=1 $(GO) test -v -tags "cgo avx512" -bench=AVX512 -benchmem ./internal/simd/...
+	CGO_ENABLED=1 $(GO) test -v -tags "cgo avx512" -bench=AVX512 -benchmem -p $(QUARREL_TEST_PARALLEL) -timeout 5m ./internal/simd/...
 
 bench-simd-all:
-	CGO_ENABLED=1 $(GO) test -bench=. -benchmem ./internal/simd/...
+	CGO_ENABLED=1 $(GO) test -bench=. -benchmem -p $(QUARREL_TEST_PARALLEL) -timeout 10m ./internal/simd/...
 
 # emlgo math backend (A/B vs stdlib math)
 test-emlgo:
-	$(GO) test -v -tags emlgo ./internal/mathx/...
+	$(GO) test -v -tags emlgo -p $(QUARREL_TEST_PARALLEL) -timeout 5m ./internal/mathx/...
 
 test-emlfast:
-	$(GO) test -v -tags "emlgo emlfast" ./internal/mathx/...
+	$(GO) test -v -tags "emlgo emlfast" -p $(QUARREL_TEST_PARALLEL) -timeout 5m ./internal/mathx/...
 
 bench-emlgo:
-	$(GO) test -run '^$' -bench . -benchmem ./internal/mathx/...
+	$(GO) test -run '^$' -bench . -benchmem -p $(QUARREL_TEST_PARALLEL) -timeout 5m ./internal/mathx/...
 
 bench-emlgo-all:
-	$(GO) test -tags emlgo -run '^$' -bench . -benchmem ./internal/mathx/...
+	$(GO) test -tags emlgo -run '^$' -bench . -benchmem -p $(QUARREL_TEST_PARALLEL) -timeout 5m ./internal/mathx/...
 
 # Go vet
 check:
@@ -325,7 +330,7 @@ race:
 
 # Benchmark
 bench:
-	$(GO) test -bench=. -benchmem ./...
+	$(GO) test -bench=. -benchmem -p $(QUARREL_TEST_PARALLEL) -timeout 10m ./...
 
 # =============================================================================
 # Cleanup

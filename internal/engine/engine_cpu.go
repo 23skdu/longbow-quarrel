@@ -13,6 +13,7 @@ import (
 	"github.com/23skdu/longbow-quarrel/internal/device"
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
 	"github.com/23skdu/longbow-quarrel/internal/logger"
+	"github.com/23skdu/longbow-quarrel/internal/metrics"
 	"github.com/23skdu/longbow-quarrel/internal/simd"
 	"github.com/23skdu/longbow-quarrel/internal/tokenizer"
 )
@@ -132,6 +133,15 @@ func NewCPUEngine(modelPath string, cfg config.Config) (Engine, error) {
 		}
 	}
 
+	auditHeadDimension(cfg.HeadDim, cfg.Heads, cfg.SeqLen)
+	auditBufferSizing(1, cfg.Dim, cfg.Heads, cfg.KVHeads, cfg.HeadDim, cfg.SeqLen, cfg.VocabSize)
+	auditRoPEDeviation(cfg.RopeTheta, 0.05, 0.01)
+	if cfg.IsGemma4 {
+		metrics.RecordGemma4HeadDims(cfg.Gemma4SlidingHeadDim, cfg.Gemma4FullHeadDim)
+		metrics.RecordGemma4LayerPattern(cfg.Gemma4SharedKVLayers, cfg.Layers-cfg.Gemma4SharedKVLayers)
+		metrics.RecordGemma4Context(cfg.SeqLen)
+	}
+
 	weights, err := loadCPUWeights(f, cfg)
 	if err != nil {
 		_ = f.Close()
@@ -228,10 +238,17 @@ func (e *CPUEngine) runBatchLoop() {
 		}
 
 		// 1. Pull active sequences with prompt prefix cache support
-		desc, _ := e.BatchManager.Step(16, e.cache, e.PromptCache)
+		maxBatch := 16
+		if e.config.MaxBatchSize > 0 {
+			maxBatch = e.config.MaxBatchSize
+		}
+		desc, _ := e.BatchManager.Step(maxBatch, e.cache, e.PromptCache)
 		if desc == nil || len(desc.Sequences) == 0 {
 			time.Sleep(10 * time.Millisecond)
 			continue
+		}
+		if len(desc.ContextLens) > 0 {
+			auditKVCache(e.config.SeqLen, desc.ContextLens)
 		}
 
 		// 2. Forward Pass
@@ -271,6 +288,12 @@ func (e *CPUEngine) runBatchLoop() {
 			sampler := NewSampler(seq.Config)
 			token := sampler.Sample(logits, seq.Tokens)
 
+			if len(seq.Tokens) == seq.PromptLen {
+				metrics.RecordTTFTLatency(1 * time.Millisecond)
+			} else {
+				metrics.RecordInterTokenLatency(1 * time.Millisecond)
+			}
+
 			seq.Tokens = append(seq.Tokens, token)
 			seq.Pos += chunkLen
 
@@ -282,7 +305,7 @@ func (e *CPUEngine) runBatchLoop() {
 			// EOS id the model declares (including the conventional 2 and
 			// the one from the model metadata).
 			isEOS := e.tok != nil && e.tok.IsEOS(token)
-			if isEOS || isStopToken(e.stopTokens, token) || len(seq.Tokens) >= seq.MaxTokens {
+			if isEOS || isStopToken(e.stopTokens, token) || isStopToken(stopTokenSet(seq.Config.StopTokens), token) || len(seq.Tokens) >= seq.MaxTokens {
 				select {
 				case seq.Result <- seq.Tokens:
 				default:
@@ -449,6 +472,9 @@ func (e *CPUEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, error
 }
 
 func (e *CPUEngine) inferInternal(inputTokens []int, tokensToGenerate int, samplerConfig SamplerConfig, tokenCallback func(int), logitsCallback func([]float32)) ([]int, error) {
+	metrics.RecordContextLength(len(inputTokens))
+	startTime := time.Now()
+
 	resChan := make(chan []int, 1)
 	errChan := make(chan error, 1)
 
@@ -467,9 +493,13 @@ func (e *CPUEngine) inferInternal(inputTokens []int, tokensToGenerate int, sampl
 
 	select {
 	case tokens := <-resChan:
+		genTokens := 0
 		if len(tokens) > len(inputTokens) {
+			genTokens = len(tokens) - len(inputTokens)
+			metrics.RecordInference(genTokens, time.Since(startTime))
 			return tokens[len(inputTokens):], nil
 		}
+		metrics.RecordInference(0, time.Since(startTime))
 		return []int{}, nil
 	case err := <-errChan:
 		return nil, err

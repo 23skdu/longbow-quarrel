@@ -9,7 +9,9 @@ import (
 	"github.com/23skdu/longbow-quarrel/internal/mathx"
 
 	"github.com/23skdu/longbow-quarrel/internal/config"
+	"github.com/23skdu/longbow-quarrel/internal/device"
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
+	"github.com/23skdu/longbow-quarrel/internal/metrics"
 	"github.com/23skdu/longbow-quarrel/internal/simd"
 )
 
@@ -128,6 +130,17 @@ func loadCPUWeights(f *gguf.GGUFFile, cfg config.Config) (*CPUWeights, error) {
 	w.LayerOutputScale = make([][]float32, numLayers)
 	w.RawInpGate = make([]*gguf.TensorInfo, numLayers)
 	w.RawProj = make([]*gguf.TensorInfo, numLayers)
+
+	if len(f.Tensors) > 0 {
+		t0 := f.Tensors[0]
+		rows := 1
+		cols := int(t0.Dimensions[0])
+		if len(t0.Dimensions) > 1 {
+			rows = int(t0.Dimensions[1])
+		}
+		auditWeightPadding(t0.Name, rows, cols, rows, cols, int(t0.Type))
+		auditDequantization(device.DataTypeQ4K, nil, 256)
+	}
 
 	for _, t := range f.Tensors {
 		isQ8Matrix := t.Type == gguf.GGMLTypeQ8_0 && len(t.Dimensions) >= 2
@@ -1940,6 +1953,9 @@ func ApplyGemma4LayerCPU(
 	if !isSliding {
 		headDim = cfg.Gemma4FullHeadDim
 		ropeTheta = cfg.Gemma4FullRoPETheta
+		metrics.RecordGemma4FullAttentionLayer(float64(cfg.Gemma4PartialRoPEFactor), float64(ropeTheta), 0)
+	} else {
+		metrics.RecordGemma4SlidingWindowLayer(cfg.Gemma4SlidingWindowSize, 0)
 	}
 	if headDim == 0 {
 		headDim = 256
@@ -2013,6 +2029,8 @@ func ApplyGemma4LayerCPU(
 
 		// K-Norm (per-head with AttnKNorm)
 		if layerIdx < len(w.AttnKNorm) && len(w.AttnKNorm[layerIdx]) == headDim {
+			metrics.RecordGemma4KNormApplied()
+			metrics.RecordGemma4QKNorm(false, true)
 			kLen := kvHeads * headDim
 			if kLen > len(k) {
 				kLen = len(k)
@@ -2032,6 +2050,7 @@ func ApplyGemma4LayerCPU(
 		partialRoPECPU(k, []int{pos}, kvHeads, headDim, headDim, ropeTheta)
 
 		// V Unit RMSNorm (weight=1.0, eps=1e-6, per-head)
+		metrics.RecordGemma4VNorm()
 		vLen := kvHeads * headDim
 		if vLen > len(v) {
 			vLen = len(v)
@@ -2093,6 +2112,8 @@ func ApplyGemma4LayerCPU(
 
 	// Q-Norm (per-head with AttnQNorm)
 	if layerIdx < len(w.AttnQNorm) && len(w.AttnQNorm[layerIdx]) == headDim {
+		metrics.RecordGemma4QNormApplied()
+		metrics.RecordGemma4QKNorm(true, false)
 		qLen := heads * headDim
 		if qLen > len(q) {
 			qLen = len(q)

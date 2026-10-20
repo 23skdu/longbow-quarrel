@@ -77,7 +77,9 @@ func BenchmarkCUDA_Sample_Vocab32k(b *testing.B) {
 
 	b.ResetTimer()
 	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		_ = ctx.SampleTopKTopP(logitsTensor, prev, 1.1, 0.1, 0.1, 0.7, 50, 0.9, uint64(i), vocabSize)
+	var seed uint64
+	for b.Loop() {
+		seed++
+		_ = ctx.SampleTopKTopP(logitsTensor, prev, 1.1, 0.1, 0.1, 0.7, 50, 0.9, seed, vocabSize)
 	}
 }

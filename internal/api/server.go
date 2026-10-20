@@ -192,6 +192,7 @@ type CompletionRequest struct {
 	DraftK      int      `json:"draft_k"` // Draft tokens per step when speculative
 	Images      []string `json:"images"`  // Base64 encoded images
 	Grammar     string   `json:"grammar"` // EBNF grammar source
+	StopTokens  []int    `json:"stop_tokens,omitempty"`
 }
 
 type CompletionResponse struct {
@@ -242,6 +243,7 @@ func (s *Server) CompletionsHandler(w http.ResponseWriter, r *http.Request) {
 		Temperature: req.Temperature,
 		TopP:        0.95,
 		TopK:        40,
+		StopTokens:  req.StopTokens,
 	}
 
 	if req.Grammar != "" {
@@ -306,6 +308,7 @@ type ChatCompletionRequest struct {
 	Grammar     string        `json:"grammar,omitempty"`
 	Speculative bool          `json:"speculative,omitempty"`
 	DraftK      int           `json:"draft_k,omitempty"` // Draft tokens per step when speculative
+	StopTokens  []int         `json:"stop_tokens,omitempty"`
 }
 
 type ChatCompletionResponse struct {
@@ -318,6 +321,25 @@ type ChatCompletionResponse struct {
 		Message      ChatMessage `json:"message"`
 		FinishReason string      `json:"finish_reason"`
 	} `json:"choices"`
+}
+
+type ChatCompletionChunk struct {
+	ID      string                      `json:"id"`
+	Object  string                      `json:"object"`
+	Created int64                       `json:"created"`
+	Model   string                      `json:"model"`
+	Choices []ChatCompletionChunkChoice `json:"choices"`
+}
+
+type ChatCompletionChunkChoice struct {
+	Index        int                      `json:"index"`
+	Delta        ChatCompletionChunkDelta `json:"delta"`
+	FinishReason *string                  `json:"finish_reason"`
+}
+
+type ChatCompletionChunkDelta struct {
+	Role    string `json:"role,omitempty"`
+	Content string `json:"content,omitempty"`
 }
 
 func (s *Server) ChatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
@@ -451,10 +473,16 @@ func (s *Server) ChatCompletionsHandler(w http.ResponseWriter, r *http.Request) 
 		maxTokens = 64
 	}
 
+	topP := req.TopP
+	if topP <= 0 {
+		topP = 0.95
+	}
+
 	samplerCfg := engine.SamplerConfig{
 		Temperature: req.Temperature,
-		TopP:        0.95,
+		TopP:        topP,
 		TopK:        40,
+		StopTokens:  req.StopTokens,
 	}
 
 	if req.Grammar != "" {
@@ -468,6 +496,86 @@ func (s *Server) ChatCompletionsHandler(w http.ResponseWriter, r *http.Request) 
 	// A request that asks for speculative decoding uses the speculative
 	// engine, which is the same target model with a draft model attached.
 	eng := s.engineFor(req.Speculative, req.DraftK)
+
+	if req.Stream {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "Streaming not supported", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+
+		id := fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano())
+		created := time.Now().Unix()
+
+		firstChunk := ChatCompletionChunk{
+			ID:      id,
+			Object:  "chat.completion.chunk",
+			Created: created,
+			Model:   req.Model,
+			Choices: []ChatCompletionChunkChoice{
+				{
+					Index: 0,
+					Delta: ChatCompletionChunkDelta{
+						Role: "assistant",
+					},
+				},
+			},
+		}
+		firstBytes, _ := json.Marshal(firstChunk)
+		fmt.Fprintf(w, "data: %s\n\n", firstBytes)
+		flusher.Flush()
+
+		callback := func(tok int) {
+			tokenStr := s.Tokenizer.Decode([]int{tok})
+			chunk := ChatCompletionChunk{
+				ID:      id,
+				Object:  "chat.completion.chunk",
+				Created: created,
+				Model:   req.Model,
+				Choices: []ChatCompletionChunkChoice{
+					{
+						Index: 0,
+						Delta: ChatCompletionChunkDelta{
+							Content: tokenStr,
+						},
+					},
+				},
+			}
+			chunkBytes, _ := json.Marshal(chunk)
+			fmt.Fprintf(w, "data: %s\n\n", chunkBytes)
+			flusher.Flush()
+		}
+
+		_, err := eng.InferWithCallback(tokens, maxTokens, samplerCfg, callback)
+		if err != nil {
+			logger.Log.Error("streaming inference failed", "error", err)
+			return
+		}
+
+		stopReason := "stop"
+		finalChunk := ChatCompletionChunk{
+			ID:      id,
+			Object:  "chat.completion.chunk",
+			Created: created,
+			Model:   req.Model,
+			Choices: []ChatCompletionChunkChoice{
+				{
+					Index:        0,
+					Delta:        ChatCompletionChunkDelta{},
+					FinishReason: &stopReason,
+				},
+			},
+		}
+		finalBytes, _ := json.Marshal(finalChunk)
+		fmt.Fprintf(w, "data: %s\n\n", finalBytes)
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+		return
+	}
 
 	resTokens, err := eng.Infer(tokens, maxTokens, samplerCfg)
 	if err != nil {

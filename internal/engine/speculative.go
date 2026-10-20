@@ -287,6 +287,9 @@ func NewSpeculativeEngine(target Engine, draftModelPath string, cfg config.Confi
 	if target == nil {
 		return nil, fmt.Errorf("no target engine to wrap")
 	}
+	if draftModelPath == "" && cfg.SpeculativeDraftModel != "" {
+		draftModelPath = cfg.SpeculativeDraftModel
+	}
 	if draftModelPath == "" {
 		return nil, fmt.Errorf("no draft model given")
 	}

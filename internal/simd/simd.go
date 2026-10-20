@@ -4,8 +4,10 @@ import (
 	"encoding/binary"
 	"runtime"
 	"sync"
+	"time"
 
 	"github.com/23skdu/longbow-quarrel/internal/mathx"
+	"github.com/23skdu/longbow-quarrel/internal/metrics"
 )
 
 // VNNI dot product function pointers (set from avx512.go when VNNI is available)
@@ -318,6 +320,11 @@ func VecDotQ8_0_VNNI(data []byte, vector []float32) float32 {
 			return dotQ8_0VNNI(data, vector, n)
 		}
 	}
+	metrics.RecordSIMDFallback("vnni", "simd_unrolled")
+	t0 := time.Now()
+	defer func() {
+		metrics.RecordVNNIDotProduct(time.Since(t0))
+	}()
 
 	var totalSum float32
 	for b := 0; b < numBlocks; b++ {
@@ -361,6 +368,11 @@ func VecDotQ4_K_VNNI(data []byte, vector []float32) float32 {
 			return dotQ4KVNNI(data, vector, n)
 		}
 	}
+	metrics.RecordSIMDFallback("vnni", "simd_unrolled")
+	t0 := time.Now()
+	defer func() {
+		metrics.RecordVNNIDotProduct(time.Since(t0))
+	}()
 
 	var totalSum float32
 	for i := 0; i < numBlocks; i++ {

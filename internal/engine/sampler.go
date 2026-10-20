@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/23skdu/longbow-quarrel/internal/mathx"
+	"github.com/23skdu/longbow-quarrel/internal/metrics"
 )
 
 var ErrModelSwapped = errors.New("inference interrupted: engine model was swapped")
@@ -101,6 +102,11 @@ func (s *Sampler) Sample(logits []float32, history []int) int {
 
 	temp := s.Config.Temperature
 	if temp == 0 {
+		metrics.RecordSamplingAudit(map[string]interface{}{
+			"temperature":    0.0,
+			"top_token_prob": 1.0,
+			"unique_samples": 1,
+		})
 		return argMax(logits)
 	}
 
@@ -157,6 +163,19 @@ func (s *Sampler) Sample(logits []float32, history []int) int {
 			}
 		}
 	}
+
+	topProb := 0.0
+	if len(candidates) > 0 {
+		topProb = candidates[0].prob
+	}
+	metrics.RecordSamplingAudit(map[string]interface{}{
+		"temperature":    float64(temp),
+		"top_k":          s.Config.TopK,
+		"top_p":          float64(s.Config.TopP),
+		"top_token_prob": topProb,
+		"unique_samples": len(candidates),
+		"rep_penalty":    float64(s.Config.RepPenalty),
+	})
 
 	return selected
 }

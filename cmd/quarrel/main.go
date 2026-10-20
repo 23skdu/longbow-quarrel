@@ -22,6 +22,7 @@ import (
 	"github.com/23skdu/longbow-quarrel/internal/logger"
 	"github.com/23skdu/longbow-quarrel/internal/metrics"
 	"github.com/23skdu/longbow-quarrel/internal/models"
+	"github.com/23skdu/longbow-quarrel/internal/simd"
 	"github.com/23skdu/longbow-quarrel/internal/telemetry"
 	"github.com/23skdu/longbow-quarrel/internal/tokenizer"
 	"github.com/23skdu/longbow-quarrel/internal/vlm"
@@ -57,6 +58,7 @@ var (
 	DraftLength      = flag.Int("draft-length", 4, "How many tokens the draft model proposes per step")
 	DraftPaths       = flag.Int("draft-paths", 2, "How many parallel draft paths to generate per step")
 	imagePath        = flag.String("image", "", "Path to image file for VLM inference (optional)")
+	stopTokensFlag   = flag.String("stop-tokens", "", "Comma-separated list of stop token IDs (e.g. 2,13)")
 
 	// Multi-GPU Flags
 	devicesFlag  = flag.String("devices", "", "Comma-separated list of CUDA device IDs for multi-GPU (e.g. 0,1)")
@@ -82,6 +84,7 @@ func main() {
 	}
 
 	fmt.Printf("=== Longbow-Quarrel CUDA ===\n")
+	metrics.RecordSIMDLevel(simd.GetCPULevel())
 	fmt.Printf("Model: %s\n", *modelPath)
 
 	resolvedPath, err := models.ResolveModelPath(*modelPath)
@@ -124,6 +127,18 @@ func main() {
 	}
 	if *totalBlocks > 0 {
 		engineConfig.TotalBlocks = *totalBlocks
+	}
+	if *stopTokensFlag != "" {
+		for _, s := range strings.Split(*stopTokensFlag, ",") {
+			s = strings.TrimSpace(s)
+			if s == "" {
+				continue
+			}
+			var id int
+			if _, err := fmt.Sscanf(s, "%d", &id); err == nil {
+				engineConfig.StopTokens = append(engineConfig.StopTokens, id)
+			}
+		}
 	}
 
 	var devIDs []int
@@ -321,6 +336,7 @@ func main() {
 		FrequencyPenalty: *frequencyPenalty,
 		MinP:             *minP,
 		Seed:             *seed,
+		StopTokens:       engineConfig.StopTokens,
 	}
 
 	startTime := time.Now()

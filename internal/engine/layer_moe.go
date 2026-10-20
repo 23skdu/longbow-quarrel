@@ -47,10 +47,17 @@ func (e *metalEngine) MOELayerForward(layerIdx int, input *device.Tensor) *devic
 	indices := expertIndices.ToHost()
 	// Convert flat float32 slice to int32 slice
 	intIndices := make([]int32, len(indices))
+	counts := make(map[int]int)
 	for i, v := range indices {
 		intIndices[i] = int32(v)
+		counts[int(v)]++
 	}
 	metrics.RecordMOEExpertSelection(layerIdx, intIndices)
+	if len(intIndices) > 0 {
+		for exp, count := range counts {
+			metrics.RecordMOEExpertUtilization(layerIdx, exp, float64(count)/float64(len(intIndices)))
+		}
+	}
 
 	// Step 3 & 4: Compute expert outputs (fused Gate + Up + SwiGLU)
 	gemmStart := time.Now()

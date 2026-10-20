@@ -110,6 +110,9 @@ func (c *PagedKVCache) Init(ctx *device.Context, config config.Config) error {
 
 	// Configurable block size
 	c.blockSize = 16 // Default to 16
+	if config.BlockSize > 0 {
+		c.blockSize = config.BlockSize
+	}
 	// Total capacity
 	capacity := config.KVCacheSize
 	if capacity == 0 {
@@ -127,7 +130,11 @@ func (c *PagedKVCache) Init(ctx *device.Context, config config.Config) error {
 	}
 
 	// Calculate number of blocks
-	c.totalBlocks = (capacity + c.blockSize - 1) / c.blockSize
+	if config.TotalBlocks > 0 {
+		c.totalBlocks = config.TotalBlocks
+	} else {
+		c.totalBlocks = (capacity + c.blockSize - 1) / c.blockSize
+	}
 
 	// Ensure we align to block size
 	capacity = c.totalBlocks * c.blockSize
@@ -347,7 +354,10 @@ func (c *PagedKVCache) encodeKVTurboQuant(k, v, kCache, vCache *device.Tensor, p
 	_ = vCache.LoadFrom(vRaw)
 
 	compressionRatio := float64(c.headDim*4) / float64(bytesPerBlock)
-	metrics.RecordTurboQuantBatch(compressionRatio, time.Since(startTime).Seconds())
+	durationSec := time.Since(startTime).Seconds()
+	metrics.RecordTurboQuantCompression("paged", compressionRatio)
+	metrics.RecordTurboQuantLatency(durationSec)
+	metrics.RecordTurboQuantBatch(compressionRatio, durationSec)
 }
 
 // SetStreamingLLM configures attention sinks and rolling sliding window for a sequence.

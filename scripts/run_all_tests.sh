@@ -17,6 +17,10 @@ cd "${REPO_ROOT}"
 # Default: 2GB. Override with QUARREL_TEST_MEMLIMIT env var.
 export GOMEMLIMIT="${QUARREL_TEST_MEMLIMIT:-2GiB}"
 
+# Bound CPU concurrency to prevent pinning all host cores and exhausting RAM across parallel package tests.
+# Default: 4. Override with QUARREL_TEST_PARALLEL or GOMAXPROCS.
+export GOMAXPROCS="${QUARREL_TEST_PARALLEL:-${GOMAXPROCS:-4}}"
+
 # Styling
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -151,7 +155,7 @@ fi
 # engine/api hold the actual concurrent code (batch scheduler, seq manager,
 # resource monitor); the earlier gate only covered leaf packages.
 log_header "7. Running Race Detector on Concurrency-Critical Components"
-if go test -race -timeout 600s -count=1 ./internal/engine/... ./internal/api/... ./internal/metrics/... ./internal/sampler/... ./internal/tokenizer/...; then
+if go test -race -p "${GOMAXPROCS}" -timeout 300s -count=1 ./internal/engine/... ./internal/api/... ./internal/metrics/... ./internal/sampler/... ./internal/tokenizer/...; then
     log_pass "Race Detector Validation"
 else
     log_fail "Race Detector Validation"
@@ -167,7 +171,7 @@ fi
 # a grep that silently took only the first match.
 log_header "8. Validating Code Coverage Gates (>= 80% + ratchet floors)"
 COVERAGE_PROFILE="${TMPDIR:-/tmp}/quarrel-coverage.out"
-if go test -coverprofile="${COVERAGE_PROFILE}" -covermode=atomic ./... >/dev/null 2>&1; then
+if go test -p "${GOMAXPROCS}" -timeout 300s -coverprofile="${COVERAGE_PROFILE}" -covermode=atomic ./... >/dev/null 2>&1; then
     if "${SCRIPT_DIR}/coverage_gate.sh" "${COVERAGE_PROFILE}"; then
         log_pass "Coverage Gates (>= 80% + ratchet floors)"
     else
@@ -218,9 +222,19 @@ fi
 # is not available; the CI job is the gate.
 log_header "9c. Building and testing the arm64 / NEON configuration"
 if command -v docker >/dev/null 2>&1; then
+    DOCKER_CACHE_ARGS=()
+    if [ -d "${HOME}/go/pkg/mod" ]; then
+        DOCKER_CACHE_ARGS+=(-v "${HOME}/go/pkg/mod:/go/pkg/mod")
+    fi
+    DOCKER_BUILD_CACHE="${HOME}/.cache/go-build-arm64"
+    mkdir -p "${DOCKER_BUILD_CACHE}"
+    DOCKER_CACHE_ARGS+=(-v "${DOCKER_BUILD_CACHE}:/root/.cache/go-build")
     if docker run --rm --platform linux/arm64 \
+            --cpus="${QUARREL_DOCKER_CPUS:-4}" --memory="${QUARREL_DOCKER_MEM:-4g}" \
+            "${DOCKER_CACHE_ARGS[@]}" \
             -v "${REPO_ROOT}:/src" -w /src -e CGO_ENABLED=1 \
-            golang:1.27 go test -count=1 ./internal/simd/... >/dev/null 2>&1; then
+            -e GOMAXPROCS=4 -e GOMEMLIMIT=2GiB \
+            golang:1.27 go test -p 4 -timeout 180s -count=1 ./internal/simd/... >/dev/null 2>&1; then
         log_pass "ARM64 / NEON Build and Tests"
     else
         log_fail "ARM64 / NEON Build and Tests"

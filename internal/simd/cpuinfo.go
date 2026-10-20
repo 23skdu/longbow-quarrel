@@ -5,6 +5,8 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+
+	"github.com/23skdu/longbow-quarrel/internal/metrics"
 )
 
 var (
@@ -63,7 +65,9 @@ func detectCPU() {
 	} else if hasAVX2 {
 		cpuLevel = CPULevelAVX2
 	}
+	metrics.RecordSIMDLevel(cpuLevel)
 }
+
 
 var (
 	cpuInfoOS          = runtime.GOOS

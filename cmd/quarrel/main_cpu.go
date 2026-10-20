@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/23skdu/longbow-quarrel/internal/logger"
 	"github.com/23skdu/longbow-quarrel/internal/metrics"
 	"github.com/23skdu/longbow-quarrel/internal/models"
+	"github.com/23skdu/longbow-quarrel/internal/simd"
 	"github.com/23skdu/longbow-quarrel/internal/telemetry"
 	"github.com/23skdu/longbow-quarrel/internal/tokenizer"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -44,6 +46,9 @@ var (
 	cpuDraftModel    = flag.String("draft-model", "", "Path to a smaller GGUF model used for speculative decoding (optional)")
 	cpuDraftLength   = flag.Int("draft-length", 4, "How many tokens the draft model proposes per step")
 	cpuDraftPaths    = flag.Int("draft-paths", 2, "How many parallel draft paths to generate per step")
+	cpuBlockSize     = flag.Int("block-size", 16, "Paged attention block size")
+	cpuTotalBlocks   = flag.Int("total-blocks", 256, "Total number of physical blocks in paged cache")
+	cpuStopTokens    = flag.String("stop-tokens", "", "Comma-separated list of stop token IDs (e.g. 2,13)")
 )
 
 // GPU-offload flags are accepted for command-line compatibility with the CUDA
@@ -78,6 +83,7 @@ func main() {
 	}
 
 	printVersion()
+	metrics.RecordSIMDLevel(simd.GetCPULevel())
 	fmt.Printf("=== Longbow-Quarrel (CPU) ===\nModel: %s\n", *cpuModelPath)
 
 	// Universal model resolution: accept a bare name like "qwen3" as well as a
@@ -113,6 +119,24 @@ func main() {
 	}
 	if *cpuMaxBatchSize > 0 {
 		engineConfig.MaxBatchSize = *cpuMaxBatchSize
+	}
+	if *cpuBlockSize > 0 {
+		engineConfig.BlockSize = *cpuBlockSize
+	}
+	if *cpuTotalBlocks > 0 {
+		engineConfig.TotalBlocks = *cpuTotalBlocks
+	}
+	if *cpuStopTokens != "" {
+		for _, s := range strings.Split(*cpuStopTokens, ",") {
+			s = strings.TrimSpace(s)
+			if s == "" {
+				continue
+			}
+			var id int
+			if _, err := fmt.Sscanf(s, "%d", &id); err == nil {
+				engineConfig.StopTokens = append(engineConfig.StopTokens, id)
+			}
+		}
 	}
 	// The CPU engine has no device offload; force a fully host-resident run so
 	// the registered factory cannot select a GPU backend.
@@ -215,6 +239,7 @@ func main() {
 		RepPenalty:  *cpuRepPenalty,
 		MinP:        *cpuMinP,
 		Seed:        *cpuSeed,
+		StopTokens:  engineConfig.StopTokens,
 	}
 
 	startTime := time.Now()

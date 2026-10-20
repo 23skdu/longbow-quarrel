@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"encoding/json"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -250,3 +251,290 @@ func docsMetricsPath(t *testing.T) string {
 	}
 	return p
 }
+
+// productionMetricAllowlist contains declared metrics that are intentionally not
+// written by the standard engine execution path on this host (e.g. experimental backends).
+var productionMetricAllowlist = map[string]string{
+	"quarrel_tpu_engine_initialized_total":   "TPU backend stub (Step 58/61)",
+	"quarrel_tpu_engine_failed_total":        "TPU backend stub (Step 58/61)",
+	"quarrel_tpu_inference_total":            "TPU backend stub (Step 58/61)",
+	"quarrel_tpu_inference_duration_seconds": "TPU backend stub (Step 58/61)",
+	"quarrel_tpu_tokens_generated_total":     "TPU backend stub (Step 58/61)",
+	"quarrel_tpu_tokens_per_second":          "TPU backend stub (Step 58/61)",
+	"quarrel_tpu_layer_latency_seconds":      "TPU backend stub (Step 58/61)",
+	"quarrel_tpu_memory_bytes":               "TPU backend stub (Step 58/61)",
+	"quarrel_tpu_dequantization_seconds":     "TPU backend stub (Step 58/61)",
+	"quarrel_tpu_attention_seconds":          "TPU backend stub (Step 58/61)",
+	"quarrel_tpu_sampling_seconds":           "TPU backend stub (Step 58/61)",
+	"quarrel_tpu_batch_size":                 "TPU backend stub (Step 58/61)",
+}
+
+// TestMetrics_WrittenByProductionCode verifies that every declared metric is written
+// by production code or is on the explicit allowlist, and that no dashboard panel reads
+// a metric that is never written.
+func TestMetrics_WrittenByProductionCode(t *testing.T) {
+	root := repoRoot(t)
+	if root == "" {
+		t.Skip("repository root not found")
+	}
+
+	type metricInfo struct {
+		varName string
+		file    string
+	}
+	metricDecls := map[string]metricInfo{}   // fullName -> info
+	varToMetric := map[string]string{}       // varName -> fullName
+	funcToVars := map[string]map[string]bool{} // funcName -> set of varNames written
+
+	fset := token.NewFileSet()
+
+	// 1. Collect metric declarations and helper functions across all non-test files
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			if info != nil && info.IsDir() {
+				switch info.Name() {
+				case ".git", "node_modules", "vendor":
+					return filepath.SkipDir
+				}
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+
+		f, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			return nil
+		}
+
+		// Look for variable declarations initialized with promauto.New*
+		ast.Inspect(f, func(n ast.Node) bool {
+			genDecl, ok := n.(*ast.GenDecl)
+			if ok && genDecl.Tok == token.VAR {
+				for _, spec := range genDecl.Specs {
+					valSpec, ok := spec.(*ast.ValueSpec)
+					if !ok {
+						continue
+					}
+					for i, nameIdent := range valSpec.Names {
+						if i >= len(valSpec.Values) {
+							continue
+						}
+						val := valSpec.Values[i]
+						// Find metric name insideOpts
+						fullName := extractMetricNameFromExpr(val)
+						if fullName != "" && isProjectMetric(fullName) {
+							metricDecls[fullName] = metricInfo{varName: nameIdent.Name, file: path}
+							varToMetric[nameIdent.Name] = fullName
+						}
+					}
+				}
+			}
+			return true
+		})
+
+		// Look for function declarations and which metric vars they reference
+		for _, decl := range f.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			fnName := fn.Name.Name
+			if funcToVars[fnName] == nil {
+				funcToVars[fnName] = map[string]bool{}
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				switch x := n.(type) {
+				case *ast.Ident:
+					funcToVars[fnName][x.Name] = true
+				case *ast.SelectorExpr:
+					funcToVars[fnName][x.Sel.Name] = true
+				}
+				return true
+			})
+		}
+
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("failed scanning metric declarations: %v", err)
+	}
+
+	// 2. Collect which functions and variables are called/referenced in production code
+	calledFuncs := map[string]bool{}
+	referencedVars := map[string]bool{}
+
+	err = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			if info != nil && info.IsDir() {
+				switch info.Name() {
+				case ".git", "node_modules", "vendor":
+					return filepath.SkipDir
+				}
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+
+		f, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			return nil
+		}
+
+		ast.Inspect(f, func(n ast.Node) bool {
+			// Skip the metric variable declaration itself
+			if genDecl, ok := n.(*ast.GenDecl); ok && genDecl.Tok == token.VAR {
+				for _, spec := range genDecl.Specs {
+					if valSpec, ok := spec.(*ast.ValueSpec); ok {
+						for i := range valSpec.Names {
+							if i < len(valSpec.Values) && extractMetricNameFromExpr(valSpec.Values[i]) != "" {
+								return false
+							}
+						}
+					}
+				}
+			}
+			switch expr := n.(type) {
+			case *ast.CallExpr:
+				switch fn := expr.Fun.(type) {
+				case *ast.Ident:
+					calledFuncs[fn.Name] = true
+				case *ast.SelectorExpr:
+					calledFuncs[fn.Sel.Name] = true
+				}
+			case *ast.SelectorExpr:
+				referencedVars[expr.Sel.Name] = true
+			case *ast.Ident:
+				referencedVars[expr.Name] = true
+			}
+			return true
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("failed scanning production callers: %v", err)
+	}
+
+	// 3. Mark written metrics
+	writtenMetrics := map[string]bool{}
+
+	// If a helper function is called, mark all vars it references
+	for fnName, referencedInFn := range funcToVars {
+		if calledFuncs[fnName] {
+			for varName := range referencedInFn {
+				if metricName, ok := varToMetric[varName]; ok {
+					writtenMetrics[metricName] = true
+				}
+			}
+		}
+	}
+
+	// If a variable itself is referenced with method calls (e.g. .Inc, .Set, .Observe)
+	for varName := range referencedVars {
+		if metricName, ok := varToMetric[varName]; ok {
+			writtenMetrics[metricName] = true
+		}
+	}
+
+	// 4. Assert that every declared metric is written or on the allowlist
+	for metricName, info := range metricDecls {
+		if writtenMetrics[metricName] {
+			continue
+		}
+		if _, ok := productionMetricAllowlist[metricName]; ok {
+			continue
+		}
+		t.Errorf("metric %q (variable %s in %s) is declared but never written by production code",
+			metricName, info.varName, filepath.Base(info.file))
+	}
+
+	// 5. Assert that every metric queried by the Grafana dashboard is written or allowlisted
+	dashPath := dashboardPath(t)
+	if dashPath != "" {
+		dashRaw, err := os.ReadFile(dashPath)
+		if err == nil {
+			var dashboard struct {
+				Panels []struct {
+					Title   string `json:"title"`
+					Targets []struct {
+						Expr string `json:"expr"`
+					} `json:"targets"`
+				} `json:"panels"`
+			}
+			if err := json.Unmarshal(dashRaw, &dashboard); err == nil {
+				for _, panel := range dashboard.Panels {
+					for _, target := range panel.Targets {
+						for _, word := range regexp.MustCompile(`\b([a-z][a-z0-9_]*)\b`).FindAllStringSubmatch(target.Expr, -1) {
+							name := word[1]
+							for _, suffix := range []string{"_bucket", "_sum", "_count"} {
+								name = strings.TrimSuffix(name, suffix)
+							}
+							if _, isDecl := metricDecls[name]; isDecl {
+								if !writtenMetrics[name] && productionMetricAllowlist[name] == "" {
+									t.Errorf("dashboard panel %q queries metric %q which is never written by production code",
+										panel.Title, name)
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+func extractMetricNameFromExpr(expr ast.Expr) string {
+	cl, ok := expr.(*ast.CompositeLit)
+	if !ok {
+		// Might be CallExpr: promauto.NewCounter(prometheus.CounterOpts{...})
+		if call, ok := expr.(*ast.CallExpr); ok && len(call.Args) > 0 {
+			return extractMetricNameFromExpr(call.Args[0])
+		}
+		return ""
+	}
+	if !isOptsType(cl.Type) {
+		return ""
+	}
+	ns, sub, name := "", "", ""
+	for _, elt := range cl.Elts {
+		kv, ok := elt.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		key, ok := kv.Key.(*ast.Ident)
+		if !ok {
+			continue
+		}
+		lit, ok := kv.Value.(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			continue
+		}
+		v, err := strconv.Unquote(lit.Value)
+		if err != nil {
+			continue
+		}
+		switch key.Name {
+		case "Namespace":
+			ns = v
+		case "Subsystem":
+			sub = v
+		case "Name":
+			name = v
+		}
+	}
+	if name == "" {
+		return ""
+	}
+	full := name
+	if ns != "" {
+		full = ns + "_" + full
+	}
+	if sub != "" {
+		full = ns + "_" + sub + "_" + name
+	}
+	return full
+}
+

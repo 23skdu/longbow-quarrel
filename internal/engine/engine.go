@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unsafe"
 
 	"github.com/23skdu/longbow-quarrel/internal/mathx"
 
@@ -344,6 +345,9 @@ func (e *metalEngine) loadModel(path string) error {
 				"shared_kv_layers", e.config.Gemma4SharedKVLayers,
 				"sliding_head_dim", e.config.Gemma4SlidingHeadDim,
 				"full_head_dim", e.config.Gemma4FullHeadDim)
+			metrics.RecordGemma4HeadDims(e.config.Gemma4SlidingHeadDim, e.config.Gemma4FullHeadDim)
+			metrics.RecordGemma4LayerPattern(e.config.Gemma4SharedKVLayers, e.config.Layers-e.config.Gemma4SharedKVLayers)
+			metrics.RecordGemma4Context(e.config.SeqLen)
 		}
 		logger.Log.Info("Model architecture confirmed", "arch", arch)
 	}
@@ -454,13 +458,26 @@ func (e *metalEngine) loadModel(path string) error {
 		switch t.Type {
 
 		case gguf.GGMLTypeF32:
-			mt = e.ctx.NewTensorFP32(rows, cols)
-			dataBytes := numElements * 4
-			if uint64(len(t.Data)) < uint64(dataBytes) {
-				return fmt.Errorf("tensor %s data truncated", t.Name)
-			}
-			if err := mt.LoadFromRaw(t.Data[:dataBytes]); err != nil {
-				return err
+			if isNormWeight(t.Name) {
+				mt = e.ctx.NewTensorFP32(rows, cols)
+				dataBytes := numElements * 4
+				if uint64(len(t.Data)) < uint64(dataBytes) {
+					return fmt.Errorf("tensor %s data truncated", t.Name)
+				}
+				if err := mt.LoadFromRaw(t.Data[:dataBytes]); err != nil {
+					return err
+				}
+			} else {
+				// Convert F32 linear weights to F16 for Metal kernels
+				mt = e.ctx.NewTensorWithType(rows, cols, device.DataTypeF16)
+				dataBytes := numElements * 4
+				if uint64(len(t.Data)) < uint64(dataBytes) {
+					return fmt.Errorf("tensor %s data truncated", t.Name)
+				}
+				f32Data := unsafe.Slice((*float32)(unsafe.Pointer(&t.Data[0])), numElements)
+				if err := mt.LoadFrom(f32Data); err != nil {
+					return err
+				}
 			}
 			e.GlobalScale = 1.0
 
@@ -1109,8 +1126,8 @@ func (e *metalEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, err
 					for j := 0; j < chunkLen; j++ {
 						updateItems[tokenIdx].SeqID = seqIDs[i]
 						updateItems[tokenIdx].Pos = desc.ContextLens[i] + j
-						updateItems[tokenIdx].K = k.Slice(tokenIdx, 1)
-						updateItems[tokenIdx].V = v.Slice(tokenIdx, 1)
+						updateItems[tokenIdx].K = k.SliceRow(tokenIdx)
+						updateItems[tokenIdx].V = v.SliceRow(tokenIdx)
 						tokenIdx++
 					}
 				}
@@ -1143,11 +1160,8 @@ func (e *metalEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, err
 			lastTokenIdx = numTokens - 1
 		}
 
-		// Copy single row to a new tensor
-		row := logitsAll.Slice(lastTokenIdx, 1)
-		rowCopy := e.ctx.NewTensorWithType(1, e.config.VocabSize, device.DataTypeF32)
-		row.CopyF32Into(rowCopy)
-		results[i] = rowCopy
+		// Extract row tensor directly as [1, VocabSize] F32
+		results[i] = logitsAll.SliceRow(lastTokenIdx)
 	}
 
 	return results, nil
@@ -1206,9 +1220,11 @@ func (e *metalEngine) applyLoRAtoLayer(adapterID, name string, input, output *de
 
 	// Slice the rows of input and output that belong to this adapter
 	for _, rowIdx := range tokenIndices {
-		rowIn := finalInput.Slice(rowIdx, 1)
-		rowOut := output.Slice(rowIdx, 1)
+		rowIn := finalInput.SliceRow(rowIdx)
+		rowOut := output.SliceRow(rowIdx)
 		e.ctx.LinearLoRAAdd(rowIn, w.A, w.B, rowOut, w.Alpha/float32(w.Rank))
+		rowIn.Free()
+		rowOut.Free()
 	}
 
 	if isTempInput {
@@ -1225,7 +1241,11 @@ func (e *metalEngine) runBatchLoop() {
 		default:
 		}
 		// Pull active sequences from the manager (desc contains packed tokens)
-		desc, _ := e.BatchManager.Step(16, e.cache, e.PromptCache)
+		maxBatch := 16
+		if e.config.MaxBatchSize > 0 {
+			maxBatch = e.config.MaxBatchSize
+		}
+		desc, _ := e.BatchManager.Step(maxBatch, e.cache, e.PromptCache)
 		if desc == nil || len(desc.Sequences) == 0 {
 			time.Sleep(10 * time.Millisecond)
 			continue
@@ -1307,7 +1327,7 @@ func (e *metalEngine) runBatchLoop() {
 					isEOS = t.IsEOS(token)
 				}
 			}
-			if isEOS || isStopToken(e.stopTokens, token) || len(seq.Tokens) >= seq.MaxTokens {
+			if isEOS || isStopToken(e.stopTokens, token) || isStopToken(stopTokenSet(seq.Config.StopTokens), token) || len(seq.Tokens) >= seq.MaxTokens {
 				select {
 				case seq.Result <- seq.Tokens:
 				default:
@@ -1319,6 +1339,9 @@ func (e *metalEngine) runBatchLoop() {
 }
 
 func (e *metalEngine) inferInternal(inputTokens []int, tokensToGenerate int, samplerConfig SamplerConfig, tokenCallback func(int), logitsCallback func([]float32)) ([]int, error) {
+	metrics.RecordContextLength(len(inputTokens))
+	startTime := time.Now()
+
 	// Create channels for async completion
 	resChan := make(chan []int, 1)
 	errChan := make(chan error, 1)
@@ -1340,10 +1363,13 @@ func (e *metalEngine) inferInternal(inputTokens []int, tokensToGenerate int, sam
 	// Wait for completion (blocking call for sync API compatibility)
 	select {
 	case tokens := <-resChan:
-		// Return only the newly generated tokens
+		genTokens := 0
 		if len(tokens) > len(inputTokens) {
+			genTokens = len(tokens) - len(inputTokens)
+			metrics.RecordInference(genTokens, time.Since(startTime))
 			return tokens[len(inputTokens):], nil
 		}
+		metrics.RecordInference(0, time.Since(startTime))
 		return []int{}, nil
 	case err := <-errChan:
 		return nil, err

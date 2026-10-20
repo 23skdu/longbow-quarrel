@@ -19,6 +19,11 @@ func (m *mockEngine) InferWithLogits(tokens []int, count int, cfg engine.Sampler
 }
 
 func (m *mockEngine) InferWithCallback(tokens []int, count int, cfg engine.SamplerConfig, callback func(token int)) ([]int, error) {
+	for _, tok := range []int{1, 2, 3} {
+		if callback != nil {
+			callback(tok)
+		}
+	}
 	return []int{1, 2, 3}, nil
 }
 

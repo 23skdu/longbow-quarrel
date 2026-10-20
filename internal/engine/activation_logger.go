@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/23skdu/longbow-quarrel/internal/device"
 	"github.com/23skdu/longbow-quarrel/internal/mathx"
 )
 
@@ -53,6 +54,11 @@ func (al *ActivationLogger) LogLayer(layerIdx int, qMax, kMax, vMax, attnMax, ff
 	if !al.enabled {
 		return
 	}
+
+	auditActivationPrecision("rmsnorm", qMax)
+	auditActivationPrecision("swiglu", ffnMax)
+	auditActivationPrecision("residual", attnMax)
+	auditSoftmaxMasking(len(qSample), layerIdx, 512, nil)
 
 	layer := LayerLog{
 		Idx:        layerIdx,
@@ -120,6 +126,18 @@ func (al *ActivationLogger) SaveToFile(filename string) error {
 	}
 
 	fmt.Printf("Activation log saved to: %s\n", filename)
+
+	stats := make([]device.ActivationStats, len(al.log.Layers))
+	for i, l := range al.log.Layers {
+		stats[i] = device.ActivationStats{
+			Max:  l.AttnOutMax,
+			NaNs: l.AttnNaNCount,
+			Infs: l.AttnInfCount,
+		}
+	}
+	auditActivationFlow(stats, len(stats))
+	auditNaNPropagation(stats)
+
 	return nil
 }
 

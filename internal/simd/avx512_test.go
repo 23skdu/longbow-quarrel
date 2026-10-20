@@ -544,3 +544,124 @@ func TestRoPE(t *testing.T) {
 		})
 	}
 }
+
+func TestAVX512_SoftmaxAVX2_Compatibility(t *testing.T) {
+	input := []float32{1.0, 2.0, 3.0}
+	SoftmaxAVX2(input)
+	expected := []float32{0.090030, 0.244728, 0.665241}
+	for i, v := range input {
+		if math.Abs(float64(v-expected[i])) > 1e-4 {
+			t.Errorf("SoftmaxAVX2()[%d] = %v, want %v", i, v, expected[i])
+		}
+	}
+}
+
+func TestAVX512_SwiGLUAVX2_Compatibility(t *testing.T) {
+	gate := []float32{0.0, 1.0, -1.0}
+	up := []float32{1.0, 2.0, 3.0}
+	out := make([]float32, 3)
+	SwiGLUAVX2(gate, up, out)
+	for i, v := range out {
+		if math.IsInf(float64(v), 0) || math.IsNaN(float64(v)) {
+			t.Errorf("SwiGLUAVX2()[%d] = %v", i, v)
+		}
+	}
+}
+
+func TestAVX512_FusedAttentionScalar(t *testing.T) {
+	const (
+		batch    = 1
+		heads    = 2
+		seqLen   = 4
+		kvSeqLen = 4
+		headDim  = 8
+		scale    = float32(0.3535)
+	)
+	total := batch * heads * seqLen * headDim
+	q := make([]float32, total)
+	k := make([]float32, total)
+	v := make([]float32, total)
+	out := make([]float32, total)
+	for i := range q {
+		q[i] = float32(i%7) * 0.1
+		k[i] = float32(i%5) * 0.1
+		v[i] = float32(i%3) * 0.1
+	}
+
+	fusedAttentionScalar(q, k, v, out, batch, heads, seqLen, kvSeqLen, headDim, scale)
+
+	for i, val := range out {
+		if math.IsNaN(float64(val)) || math.IsInf(float64(val), 0) {
+			t.Errorf("fusedAttentionScalar out[%d] = %v", i, val)
+		}
+	}
+}
+
+func TestAVX512_FusedMLPScalar(t *testing.T) {
+	const (
+		batch     = 1
+		dim       = 16
+		hiddenDim = 32
+	)
+	input := make([]float32, batch*dim)
+	gateW := make([]float32, hiddenDim)
+	upW := make([]float32, hiddenDim)
+	downW := make([]float32, dim*hiddenDim)
+	out := make([]float32, batch*dim)
+	for i := range input {
+		input[i] = 0.5
+	}
+	for i := range gateW {
+		gateW[i] = 0.2
+		upW[i] = 0.3
+	}
+	for i := range downW {
+		downW[i] = 0.1
+	}
+
+	fusedMLPScalar(input, gateW, upW, downW, out, batch, dim, hiddenDim)
+
+	for i, val := range out {
+		if math.IsNaN(float64(val)) || math.IsInf(float64(val), 0) {
+			t.Errorf("fusedMLPScalar out[%d] = %v", i, val)
+		}
+	}
+}
+
+func TestAVX512_VNNIKernels(t *testing.T) {
+	dataQ8 := make([]byte, 34) // 1 block of Q8_0: 2 bytes d (f16) + 32 bytes qs (int8)
+	dataQ8[0] = 0x00
+	dataQ8[1] = 0x3c // 1.0 in f16
+	for i := 2; i < 34; i++ {
+		dataQ8[i] = 1
+	}
+	vec := make([]float32, 32)
+	for i := range vec {
+		vec[i] = 1.0
+	}
+
+	resQ8 := VecDotQ8_0_VNNI(dataQ8, vec)
+	if math.IsNaN(float64(resQ8)) {
+		t.Errorf("VecDotQ8_0_VNNI returned NaN")
+	}
+
+	dataQ4 := make([]byte, 144) // 1 block of Q4_K
+	dataQ4[0] = 0x00
+	dataQ4[1] = 0x3c // d = 1.0
+	resQ4 := VecDotQ4_K_VNNI(dataQ4, make([]float32, 256))
+	if math.IsNaN(float64(resQ4)) {
+		t.Errorf("VecDotQ4_K_VNNI returned NaN")
+	}
+
+	if HasAVXVNNI() {
+		resC8 := dotQ8_0VNNIC(dataQ8, vec, 32)
+		if math.IsNaN(float64(resC8)) {
+			t.Errorf("dotQ8_0VNNIC returned NaN")
+		}
+		resC4 := dotQ4KVNNIC(dataQ4, make([]float32, 256), 256)
+		if math.IsNaN(float64(resC4)) {
+			t.Errorf("dotQ4KVNNIC returned NaN")
+		}
+	}
+}
+

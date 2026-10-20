@@ -53,9 +53,11 @@ float dot_q4_k_vnni(const uint8_t* data, const float* vector, int n);
 import "C"
 import (
 	"runtime"
+	"time"
 	"unsafe"
 
 	"github.com/23skdu/longbow-quarrel/internal/mathx"
+	"github.com/23skdu/longbow-quarrel/internal/metrics"
 )
 
 var (
@@ -106,12 +108,14 @@ func Softmax(x []float32) {
 			return
 		}
 		// Fall through to AVX2 for smaller arrays
+		metrics.RecordSIMDFallback("avx512", "avx2")
 		fallthrough
 	case 1:
 		if len(x) >= 16 {
 			C.softmax_avx2((*C.float)(unsafe.Pointer(&x[0])), C.long(len(x)))
 			return
 		}
+		metrics.RecordSIMDFallback("avx2", "scalar")
 		fallthrough
 	default:
 		softmaxScalar(x)
@@ -693,12 +697,18 @@ func fp32ToFp16(f float32) uint16 {
 
 // DotQ8_0VNNI calls the VNNI-accelerated Q8_0 dot product kernel.
 func dotQ8_0VNNIC(data []byte, vector []float32, n int) float32 {
-	return float32(C.dot_q8_0_vnni((*C.uint8_t)(unsafe.Pointer(&data[0])), (*C.float)(unsafe.Pointer(&vector[0])), C.int(n)))
+	t0 := time.Now()
+	res := float32(C.dot_q8_0_vnni((*C.uint8_t)(unsafe.Pointer(&data[0])), (*C.float)(unsafe.Pointer(&vector[0])), C.int(n)))
+	metrics.RecordVNNIDotProduct(time.Since(t0))
+	return res
 }
 
 // DotQ4KVNNI calls the VNNI-accelerated Q4_K dot product kernel.
 func dotQ4KVNNIC(data []byte, vector []float32, n int) float32 {
-	return float32(C.dot_q4_k_vnni((*C.uint8_t)(unsafe.Pointer(&data[0])), (*C.float)(unsafe.Pointer(&vector[0])), C.int(n)))
+	t0 := time.Now()
+	res := float32(C.dot_q4_k_vnni((*C.uint8_t)(unsafe.Pointer(&data[0])), (*C.float)(unsafe.Pointer(&vector[0])), C.int(n)))
+	metrics.RecordVNNIDotProduct(time.Since(t0))
+	return res
 }
 
 func init() {

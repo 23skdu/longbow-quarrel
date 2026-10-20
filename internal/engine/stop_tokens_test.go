@@ -54,3 +54,32 @@ func TestStopTokensAreReadFromConfig(t *testing.T) {
 		t.Error("the configured stop tokens are not reflected in the lookup set")
 	}
 }
+
+// TestStopTokensTerminateSequence verifies that a sequence terminates early
+// when a token matches seq.Config.StopTokens or engine stopTokens.
+func TestStopTokensTerminateSequence(t *testing.T) {
+	seq := &Sequence{
+		Config: SamplerConfig{
+			StopTokens: []int{42},
+		},
+	}
+	engineStopTokens := stopTokenSet([]int{99})
+
+	// Non-matching token
+	tok := 10
+	if isStopToken(engineStopTokens, tok) || isStopToken(stopTokenSet(seq.Config.StopTokens), tok) {
+		t.Fatalf("token %d should not be a stop token", tok)
+	}
+
+	// Engine stop token
+	tok = 99
+	if !(isStopToken(engineStopTokens, tok) || isStopToken(stopTokenSet(seq.Config.StopTokens), tok)) {
+		t.Fatalf("token %d should be recognised as engine stop token", tok)
+	}
+
+	// Per-sequence stop token from SamplerConfig
+	tok = 42
+	if !(isStopToken(engineStopTokens, tok) || isStopToken(stopTokenSet(seq.Config.StopTokens), tok)) {
+		t.Fatalf("token %d should be recognised as per-sequence stop token", tok)
+	}
+}

@@ -203,6 +203,7 @@ func GenerateHandler(cfg config.Config) http.HandlerFunc {
 		responseChanChan, err := adapter.Infer(r.Context(), adapterReq)
 		if err != nil {
 			log.Printf("Inference error: %v", err)
+			RecordError("inference_failed")
 			http.Error(w, "Inference failed", http.StatusInternalServerError)
 			return
 		}

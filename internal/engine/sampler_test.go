@@ -130,3 +130,24 @@ func TestSampler_MinP(t *testing.T) {
 		}
 	}
 }
+
+func TestSampler_Mirostat(t *testing.T) {
+	s := NewSampler(SamplerConfig{
+		Temperature: 1.0,
+		MirostatTau: 3.0,
+		MirostatEta: 0.1,
+	})
+	logits := []float32{2.0, 1.5, 0.5, 0.1}
+
+	// Sample multiple times to exercise Mirostat adaptation of mu
+	for i := 0; i < 10; i++ {
+		token := s.Sample(logits, nil)
+		if token < 0 || token >= len(logits) {
+			t.Fatalf("unexpected token sampled by Mirostat: %d", token)
+		}
+	}
+	if s.mirostatMu <= 0 {
+		t.Errorf("expected mirostatMu to be initialized and positive, got %f", s.mirostatMu)
+	}
+}
+

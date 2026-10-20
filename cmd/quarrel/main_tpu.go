@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -47,6 +48,7 @@ var (
 	DraftModel    = flag.String("draft-model", "", "Path to a smaller GGUF model used for speculative decoding (optional)")
 	DraftLength   = flag.Int("draft-length", 4, "How many tokens the draft model proposes per step")
 	DraftPaths    = flag.Int("draft-paths", 2, "How many parallel draft paths to generate per step")
+	stopTokensFlag = flag.String("stop-tokens", "", "Comma-separated list of stop token IDs (e.g. 2,13)")
 )
 
 func main() {
@@ -143,11 +145,26 @@ func main() {
 	}
 
 	engineConfig := config.Config{
-		KVCacheSize: *kvCacheSize,
-		SeqLen:      *kvCacheSize,
+		KVCacheSize:  *kvCacheSize,
+		SeqLen:       *kvCacheSize,
+		MaxBatchSize: *maxBatchSize,
+		BlockSize:    *blockSize,
+		TotalBlocks:  *totalBlocks,
 	}
 	if *ActivationLog != "" {
 		engineConfig.ActivationLogPath = *ActivationLog
+	}
+	if *stopTokensFlag != "" {
+		for _, s := range strings.Split(*stopTokensFlag, ",") {
+			s = strings.TrimSpace(s)
+			if s == "" {
+				continue
+			}
+			var id int
+			if _, err := fmt.Sscanf(s, "%d", &id); err == nil {
+				engineConfig.StopTokens = append(engineConfig.StopTokens, id)
+			}
+		}
 	}
 
 	e, err := engine.NewEngine(*modelPath, engineConfig)
@@ -205,6 +222,7 @@ func main() {
 		TopK:        *topK,
 		TopP:        *topP,
 		RepPenalty:  *repPenalty,
+		StopTokens:  engineConfig.StopTokens,
 	}
 
 	startTime := time.Now()

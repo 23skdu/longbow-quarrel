@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 	"github.com/23skdu/longbow-quarrel/internal/logger"
 	"github.com/23skdu/longbow-quarrel/internal/metrics"
 	"github.com/23skdu/longbow-quarrel/internal/ollama"
+	"github.com/23skdu/longbow-quarrel/internal/simd"
 	"github.com/23skdu/longbow-quarrel/internal/telemetry"
 	"github.com/23skdu/longbow-quarrel/internal/tokenizer"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -45,6 +47,7 @@ var (
 	DraftModel    = flag.String("draft-model", "", "Path to a smaller GGUF model used for speculative decoding (optional)")
 	DraftLength   = flag.Int("draft-length", 4, "How many tokens the draft model proposes per step")
 	DraftPaths    = flag.Int("draft-paths", 2, "How many parallel draft paths to generate per step")
+	stopTokensFlag = flag.String("stop-tokens", "", "Comma-separated list of stop token IDs (e.g. 2,13)")
 )
 
 func main() {
@@ -65,6 +68,7 @@ func main() {
 	}
 
 	fmt.Printf("=== Longbow-Quarrel Metal ===\n")
+	metrics.RecordSIMDLevel(simd.GetCPULevel())
 	fmt.Printf("Model: %s\n", *modelPath)
 
 	resolvedPath, err := ollama.ResolveModelPath(*modelPath)
@@ -137,6 +141,18 @@ func main() {
 	if *ActivationLog != "" {
 		engineConfig.ActivationLogPath = *ActivationLog
 	}
+	if *stopTokensFlag != "" {
+		for _, s := range strings.Split(*stopTokensFlag, ",") {
+			s = strings.TrimSpace(s)
+			if s == "" {
+				continue
+			}
+			var id int
+			if _, err := fmt.Sscanf(s, "%d", &id); err == nil {
+				engineConfig.StopTokens = append(engineConfig.StopTokens, id)
+			}
+		}
+	}
 
 	e, err := engine.NewEngine(*modelPath, engineConfig)
 	if err != nil {
@@ -194,6 +210,7 @@ func main() {
 			TopP:        *topP,
 			RepPenalty:  *repPenalty,
 			Seed:        time.Now().UnixNano(),
+			StopTokens:  engineConfig.StopTokens,
 		}
 
 		var result []int

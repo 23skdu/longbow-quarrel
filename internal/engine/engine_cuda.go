@@ -81,14 +81,66 @@ func NewcudaEngine(modelPath string, cfg config.Config) (Engine, error) {
 	}
 
 	modelCfg := ExtractModelConfig(f)
+	if cfg.Layers <= 0 {
+		cfg.Layers = modelCfg.Layers
+	}
+	if cfg.Dim <= 0 {
+		cfg.Dim = modelCfg.Dim
+	}
+	if cfg.Heads <= 0 {
+		cfg.Heads = modelCfg.Heads
+	}
+	if cfg.KVHeads <= 0 {
+		cfg.KVHeads = modelCfg.KVHeads
+	}
+	if modelCfg.HeadDim > 0 {
+		cfg.HeadDim = modelCfg.HeadDim
+	} else if cfg.HeadDim <= 0 {
+		cfg.HeadDim = modelCfg.HeadDim
+	}
+	if cfg.HiddenDim <= 0 {
+		cfg.HiddenDim = modelCfg.HiddenDim
+	}
+	if cfg.VocabSize <= 0 {
+		cfg.VocabSize = modelCfg.VocabSize
+	}
+	if cfg.SeqLen <= 0 {
+		cfg.SeqLen = modelCfg.SeqLen
+	}
+	if modelCfg.Eps > 0 {
+		cfg.Eps = modelCfg.Eps
+	} else if cfg.Eps <= 0 {
+		cfg.Eps = modelCfg.Eps
+	}
+	if modelCfg.RopeTheta > 0 {
+		cfg.RopeTheta = modelCfg.RopeTheta
+	} else if cfg.RopeTheta <= 0 {
+		cfg.RopeTheta = modelCfg.RopeTheta
+	}
+	if cfg.Architecture == "" {
+		cfg.Architecture = modelCfg.Architecture
+	}
+	if modelCfg.IsGemma4 {
+		cfg.IsGemma4 = true
+		cfg.Gemma4SlidingWindowSize = modelCfg.Gemma4SlidingWindowSize
+		cfg.Gemma4SlidingRoPETheta = modelCfg.Gemma4SlidingRoPETheta
+		cfg.Gemma4FullRoPETheta = modelCfg.Gemma4FullRoPETheta
+		cfg.Gemma4PartialRoPEFactor = modelCfg.Gemma4PartialRoPEFactor
+		cfg.Gemma4SlidingHeadDim = modelCfg.Gemma4SlidingHeadDim
+		cfg.Gemma4FullHeadDim = modelCfg.Gemma4FullHeadDim
+		cfg.Gemma4SharedKVLayers = modelCfg.Gemma4SharedKVLayers
+		cfg.Gemma4SlidingPattern = modelCfg.Gemma4SlidingPattern
+		cfg.FinalLogitSoftcapping = modelCfg.FinalLogitSoftcapping
+		cfg.Eps = modelCfg.Eps
+	}
 	if cfg.KVCacheSize > 0 {
-		modelCfg.KVCacheSize = cfg.KVCacheSize
-		modelCfg.SeqLen = cfg.KVCacheSize
+		cfg.SeqLen = cfg.KVCacheSize
+	} else if modelCfg.KVCacheSize > 0 {
+		cfg.KVCacheSize = modelCfg.KVCacheSize
 	}
-	if cfg.NumGPULayers != 0 {
-		modelCfg.NumGPULayers = cfg.NumGPULayers
+	if modelCfg.EOSTokenID > 0 && cfg.EOSTokenID <= 0 {
+		cfg.EOSTokenID = modelCfg.EOSTokenID
 	}
-	cfg = modelCfg
 
 	// The -devices flag selects the CUDA device the engine runs on. It
 	// used to be ignored: the engine always created its context on the
@@ -182,6 +234,9 @@ func NewcudaEngine(modelPath string, cfg config.Config) (Engine, error) {
 		e.config.Gemma4FullHeadDim = 512
 		e.config.Gemma4SharedKVLayers = modelCfg.Gemma4SharedKVLayers
 		e.config.Gemma4SlidingPattern = modelCfg.Gemma4SlidingPattern
+		metrics.RecordGemma4HeadDims(e.config.Gemma4SlidingHeadDim, e.config.Gemma4FullHeadDim)
+		metrics.RecordGemma4LayerPattern(e.config.Gemma4SharedKVLayers, e.config.Layers-e.config.Gemma4SharedKVLayers)
+		metrics.RecordGemma4Context(e.config.SeqLen)
 	}
 
 	log.Printf("CUDA engine initialized with PagedKVCache: model=%s heads=%d kv_heads=%d", modelPath, heads, kvHeads)
@@ -323,7 +378,11 @@ func (e *cudaEngine) runBatchLoop() {
 		}
 
 		// 1. Pull active sequences
-		desc, _ := e.BatchManager.Step(16, e.cache, e.PromptCache)
+		maxBatch := 16
+		if e.config.MaxBatchSize > 0 {
+			maxBatch = e.config.MaxBatchSize
+		}
+		desc, _ := e.BatchManager.Step(maxBatch, e.cache, e.PromptCache)
 		if desc == nil || len(desc.Sequences) == 0 {
 			time.Sleep(10 * time.Millisecond)
 			continue
@@ -425,7 +484,7 @@ func (e *cudaEngine) runBatchLoop() {
 			// Termination
 			// The tokenizer knows every EOS id the model declares.
 			isEOS := e.tok != nil && e.tok.IsEOS(token)
-			if isEOS || isStopToken(e.stopTokens, token) || len(seq.Tokens) >= seq.MaxTokens {
+			if isEOS || isStopToken(e.stopTokens, token) || isStopToken(stopTokenSet(seq.Config.StopTokens), token) || len(seq.Tokens) >= seq.MaxTokens {
 				select {
 				case seq.Result <- seq.Tokens:
 				default:
@@ -552,6 +611,16 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 		_ = hidden.LoadFrom(hiddenHost)
 	}
 
+	var actLog *ActivationLogger
+	if e.config.ActivationLogPath != "" {
+		actLog = NewActivationLogger()
+		actLog.Enable("", desc.Tokens)
+		hHost := hidden.ToHostF32()
+		if len(hHost) >= dim {
+			actLog.LogEmbedding(hHost[:dim])
+		}
+	}
+
 	// 3. Layer Loop
 	heads := e.config.Heads
 	kvHeads := e.config.KVHeads
@@ -595,7 +664,9 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 			}
 
 			startCPU := time.Now()
+			transferStart := time.Now()
 			hiddenHost := hidden.ToHostF32()
+			transferDuration := time.Since(transferStart)
 
 			// Pre-allocate Gemma4 layer buffers or standard CPU layer scratch for this CPU offload batch
 			var gemma4Buf *Gemma4LayerBuf
@@ -649,7 +720,10 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 					copy(hiddenHost[tokOffset:tokOffset+dim], tokenHidden)
 				}
 			}
+			loadStart := time.Now()
 			_ = hidden.LoadFrom(hiddenHost)
+			transferDuration += time.Since(loadStart)
+			metrics.RecordLayerOffloadTransfer(e.config.Architecture, transferDuration)
 			metrics.RecordLayerOffloadCPUDuration(e.config.Architecture, time.Since(startCPU))
 			layer = endLayer - 1
 			continue
@@ -907,6 +981,10 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 				normedFFN.ReturnToPool()
 			}
 		}
+		if actLog != nil {
+			collector := &LayerActivationCollector{LayerIdx: layer}
+			logLayerActivations(actLog, collector)
+		}
 	}
 
 	// 4. Extract Last Logits
@@ -935,6 +1013,13 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 			}
 		}
 
+		if actLog != nil && len(finalLogits) > 0 {
+			actLog.LogLogits(finalLogits, topTokenIDs(finalLogits, 5))
+			if err := actLog.SaveToFile(e.config.ActivationLogPath); err != nil {
+				log.Printf("Warning: failed to save activation log: %v", err)
+			}
+		}
+
 		res := ctx.NewTensorFP32(1, e.config.VocabSize)
 		if err := res.LoadFrom(finalLogits); err != nil {
 			return nil, err
@@ -946,6 +1031,9 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 }
 
 func (e *cudaEngine) inferInternal(inputTokens []int, tokensToGenerate int, samplerConfig SamplerConfig, tokenCallback func(int), logitsCallback func([]float32)) ([]int, error) {
+	metrics.RecordContextLength(len(inputTokens))
+	startTime := time.Now()
+
 	resChan := make(chan []int, 1)
 	errChan := make(chan error, 1)
 
@@ -968,9 +1056,13 @@ func (e *cudaEngine) inferInternal(inputTokens []int, tokensToGenerate int, samp
 
 	select {
 	case tokens := <-resChan:
+		genTokens := 0
 		if len(tokens) > len(inputTokens) {
+			genTokens = len(tokens) - len(inputTokens)
+			metrics.RecordInference(genTokens, time.Since(startTime))
 			return tokens[len(inputTokens):], nil
 		}
+		metrics.RecordInference(0, time.Since(startTime))
 		return []int{}, nil
 	case err := <-errChan:
 		return nil, err

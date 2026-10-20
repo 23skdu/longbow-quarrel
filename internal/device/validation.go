@@ -9,6 +9,7 @@ import (
 	"fmt"
 
 	"github.com/23skdu/longbow-quarrel/internal/mathx"
+	"github.com/23skdu/longbow-quarrel/internal/metrics"
 )
 
 type ModelConfig struct {
@@ -177,6 +178,7 @@ func (e *ValidationError) Error() string {
 }
 
 func NewValidationError(op, msg, path string) *ValidationError {
+	metrics.RecordValidationError(op, msg)
 	return &ValidationError{Op: op, Msg: msg, Path: path}
 }
 

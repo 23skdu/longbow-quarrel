@@ -44,6 +44,7 @@ func (m *metricsWrapper) record() {
 		return
 	}
 
+	metrics.RecordSIMDDispatch(m.kernel)
 	duration := time.Since(m.startTime)
 	sizeClass := classifySize(m.size)
 

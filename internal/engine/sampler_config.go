@@ -17,4 +17,5 @@ type SamplerConfig struct {
 	MinP             float64
 	MirostatTau      float64
 	MirostatEta      float64
+	StopTokens       []int
 }

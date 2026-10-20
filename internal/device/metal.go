@@ -1114,6 +1114,12 @@ func (t *Tensor) ToHost() []float32 {
 		return gguf.DequantizeQ6K(rawBytes, t.rows*t.cols)
 	}
 
+	if t.dataType == DataTypeQ4K {
+		rawBytes := make([]byte, t.sizeBytes)
+		C.Metal_CopyToHost(t.buf, C.int(t.Offset), unsafe.Pointer(&rawBytes[0]), C.int(t.sizeBytes))
+		return gguf.DequantizeQ4K(rawBytes, t.rows*t.cols)
+	}
+
 	f16 := make([]uint16, t.rows*t.cols)
 	C.Metal_CopyToHost(t.buf, C.int(t.Offset), unsafe.Pointer(&f16[0]), C.int(t.sizeBytes))
 
@@ -1241,6 +1247,15 @@ func (t *Tensor) linearIntoInternal(weight *Tensor, out *Tensor, scale float32) 
 	}
 	if t.dataType == DataTypeF32 {
 		t.linearF32IntoInternal(weight, out, scale)
+		return
+	}
+	if out.dataType == DataTypeF32 {
+		switch weight.dataType {
+		case DataTypeQ8_0:
+			C.Metal_LinearQ8_0_F32(t.ctx.ref, weight.buf, C.int(weight.Offset), t.buf, C.int(t.Offset), out.buf, C.int(out.Offset), C.int(t.rows), C.int(weight.cols), C.int(weight.rows), C.float(scale))
+		default:
+			C.Metal_MatMul_F16_F16_F32(t.ctx.ref, weight.buf, C.int(weight.Offset), t.buf, C.int(t.Offset), out.buf, C.int(out.Offset), C.int(t.rows), C.int(weight.rows), C.int(weight.cols))
+		}
 		return
 	}
 	switch weight.dataType {
@@ -1527,9 +1542,9 @@ func (c *Context) NewLayerScratch(batch, dim, hiddenDim, heads, kvHeads, headDim
 		szScores = align(32768 * 4)
 	}
 
-	szGate := align(batch * hiddenDim * 4)
-	szUp := align(batch * hiddenDim * 4)
-	szSwiOut := align(batch * hiddenDim * 4)
+	szGate := align(batch * hiddenDim * 2)
+	szUp := align(batch * hiddenDim * 2)
+	szSwiOut := align(batch * hiddenDim * 2)
 
 	szLogits := align(1 * vocabSize * 4) // F32 Logits
 
@@ -1564,9 +1579,9 @@ func (c *Context) NewLayerScratch(batch, dim, hiddenDim, heads, kvHeads, headDim
 
 	s.Scores = newT(szScores, 1, szScores/4, DataTypeF32)
 
-	s.GatePart = newT(szGate, batch, hiddenDim, DataTypeF32)
-	s.UpPart = newT(szUp, batch, hiddenDim, DataTypeF32)
-	s.SwiOut = newT(szSwiOut, batch, hiddenDim, DataTypeF32)
+	s.GatePart = newT(szGate, batch, hiddenDim, DataTypeF16)
+	s.UpPart = newT(szUp, batch, hiddenDim, DataTypeF16)
+	s.SwiOut = newT(szSwiOut, batch, hiddenDim, DataTypeF16)
 
 	// Gemma4 Q/K norm buffers
 	s.QNormed = newT(szQNormed, batch, qNormDim, DataTypeF16)
@@ -1758,7 +1773,11 @@ func (t *Tensor) Layer(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate, ffn
 			pSeq := t.ctx.NewTensorFP32(1, 1)
 			_ = pSeq.LoadFrom([]float32{0})
 
-			t.ctx.FlashAttention2(qPart.Slice(i, 1), kCache, vCache, attOut.Slice(i, 1), pPos, heads, kvHeads, headDim, blockSize, blockTable, maxBlocks, pSeq, 1)
+			qRow := qPart.SliceRow(i)
+			attOutRow := attOut.SliceRow(i)
+			t.ctx.FlashAttention2(qRow, kCache, vCache, attOutRow, pPos, heads, kvHeads, headDim, blockSize, blockTable, maxBlocks, pSeq, 1)
+			qRow.Free()
+			attOutRow.Free()
 
 			pPos.Free()
 			pSeq.Free()
@@ -1934,7 +1953,9 @@ func (t *Tensor) LayerBatch(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate
 	// 6. Projections & Residual 1
 	resAtt := scratch.ResAtt
 	attOut.linearIntoInternal(o, resAtt, globalScale)
-	t.AddInPlace(resAtt)
+	if err := t.AddInPlace(resAtt); err != nil {
+		logger.Log.Error("failed to add attention residual in LayerBatch", "error", err)
+	}
 
 	// 7. FFN Part (Batched)
 	normedFFN := scratch.NormedFFN
@@ -1952,7 +1973,9 @@ func (t *Tensor) LayerBatch(layerIdx int, attnNorm, q, k, v, o, ffnNorm, ffnGate
 
 	resFFN := scratch.ResFFN
 	scratch.SwiOut.linearIntoInternal(ffnDown, resFFN, globalScale)
-	t.AddInPlace(resFFN)
+	if err := t.AddInPlace(resFFN); err != nil {
+		logger.Log.Error("failed to add FFN residual in LayerBatch", "error", err)
+	}
 }
 
 func (t *Tensor) ropeInternal(pos interface{}, heads, headDim, seqLen int, ropeTheta float32) {
@@ -2081,7 +2104,7 @@ func (t *Tensor) linearF32IntoInternal(weight *Tensor, out *Tensor, scale float3
 				t.buf, C.int(t.Offset), out.buf, C.int(out.Offset),
 				C.int(t.rows), C.int(weight.cols), C.int(weight.rows), C.float(scale))
 		}
-	case DataTypeF16:
+	case DataTypeF16, DataTypeF32:
 		C.Metal_MatMul_F16_F32_F32(t.ctx.ref, weight.buf, C.int(weight.Offset), t.buf, C.int(t.Offset), out.buf, C.int(out.Offset), C.int(t.rows), C.int(weight.rows), C.int(weight.cols))
 	case DataTypeQ8_0:
 		C.Metal_LinearQ8_0_F32(t.ctx.ref, weight.buf, C.int(weight.Offset), t.buf, C.int(t.Offset), out.buf, C.int(out.Offset), C.int(t.rows), C.int(weight.cols), C.int(weight.rows), C.float(scale))
@@ -2140,18 +2163,25 @@ func (t *Tensor) Add(other *Tensor) (*Tensor, error) {
 	return res, nil
 }
 
-// AddInPlace performs t += other (FP32)
+// AddInPlace performs t += other (supports F32 and F16)
 func (t *Tensor) AddInPlace(other *Tensor) error {
 	if err := ValidateAddDimensions(t.rows, t.cols, other.rows, other.cols); err != nil {
 		return err
 	}
-	if t.dataType != DataTypeF32 || other.dataType != DataTypeF32 {
-		return NewValidationError("AddInPlace", "requires FP32 inputs", "datatype")
+	if t.dataType != other.dataType {
+		return NewValidationError("AddInPlace", fmt.Sprintf("mismatched datatypes: t=%v other=%v", t.dataType, other.dataType), "datatype")
 	}
 	t.ctx.ExecMu.Lock()
 	defer t.ctx.ExecMu.Unlock()
-	C.Metal_Add_F32(t.ctx.ref, t.buf, C.int(t.Offset), other.buf, C.int(other.Offset), t.buf, C.int(t.Offset), C.int(t.rows*t.cols))
-	return nil
+	if t.dataType == DataTypeF32 {
+		C.Metal_Add_F32(t.ctx.ref, t.buf, C.int(t.Offset), other.buf, C.int(other.Offset), t.buf, C.int(t.Offset), C.int(t.rows*t.cols))
+		return nil
+	}
+	if t.dataType == DataTypeF16 {
+		C.Metal_Add_F16(t.ctx.ref, t.buf, C.int(t.Offset), other.buf, C.int(other.Offset), t.buf, C.int(t.Offset), C.int(t.rows*t.cols))
+		return nil
+	}
+	return NewValidationError("AddInPlace", "unsupported datatype", "datatype")
 }
 
 func (t *Tensor) EmbeddingLookup(row int, scale float32) *Tensor {
@@ -2654,6 +2684,25 @@ func (t *Tensor) attPagedInternal(kCache, vCache, blockTable *Tensor, output *Te
 func (t *Tensor) SiLU() *Tensor {
 	res := t.ctx.NewTensorPooled(t.rows, t.cols)
 	C.Metal_SiLU_F16(t.ctx.ref, t.buf, C.int(t.Offset), res.buf, C.int(res.Offset), C.int(t.rows*t.cols))
+	return res
+}
+
+// SliceRow extracts row `row` from this tensor and returns a [1, cols] tensor.
+func (t *Tensor) SliceRow(row int) *Tensor {
+	t.ctx.ExecMu.Lock()
+	defer t.ctx.ExecMu.Unlock()
+	res := t.ctx.newTensorPooledInternal(1, t.cols)
+	res.dataType = t.dataType
+	elemSize := 2
+	if t.dataType == DataTypeF32 {
+		elemSize = 4
+	}
+	off := row * t.cols * elemSize
+	if t.dataType == DataTypeF32 {
+		C.Metal_Copy_F32(t.ctx.ref, t.buf, C.int(t.Offset+off), res.buf, C.int(res.Offset), C.int(t.cols))
+	} else {
+		C.Metal_Copy_F16(t.ctx.ref, t.buf, C.int(t.Offset+off), res.buf, C.int(res.Offset), C.int(t.cols))
+	}
 	return res
 }
 

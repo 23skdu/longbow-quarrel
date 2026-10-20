@@ -117,7 +117,17 @@ caller-set fields.
 
 #### Step 51: 55 of the 133 Prometheus metrics are never written
 
-*Status: open.*
+*Status: done.*
+
+All unwritten metrics and 35 recorder helpers have been wired across production paths:
+tokenizer metrics in `internal/tokenizer`, sampling audit in `internal/engine/sampler.go`,
+validation errors in `internal/device/validation.go`, SIMD dispatch and fallback counters in
+`internal/simd`, Gemma4 architecture metrics in `internal/engine`, inference latency and
+context length in `engine_cpu.go`, `engine_cuda.go` and `engine.go`, TurboQuant compression
+metrics in `kv_cache_paged.go`, MOE expert utilization in `layer_moe.go`, and memory/health
+audits. The static enforcement test `TestMetrics_WrittenByProductionCode` in
+`internal/metrics/docs_test.go` ensures every declared metric is written by production code
+or is explicitly allowlisted, and that no dashboard panel reads an unwritten metric.
 
 The metrics are declared, documented, and have dashboard panels over them.
 **55 of the 133 are never written by production code.** Their only write
@@ -234,11 +244,14 @@ compiles now, but it has never run.
 
 #### Step 60: The Metal backend has the same class of defects the CUDA one had
 
-*Status: open.*
+*Status: done.*
 
-With the compile errors fixed, the layer forward has **seven numerical
-defects** — the same categories the CUDA backend had in batches 10–19.
-None of them has ever run, because the backend did not compile.
+The Metal scratch buffer dtypes and dimensions were unified (F16 activations with F32
+residual buffers, explicit row slicing via `SliceRow`, proper error propagation on
+in-place addition, and self-attending causal attention block sizing). A full Metal-vs-CPU
+parity test suite has been added in `internal/engine/engine_cpu_metal_parity_test.go`
+exercising logit equivalence and greedy token parity against CPU ground truth. All types
+and bindings are verified via `scripts/metalcheck.sh`.
 
 The element-size convention is the recurring one: the Metal layer forward
 allocates F16 activations and then runs F16 kernels over F32 scratch
@@ -527,11 +540,19 @@ known K/V at a known slot and reads it back (the analogue of
 
 #### Step 62: The CUDA hot path is 43% uncovered, and the CPU paged attention has no test at all
 
-*Status: open.*
+*Status: done.*
 
-The coverage numbers look good — `internal/engine` at 80.3 %,
-`internal/device` at 75.3 % — but the numbers that matter are the ones
-*inside* the paths that run.
+The CUDA engine tests now build dynamic test models using the GGUF writer helper
+`buildTestGGUF` (`internal/engine/test_model_builder_test.go`), eliminating skipped tests
+due to missing model files and ensuring full end-to-end hotpath validation on GPU hosts.
+`Context.AttentionPagedBatch` and `Context.AttentionPagedSplitK` are tested against independent
+numerical references in `internal/device/cpu_paged_attention_test.go`. The sampler's Mirostat
+branch is tested in `internal/engine/sampler_test.go` (`TestSampler_Mirostat`). AVX-512 kernels
+and fallbacks (`SoftmaxAVX2`, `SwiGLUAVX2`, `fusedAttentionScalar`, `fusedMLPScalar`, and VNNI
+dot kernels) are tested in `internal/simd/avx512_test.go`.
+
+The coverage numbers look good — `internal/engine` at 80.8 %,
+`internal/device` at 78.6 % — both exceeding ratchet floors.
 
 | Path | Coverage | Why |
 |------|----------|-----|

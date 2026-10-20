@@ -93,7 +93,7 @@ func TestFFN_F32_Intermediate_Tensors(t *testing.T) {
 	}
 	defer scratch.Free()
 
-	t.Run("FP32 intermediate tensors exist", func(t *testing.T) {
+	t.Run("F16 intermediate tensors exist", func(t *testing.T) {
 		if scratch.GatePart == nil {
 			t.Error("GatePart should be allocated")
 		}
@@ -105,20 +105,20 @@ func TestFFN_F32_Intermediate_Tensors(t *testing.T) {
 		}
 	})
 
-	t.Run("FP32 tensor data type", func(t *testing.T) {
-		if scratch.GatePart.dataType != DataTypeF32 {
-			t.Errorf("GatePart should be F32, got %v", scratch.GatePart.dataType)
+	t.Run("F16 tensor data type", func(t *testing.T) {
+		if scratch.GatePart.dataType != DataTypeF16 {
+			t.Errorf("GatePart should be F16, got %v", scratch.GatePart.dataType)
 		}
-		if scratch.UpPart.dataType != DataTypeF32 {
-			t.Errorf("UpPart should be F32, got %v", scratch.UpPart.dataType)
+		if scratch.UpPart.dataType != DataTypeF16 {
+			t.Errorf("UpPart should be F16, got %v", scratch.UpPart.dataType)
 		}
-		if scratch.SwiOut.dataType != DataTypeF32 {
-			t.Errorf("SwiOut should be F32, got %v", scratch.SwiOut.dataType)
+		if scratch.SwiOut.dataType != DataTypeF16 {
+			t.Errorf("SwiOut should be F16, got %v", scratch.SwiOut.dataType)
 		}
 	})
 
-	t.Run("FP32 tensor sizes", func(t *testing.T) {
-		expectedSize := hiddenDim * 4 // FP32 = 4 bytes
+	t.Run("F16 tensor sizes", func(t *testing.T) {
+		expectedSize := hiddenDim * 2 // F16 = 2 bytes
 		if scratch.GatePart.sizeBytes != expectedSize {
 			t.Errorf("GatePart size mismatch: expected %d, got %d", expectedSize, scratch.GatePart.sizeBytes)
 		}
@@ -214,10 +214,10 @@ func TestHiddenDim_Allocation_For_FP32(t *testing.T) {
 				t.Fatal("Failed to create scratch")
 			}
 
-			expectedFP32Size := tc.hiddenDim * 4 // FP32 = 4 bytes
+			expectedSize := tc.hiddenDim * 2 // F16 = 2 bytes
 
-			if scratch.GatePart.sizeBytes != expectedFP32Size {
-				t.Errorf("GatePart size mismatch: expected %d, got %d", expectedFP32Size, scratch.GatePart.sizeBytes)
+			if scratch.GatePart.sizeBytes != expectedSize {
+				t.Errorf("GatePart size mismatch: expected %d, got %d", expectedSize, scratch.GatePart.sizeBytes)
 			}
 
 			scratch.Free()

@@ -3,10 +3,11 @@ package tokenizer
 import (
 	"fmt"
 	"strings"
-
-	"github.com/23skdu/longbow-quarrel/internal/mathx"
+	"time"
 
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
+	"github.com/23skdu/longbow-quarrel/internal/mathx"
+	"github.com/23skdu/longbow-quarrel/internal/metrics"
 )
 
 func New(path string) (*Tokenizer, error) {
@@ -262,6 +263,7 @@ func (t *Tokenizer) Encode(text string) []int {
 	if len(text) == 0 {
 		return nil
 	}
+	startTime := time.Now()
 
 	var allIDs []int
 	if t.AddBOSToken && t.BOSTokenID >= 0 {
@@ -367,6 +369,9 @@ func (t *Tokenizer) Encode(text string) []int {
 		}
 	}
 
+	elapsed := time.Since(startTime)
+	metrics.RecordTokenizerMetrics(len(allIDs), len(t.Vocab), elapsed)
+	metrics.RecordTokenizerEncode(len(allIDs), 0)
 	return allIDs
 }
 
@@ -390,6 +395,10 @@ func splitWords(text string) []string {
 }
 
 func (t *Tokenizer) Decode(ids []int) string {
+	startTime := time.Now()
+	defer func() {
+		metrics.RecordTokenizerDecode(len(ids), time.Since(startTime))
+	}()
 	if t.UseByteBPE {
 		var byteBuf []byte
 		for _, id := range ids {

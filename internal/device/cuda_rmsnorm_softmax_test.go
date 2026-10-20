@@ -148,7 +148,7 @@ func BenchmarkCUDA_WarpShuffle_RMSNorm_4096(b *testing.B) {
 	defer outTensor.Free()
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		ctx.RMSNorm(inTensor, wTensor, outTensor, rows, cols, 1e-5)
 	}
 	ctx.Synchronize()
@@ -166,7 +166,7 @@ func BenchmarkCUDA_WarpShuffle_Softmax_4096(b *testing.B) {
 	defer outTensor.Free()
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		ctx.Softmax(inTensor, outTensor, rows, cols)
 	}
 	ctx.Synchronize()
