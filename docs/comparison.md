@@ -34,7 +34,7 @@ Comprehensive comparison of Longbow-Quarrel against the top LLM inference engine
 | Q2_K | ✅ | ✅ | - | ✅ | - |
 | FP8 (E4M3/E5M2) | ✅ | ✅ | ✅ | - | ✅ |
 | GPTQ | - | - | ✅ | - | ✅ |
-| AWQ | - | - | ✅ | - | �Q |
+| AWQ | - | - | ✅ | - | ✅ |
 | GGUF (generic) | ✅ | ✅ | - | ✅ | - |
 
 ### Zero-Copy MatVec Kernels

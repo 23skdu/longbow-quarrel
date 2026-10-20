@@ -2,10 +2,9 @@
 # `COPY . .` ships .git, the stale 138 MB of binaries in bin/, the 29 MB
 # engine.test binary and the coverage dumps into the build context.
 #
-# NOTE: .git is excluded here, but Dockerfile.cpu stamps the version with
-# `git rev-parse --short HEAD`. That build therefore needs the repository
-# checked out with its .git directory, or the version argument passed in as
-# a build arg.
+# NOTE: .git is excluded here, but Dockerfile.cpu stamps the version from
+# the QUARREL_VERSION build argument, so a checkout without its .git
+# directory still produces a correctly stamped binary.
 
 .git
 .github

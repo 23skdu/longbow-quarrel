@@ -21,7 +21,7 @@ whole advertised backend unusable.
 | Priority | Count | The findings |
 |----------|------:|--------------|
 | **P0** | 4 | Steps 50, 51, 59, 60 — the CUDA engine drops the caller's configuration; 55 of the 133 metrics are never written; the Metal backend did not compile, and once it does, its layer forward has seven numerical defects |
-| **P1** | 7 | Steps 52, 53, 55, 57, 58, 61, 62 — write-only configuration fields; the ignored `stream` field; ~4,750 lines of dead code; the Flight sharded forward; the TPU backend |
+| **P1** | 9 | Steps 52, 53, 55, 57, 58, 61, 62, 65, 66 — write-only configuration fields; the ignored `stream` field; ~4,750 lines of dead code; the Flight sharded forward; the TPU backend; four features that are implemented and never enabled |
 | **P2** | 4 | Steps 54, 56, 63, 64 — the commands the CI never builds; the CUDA graph manager; the 26 tests that cannot fail; the skips that hide defects |
 
 There are also four **planned features** that were specified and never
@@ -534,6 +534,46 @@ same way the parity test does, so they run on any machine with a GPU;
 Mirostat branch gets a test; the AVX-512 kernels get the coverage the
 default build has.
 
+#### Step 65: Four features are implemented and never enabled — [OPEN]
+
+A second verification pass found four more stacks that compile, have
+tests, and cannot be reached from a shipped binary. They are the same
+class of defect as the Arrow Flight client (Step 55): the code is there,
+the documentation implies it works, and nothing turns it on.
+
+| Feature | Where it lives | Why it is unreachable |
+|---------|-----------------|------------------------|
+| **The FP8 paged KV cache** | `kv_cache_paged.go:178-180` allocates the pool as `DataTypeFP8`; `cuda.go:1183 PagedAttentionQuantized` and the branch at `engine_cuda.go:805-809` implement it | `PagedKVCache.Precision` is **never assigned** in production — only in two test files. The default is `DataTypeF16`, so the FP8 branch is never taken. It needs a configuration knob. |
+| **Sliding-window attention with attention sinks** | `kv_cache_paged.go:354 SetStreamingLLM` / `:377 GetStreamingLLM` | Both are called from tests only. No flag, no configuration field and no REST parameter turns StreamingLLM on, so the "constant VRAM at 100,000 tokens" property cannot occur in a shipped binary. |
+| **The memory governor** | `kv_cache_paged.go:1360 RegisterMemoryGovernor` wires `Defragment` (`:1273`) and `OffloadLRU` (`:1241`) | The registration is called from tests only. The CUDA engine calls `e.governor.TriggerGovernor(0.85)` (`engine_cuda.go:320`), but no handler is ever registered in production, so the trigger does nothing. |
+| **The on-device softmax** | `cuda.go:722 ctx.Softmax` | No production caller. The softmax kernel is dead. |
+
+Each of these needs one thing: a way to turn it on, or a deletion. The
+FP8 cache and StreamingLLM are the two with the most value — both are
+real memory savings, and both are one configuration field away.
+
+**Done when:** each of the four has a flag or a configuration field that
+reaches it, and a test that shows the feature doing something; or each is
+deleted.
+
+#### Step 66: The nightly benchmark job runs the wrong script — [OPEN]
+
+The CI has a nightly job (`ci.yml:472-517`, `cron: '0 2 * * *'`) that
+uploads a benchmark artifact. It runs **`scripts/benchmark_compare.sh`
+only**. The three scripts that actually benchmark the engines —
+`benchmark_engines.sh`, `benchmark_models.sh` and `benchmark_report.py` —
+are never invoked by anything in `.github/`, and there is no vLLM
+anywhere outside [comparison.md](comparison.md). The artifact is a plain
+text file uploaded to a workflow artifact, not attached to the release
+(`ci.yml:660-684` uploads `release_notes.md` only).
+
+The A/B plan in [testplan.md](testplan.md) asks for a cross-engine
+comparison table and a release artifact. Neither exists.
+
+**Done when:** the nightly job runs the engine and model benchmarks, the
+report is produced as a markdown table, and it is attached to the
+release.
+
 ### P2
 
 #### Step 54: The CI builds one command out of sixteen
@@ -801,14 +841,17 @@ Cutting a tag is a release decision, not a documentation edit.
 | Area | What landed |
 |------|-------------|
 | **The shipped binary** | The CPU build was a stub that exited 1; it is now a real binary that runs inference. The OpenAI-compatible REST API is started and served. The WebUI has a working CPU adapter and a CI job that runs its tests, including the browser end-to-end suite. |
-| **The SIMD path** | The AVX-512 build was never compiled and had a SIGILL bug; it is now built, tested and gated. The TurboQuant C kernels were never called; they now are, and the CPU and CUDA encoders agree. |
+| **The SIMD path** | The AVX-512 build was never compiled and had a SIGILL bug; it is now built, tested and gated. The TurboQuant C kernels were never called; they now are, and the CPU and CUDA encoders agree. The fuzz targets never ran — `make test-simd-fuzz` passed the flags in a form that fuzzed nothing — and they found two real bugs when fixed. |
 | **The CUDA path** | Six defects were found by a CPU-vs-CUDA parity test: the activation dtype, the KV pool's declared type, the KV store's token count, the scratch sizing, the block table's width and the embedding dimension. The broken single-token forward and ~1 GB of unused VRAM went with it. |
 | **The model formats** | A GGUF writer, so a model can be created inside a test. The Q4_K and FP8 codecs were corrected against the GGML standard, and `cmd/quantize` produces quantized models. |
 | **Speculative decoding** | Wired end to end through `-draft-model` and the API's `speculative` field, with the correct `min(1, p_target/p_draft)` acceptance rule and a residual correction. |
 | **The multi-device flags** | `-devices 0,1`, `-tp-size 2` and `-pp-stages 2` now exit with an error instead of pretending to shard a model. |
 | **The audits and the activation logger** | Made real: `-activation-log` writes the activations as JSON, and the health audit reports on the logit distribution. |
 | **The observability surface** | 133 Prometheus metrics, a Grafana dashboard over all of them, and a drift checker that fails the build when the dashboard, the Helm chart and the code disagree. |
-| **The CI** | 15 local gates and the CI jobs that run them: the lint, the build, the race detector, the CUDA compile gate, the Metal build and the Metal type check, the coverage gate, the duplicate-declaration check, the vacuous-test check, the workflow lint, the security scans and the documentation drift check. |
+| **The CI** | 15 local gates and the CI jobs that run them: the lint, the build, the race detector, the CUDA compile gate, the Metal build and the Metal type check, the coverage gate, the duplicate-declaration check, the vacuous-test check, the workflow lint, the security scans and the documentation drift check. The pipeline had been **disabled on the repository** since 2026-09-04; it is enabled again, and the three latent failures it had been hiding are fixed. |
 
-The history of the individual changes is in the git log. The gates above
-are the mechanism that keeps the history honest from here on.
+Every item above was verified against the current code before it was
+recorded, and the ones that turned out to be incomplete are in the open
+work rather than here. The history of the individual changes is in the git
+log; the gates above are the mechanism that keeps the history honest from
+here on.
