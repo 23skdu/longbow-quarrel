@@ -71,7 +71,7 @@ func Fp32ToFp16AVX2(src []float32, dst []uint16) {
 	}
 
 	for i := 0; i < n; i++ {
-		dst[i] = fp32ToFp16Scalar(src[i])
+		dst[i] = fp32ToFp16Value(src[i])
 	}
 }
 
@@ -108,7 +108,9 @@ func fp16ToFp32Scalar(h uint16) float32 {
 	return mathx.Float32frombits(f32)
 }
 
-func fp32ToFp16Scalar(f float32) uint16 {
+// fp32ToFp16Value converts one float32 to a float16. It is the
+// single-value form; fp32ToFp16Scalar is the slice form the tests use.
+func fp32ToFp16Value(f float32) uint16 {
 	bits := mathx.Float32bits(f)
 	sign := bits >> 31
 	exp := (bits >> 23) & 0xFF
@@ -139,5 +141,5 @@ func fp16ToFp32(h uint16) float32 {
 }
 
 func fp32ToFp16(f float32) uint16 {
-	return fp32ToFp16Scalar(f)
+	return fp32ToFp16Value(f)
 }

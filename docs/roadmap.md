@@ -24,6 +24,10 @@ whole advertised backend unusable.
 | **P1** | 9 | Steps 52, 53, 55, 57, 58, 61, 62, 65, 66 — write-only configuration fields; the ignored `stream` field; ~4,750 lines of dead code; the Flight sharded forward; the TPU backend; four features that are implemented and never enabled |
 | **P2** | 4 | Steps 54, 56, 63, 64 — the commands the CI never builds; the CUDA graph manager; the 26 tests that cannot fail; the skips that hide defects |
 
+The arm64 configuration is now built and tested — it was not, and the NEON
+TurboQuant kernel had a wrong absolute-value mask that made it round half
+to even while the CPU reference and the GPU round half away from zero.
+
 There are also four **planned features** that were specified and never
 built ([Planned features](#planned-features)), five **vector-search
 blockers** ([Vector search](#vector-search)) and four **WebUI items**
@@ -52,6 +56,7 @@ jobs that run them. `scripts/run_all_tests.sh` runs all of them:
 | 8 | Coverage gates | `internal/engine` ≥ 80 %, `internal/device` ≥ 75 % |
 | 9 | Duplicate declaration check | A name declared twice in one configuration |
 | 9b | Metal type check | The Metal backend compiles |
+| 9c | ARM64 / NEON build and tests | The NEON kernels compile and agree with the reference |
 | 10 | Zero-allocation hotpath | An allocation in a hot kernel |
 | 11 | Workflow lint | A broken workflow file |
 | 12 | Documentation drift | The docs, the chart and the dashboard against the code |
@@ -841,7 +846,7 @@ Cutting a tag is a release decision, not a documentation edit.
 | Area | What landed |
 |------|-------------|
 | **The shipped binary** | The CPU build was a stub that exited 1; it is now a real binary that runs inference. The OpenAI-compatible REST API is started and served. The WebUI has a working CPU adapter and a CI job that runs its tests, including the browser end-to-end suite. |
-| **The SIMD path** | The AVX-512 build was never compiled and had a SIGILL bug; it is now built, tested and gated. The TurboQuant C kernels were never called; they now are, and the CPU and CUDA encoders agree. The fuzz targets never ran — `make test-simd-fuzz` passed the flags in a form that fuzzed nothing — and they found two real bugs when fixed. |
+| **The SIMD path** | The AVX-512 build was never compiled and had a SIGILL bug; it is now built, tested and gated. The TurboQuant C kernels were never called; they now are, and the CPU and CUDA encoders agree. The fuzz targets never ran — `make test-simd-fuzz` passed the flags in a form that fuzzed nothing — and they found two real bugs when fixed. The arm64 configuration is built and tested too, which is how the NEON kernel's wrong absolute-value mask was found: it rounded half to even while the CPU reference and the GPU round half away from zero. |
 | **The CUDA path** | Six defects were found by a CPU-vs-CUDA parity test: the activation dtype, the KV pool's declared type, the KV store's token count, the scratch sizing, the block table's width and the embedding dimension. The broken single-token forward and ~1 GB of unused VRAM went with it. |
 | **The model formats** | A GGUF writer, so a model can be created inside a test. The Q4_K and FP8 codecs were corrected against the GGML standard, and `cmd/quantize` produces quantized models. |
 | **Speculative decoding** | Wired end to end through `-draft-model` and the API's `speculative` field, with the correct `min(1, p_target/p_draft)` acceptance rule and a residual correction. |

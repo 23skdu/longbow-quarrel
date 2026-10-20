@@ -17,22 +17,41 @@ static float horizontal_max_f32(float32x4_t v) {
 // inputs that land exactly on a .5 boundary, and it disagreed with the
 // scalar tail of this very function, which uses roundf(). Ties are detected
 // and corrected explicitly.
+// bitand_f32 applies a bitwise AND to two float vectors. The float
+// spelling of the intrinsic - vandq_f32 - is not declared by Apple's
+// clang, so the integer form is used and the result reinterpreted.
+static inline float32x4_t bitand_f32(float32x4_t a, float32x4_t b) {
+    return vreinterpretq_f32_u32(
+        vandq_u32(vreinterpretq_u32_f32(a), vreinterpretq_u32_f32(b)));
+}
+
+// bitor_f32 applies a bitwise OR to two float vectors. As with the AND,
+// the float spelling of the intrinsic is not declared by Apple's clang.
+static inline float32x4_t bitor_f32(float32x4_t a, float32x4_t b) {
+    return vreinterpretq_f32_u32(
+        vorrq_u32(vreinterpretq_u32_f32(a), vreinterpretq_u32_f32(b)));
+}
+
 static inline float32x4_t round_half_away_neon(float32x4_t v) {
-    const float32x4_t abs_mask = vdupq_n_f32(0x7FFFFFFF);
-    const float32x4_t sign_mask = vdupq_n_f32(-0.0f);
+    // The masks are bit patterns, so they are built as integers and
+    // reinterpreted. vdupq_n_f32(0x7FFFFFFF) would convert the integer
+    // 2147483647 to the float 2147483648.0f, whose bit pattern is
+    // 0x4F000000 - not the mask at all.
+    const float32x4_t abs_mask = vreinterpretq_f32_u32(vdupq_n_u32(0x7FFFFFFF));
+    const float32x4_t sign_mask = vreinterpretq_f32_u32(vdupq_n_u32(0x80000000));
 
     float32x4_t v_even = vrndnq_f32(v);
 
     // Truncate toward zero to recover the integral part and the fraction.
     float32x4_t v_trunc = vcvtq_f32_s32(vcvtq_s32_f32(v));
     float32x4_t v_frac = vsubq_f32(v, v_trunc);
-    float32x4_t v_absfrac = vandq_f32(v_frac, abs_mask);
+    float32x4_t v_absfrac = bitand_f32(v_frac, abs_mask);
 
     // A tie is a fraction of exactly 0.5.
     uint32x4_t v_is_tie = vceqq_f32(v_absfrac, vdupq_n_f32(0.5f));
 
     // Away from zero is trunc + sign(v).
-    float32x4_t v_sign = vorrq_f32(vandq_f32(v, sign_mask), vdupq_n_f32(1.0f));
+    float32x4_t v_sign = bitor_f32(bitand_f32(v, sign_mask), vdupq_n_f32(1.0f));
     float32x4_t v_away = vaddq_f32(v_trunc, v_sign);
 
     return vbslq_f32(v_is_tie, v_away, v_even);

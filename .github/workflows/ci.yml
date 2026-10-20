@@ -416,6 +416,53 @@ jobs:
         continue-on-error: true
         run: go test -tags avx512 -count=1 ./internal/simd/...
 
+  # ===== ARM64 / NEON COMPILE & TEST =====
+  # The NEON TurboQuant kernel did not compile: it used vandq_f32 and
+  # vorrq_f32, which Apple's clang does not declare, and its absolute
+  # value mask was built as an integer literal converted to a float, so
+  # the bit pattern was 0x4F000000 instead of 0x7FFFFFFF. The kernel
+  # therefore rounded half to even while the CPU reference and the GPU
+  # round half away from zero.
+  #
+  # Nothing caught it because the CI has no arm64 job. This one builds
+  # and tests the arm64 configuration under QEMU.
+  arm64:
+    name: ARM64 / NEON Compile & Test
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Set up QEMU for the arm64 binaries
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Compile the arm64 build
+        # The NEON kernels are C, so the build needs a cross compiler.
+        run: |
+          docker run --rm --platform linux/arm64 \
+            -v "${PWD}:/src" -w /src \
+            -e CGO_ENABLED=1 \
+            golang:1.27 \
+            go build ./...
+
+      - name: Run the SIMD tests on arm64
+        # The TurboQuant parity test compares the NEON encoder with the
+        # pure-Go reference, which is what catches a divergence in the
+        # rounding.
+        run: |
+          docker run --rm --platform linux/arm64 \
+            -v "${PWD}:/src" -w /src \
+            -e CGO_ENABLED=1 \
+            golang:1.27 \
+            go test -count=1 ./internal/simd/...
+
   # ===== BENCHMARK REGRESSION GATE =====
   # Runs the same benchmarks on the base commit and on this commit, back to
   # back on one runner, and fails when a benchmark gets >1.5x slower.

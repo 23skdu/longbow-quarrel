@@ -206,6 +206,30 @@ else
 fi
 
 # ------------------------------------------------------------------------------
+# 9c. ARM64 / NEON build and tests
+# ------------------------------------------------------------------------------
+# The NEON TurboQuant kernel did not compile, and its absolute value mask
+# was built as an integer literal converted to a float, so the bit pattern
+# was 0x4F000000 instead of 0x7FFFFFFF: the kernel rounded half to even
+# while the CPU reference and the GPU round half away from zero. Nothing
+# caught it because nothing built the arm64 configuration.
+#
+# The job runs under QEMU, so it needs docker. It is skipped when docker
+# is not available; the CI job is the gate.
+log_header "9c. Building and testing the arm64 / NEON configuration"
+if command -v docker >/dev/null 2>&1; then
+    if docker run --rm --platform linux/arm64 \
+            -v "${REPO_ROOT}:/src" -w /src -e CGO_ENABLED=1 \
+            golang:1.27 go test -count=1 ./internal/simd/... >/dev/null 2>&1; then
+        log_pass "ARM64 / NEON Build and Tests"
+    else
+        log_fail "ARM64 / NEON Build and Tests"
+    fi
+else
+    log_skip "ARM64 / NEON Build and Tests (docker is not available)"
+fi
+
+# ------------------------------------------------------------------------------
 # 10. Zero-Allocation Hotpath Regression Gate
 # ------------------------------------------------------------------------------
 log_header "10. Validating Zero-Allocation Hotpath Invariants"
