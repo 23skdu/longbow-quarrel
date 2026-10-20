@@ -504,8 +504,8 @@ Based on deep profiling of autoregressive decode loops, CUDA kernel execution pr
 > (Steps 44, 47), Batch 8 (Step 40), Batch 9 (Step 40), Batch 10 (Step 35)
 > and Batch 11 (Step 35), Batch 12 (Step 35), Batch 13 (Step 35),
 > Batch 14 (Step 35), Batch 15 (Step 35), Batch 16 (Step 35),
-> Batch 17 (Step 35), Batch 18 (Step 35) are DONE** — see the status
-> markers on each step.
+> Batch 17 (Step 35), Batch 18 (Step 35), Batch 19 (Step 35) are
+> DONE** — see the status markers on each step.
 > Verified locally after the change:
 >
 > | Check | Command | Result |
@@ -1434,6 +1434,30 @@ all of them. It also caught a bug *in the test*: the comparison was
 the test passed with a NaN on the GPU. The comparison now checks for a NaN
 explicitly.
 
+**Batch 19 made the position tensors say what they hold.**
+
+The paged attention needs three things beside the activations: the position
+of every token, the block table of every sequence, and the physical slot
+every token goes to. The kernels that read them want integers.
+
+The CUDA engine passed the physical slots as int32 and the store kernel
+reads them as float32, so it read the bits of the integer as a float — a
+denormal — and every token landed in the first slot. The paged cache
+itself, and the Metal engine, carry the positions as float32, which is what
+the CUDA store kernel and the Metal kernels expect.
+
+The Metal kernels were the other way round: they took the positions and
+the block table as `int *` while the engine allocated them as float32, so
+the attention read the bits of a float as an integer. They read float32
+now, which is the convention the rest of the engine uses.
+
+The parity test did not catch either of them. The attention then read a slot
+that nothing had written, the memory happened to be zero, and the
+difference fell inside the tolerance. `internal/device/cuda_paged_store_test.go`
+checks the store directly instead: every token has to land in the slot its
+position names, and the slots that nothing names have to keep the value
+that was in them before.
+
 **Batch 18 removed the broken single-token forward and the VRAM it
 wasted.**
 
@@ -1880,6 +1904,8 @@ Flight server and client disagreeing on the wire format (see Step 35).
 and the GPU parity test it made possible found six defects in the GPU's
 batched forward (see Step 35). **Batch 18** removed the single-token
 forward it left broken and the gigabyte of VRAM it wasted (see Step 35).
+**Batch 19** made the position tensors say what they hold, on both the
+CUDA and the Metal side (see Step 35).
 
 **Still open:** generating the README table from a script so it cannot drift apart from the floors again. The `internal/engine` coverage is now 80.3% and its floor is 80.0%.
 

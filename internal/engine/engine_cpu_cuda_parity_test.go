@@ -79,7 +79,7 @@ func TestCPUAndCUDAAgree(t *testing.T) {
 	if scale == 0 {
 		scale = 1
 	}
-	tolerance := scale * 0.05
+	tolerance := scale * 0.005
 
 	for i := range cpuLogits {
 		cpuValue := float64(cpuLogits[i])

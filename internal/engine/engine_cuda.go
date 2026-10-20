@@ -775,7 +775,9 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 
 		// Update Cache (StoreKV)
 		// We'll calculate physical positions for new tokens
-		physPosData := make([]int32, numTokens)
+		// The store kernel reads the physical positions as float32, the
+		// same convention the paged cache and the Metal kernels use.
+		physPosData := make([]float32, numTokens)
 		for i, seqIdx := range desc.TokenToSeq {
 			seq := desc.Sequences[seqIdx]
 			seqID := fmt.Sprintf("seq-%d", seq.ID)
@@ -784,10 +786,10 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 			blockIdx := logicalPos / e.cache.blockSize
 			offset := logicalPos % e.cache.blockSize
 			if blockIdx < len(table) {
-				physPosData[i] = table[blockIdx]*int32(e.cache.blockSize) + int32(offset)
+				physPosData[i] = float32(table[blockIdx]*int32(e.cache.blockSize) + int32(offset))
 			}
 		}
-		physPosTensor := ctx.NewTensorI32(1, numTokens)
+		physPosTensor := ctx.NewTensorFP32(1, numTokens)
 		if err := physPosTensor.LoadFrom(physPosData); err != nil {
 			return nil, err
 		}

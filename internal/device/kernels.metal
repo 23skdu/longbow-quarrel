@@ -2161,7 +2161,7 @@ kernel void att_paged_f16(device const half *q [[ buffer(0) ]],
                         constant int &headDim [[ buffer(7) ]],
                         constant int &block_size [[ buffer(8) ]],
                         constant int &max_context_len [[ buffer(9) ]],
-                        device const int *block_table [[ buffer(10) ]],
+                        device const float *block_table [[ buffer(10) ]],
                         uint3 tid [[ thread_position_in_threadgroup ]],
                         uint3 nthreads [[ threads_per_threadgroup ]],
                         uint3 group_id [[ threadgroup_position_in_grid ]]) {
@@ -2183,7 +2183,7 @@ kernel void att_paged_f16(device const half *q [[ buffer(0) ]],
     for (int t = tid.x; t < effective_len; t += nt) {
         int logical_block = t / block_size;
         int block_offset = t % block_size;
-        int physical_block = block_table[logical_block];
+        int physical_block = (int)block_table[logical_block];
         
         int kv_dim = kv_heads * headDim;
         int block_stride = block_size * kv_dim;
@@ -2249,7 +2249,7 @@ kernel void att_paged_f16(device const half *q [[ buffer(0) ]],
         for (int t = 0; t < effective_len; t++) {
             int logical_block = t / block_size;
             int block_offset = t % block_size;
-            int physical_block = block_table[logical_block];
+            int physical_block = (int)block_table[logical_block];
             
             device const half *mv_ptr = v_cache + physical_block * block_stride + block_offset * kv_dim + kvh * headDim + tid.x;
             r += (s_mem[t] / se) * (float)*mv_ptr;
@@ -2262,12 +2262,12 @@ kernel void att_paged_batch_f16(device const half *q [[ buffer(0) ]],
                                device const half *k_cache [[ buffer(1) ]],
                                device const half *v_cache [[ buffer(2) ]],
                                device half *output [[ buffer(3) ]],
-                               device const int *batch_positions [[ buffer(4) ]],
+                               device const float *batch_positions [[ buffer(4) ]],
                                constant int &num_heads [[ buffer(5) ]],
                                constant int &kv_heads [[ buffer(6) ]],
                                constant int &headDim [[ buffer(7) ]],
                                constant int &block_size [[ buffer(8) ]],
-                               device const int *block_tables [[ buffer(9) ]],
+                               device const float *block_tables [[ buffer(9) ]],
                                constant int &max_blocks_per_seq [[ buffer(10) ]],
                                uint3 tid [[ thread_position_in_threadgroup ]],
                                uint3 nthreads [[ threads_per_threadgroup ]],
@@ -2278,10 +2278,10 @@ kernel void att_paged_batch_f16(device const half *q [[ buffer(0) ]],
     
     uint kvh = h / (num_heads / kv_heads);
     float scale = 1.0f / sqrt((float)headDim);
-    int pos = batch_positions[b];
+    int pos = (int)batch_positions[b];
     
     device const half *mq = q + (b * num_heads + h) * headDim;
-    device const int *seq_block_table = block_tables + b * max_blocks_per_seq;
+    device const float *seq_block_table = block_tables + b * max_blocks_per_seq;
     
     uint nt = nthreads.x;
     threadgroup float s_mem[4096]; // Capacity for scores
@@ -2293,7 +2293,7 @@ kernel void att_paged_batch_f16(device const half *q [[ buffer(0) ]],
     for (int t = tid.x; t < effective_len; t += nt) {
         int logical_block = t / block_size;
         int block_offset = t % block_size;
-        int physical_block = seq_block_table[logical_block];
+        int physical_block = (int)seq_block_table[logical_block];
         
         int kv_dim = kv_heads * headDim;
         int block_stride = block_size * kv_dim;
@@ -2338,7 +2338,7 @@ kernel void att_paged_batch_f16(device const half *q [[ buffer(0) ]],
         for (int t = 0; t < effective_len; t++) {
             int logical_block = t / block_size;
             int block_offset = t % block_size;
-            int physical_block = seq_block_table[logical_block];
+            int physical_block = (int)seq_block_table[logical_block];
             device const half *mv_ptr = v_cache + physical_block * block_stride + block_offset * kv_dim + kvh * headDim + tid.x;
             r += (s_mem[t] / se) * (float)*mv_ptr;
         }
