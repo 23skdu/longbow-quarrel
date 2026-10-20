@@ -2403,6 +2403,34 @@ package has three backends (stdlib, emlgo, emlfast) and only the default
 one has a test suite, so the two backends that only exist behind a build
 tag are unverified.
 
+### The pipeline was disabled on the repository
+
+The `Longbow Quarrel CI Pipeline` workflow was in the state
+`disabled_manually` on the repository, last updated **2026-09-04**:
+
+```
+$ gh api repos/23skdu/longbow-quarrel/actions/workflows --jq '.workflows[].state'
+disabled_manually
+```
+
+`main` also had **no branch protection**, so nothing required the pipeline
+to run. The consequence: every gate in `.github/workflows/ci.yml` — the
+lint, the build, the race detector, the CUDA compile gate, the Metal
+build, the coverage gate, the duplicate-declaration check, the
+vacuous-test check and the documentation drift check — had been **off**
+for every push since that date. A red build would have been merged without
+a peep.
+
+The last recorded run before this was a **failure** on commit `ae98a414`,
+and every visible run before that was also a failure. The pipeline had not
+been green in a long time either.
+
+The workflow was re-enabled and an empty commit pushed to re-trigger it.
+The gate list itself is unchanged and all thirteen local gates pass
+(`scripts/run_all_tests.sh`).
+
+---
+
 **Acceptance criteria:** a CI step that builds every command for the
 platform it targets, and a test job for the `emlgo` build.
 
@@ -2564,6 +2592,11 @@ The reason nobody noticed: **the CI has no TPU job.** `grep -n tpu
 docker-build matrix. The `make tpu` target and `Dockerfile.tpu` both build
 it, but nothing in CI runs them, so the backend has been rotting for as
 long as it has existed.
+
+And the CI pipeline itself was **disabled on the repository** from
+2026-09-04 until this batch (Step 54), so even the jobs that did exist
+were not running. The TPU backend has therefore never been compiled by
+anything that reports a result.
 
 The Metal backend is in the same position, and is *worse* than the roadmap
 says. The `metal-tests` job on `macos-latest` compiles the Metal build —
