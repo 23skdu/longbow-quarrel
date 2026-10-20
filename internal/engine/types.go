@@ -176,6 +176,29 @@ func (sm *SequenceManager) GetSequence(id uint64) (*Sequence, bool) {
 	return seq, ok
 }
 
+// GetSequencePos returns the cached position of a sequence under the
+// manager's lock. The decode loop advances Pos while a caller may be
+// reading it to report the cached length, so the two must not race.
+func (sm *SequenceManager) GetSequencePos(id uint64) (int, bool) {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	seq, ok := sm.sequences[id]
+	if !ok {
+		return 0, false
+	}
+	return seq.Pos, true
+}
+
+// IncSequencePos advances the cached position of a sequence under the
+// manager's lock.
+func (sm *SequenceManager) IncSequencePos(id uint64) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if seq, ok := sm.sequences[id]; ok {
+		seq.Pos++
+	}
+}
+
 type LlamaWeights struct {
 	TokenEmb *device.Tensor // vocab x dim
 

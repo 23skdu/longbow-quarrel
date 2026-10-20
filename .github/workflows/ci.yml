@@ -95,6 +95,18 @@ jobs:
         # the macOS Metal build while every Linux build stayed green.
         run: ./scripts/dupcheck.sh
 
+      - name: Type-check the Metal backend
+        # The Metal backend is a `darwin && metal` build, so it is normally
+        # only compiled on the macos-latest runner -- and that runner did
+        # not run for months. In the meantime the backend accumulated four
+        # compile errors: a missing import, an unused variable, a call with
+        # the wrong arity, and a lock on a field that did not exist. All
+        # four are Go *type* errors, and none of them needs the Metal
+        # framework, so they can be found from a Linux runner: the check
+        # strips only the `darwin` token from the build tags and builds
+        # with cgo against the plain-C bridge.
+        run: ./scripts/metalcheck.sh
+
       - name: Check the documentation against the code
         # The Helm chart passed flags the command no longer had, the
         # Grafana dashboard queried 27 of the 133 declared metrics, and

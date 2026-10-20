@@ -83,20 +83,14 @@ func (e *metalEngine) GetSeqCachePos(seqID string) int {
 	if err != nil {
 		return 0
 	}
-	if seq, ok := e.SeqMgr.GetSequence(id); ok {
-		seq.mu.RLock()
-		defer seq.mu.RUnlock()
-		return seq.Pos
+	if pos, ok := e.SeqMgr.GetSequencePos(id); ok {
+		return pos
 	}
 	return 0
 }
 
 func (e *metalEngine) IncSeqCachePos(seqID uint64) {
-	if seq, ok := e.SeqMgr.GetSequence(seqID); ok {
-		seq.mu.Lock()
-		defer seq.mu.Unlock()
-		seq.Pos++
-	}
+	e.SeqMgr.IncSequencePos(seqID)
 }
 
 func (e *metalEngine) SeqIDStr(seqID uint64) string {

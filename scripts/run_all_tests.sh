@@ -192,6 +192,20 @@ else
 fi
 
 # ------------------------------------------------------------------------------
+# 9b. Metal type check
+# ------------------------------------------------------------------------------
+# The Metal backend is a `darwin && metal` build, so it is normally only
+# compiled on a macOS runner. Its compile errors are Go type errors, though,
+# so they can be found from here: the check strips only the `darwin` token
+# from the build tags and builds with cgo against the plain-C bridge.
+log_header "9b. Type-checking the Metal backend"
+if "${SCRIPT_DIR}/metalcheck.sh"; then
+    log_pass "Metal Backend Type Check"
+else
+    log_fail "Metal Backend Type Check"
+fi
+
+# ------------------------------------------------------------------------------
 # 10. Zero-Allocation Hotpath Regression Gate
 # ------------------------------------------------------------------------------
 log_header "10. Validating Zero-Allocation Hotpath Invariants"

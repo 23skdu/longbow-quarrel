@@ -4,7 +4,6 @@ package device
 
 import (
 	"encoding/binary"
-	"fmt"
 	"math"
 	"testing"
 

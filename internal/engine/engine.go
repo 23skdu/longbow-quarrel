@@ -1024,7 +1024,7 @@ func (e *metalEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, err
 		// In a production engine, we would perform a zero-copy "Scatter-Gather"
 		// to interleave vision features into the hidden state.
 		// For the Phase 5 implementation, we prepended vision features to the prompt.
-		for seqIdx, visionT := range desc.VisionTensors {
+		for _, visionT := range desc.VisionTensors {
 			if vt, ok := visionT.(*device.Tensor); ok {
 				// Stub: Simplified concatenation logic for vision prefill
 				// In Gemma 4 / PaliGemma, vision tokens typically take the first N positions.
@@ -1247,7 +1247,7 @@ func (e *metalEngine) runBatchLoop() {
 		for i, seq := range desc.Sequences {
 			if seq.Speculative && e.SpeculativeMgr != nil && !seq.PrefillCompleted {
 				// Use Speculative Decoding for this sequence
-				err := e.SpeculativeMgr.GenerateSpeculativeMultiPath(context.Background(), seq)
+				err := e.SpeculativeMgr.GenerateSpeculativeMultiPath(context.Background(), seq, nil)
 				if err != nil {
 					logger.Log.Error("Speculative generation failed", "seq", seq.ID, "error", err)
 					// Fallback to regular sampling

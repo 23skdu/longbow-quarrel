@@ -2613,7 +2613,7 @@ file given a build tag or made backend-neutral.
 
 ---
 
-#### Step 59: The Metal backend does not compile — P0 — [OPEN]
+#### Step 59: The Metal backend did not compile — P0 — [PARTIAL]
 
 This is the most serious finding of the audit. **The Metal build has been
 broken for a long time and the CI does not catch it**, because the
@@ -2654,9 +2654,57 @@ runners, and the `metal-tests` job that would exercise the code is gated
 behind a `run-metal-tests` label. A push that breaks Metal is therefore
 green on every runner that reports to the branch protection.
 
-**Acceptance criteria:** the Metal build compiles; a CI job that builds the
-Metal backend on every push (or at least a `go vet` type check that does
-not need a Mac — see the next step); the four errors are gone.
+**Fix applied.** All four errors are fixed and the Metal `internal/device`
+and `internal/engine` packages now type-check:
+
+| Error | Fix |
+|-------|-----|
+| `undefined: simd` | `metal.go` now imports `internal/simd`. This is the same change `goimports` made — the CI's goimports check was failing on this exact file, because `goimports` adds the import that the compiler then rejects. |
+| `declared and not used: seqIdx` | `engine.go:1027` — `for _, visionT := range desc.VisionTensors`. |
+| `GenerateSpeculativeMultiPath` arity | `engine.go:1250` — the third argument (`logitsCallback`) is now `nil`, matching the call at `speculative.go:250`. |
+| `seq.mu` undefined | The mutex belongs to the `SequenceManager` (`types.go:161`), which already guards the map that owns the sequences. Two methods were added: `GetSequencePos(id)` and `IncSequencePos(id)`, and the Metal engine now calls them. The locking stays in one place and the linter can see that it is used. |
+
+**New gate: `scripts/metalcheck.sh`.** The CI could not *see* a Metal
+regression from a Linux runner, because the Metal build needs the macOS
+toolchain. But the four errors above are all *Go type* errors, and none of
+them needs the Metal framework — so they can be found from Linux. The new
+script copies the tree, strips only the `darwin` token from the build tags
+(leaving `metal` and `cgo` in place), and builds with cgo against the
+plain-C `metal_bridge.h`. It never links a binary, so it needs no Metal
+framework.
+
+```
+$ ./scripts/metalcheck.sh
+=== Metal type check (darwin && metal, compiled on this host) ===
+metalcheck: patched the build tags in 91 files
+metalcheck: OK - the Metal backend type-checks
+```
+
+The gate is verified to *fail* when the defect is reintroduced: removing
+the `simd` import again makes it report
+
+```
+internal/device/metal.go:2835:5: undefined: simd
+internal/device/metal.go:2847:5: undefined: simd
+metalcheck: FAILED - the Metal backend does not type-check
+```
+
+It runs in the `lint` job (so it runs on every push, on Linux) and in
+`scripts/run_all_tests.sh`.
+
+**A test for the new locking.** `internal/engine/types_sequence_pos_test.go`
+asserts that the position is read and advanced under the manager's lock,
+that a missing sequence is reported rather than created, and that the two
+operations do not race. The concurrency test is verified to fail — with a
+`DATA RACE` report — when the read lock is removed, so it is not a
+vacuous test.
+
+**Still open:** the Metal *numerical* defects (Step 60) — the backend
+compiles now, but it has never run.
+
+**Acceptance criteria:** ~~the Metal build compiles~~ (done); ~~a CI step
+that type-checks the Metal backend on every push, on Linux, without a
+Mac~~ (done); the Metal *numerical* defects are fixed (Step 60).
 
 ---
 
