@@ -257,6 +257,16 @@ func RMSNorm(input, weight, output []float32, rows, cols int, eps float32) {
 		return
 	}
 
+	// The epsilon comes from the model's metadata, so a corrupt or
+	// hostile file can make it non-positive. The engine clamps it when
+	// it reads the metadata, but the kernel is a public API and the
+	// fuzz target found the case: a non-positive epsilon turns the
+	// normalisation into a division by zero and fills the output with
+	// NaN. The engine's own default is used as the floor.
+	if eps <= 0 {
+		eps = 1e-5
+	}
+
 	switch simdLevel {
 	case 2:
 		if rows*cols >= 64 {

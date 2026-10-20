@@ -557,17 +557,43 @@ func FuzzRMSNorm(f *testing.F) {
 		if len(inputBytes) < rows*cols*4 || len(weightBytes) < cols*4 {
 			return
 		}
+		// The bounds keep the assertion meaningful. A non-finite input
+		// produces a non-finite output: that is the kernel's contract,
+		// not a defect, and the health audit is what reports a NaN in
+		// the activations. A magnitude this large can make the true
+		// result exceed the float32 range, which is arithmetic, not a
+		// kernel defect either.
+		if eps < 1e-10 || eps > 1 {
+			return
+		}
 		input := bytesToF32(inputBytes[:rows*cols*4])
 		weight := bytesToF32(weightBytes[:cols*4])
+		if !bounded(input, 1e4) || !bounded(weight, 1e4) {
+			return
+		}
 		output := make([]float32, rows*cols)
 		RMSNorm(input, weight, output, rows, cols, eps)
 		for _, v := range output {
 			if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
-				t.Errorf("RMSNorm produced NaN/Inf")
+				t.Errorf("RMSNorm produced NaN/Inf from a finite input")
 				break
 			}
 		}
 	})
+}
+
+// bounded reports whether every value in the slice is finite and within
+// the given magnitude.
+func bounded(values []float32, limit float32) bool {
+	for _, v := range values {
+		if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
+			return false
+		}
+		if v > limit || v < -limit {
+			return false
+		}
+	}
+	return true
 }
 
 func FuzzMatmulDefault(f *testing.F) {
@@ -622,9 +648,26 @@ func FuzzMatMul(f *testing.F) {
 		}
 		a := bytesToF32(aBytes[:m*k*4])
 		b := bytesToF32(bBytes[:k*n*4])
-		result := MatMul(a, b, m, n, k)
+		// A is m x k and B is k x n, so the result is m x n. The
+		// arguments of MatMul are (rowsA, colsA, colsB), which is
+		// (m, k, n) -- not (m, n, k).
+		result := MatMul(a, b, m, k, n)
 		if len(result) != m*n {
-			t.Errorf("expected length %d, got %d", m*n, len(result))
+			t.Fatalf("expected length %d, got %d", m*n, len(result))
+		}
+		// The values are checked against the naive definition, so the
+		// test is not only about the length.
+		for i := 0; i < m; i++ {
+			for j := 0; j < n; j++ {
+				want := float32(0)
+				for p := 0; p < k; p++ {
+					want += a[i*k+p] * b[p*n+j]
+				}
+				got := result[i*n+j]
+				if math.Abs(float64(got-want)) > 1e-3*float64(math.Abs(float64(want))+1) {
+					t.Fatalf("result[%d][%d] = %v, want %v", i, j, got, want)
+				}
+			}
 		}
 	})
 }

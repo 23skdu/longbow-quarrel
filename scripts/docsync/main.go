@@ -154,7 +154,11 @@ func readRepoDir(name string) ([]os.DirEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer dir.Close()
+	defer func() {
+		// A directory that fails to close is already read; the entries
+		// are what the caller asked for.
+		_ = dir.Close()
+	}()
 	return dir.ReadDir(-1)
 }
 

@@ -380,7 +380,11 @@ func (e *tpuEngine) runBatchLoop() {
 				seq.TokenCallback(token)
 			}
 
-			if token == 2 || isStopToken(e.stopTokens, token) || len(seq.Tokens) >= seq.MaxTokens {
+			// The tokenizer knows every EOS id the model declares
+			// (including the conventional 2 and the one from the model
+			// metadata).
+			isEOS := e.tok != nil && e.tok.IsEOS(token)
+			if isEOS || isStopToken(e.stopTokens, token) || len(seq.Tokens) >= seq.MaxTokens {
 				select {
 				case seq.Result <- seq.Tokens:
 				default:

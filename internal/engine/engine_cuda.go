@@ -826,9 +826,8 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 		// Output Projection
 		oW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_output.weight", layer))
 		attnProj, mErr := ctx.MatmulF16(attnOut, oW)
-		fmt.Printf("DEBUG matmul: err=%v proj=%v oW=%v attnOut=%v\n", mErr, attnProj != nil, oW != nil, attnOut != nil)
 		if mErr != nil {
-			fmt.Printf("DEBUG matmul: %v\n", mErr)
+			return nil, fmt.Errorf("layer %d: the attention output projection failed: %w", layer, mErr)
 		}
 		attnOut.ReturnToPool()
 

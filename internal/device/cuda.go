@@ -811,7 +811,6 @@ func (ctx *Context) MatmulF16(a, b *Tensor) (*Tensor, error) {
 		C.CUBLAS_GEMM_DEFAULT_TENSOR_OP)
 	if res != 0 {
 		out.ReturnToPool()
-		fmt.Printf("DEBUG gemm: res=%v a=%v(%d,%d) b=%v(%d,%d)\n", int(res), a.dataType, a.rows, a.cols, b.dataType, b.rows, b.cols)
 		return nil, fmt.Errorf("cublasGemmEx failed: %v (a type=%v rows=%d cols=%d, b type=%v rows=%d cols=%d)", res, a.dataType, a.rows, a.cols, b.dataType, b.rows, b.cols)
 	}
 	return out, nil

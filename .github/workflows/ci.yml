@@ -114,6 +114,13 @@ jobs:
         # with cgo against the plain-C bridge.
         run: ./scripts/metalcheck.sh
 
+      - name: Check the coverage table in the README
+        # The table was maintained by hand and drifted: eight of its
+        # nineteen rows were wrong the last time anybody checked. It is
+        # generated now, and this step fails when the README does not
+        # match the measurement.
+        run: ./scripts/coverage_table.py --check
+
       - name: Check the documentation against the code
         # The Helm chart passed flags the command no longer had, the
         # Grafana dashboard queried 27 of the 133 declared metrics, and

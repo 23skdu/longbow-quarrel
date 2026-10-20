@@ -173,36 +173,43 @@ go run ./scripts/vacuous_tests
 
 Measured with `go test -cover ./internal/...` on the **default (no build tag)
 build**. Packages below 80% are pinned to a ratchet floor in CI so coverage may
-rise freely but never regress. The floors live in `.github/workflows/ci.yml`
-and `scripts/run_all_tests.sh` and must be kept in sync.
+rise freely but never regress. The floors live in `scripts/coverage_gate.sh`.
 
-> **Note.** These numbers cover the default build only. `internal/device` has
-> 88 `.go` files but only 9 compile without a build tag, and `internal/engine`
-> has 88 files of which 20 compile — all CUDA, Metal, TPU and AVX-512 code is
-> excluded from both the numerator and the denominator. The percentages
-> therefore say nothing about the GPU backends.
+The table is generated: `scripts/coverage_table.py` measures, renders and
+rewrites it, and the CI fails when it is out of date.
+
+<!-- coverage:start -->
+
+> These numbers cover the default build only. `internal/device` has
+> 93 `.go` files but only 13 compile without a build tag, and
+> `internal/engine` has 123 files of which 78 compile — all CUDA,
+> Metal, TPU and AVX-512 code is excluded from both the numerator
+> and the denominator. The percentages therefore say nothing about
+> the GPU backends.
 
 | Package | Coverage |
 |---|---|
+| `internal/config` | 100.0% |
 | `internal/cpu` | 100.0% |
 | `internal/logger` | 100.0% |
-| `internal/config` | 100.0% |
-| `internal/gguf` | 100.0% |
 | `internal/mathx` | 100.0% |
-| `internal/metrics` | 99.5% |
 | `internal/models` | 100.0% |
 | `internal/ollama` | 100.0% |
 | `internal/promtest` | 100.0% |
 | `internal/sampler` | 100.0% |
-| `internal/telemetry` | 100.0% |
-| `internal/tokenizer` | 100.0% |
 | `internal/vector` | 100.0% |
 | `internal/vlm` | 100.0% |
-| `internal/simd` | 97.0% |
-| `internal/api` | 91.7% |
-| `internal/arrow_client` | 88.3% |
-| `internal/device` | 75.7% |
-| `internal/engine` | 68.1% |
+| `internal/metrics` | 99.5% |
+| `internal/tokenizer` | 98.5% |
+| `internal/simd` | 95.2% |
+| `internal/telemetry` | 94.0% |
+| `internal/api` | 91.6% |
+| `internal/gguf` | 89.6% |
+| `internal/arrow_client` | 82.0% |
+| `internal/engine` | 80.4% |
+| `internal/device` | 75.3% |
+
+<!-- coverage:end -->
 
 ---
 

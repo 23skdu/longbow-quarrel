@@ -1,0 +1,6 @@
+go test fuzz v1
+[]byte("0000000A")
+[]byte("0000007\xff")
+int(1)
+int(2)
+float32(4.7619048e-07)

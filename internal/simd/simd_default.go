@@ -9,6 +9,17 @@ func RMSNorm(input, weight, output []float32, rows, cols int, eps float32) {
 	m := newMetricsWrapper("RMSNorm", cols)
 	defer m.record()
 	defer checkOutputNaNInf(output, "RMSNorm")
+
+	// The epsilon comes from the model's metadata, so a corrupt or
+	// hostile file can make it non-positive. The engine clamps it when
+	// it reads the metadata, but the kernel is a public API and the
+	// fuzz target found the case: a non-positive epsilon turns the
+	// normalisation into a division by zero and fills the output with
+	// NaN. The engine's own default is used as the floor.
+	if eps <= 0 {
+		eps = 1e-5
+	}
+
 	for r := 0; r < rows; r++ {
 		offset := r * cols
 		sum := float32(0.0)
@@ -16,7 +27,8 @@ func RMSNorm(input, weight, output []float32, rows, cols int, eps float32) {
 			v := input[offset+c]
 			sum += v * v
 		}
-		invNorm := float32(1.0 / mathx.Sqrt(float64(sum)/float64(cols)+float64(eps)))
+		denom := sum/float32(cols) + eps
+		invNorm := float32(1.0 / mathx.Sqrt(float64(denom)))
 		for c := 0; c < cols; c++ {
 			output[offset+c] = input[offset+c] * invNorm * weight[c]
 		}

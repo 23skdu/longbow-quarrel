@@ -50,6 +50,16 @@ func TransposeMatrix(src []float32, rows, cols int, dst []float32) []float32 {
 	if len(dst) < rows*cols {
 		dst = make([]float32, rows*cols)
 	}
+	// The source must hold the matrix the dimensions describe. A shorter
+	// slice would be read out of range, so the destination is zeroed
+	// instead: the caller has the bug, and this is not where it should
+	// surface as a panic.
+	if len(src) < rows*cols {
+		for i := range dst[:rows*cols] {
+			dst[i] = 0
+		}
+		return dst
+	}
 	if rows*cols < 2048 {
 		for k := 0; k < rows; k++ {
 			rowOff := k * cols
@@ -80,6 +90,16 @@ func MatMulPretransposed(a, bT, result []float32, rowsA, colsA, colsB int) []flo
 	}
 	if len(result) < rowsA*colsB {
 		result = make([]float32, rowsA*colsB)
+	}
+	// The inputs must hold the matrices the dimensions describe. A
+	// shorter slice would be read out of range, so the result is zeroed
+	// instead: the caller has the bug, and this is not where it should
+	// surface as a panic.
+	if len(a) < rowsA*colsA || len(bT) < colsB*colsA {
+		for i := range result[:rowsA*colsB] {
+			result[i] = 0
+		}
+		return result
 	}
 
 	if rowsA*colsB < 1024 {

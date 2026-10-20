@@ -8,7 +8,15 @@
 #   - TPU (linux/amd64): Google TPU/XLA acceleration
 # =============================================================================
 
-.PHONY: all clean test build cpu metal nvidia tpu install check deps help
+.PHONY: all bench bench-emlgo bench-emlgo-all bench-simd bench-simd-all \
+	build changelog check check-sec clean cpu cpu-darwin-amd64 \
+	cpu-darwin-arm64 cpu-linux-amd64 cpu-linux-arm64 deps docker-all \
+	docker-cpu docker-metal docker-nvidia docker-tpu docker-webui fmt help \
+	lint metal metal-darwin-amd64 metal-darwin-arm64 nvidia nvidia-cuda \
+	package-dist race release release-darwin release-docker release-linux \
+	simd-avx2 simd-avx512 simd-scalar test test-all test-cuda test-emlfast \
+	test-emlgo test-metal test-simd test-simd-fuzz test-simd-quick test-tpu \
+	tpu tpu-xla verify-env
 
 # Default target
 all: cpu
@@ -207,11 +215,24 @@ test-simd-quick:
 	CGO_ENABLED=1 $(GO) test -v -tags cgo -run "QuickCheck" ./internal/simd/...
 
 test-simd-fuzz:
-	CGO_ENABLED=1 $(GO) test -v -tags cgo -fuzz -fuzztime=10s ./internal/simd/...
+	@echo "Fuzzing the SIMD kernels..."
+	@# Two things were wrong here. The `-fuzz=` form is required: with a
+	@# space, the flag consumes the next argument as its pattern, so
+	@# `-fuzztime=10s` became the pattern and go test reported "no fuzz
+	@# tests to fuzz" and passed. And go test fuzzes one target at a
+	@# time, so the targets are fuzzed in turn.
+	@for target in FuzzRMSNorm FuzzMatmulDefault FuzzMatMul FuzzMatVecMul \
+	              FuzzAttentionF32 FuzzSoftmaxF32 FuzzPolarQuant FuzzQJLTransform; do \
+		echo "--- $$target"; \
+		CGO_ENABLED=1 $(GO) test -v -tags cgo -fuzz=$$target -fuzztime=10s \
+			./internal/simd/... || exit 1; \
+	done
 
 # SIMD benchmarks
 bench-simd:
-	CGO_ENABLED=1 $(GO) test -v -bench=AVX512 -benchmem ./internal/simd/...
+	@# The AVX-512 benchmarks live behind the `avx512` build tag. Without
+	@# it the filter matched nothing and the target reported no data.
+	CGO_ENABLED=1 $(GO) test -v -tags "cgo avx512" -bench=AVX512 -benchmem ./internal/simd/...
 
 bench-simd-all:
 	CGO_ENABLED=1 $(GO) test -bench=. -benchmem ./internal/simd/...
