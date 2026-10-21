@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"testing"
 	"time"
 
@@ -14,7 +15,14 @@ func TestPlaywrightE2E_API(t *testing.T) {
 	// 1. Initialize Playwright
 	pw, err := playwright.Run()
 	if err != nil {
-		t.Skipf("skipping: could not start playwright driver: %v", err)
+		// The CI installs the driver before the tests, so a driver that
+		// will not start is a failure of the end-to-end path, not a
+		// reason to report green. A developer without the driver can
+		// say so.
+		if os.Getenv("QUARREL_SKIP_PLAYWRIGHT") == "1" {
+			t.Skipf("skipping: could not start playwright driver: %v", err)
+		}
+		t.Fatalf("could not start the playwright driver: %v", err)
 	}
 	defer func() { _ = pw.Stop() }()
 

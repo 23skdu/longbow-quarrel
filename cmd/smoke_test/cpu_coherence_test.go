@@ -3,8 +3,9 @@
 package main
 
 import (
-	"encoding/binary"
+	"math"
 	"os"
+	"strconv"
 	"testing"
 
 	"github.com/23skdu/longbow-quarrel/internal/config"
@@ -12,79 +13,78 @@ import (
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
 )
 
+// generateTestGGUFCPU writes a small llama-style model.
+//
+// The generator used to write the file by hand: every tensor got the
+// offset zero and the file held one block of data. That was never a valid
+// GGUF, and the engine now rejects it, which is what the test reports.
 func generateTestGGUFCPU(path string, seqLen uint32) error {
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
+	const (
+		dim      = 32
+		vocab    = 100
+		ffnDim   = 64
+		attnDim  = 32
+		kvDim    = 32
+		hiddenNo = 32
+	)
 
-	_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMagic))
-	_ = binary.Write(f, binary.LittleEndian, uint32(3))
-	_ = binary.Write(f, binary.LittleEndian, uint64(12))
-	_ = binary.Write(f, binary.LittleEndian, uint64(6))
-
-	writeKV := func(key string, val interface{}) {
-		_ = binary.Write(f, binary.LittleEndian, uint64(len(key)))
-		_, _ = f.WriteString(key)
-		switch v := val.(type) {
-		case uint32:
-			_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeUint32))
-			_ = binary.Write(f, binary.LittleEndian, v)
-		case float32:
-			_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeFloat32))
-			_ = binary.Write(f, binary.LittleEndian, v)
+	weight := func(n int) []byte {
+		out := make([]byte, n*4)
+		for i := 0; i < n; i++ {
+			// A small, non-zero weight: a zero weight makes every
+			// output zero and the coherence checks meaningless.
+			bits := math.Float32bits(float32(i%7) * 0.01)
+			out[i*4] = byte(bits)
+			out[i*4+1] = byte(bits >> 8)
+			out[i*4+2] = byte(bits >> 16)
+			out[i*4+3] = byte(bits >> 24)
 		}
+		return out
 	}
 
-	writeKV("llama.block_count", uint32(1))
-	writeKV("llama.embedding_length", uint32(32))
-	writeKV("llama.attention.head_count", uint32(4))
-	writeKV("llama.attention.head_count_kv", uint32(4))
-	writeKV("llama.context_length", seqLen)
-	writeKV("llama.rope.freq_base", float32(10000.0))
-
-	writeTensor := func(name string, rows, cols int) {
-		_ = binary.Write(f, binary.LittleEndian, uint64(len(name)))
-		_, _ = f.WriteString(name)
-		_ = binary.Write(f, binary.LittleEndian, uint32(2))
-		_ = binary.Write(f, binary.LittleEndian, uint64(cols))
-		_ = binary.Write(f, binary.LittleEndian, uint64(rows))
-		_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGMLTypeF32))
-		offset := uint64(0)
-		_ = binary.Write(f, binary.LittleEndian, offset)
+	kv := map[string]interface{}{
+		"general.architecture":                   "llama",
+		"general.alignment":                      uint32(32),
+		"llama.block_count":                      uint32(1),
+		"llama.embedding_length":                 uint32(dim),
+		"llama.attention.head_count":             uint32(4),
+		"llama.attention.head_count_kv":          uint32(4),
+		"llama.attention.layer_norm_rms_epsilon": float32(1e-5),
+		"llama.context_length":                   seqLen,
+		"llama.rope.freq_base":                   float32(10000.0),
+		"llama.feed_forward_length":              uint32(ffnDim),
+		"llama.vocab_size":                       uint32(vocab),
+		"tokenizer.ggml.model":                   "llama",
 	}
 
-	tensorNames := []string{
-		"token_embd.weight",
-		"output.weight",
-		"output_norm.weight",
-		"blk.0.attn_q.weight",
-		"blk.0.attn_k.weight",
-		"blk.0.attn_v.weight",
-		"blk.0.attn_output.weight",
-		"blk.0.attn_norm.weight",
-		"blk.0.ffn_gate.weight",
-		"blk.0.ffn_up.weight",
-		"blk.0.ffn_down.weight",
-		"blk.0.ffn_norm.weight",
+	tokens := make([]string, vocab)
+	scores := make([]float32, vocab)
+	types := make([]int32, vocab)
+	for i := range tokens {
+		tokens[i] = "t" + strconv.Itoa(i)
+		scores[i] = float32(-i)
+		types[i] = 1
+	}
+	kv["tokenizer.ggml.tokens"] = tokens
+	kv["tokenizer.ggml.scores"] = scores
+	kv["tokenizer.ggml.token_type"] = types
+
+	tensors := []gguf.TensorData{
+		{Name: "token_embd.weight", Dimensions: []uint64{uint64(dim), uint64(vocab)}, Type: gguf.GGMLTypeF32, Data: weight(dim * vocab)},
+		{Name: "output.weight", Dimensions: []uint64{uint64(dim), uint64(vocab)}, Type: gguf.GGMLTypeF32, Data: weight(dim * vocab)},
+		{Name: "output_norm.weight", Dimensions: []uint64{uint64(dim)}, Type: gguf.GGMLTypeF32, Data: weight(dim)},
+		{Name: "blk.0.attn_norm.weight", Dimensions: []uint64{uint64(dim)}, Type: gguf.GGMLTypeF32, Data: weight(dim)},
+		{Name: "blk.0.attn_q.weight", Dimensions: []uint64{uint64(dim), uint64(attnDim)}, Type: gguf.GGMLTypeF32, Data: weight(attnDim * dim)},
+		{Name: "blk.0.attn_k.weight", Dimensions: []uint64{uint64(dim), uint64(kvDim)}, Type: gguf.GGMLTypeF32, Data: weight(kvDim * dim)},
+		{Name: "blk.0.attn_v.weight", Dimensions: []uint64{uint64(dim), uint64(kvDim)}, Type: gguf.GGMLTypeF32, Data: weight(kvDim * dim)},
+		{Name: "blk.0.attn_output.weight", Dimensions: []uint64{uint64(attnDim), uint64(dim)}, Type: gguf.GGMLTypeF32, Data: weight(dim * attnDim)},
+		{Name: "blk.0.ffn_norm.weight", Dimensions: []uint64{uint64(dim)}, Type: gguf.GGMLTypeF32, Data: weight(dim)},
+		{Name: "blk.0.ffn_gate.weight", Dimensions: []uint64{uint64(dim), uint64(ffnDim)}, Type: gguf.GGMLTypeF32, Data: weight(ffnDim * dim)},
+		{Name: "blk.0.ffn_up.weight", Dimensions: []uint64{uint64(dim), uint64(ffnDim)}, Type: gguf.GGMLTypeF32, Data: weight(ffnDim * dim)},
+		{Name: "blk.0.ffn_down.weight", Dimensions: []uint64{uint64(ffnDim), uint64(dim)}, Type: gguf.GGMLTypeF32, Data: weight(dim * ffnDim)},
 	}
 
-	for _, n := range tensorNames {
-		rows, cols := 32, 32
-		if n == "token_embd.weight" || n == "output.weight" {
-			rows = 100
-			cols = 32
-		}
-		writeTensor(n, rows, cols)
-	}
-
-	_, _ = f.Write(make([]byte, 1024))
-
-	data := make([]byte, 100*32*4)
-	_, _ = f.Write(data)
-
-	return nil
+	return gguf.WriteFile(path, kv, tensors, 32)
 }
 
 func TestCPUCoherenceWrapping(t *testing.T) {
@@ -106,8 +106,9 @@ func TestCPUCoherenceWrapping(t *testing.T) {
 
 	e, err := engine.NewEngine(modelPath, conf)
 	if err != nil {
-		t.Skip("Engine not available on this platform")
-		return
+		// The engine failed to load a model the test built itself: that
+		// is a defect, not a platform.
+		t.Fatalf("the engine failed to load the model: %v", err)
 	}
 	defer e.Close()
 
@@ -149,8 +150,9 @@ func TestCPUMultiTokenCoherence(t *testing.T) {
 
 	e, err := engine.NewEngine(modelPath, conf)
 	if err != nil {
-		t.Skip("Engine not available on this platform")
-		return
+		// The engine failed to load a model the test built itself: that
+		// is a defect, not a platform.
+		t.Fatalf("the engine failed to load the model: %v", err)
 	}
 	defer e.Close()
 
@@ -194,8 +196,9 @@ func TestCPUSelfConsistency(t *testing.T) {
 
 	e, err := engine.NewEngine(modelPath, conf)
 	if err != nil {
-		t.Skip("Engine not available on this platform")
-		return
+		// The engine failed to load a model the test built itself: that
+		// is a defect, not a platform.
+		t.Fatalf("the engine failed to load the model: %v", err)
 	}
 
 	input := []int{1, 2, 3, 4, 5}
@@ -208,8 +211,7 @@ func TestCPUSelfConsistency(t *testing.T) {
 
 	e2, err := engine.NewEngine(modelPath, conf)
 	if err != nil {
-		t.Skip("Second engine not available")
-		return
+		t.Fatalf("the second engine failed to load the model: %v", err)
 	}
 	defer e2.Close()
 
@@ -253,8 +255,9 @@ func TestCPUKVCacheCorrectness(t *testing.T) {
 
 	e, err := engine.NewEngine(modelPath, conf)
 	if err != nil {
-		t.Skip("Engine not available on this platform")
-		return
+		// The engine failed to load a model the test built itself: that
+		// is a defect, not a platform.
+		t.Fatalf("the engine failed to load the model: %v", err)
 	}
 	defer e.Close()
 

@@ -136,7 +136,7 @@ func TestScanNaNs_Implementation(t *testing.T) {
 	t.Run("Q4K tensor skips NaN scan", func(t *testing.T) {
 		tensor, err := ctx.NewQ4KTensor(16, 256)
 		if err != nil {
-			t.Skip("Cannot create Q4K tensor: ", err)
+			t.Fatalf("cannot create the Q4K tensor: %v", err)
 		}
 
 		count := tensor.ScanNaNs("q4k_tensor")

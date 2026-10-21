@@ -618,8 +618,20 @@ func (c *PagedKVCache) FreeBlocksCount() int {
 // HasCapacityFor checks if the cache can accommodate a requested number of tokens.
 func (c *PagedKVCache) HasCapacityFor(numTokens int) bool {
 	blocksNeeded := (numTokens + c.blockSize - 1) / c.blockSize
-	// Require at least 2 extra blocks of headroom to prevent immediate stall
-	return c.FreeBlocksCount() >= (blocksNeeded + 2)
+
+	// Require some headroom so that a request does not stall as soon as
+	// it is admitted.
+	//
+	// The headroom is a fraction of the cache and not a fixed number of
+	// blocks: a fixed headroom of two blocks means a cache of two blocks
+	// can never admit anything, and the engine then waits for a request
+	// that will never arrive.
+	headroom := 2
+	if max := c.totalBlocks / 4; headroom > max {
+		headroom = max
+	}
+
+	return c.FreeBlocksCount() >= blocksNeeded+headroom
 }
 
 // AttachPrefixBlocks maps existing physical blocks into a new sequence's block table.

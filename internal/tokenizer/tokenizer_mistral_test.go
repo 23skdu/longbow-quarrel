@@ -194,3 +194,52 @@ func TestTokenizer_Mistral_ModelFileIsTemporary(t *testing.T) {
 		t.Fatalf("the model was not written: %v", err)
 	}
 }
+
+// writeGemma4LikeModel writes a small model with the Gemma 4 metadata:
+// the architecture is "gemma4" and the vocabulary holds the pieces of a
+// handful of words.
+func writeGemma4LikeModel(t *testing.T) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "gemma4-like.gguf")
+
+	tokens := []string{
+		"<unk>", "<bos>", "<eos>",
+		"▁The", "▁capital", "▁of", "▁France", "▁is", "▁Paris", ".",
+		"The", "capital", "of", "France", "is", "Paris", "▁", "▁▁",
+	}
+	scores := make([]float32, len(tokens))
+	for i := range scores {
+		scores[i] = float32(-i)
+	}
+	types := make([]int32, len(tokens))
+	for i := range types {
+		types[i] = 1
+	}
+	types[0] = 2
+	types[1] = 3
+	types[2] = 3
+
+	kv := map[string]interface{}{
+		"general.architecture":           "gemma4",
+		"general.alignment":              uint32(32),
+		"gemma4.block_count":             uint32(2),
+		"gemma4.embedding_length":        uint32(64),
+		"gemma4.attention.head_count":    uint32(4),
+		"gemma4.attention.head_count_kv": uint32(2),
+		"gemma4.feed_forward_length":     uint32(128),
+		"gemma4.context_length":          uint32(256),
+		"gemma4.vocab_size":              uint32(len(tokens)),
+		"tokenizer.ggml.model":           "llama",
+		"tokenizer.ggml.tokens":          tokens,
+		"tokenizer.ggml.scores":          scores,
+		"tokenizer.ggml.token_type":      types,
+		"tokenizer.ggml.bos_token_id":    uint32(1),
+		"tokenizer.ggml.eos_token_id":    uint32(2),
+	}
+
+	if err := gguf.WriteFile(path, kv, nil, 32); err != nil {
+		t.Fatalf("failed to write the model: %v", err)
+	}
+	return path
+}

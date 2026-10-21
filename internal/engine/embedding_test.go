@@ -6,9 +6,11 @@ import (
 	"testing"
 )
 
-func TestEmbeddingDim(t *testing.T) {
-	t.Skip("Requires loaded model")
+// The tests used to skip unconditionally: the assertions below them were
+// dead code, because a skip stops the test before it reaches them. The
+// engine is built here instead, so the assertions run.
 
+func TestEmbeddingDim(t *testing.T) {
 	e := &metalEngine{
 		weights: &LlamaWeights{
 			TokenEmb: nil,
@@ -22,8 +24,6 @@ func TestEmbeddingDim(t *testing.T) {
 }
 
 func TestGetEmbedding(t *testing.T) {
-	t.Skip("Requires loaded model")
-
 	e := &metalEngine{
 		weights: &LlamaWeights{
 			TokenEmb: nil,
@@ -37,8 +37,6 @@ func TestGetEmbedding(t *testing.T) {
 }
 
 func TestGetEmbeddings(t *testing.T) {
-	t.Skip("Requires loaded model")
-
 	e := &metalEngine{
 		weights: &LlamaWeights{
 			TokenEmb: nil,
@@ -52,8 +50,6 @@ func TestGetEmbeddings(t *testing.T) {
 }
 
 func TestTextToEmbedding(t *testing.T) {
-	t.Skip("Requires loaded model and tokenizer")
-
 	e := &metalEngine{
 		Tokenizer: nil,
 	}
@@ -65,13 +61,32 @@ func TestTextToEmbedding(t *testing.T) {
 }
 
 func BenchmarkGetEmbedding(b *testing.B) {
-	b.Skip("Requires loaded model")
+	e := &metalEngine{
+		weights: &LlamaWeights{
+			TokenEmb: nil,
+		},
+	}
+	for i := 0; i < b.N; i++ {
+		_, _ = e.GetEmbedding(0)
+	}
 }
 
 func BenchmarkGetEmbeddings(b *testing.B) {
-	b.Skip("Requires loaded model")
+	e := &metalEngine{
+		weights: &LlamaWeights{
+			TokenEmb: nil,
+		},
+	}
+	for i := 0; i < b.N; i++ {
+		_, _ = e.GetEmbeddings([]int{0, 1, 2})
+	}
 }
 
 func BenchmarkTextToEmbedding(b *testing.B) {
-	b.Skip("Requires loaded model")
+	e := &metalEngine{
+		Tokenizer: nil,
+	}
+	for i := 0; i < b.N; i++ {
+		_, _ = e.TextToEmbedding("hello")
+	}
 }

@@ -10,15 +10,20 @@ import (
 )
 
 func TestGemma4MultiTokenInference(t *testing.T) {
-	modelPath := "/home/rsd/.cache/llmfit/models/Gemma4_E2B_Abliterated_Opus_Distilled.Q8_0.gguf"
+	modelPath := realModelPath(t)
 	f, err := gguf.LoadFile(modelPath)
 	if err != nil {
-		t.Skipf("Gemma 4 model not found: %v", err)
-		return
+		t.Fatalf("failed to load the model: %v", err)
 	}
 	defer func() { _ = f.Close() }()
 
 	modelCfg := ExtractModelConfig(f)
+
+	// The test uses the token ids of a Gemma 4 model, so it only
+	// applies to one.
+	if modelCfg.Architecture != "gemma4" {
+		t.Skipf("the model at %s is a %s, not a gemma4", modelPath, modelCfg.Architecture)
+	}
 
 	cfg := config.Config{
 		Dim:                   modelCfg.Dim,

@@ -540,10 +540,7 @@ func attentionCPUScalar(q, k, v []float32, numHeads, kvHeads, headDim int) []flo
 // Verify SSM tensors are loaded for SSM layers
 
 func TestQwen35ModelStructure(t *testing.T) {
-	modelPath := "/home/rsd/.cache/llmfit/models/Huihui-Qwen3.5-4B-Claude-4.6-Opus-abliterated.Q8_0.gguf"
-	if _, err := os.Stat(modelPath); os.IsNotExist(err) {
-		t.Skip("Qwen3.5 model not found: " + modelPath)
-	}
+	modelPath := realModelPath(t)
 
 	conf := config.Default()
 	e, err := NewRegisteredEngine(modelPath, conf)
@@ -552,9 +549,10 @@ func TestQwen35ModelStructure(t *testing.T) {
 	}
 	defer e.Close()
 
-	// Verify basic engine configuration
+	// Verify basic engine configuration. The model is the one the
+	// environment names, so the test only applies to a Qwen 3.5 model.
 	if e.Config().Architecture != "qwen35" {
-		t.Errorf("Expected architecture qwen35, got %s", e.Config().Architecture)
+		t.Skipf("the model at %s is a %s, not a qwen35", modelPath, e.Config().Architecture)
 	}
 	if e.Config().Layers != 32 {
 		t.Errorf("Expected 32 layers, got %d", e.Config().Layers)

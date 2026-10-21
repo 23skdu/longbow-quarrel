@@ -2,7 +2,10 @@
 
 package device
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 // TestNewContextOnDevice checks that a context can be created on a chosen
 // CUDA device.
@@ -13,6 +16,11 @@ import "testing"
 func TestNewContextOnDevice(t *testing.T) {
 	count, err := GetDeviceCount()
 	if err != nil {
+		// A host without a CUDA device is not a failure; a driver that
+		// is there and broken is.
+		if !errors.Is(err, ErrNoCUDADevice) {
+			t.Fatalf("the CUDA driver failed: %v", err)
+		}
 		t.Skipf("no CUDA device available: %v", err)
 	}
 	if count < 1 {

@@ -397,7 +397,10 @@ func TestGetOllamaDir_NoHome(t *testing.T) {
 
 	_, err := GetOllamaDir()
 	if err == nil {
-		t.Skip("os.UserHomeDir succeeded even with empty HOME/USERPROFILE")
+		// The test emptied HOME and USERPROFILE, so there is no home
+		// directory to find. A success here is a failure of the
+		// resolver, not a reason to skip the test.
+		t.Fatal("GetOllamaDir found a home directory with HOME and USERPROFILE empty")
 	}
 
 	_, err = ResolveModelPath("testmodel")

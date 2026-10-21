@@ -20,9 +20,7 @@ func TestQuantization_Q4K(t *testing.T) {
 		// Q4K quantize the weights
 		q4kData, err := QuantizeWeightsToQ4K(f32Weights, 256)
 		if err != nil {
-			t.Logf("Q4_K quantization not implemented: %v", err)
-			t.SkipNow()
-			return
+			t.Fatalf("the Q4_K quantizer failed: %v", err)
 		}
 
 		// Dequantize back to F32
@@ -78,9 +76,7 @@ func TestQuantization_Q4K(t *testing.T) {
 
 		q4kData, err := QuantizeWeightsToQ4K(extremeWeights, 256)
 		if err != nil {
-			t.Logf("Q4_K quantization not implemented: %v", err)
-			t.SkipNow()
-			return
+			t.Fatalf("the Q4_K quantizer failed: %v", err)
 		}
 
 		// Should handle extreme values gracefully
@@ -152,9 +148,7 @@ func TestQuantization_Q4K(t *testing.T) {
 				// Test quantization - use total number of elements
 				q4kData, err := QuantizeWeightsToQ4K(f32Weights, len(f32Weights))
 				if err != nil {
-					t.Logf("Q4_K quantization skipped: %v", err)
-					t.SkipNow()
-					return
+					t.Fatalf("the Q4_K quantizer failed: %v", err)
 				}
 
 				dequantized := DequantizeQ4K(q4kData, len(f32Weights))
@@ -197,9 +191,7 @@ func TestQuantization_Q4K(t *testing.T) {
 		start := time.Now()
 		_, err := QuantizeWeightsToQ4K(weights, 1024)
 		if err != nil {
-			t.Logf("Q4_K quantization not implemented: %v", err)
-			t.SkipNow()
-			return
+			t.Fatalf("the Q4_K quantizer failed: %v", err)
 		}
 
 		quantDuration := time.Since(start)

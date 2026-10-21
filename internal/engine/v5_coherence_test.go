@@ -60,10 +60,7 @@ func klDivergence(p, q []float64) float64 {
 }
 
 func TestTokenCoherenceCrossEngine(t *testing.T) {
-	modelPath := "../../models/qwen2-0.5b-q4_k_m.gguf"
-	if _, err := os.Stat(modelPath); os.IsNotExist(err) {
-		t.Skip("Model file not found: " + modelPath)
-	}
+	modelPath := realModelPath(t)
 
 	tk, err := tokenizer.New(modelPath)
 	if err != nil {
@@ -119,10 +116,7 @@ func TestLogitCoherence(t *testing.T) {
 }
 
 func TestSamplingCoherence(t *testing.T) {
-	modelPath := "../../models/qwen2-0.5b-q4_k_m.gguf"
-	if _, err := os.Stat(modelPath); os.IsNotExist(err) {
-		t.Skip("Model file not found: " + modelPath)
-	}
+	modelPath := realModelPath(t)
 
 	tk, err := tokenizer.New(modelPath)
 	if err != nil {
@@ -159,10 +153,7 @@ func TestSamplingCoherence(t *testing.T) {
 }
 
 func TestLongContextCoherence(t *testing.T) {
-	modelPath := "../../models/qwen2-0.5b-q4_k_m.gguf"
-	if _, err := os.Stat(modelPath); os.IsNotExist(err) {
-		t.Skip("Model file not found: " + modelPath)
-	}
+	modelPath := realModelPath(t)
 
 	tk, err := tokenizer.New(modelPath)
 	if err != nil {
@@ -190,10 +181,7 @@ func TestLongContextCoherence(t *testing.T) {
 }
 
 func TestMultiTurnCoherence(t *testing.T) {
-	modelPath := "../../models/qwen2-0.5b-q4_k_m.gguf"
-	if _, err := os.Stat(modelPath); os.IsNotExist(err) {
-		t.Skip("Model file not found: " + modelPath)
-	}
+	modelPath := realModelPath(t)
 
 	tk, err := tokenizer.New(modelPath)
 	if err != nil {
@@ -235,4 +223,25 @@ func TestMultiTurnCoherence(t *testing.T) {
 			t.Error("Expected non-zero tokens accumulated")
 		}
 	})
+}
+
+// realModelPath returns the path of the model the tests that need a real
+// model use.
+//
+// The tests used to name a path on the machine of the developer who wrote
+// them, or a path inside a models directory that is not in the
+// repository. None of them can ever run in CI, and a skip hides that.
+// The model is now named by the environment, the same way the CUDA tests
+// name it.
+func realModelPath(t *testing.T) string {
+	t.Helper()
+
+	path := os.Getenv("QUARREL_TEST_MODEL")
+	if path == "" {
+		t.Skip("set QUARREL_TEST_MODEL to the path of a model to run this test")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Skipf("the model %s is not there: %v", path, err)
+	}
+	return path
 }

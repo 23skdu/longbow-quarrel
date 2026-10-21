@@ -96,6 +96,7 @@ import "C"
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 	"runtime"
@@ -1603,9 +1604,22 @@ func Float32SliceToFloat16(data []float32) []uint16 {
 	return res
 }
 
+// ErrNoCUDADevice is returned when the host has no CUDA device, or no
+// driver to talk to one.
+//
+// It is the one CUDA failure that is not a defect: a host without a GPU
+// is a host without a GPU. Everything else the driver reports is.
+var ErrNoCUDADevice = errors.New("no CUDA device available")
+
 func GetDeviceCount() (int, error) {
 	var count C.int
 	if err := C.cudaGetDeviceCount(&count); err != 0 {
+		// The CUDA error codes: 100 is "no device", 35 is "the driver is
+		// too old" and 46 is "no binary for this GPU".
+		code := int(err)
+		if code == 100 || code == 35 || code == 46 {
+			return 0, fmt.Errorf("%w: %v", ErrNoCUDADevice, err)
+		}
 		return 0, fmt.Errorf("cudaGetDeviceCount failed: %v", err)
 	}
 	return int(count), nil
