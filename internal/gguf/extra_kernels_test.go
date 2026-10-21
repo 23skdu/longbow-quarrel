@@ -30,34 +30,6 @@ func TestDequantizeQ4KBranchless_Kernel(t *testing.T) {
 	}
 }
 
-func TestFP8_Kernels(t *testing.T) {
-	w := []float32{1.0, -1.0, 0.5, 0.0}
-
-	// E4M3
-	data, _ := QuantizeToFP8E4M3(w)
-	res, _ := DequantizeFromFP8E4M3(data)
-	if len(res) != 4 {
-		t.Error("length mismatch")
-	}
-
-	// E5M2
-	data2, _ := QuantizeToFP8E5M2(w)
-	res2, _ := DequantizeFromFP8E5M2(data2)
-	if len(res2) != 4 {
-		t.Error("length mismatch")
-	}
-
-	// Weights wrapper
-	dataW, _ := QuantizeWeightsToFP8(w, 4, FP8E4M3)
-	_, _ = DequantizeWeightsFromFP8(dataW, 1, 4, FP8E4M3, 1.0)
-
-	// Config
-	conf := NewFP8Config(FP8E4M3)
-	bin, _ := conf.MarshalBinary()
-	conf2 := &FP8Config{}
-	_ = conf2.UnmarshalBinary(bin)
-}
-
 func TestTurboQuant_Matrices(t *testing.T) {
 	f := &GGUFFile{
 		KV:      make(map[string]interface{}),

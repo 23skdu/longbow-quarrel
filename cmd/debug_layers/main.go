@@ -39,8 +39,7 @@ func main() {
 	conf := config.Default()
 	switch quantType {
 	case "fp16":
-		conf.PrecisionMode = config.PrecisionFP16
-		fmt.Printf("Quantization: FP16\n")
+		fmt.Printf("Quantization: FP16 (the model default; the precision is not selectable)\n")
 	case "q4_0":
 		// Note: Cannot force specific quant types via config
 		fmt.Printf("Quantization: Model default (Q4_0 detected by loader)\n")

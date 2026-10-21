@@ -1,4 +1,4 @@
-//go:build !cuda && !metal && !tpu
+//go:build !cuda && !metal
 
 package engine
 
@@ -109,35 +109,42 @@ func TestPagedKVCacheForkSequence_IndependentRelease(t *testing.T) {
 	}
 }
 
-// TestPagedKVCacheGetBlockScales covers the per-layer scale lookup used by
-// the quantized (FP8) KV cache.
-func TestPagedKVCacheGetBlockScales(t *testing.T) {
+// TestPagedKVCacheGetScaleTensors covers the per-layer scale lookup used
+// by the quantized (FP8 and Q8_0) KV cache.
+func TestPagedKVCacheGetScaleTensors(t *testing.T) {
 	cache, ctx := newTestPagedCache(t, 256)
 	defer cache.Free()
 	defer ctx.Free()
 
-	// The cache initialises one scale per block, defaulting to 1.0.
-	k, v := cache.GetBlockScales(0)
-	if len(k) == 0 || len(v) == 0 {
-		t.Fatalf("expected scales for layer 0, got k=%v v=%v", k, v)
+	// The cache initialises one scale per pool slot, defaulting to 1.0.
+	k, v := cache.GetScaleTensors(0)
+	if k == nil || v == nil {
+		t.Fatalf("expected scale tensors for layer 0")
 	}
-	if len(k) != len(v) {
-		t.Errorf("the key and value scales differ in length: %d vs %d", len(k), len(v))
+	if k.Rows()*k.Cols() != v.Rows()*v.Cols() {
+		t.Errorf("the key and value scales differ in size: %d vs %d",
+			k.Rows()*k.Cols(), v.Rows()*v.Cols())
 	}
-	for i := range k {
-		if k[i] != 1.0 || v[i] != 1.0 {
-			t.Errorf("scale %d = (%v, %v), want the unit default", i, k[i], v[i])
+
+	host := k.ToHostF32()
+	if len(host) == 0 {
+		t.Fatal("expected the scale tensor to hold data")
+	}
+	for i := range host {
+		if host[i] != 1.0 {
+			t.Errorf("scale %d = %v, want the unit default", i, host[i])
+			break
 		}
 	}
 
 	// An out-of-range layer must also report none.
-	k, v = cache.GetBlockScales(9999)
-	if len(k) != 0 || len(v) != 0 {
-		t.Errorf("expected no scales for an out-of-range layer, got k=%v v=%v", k, v)
+	k, v = cache.GetScaleTensors(9999)
+	if k != nil || v != nil {
+		t.Errorf("expected no scales for an out-of-range layer")
 	}
-	k, v = cache.GetBlockScales(-1)
-	if len(k) != 0 || len(v) != 0 {
-		t.Errorf("expected no scales for a negative layer, got k=%v v=%v", k, v)
+	k, v = cache.GetScaleTensors(-1)
+	if k != nil || v != nil {
+		t.Errorf("expected no scales for a negative layer")
 	}
 }
 

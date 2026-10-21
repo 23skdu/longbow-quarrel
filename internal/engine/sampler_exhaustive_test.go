@@ -22,17 +22,6 @@ func TestSampler_Logic_Full(t *testing.T) {
 	if token < 0 || token >= 5 {
 		t.Errorf("Invalid token from Sample: %d", token)
 	}
-
-	// 2. Test Advanced Sample with Quality Mode
-	sampler.Config.QualityMode = true
-	token = sampler.SampleAdvanced(logits, history, true)
-	if token < 0 || token >= 5 {
-		t.Errorf("Invalid token from SampleAdvanced: %d", token)
-	}
-
-	// 3. Test with extreme distribution (adaptive temp)
-	l_extreme := []float32{100.0, 0.1, 0.1, 0.1, 0.1}
-	_ = sampler.SampleAdvanced(l_extreme, history, true)
 }
 
 func TestSampler_EdgeCases(t *testing.T) {

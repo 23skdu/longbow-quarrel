@@ -186,7 +186,7 @@ workflow run. The fuzz job satisfies this via `matrix.target`/`matrix.duration`.
 | `golang` | `1.27.2-alpine3.24` | current 1.27 patch |
 | `alpine` | `3.24` | 3.19 is EOL |
 | `nvidia/cuda` | `12.9.2-devel-ubuntu24.04`, `12.9.2-runtime-ubuntu24.04` | latest CUDA 12.x |
-| `ubuntu` | `24.04` (Dockerfile.tpu) | jammy has no modern Python |
+| `ubuntu` | `24.04` | jammy has no modern Python |
 | `prom/prometheus` | `v3.15.0` | v2 series is EOL |
 | `grafana/grafana` | `13.2.3` | matches dashboard `pluginVersion` |
 
@@ -200,14 +200,6 @@ toolkit), so a future CUDA 13 move also needs a GPU-support decision.
 
 The local development toolkit for this repository is CUDA 12.4 (`nvcc`); the
 container images run a newer 12.x patch.
-
-### JAX / TPU
-
-`Dockerfile.tpu` pins `jax[tpu]==0.11.2`. This requires Python ≥ 3.12, which is
-why the image is based on Ubuntu 24.04 (Python 3.12) rather than 22.04
-(Python 3.10). The previously pinned `jax==0.4.26` and the extra index
-`https://storage.googleapis.com/jax-releases/jax_lib.html` were both removed:
-the former is long superseded, the latter now returns HTTP 404.
 
 ---
 

@@ -16,16 +16,15 @@ for what has landed and what is still planned.
 > CPU binary runs real inference, the REST API is served, the Metal build
 > compiles, and the pipeline is green on every job.
 >
-> **Still outstanding — four P0 items, listed in full in
-> [docs/roadmap.md](docs/roadmap.md):** the CUDA engine discards the
-> caller's configuration, so `-devices` and `-activation-log` do nothing on
-> the GPU build; 55 of the 133 Prometheus metrics are never written, so the
-> dashboard reads "No data" on 55 panels; the Metal layer forward has seven
-> numerical defects of the same class the CUDA one had; and the TPU backend
-> does not compile at all.
+> **Still outstanding — the remaining P1/P2 items are listed in full in
+> [docs/roadmap.md](docs/roadmap.md).** The four P0 items recorded there
+> are all closed: the CUDA engine now preserves the caller's
+> configuration, every produced metric is written by production code or
+> explicitly allowlisted, the Metal backend compiles and has a CPU parity
+> test, and the TPU backend has been deleted rather than left unbuildable.
 >
-> The engine also has ~4,750 lines of dead code, and the CUDA hot path is
-> 43% uncovered.
+> The engine also had ~4,750 lines of dead code; the deletion and wiring
+> pass that removes it is recorded in the roadmap.
 
 High-performance, memory-efficient LLM inference engine written in Go with native GPU acceleration (Apple Silicon Metal, NVIDIA CUDA) and optimized CPU SIMD vectorization (AVX-512, AVX2, ARM NEON).
 
@@ -183,9 +182,9 @@ rewrites it, and the CI fails when it is out of date.
 <!-- coverage:start -->
 
 > These numbers cover the default build only. `internal/device` has
-> 93 `.go` files but only 13 compile without a build tag, and
-> `internal/engine` has 123 files of which 78 compile — all CUDA,
-> Metal, TPU and AVX-512 code is excluded from both the numerator
+> 92 `.go` files but only 13 compile without a build tag, and
+> `internal/engine` has 122 files of which 78 compile — all CUDA,
+> Metal and AVX-512 code is excluded from both the numerator
 > and the denominator. The percentages therefore say nothing about
 > the GPU backends.
 

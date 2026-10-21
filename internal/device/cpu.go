@@ -1,4 +1,4 @@
-//go:build (!cuda && !metal && !tpu) || !cgo || (!linux && !darwin)
+//go:build (!cuda && !metal) || !cgo || (!linux && !darwin)
 
 // The CPU backend is the fallback: it is compiled when no GPU backend is
 // selected, or when cgo is unavailable (in which case the cgo-only backends
@@ -114,6 +114,30 @@ func NewContextOnDevice(deviceID int) (*Context, error) {
 
 func (c *Context) NewTensorFP32(rows, cols int) *Tensor {
 	return c.NewTensor(rows, cols)
+}
+
+// SupportsQuantizedKVCache reports whether this backend can store the KV
+// cache in a quantized pool.
+//
+// The CPU reference attention reads the pool as float32, so a quantized
+// pool cannot be read back by it. The paged cache rejects a quantized KV
+// cache type on this backend.
+func (c *Context) SupportsQuantizedKVCache() bool {
+	return false
+}
+
+// StoreKVPagedBatchQuantized stores K and V into a quantized pool. The CPU
+// backend has no quantized pool; the paged cache rejects the quantized KV
+// cache types before it gets here.
+func (c *Context) StoreKVPagedBatchQuantized(k, v, kCache, vCache, kScales, vScales, physicalPositions *Tensor, kvDim, numTokens int, isFP8 bool) error {
+	return fmt.Errorf("the CPU backend cannot store the KV cache in a quantized pool")
+}
+
+// StoreKVPagedSlotQuantized stores one K/V row into a quantized pool. The
+// CPU backend has no quantized pool; the paged cache rejects the quantized
+// KV cache types before it gets here.
+func (c *Context) StoreKVPagedSlotQuantized(k, v, kCache, vCache, kScales, vScales *Tensor, slotIdx, kvDim int, isFP8 bool) error {
+	return fmt.Errorf("the CPU backend cannot store the KV cache in a quantized pool")
 }
 
 // NewPagedKVPool allocates the paged KV cache pool for one layer.

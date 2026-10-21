@@ -646,8 +646,8 @@ jobs:
 
       - name: Run Gosec on the AVX-512 build
         # The default build only covers the code that compiles without a build
-        # tag, which is a fraction of the tree: the AVX-512, CUDA, Metal and
-        # TPU backends are all excluded from it.
+        # tag, which is a fraction of the tree: the AVX-512, CUDA and Metal
+        # backends are all excluded from it.
         run: gosec -quiet -tags=avx512 ./...
 
       - name: Run govulncheck
@@ -658,8 +658,8 @@ jobs:
 
       - name: Run govulncheck on the AVX-512 build
         # The default build only covers the code that compiles without a build
-        # tag, which is a fraction of the tree: the AVX-512, CUDA, Metal and
-        # TPU backends are all excluded from it. The vulnerability database
+        # tag, which is a fraction of the tree: the AVX-512, CUDA and Metal
+        # backends are all excluded from it. The vulnerability database
         # applies to the dependencies of those builds too, and a dependency
         # that is only reachable from a tagged file is still reachable from
         # the shipped binary.
@@ -743,10 +743,6 @@ jobs:
     runs-on: ubuntu-latest
     needs: [lint, build]
     strategy:
-      # Dockerfile.tpu is not in the matrix: the TPU backend does not
-      # compile (see roadmap.md, Steps 58 and 61), and the image's JAX
-      # install fails before it gets that far. It comes back when the
-      # backend is rewritten or deleted.
       matrix:
         dockerfile: [Dockerfile.cpu, Dockerfile.nvidia, Dockerfile.webui]
         include:

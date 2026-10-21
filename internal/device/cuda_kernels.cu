@@ -2099,6 +2099,219 @@ __global__ void flash_attention_prefill_kernel(
 
 // ===== Quantized Paged Attention Kernel (Part 8) =====
 
+// The two quantized KV formats share one store path and one attention
+// path. The store quantizes each token's K/V row with a scale of its own
+// and writes the scale next to the codes; the attention reads the scale
+// back and multiplies.
+//
+//   - int8 (Q8_0): symmetric, 127 steps. code = round(x / scale).
+//   - FP8-E4M3:   four-bit exponent, three-bit mantissa, 448 is the
+//                 largest finite value. The code is the E4M3 bit
+//                 pattern of x / scale.
+//
+// The scale is per token rather than per physical block: a block is filled
+// one token at a time, so a block-wide scale could only be computed once
+// the block was full, and the tokens that arrived earlier would have to be
+// requantized. A per-token scale costs one float per slot and is at least
+// as accurate.
+
+// fp8E4M3Encode encodes a value in [-448, 448] as an E4M3 bit pattern.
+//
+// The format has one sign bit, a four-bit exponent with a bias of 7 and a
+// three-bit mantissa, in the "finite" variant: the exponent field 15 with
+// the mantissa 7 is the only NaN, so 448 is the largest finite value.
+//
+// The value 0 is the only subnormal case that matters here: the rows are
+// scaled so that the largest one is 448, which is a normal number, and
+// the small ones round to zero or to the smallest subnormal.
+__device__ __forceinline__ unsigned char fp8E4M3Encode(float x) {
+    if (x == 0.0f) return 0;
+    float ax = fabsf(x);
+    if (ax > 448.0f) ax = 448.0f;
+
+    // The smallest normal is 2^-6; below it the format is subnormal with
+    // a step of 2^-9.
+    if (ax < exp2f(-6.0f)) {
+        int m = (int)floorf(ax * 512.0f + 0.5f);
+        if (m > 7) m = 7;
+        return (unsigned char)m;
+    }
+
+    int e = (int)floorf(log2f(ax));
+    if (e < -6) e = -6;
+    if (e > 8) e = 8;
+
+    int m = (int)floorf((ax / exp2f((float)e) - 1.0f) * 8.0f + 0.5f);
+    if (m > 7) {
+        // The rounding carried into the next exponent.
+        m = 0;
+        e += 1;
+        if (e > 8) {
+            // 1.875 * 2^8 is 480, which the format cannot hold; 448 is
+            // the largest value it can.
+            e = 8;
+            m = 6;
+        }
+    }
+
+    unsigned int code = ((unsigned int)(e + 7) << 3) | (unsigned int)m;
+    if (x < 0.0f) code |= 0x80u;
+    return (unsigned char)code;
+}
+
+// fp8E4M3Decode turns an E4M3 bit pattern back into a float.
+__device__ __forceinline__ float fp8E4M3Decode(unsigned char code) {
+    int exp = (code >> 3) & 0xF;
+    int mant = code & 0x7;
+
+    float value;
+    if (exp == 0) {
+        // Subnormal: mantissa * 2^-9.
+        value = (float)mant * exp2f(-9.0f);
+    } else if (exp == 0xF && mant == 7) {
+        // The one NaN of the format. The cache never stores one.
+        value = 0.0f;
+    } else {
+        value = (1.0f + (float)mant / 8.0f) * exp2f((float)(exp - 7));
+    }
+
+    if (code & 0x80u) return -value;
+    return value;
+}
+
+// int8Encode quantizes a value with a symmetric scale.
+__device__ __forceinline__ signed char int8Encode(float x, float invScale) {
+    float q = rintf(x * invScale);
+    if (q > 127.0f) q = 127.0f;
+    if (q < -127.0f) q = -127.0f;
+    return (signed char)q;
+}
+
+// quantize_kv_row quantizes one K/V row into a quantized pool slot and
+// writes the scale it used.
+//
+// Every thread of the block takes part: the block first finds the largest
+// absolute value of the row, then turns it into the scale, and then writes
+// the quantized codes. The scale belongs to the slot, not to the physical
+// block, because a block is filled one token at a time.
+__device__ __forceinline__ void quantize_kv_row(
+    const float* __restrict__ kRow,
+    const float* __restrict__ vRow,
+    unsigned char* __restrict__ kSlot,
+    unsigned char* __restrict__ vSlot,
+    float* __restrict__ kScales,
+    float* __restrict__ vScales,
+    int slotIdx, int kvDim, int isFP8,
+    int tid, int blockDimX,
+    float* s_amax, float* s_warpMax) {
+
+    float amax = 0.0f;
+    for (int d = tid; d < kvDim; d += blockDimX) {
+        float ak = fabsf(kRow[d]);
+        float av = fabsf(vRow[d]);
+        float m = ak > av ? ak : av;
+        if (m > amax) amax = m;
+    }
+
+    // Reduce the block maximum: a warp reduction, then one reduction over
+    // the warp results.
+    for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+        float other = __shfl_down_sync(0xffffffff, amax, offset);
+        if (other > amax) amax = other;
+    }
+
+    int lane = tid % warpSize;
+    int warp = tid / warpSize;
+    int numWarps = (blockDimX + warpSize - 1) / warpSize;
+    if (lane == 0) s_warpMax[warp] = amax;
+    __syncthreads();
+
+    if (tid == 0) {
+        float blockMax = 0.0f;
+        for (int w = 0; w < numWarps; w++) {
+            if (s_warpMax[w] > blockMax) blockMax = s_warpMax[w];
+        }
+        s_amax[0] = blockMax;
+    }
+    __syncthreads();
+    amax = s_amax[0];
+
+    float maxCode = isFP8 ? 448.0f : 127.0f;
+    float scale = (amax > 0.0f) ? (amax / maxCode) : 1.0f;
+    float invScale = (scale > 0.0f) ? (1.0f / scale) : 1.0f;
+
+    if (tid == 0) {
+        kScales[slotIdx] = scale;
+        vScales[slotIdx] = scale;
+    }
+
+    for (int d = tid; d < kvDim; d += blockDimX) {
+        if (isFP8) {
+            kSlot[d] = fp8E4M3Encode(kRow[d] * invScale);
+            vSlot[d] = fp8E4M3Encode(vRow[d] * invScale);
+        } else {
+            kSlot[d] = (unsigned char)int8Encode(kRow[d], invScale);
+            vSlot[d] = (unsigned char)int8Encode(vRow[d], invScale);
+        }
+    }
+}
+
+// store_kv_paged_batch_quantized_kernel writes the K/V rows into a
+// quantized pool. One block per token.
+__global__ void store_kv_paged_batch_quantized_kernel(
+    const float* __restrict__ k,      // [numTokens, kvDim]
+    const float* __restrict__ v,      // [numTokens, kvDim]
+    unsigned char* __restrict__ kPool,   // [numSlots, kvDim] one byte per element
+    unsigned char* __restrict__ vPool,   // [numSlots, kvDim]
+    float* __restrict__ kScales,     // [numSlots] one scale per slot
+    float* __restrict__ vScales,     // [numSlots]
+    const float* __restrict__ physicalPositions, // [numTokens]
+    int kvDim, int numTokens, int isFP8) {
+
+    int tokenIdx = blockIdx.x;
+    int tid = threadIdx.x;
+
+    if (tokenIdx >= numTokens) return;
+
+    int slotIdx = (int)physicalPositions[tokenIdx];
+    if (slotIdx < 0) return;
+
+    __shared__ float s_amax[1];
+    __shared__ float s_warpMax[32];
+
+    quantize_kv_row(
+        k + (size_t)tokenIdx * kvDim,
+        v + (size_t)tokenIdx * kvDim,
+        kPool + (size_t)slotIdx * kvDim,
+        vPool + (size_t)slotIdx * kvDim,
+        kScales, vScales, slotIdx, kvDim, isFP8,
+        tid, blockDim.x, s_amax, s_warpMax);
+}
+
+// store_kv_paged_slot_quantized_kernel writes one K/V row into one
+// quantized pool slot.
+__global__ void store_kv_paged_slot_quantized_kernel(
+    const float* __restrict__ k,      // [kvDim]
+    const float* __restrict__ v,      // [kvDim]
+    unsigned char* __restrict__ kPool,
+    unsigned char* __restrict__ vPool,
+    float* __restrict__ kScales,
+    float* __restrict__ vScales,
+    int slotIdx, int kvDim, int isFP8) {
+
+    int tid = threadIdx.x;
+    if (slotIdx < 0) return;
+
+    __shared__ float s_amax[1];
+    __shared__ float s_warpMax[32];
+
+    quantize_kv_row(k, v,
+        kPool + (size_t)slotIdx * kvDim,
+        vPool + (size_t)slotIdx * kvDim,
+        kScales, vScales, slotIdx, kvDim, isFP8,
+        tid, blockDim.x, s_amax, s_warpMax);
+}
+
 __global__ void paged_attention_quantized_kernel(
     const float* __restrict__ q,
     const int8_t* __restrict__ kPool,
@@ -2138,17 +2351,21 @@ __global__ void paged_attention_quantized_kernel(
         int physicalBlockIdx = blockTables[seqIdx * maxBlocks + b];
         int tokensInThisBlock = (b == numBlocksNeeded - 1) ? (pos % blockSize) + 1 : blockSize;
 
-        float kScale = (kScales != NULL) ? kScales[physicalBlockIdx] : 1.0f;
-        float vScale = (vScales != NULL) ? vScales[physicalBlockIdx] : 1.0f;
-
         for (int t = 0; t < tokensInThisBlock; t++) {
             float score = 0.0f;
             int poolSlotIdx = physicalBlockIdx * blockSize + t;
+
+            // The scale belongs to the slot, not to the block: the store
+            // quantizes every token with a scale of its own.
+            float kScale = (kScales != NULL) ? kScales[poolSlotIdx] : 1.0f;
+            float vScale = (vScales != NULL) ? vScales[poolSlotIdx] : 1.0f;
+
             const int8_t* k_ptr = kPool + poolSlotIdx * kvDim + kvHeadIdx * headDim;
             const int8_t* v_ptr = vPool + poolSlotIdx * kvDim + kvHeadIdx * headDim;
 
             for (int d = 0; d < headDim; d++) {
-                float kVal = (float)k_ptr[d] * kScale;
+                float kVal = isFP8 ? (fp8E4M3Decode((unsigned char)k_ptr[d]) * kScale)
+                                   : ((float)k_ptr[d] * kScale);
                 score += q_row[d] * kVal;
             }
             score *= scale;
@@ -2159,13 +2376,17 @@ __global__ void paged_attention_quantized_kernel(
                 float factor = expf(prev_max - max_score);
                 sum_exp = sum_exp * factor + 1.0f;
                 for (int d = 0; d < headDim; d++) {
-                    res[d] = res[d] * factor + (float)v_ptr[d] * vScale;
+                    float vVal = isFP8 ? (fp8E4M3Decode((unsigned char)v_ptr[d]) * vScale)
+                                       : ((float)v_ptr[d] * vScale);
+                    res[d] = res[d] * factor + vVal;
                 }
             } else {
                 float exp_val = expf(score - max_score);
                 sum_exp += exp_val;
                 for (int d = 0; d < headDim; d++) {
-                    res[d] += exp_val * ((float)v_ptr[d] * vScale);
+                    float vVal = isFP8 ? (fp8E4M3Decode((unsigned char)v_ptr[d]) * vScale)
+                                       : ((float)v_ptr[d] * vScale);
+                    res[d] += exp_val * vVal;
                 }
             }
         }
@@ -2197,6 +2418,25 @@ void cudaStoreKVPagedBatch(cudaStream_t stream, const float* k, const float* v,
     if (numTokens == 0) return;
     int threads = 256;
     store_kv_paged_batch_kernel<<<numTokens, threads, 0, stream>>>(k, v, kPool, vPool, physicalPositions, kvDim, numTokens);
+}
+
+void cudaStoreKVPagedBatchQuantized(cudaStream_t stream, const float* k, const float* v,
+                             unsigned char* kPool, unsigned char* vPool,
+                             float* kScales, float* vScales, const float* physicalPositions,
+                             int kvDim, int numTokens, int isFP8) {
+    if (numTokens == 0) return;
+    int threads = 256;
+    store_kv_paged_batch_quantized_kernel<<<numTokens, threads, 0, stream>>>(
+        k, v, kPool, vPool, kScales, vScales, physicalPositions, kvDim, numTokens, isFP8);
+}
+
+void cudaStoreKVPagedSlotQuantized(cudaStream_t stream, const float* k, const float* v,
+                             unsigned char* kPool, unsigned char* vPool,
+                             float* kScales, float* vScales, int slotIdx,
+                             int kvDim, int isFP8) {
+    int threads = 256;
+    store_kv_paged_slot_quantized_kernel<<<1, threads, 0, stream>>>(
+        k, v, kPool, vPool, kScales, vScales, slotIdx, kvDim, isFP8);
 }
 
 void cudaPagedAttentionBatch(cudaStream_t stream, const float* q, const __half* kPool, const __half* vPool,

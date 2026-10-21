@@ -178,12 +178,38 @@ Memory Estimate:  %.2f GB
 func (a *MetadataAnalyzer) ValidateTensors() ([]string, error) {
 	var issues []string
 
-	expectedOffset := a.file.DataOffset
+	// The GGUF specification requires every tensor offset to be aligned to
+	// the file's alignment, and writers differ on whether they pad to it:
+	// llama.cpp pads each tensor to the next aligned offset, while this
+	// repository's writer packs the data tightly. Both are valid files, so
+	// an offset is accepted either packed or aligned to the file's
+	// alignment; anything else means the tensor table does not describe
+	// the data behind it.
+	alignment := uint64(32)
+	switch v := a.file.KV["general.alignment"].(type) {
+	case uint32:
+		alignment = uint64(v)
+	case uint64:
+		alignment = v
+	case float64:
+		alignment = uint64(v)
+	}
+	if alignment == 0 {
+		alignment = 32
+	}
+
+	// Tensor offsets in a GGUF file are relative to the start of the data
+	// section (the reader keeps them that way), so the walk starts at zero.
+	expectedOffset := uint64(0)
 	for i, t := range a.file.Tensors {
-		if t.Offset != expectedOffset {
+		aligned := expectedOffset
+		if pad := alignment - (aligned % alignment); pad != alignment {
+			aligned += pad
+		}
+		if t.Offset != expectedOffset && t.Offset != aligned {
 			issues = append(issues,
-				fmt.Sprintf("Tensor %d (%s): expected offset %d, got %d",
-					i, t.Name, expectedOffset, t.Offset))
+				fmt.Sprintf("Tensor %d (%s): expected offset %d (or aligned %d), got %d",
+					i, t.Name, expectedOffset, aligned, t.Offset))
 		}
 
 		expectedSize := t.SizeBytes()
@@ -191,9 +217,11 @@ func (a *MetadataAnalyzer) ValidateTensors() ([]string, error) {
 			issues = append(issues,
 				fmt.Sprintf("Tensor %d (%s): unknown size for type %s",
 					i, t.Name, t.Type))
+			expectedOffset = t.Offset
+			continue
 		}
 
-		expectedOffset += expectedSize
+		expectedOffset = t.Offset + expectedSize
 	}
 
 	return issues, nil

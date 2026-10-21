@@ -233,18 +233,7 @@ Comprehensive Prometheus metrics reference for monitoring inference performance,
 
 ---
 
-## 22. TPU Engine (build tag: linux && tpu)
-
-| Metric | Type | Description |
-|--------|------|-------------|
-| `quarrel_tpu_engine_initialized_total` | CounterVec (model, architecture) | Total TPU engine initializations. |
-| `quarrel_tpu_inference_total` | CounterVec (model) | Total TPU inference calls. |
-| `quarrel_tpu_tokens_generated_total` | CounterVec (model) | Total tokens generated on TPU. |
-| `quarrel_tpu_memory_bytes` | GaugeVec (model) | Current TPU memory usage. |
-
----
-
-## 23. Metrics Not Previously Documented
+## 22. Metrics Not Previously Documented
 
 These metrics are registered by the code and were missing from the
 reference above. The `internal/metrics` test suite now checks that this
@@ -321,14 +310,6 @@ the table and the source in both directions.
 | `quarrel_memory_governor_actions_total` | Counter | Total actions taken by the memory governor. |
 | `quarrel_memory_pressure_events_total` | Counter | Total memory pressure events observed. |
 | `quarrel_memory_pressure_ratio` | Gauge | Ratio of used to available memory. |
-| `quarrel_tpu_attention_seconds` | Histogram | Attention time on the TPU backend. |
-| `quarrel_tpu_batch_size` | Gauge | Current batch size on the TPU backend. |
-| `quarrel_tpu_dequantization_seconds` | Histogram | Dequantization time on the TPU backend. |
-| `quarrel_tpu_engine_failed_total` | Counter | Total TPU engine initialisation failures. |
-| `quarrel_tpu_inference_duration_seconds` | Histogram | Duration of a TPU inference call. |
-| `quarrel_tpu_layer_latency_seconds` | Histogram | Latency of a single TPU layer. |
-| `quarrel_tpu_sampling_seconds` | Histogram | Sampling time on the TPU backend. |
-| `quarrel_tpu_tokens_per_second` | Gauge | Token generation rate on the TPU backend. |
 | `quarrel_webui_connections_active` | Gauge | Active WebUI connections. |
 | `quarrel_webui_errors_total` | Counter | Total WebUI errors. |
 | `quarrel_webui_inference_duration_seconds` | Histogram | Duration of a WebUI inference request. |

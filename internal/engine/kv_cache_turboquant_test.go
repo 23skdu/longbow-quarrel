@@ -1,4 +1,4 @@
-//go:build !cuda && !metal && !tpu
+//go:build !cuda && !metal
 
 package engine
 
@@ -24,7 +24,7 @@ func TestPagedKVCache_TurboQuant(t *testing.T) {
 	}
 
 	// Enable TurboQuant precision
-	cache.Precision = device.DataTypeTQ1_0
+	config.KVCacheType = conf.KVCacheTQ1_0
 
 	err := cache.Init(ctx, config)
 	if err != nil {
@@ -83,7 +83,7 @@ func TestPagedKVCache_TurboQuantEncode(t *testing.T) {
 		WindowSize: 128,
 	}
 
-	cache.Precision = device.DataTypeTQ1_0
+	cfg.KVCacheType = conf.KVCacheTQ1_0
 
 	err := cache.Init(ctx, cfg)
 	if err != nil {
@@ -178,12 +178,13 @@ func TestPagedKVCache_TurboQuant_RoundtripAccuracy(t *testing.T) {
 	ctx.TQRotation = rot
 	ctx.TQQJL = qjl
 
-	cache := &PagedKVCache{Precision: device.DataTypeTQ2_0}
+	cache := &PagedKVCache{}
 	cfg := conf.Config{
-		KVHeads:    heads,
-		HeadDim:    headDim,
-		Layers:     1,
-		WindowSize: 64,
+		KVHeads:     heads,
+		HeadDim:     headDim,
+		Layers:      1,
+		WindowSize:  64,
+		KVCacheType: conf.KVCacheTQ2_0,
 	}
 
 	if err := cache.Init(ctx, cfg); err != nil {

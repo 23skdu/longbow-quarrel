@@ -256,3 +256,44 @@ func TestKVIntLookup(t *testing.T) {
 		t.Error("Expected 0 for nonexistent key")
 	}
 }
+
+// TestValidateTensorsAcceptsBothOffsetConventions checks that the validator
+// accepts both GGUF layouts: this repository's writer packs tensor data
+// tightly, while llama.cpp pads every tensor offset to the file alignment.
+// Rejecting either convention would make the load-time validation reject
+// valid models.
+func TestValidateTensorsAcceptsBothOffsetConventions(t *testing.T) {
+	// Two F32 tensors of 2 elements: 8 bytes each. The second tensor may
+	// start at 8 (packed) or 32 (aligned), but not at 16.
+	base := func(second uint64) *GGUFFile {
+		return &GGUFFile{
+			KV: map[string]interface{}{"general.alignment": uint32(32)},
+			Tensors: []*TensorInfo{
+				{Name: "a", Type: GGMLTypeF32, Dimensions: []uint64{2}, Offset: 0},
+				{Name: "b", Type: GGMLTypeF32, Dimensions: []uint64{2}, Offset: second},
+			},
+			DataOffset: 0,
+		}
+	}
+
+	for _, tc := range []struct {
+		name   string
+		offset uint64
+		want   int
+	}{
+		{"packed", 8, 0},
+		{"aligned", 32, 0},
+		{"misplaced", 16, 1},
+		{"out of order", 128, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			issues, err := NewMetadataAnalyzer(base(tc.offset)).ValidateTensors()
+			if err != nil {
+				t.Fatalf("ValidateTensors failed: %v", err)
+			}
+			if len(issues) != tc.want {
+				t.Errorf("got %d issues %v, want %d", len(issues), issues, tc.want)
+			}
+		})
+	}
+}

@@ -255,18 +255,6 @@ func docsMetricsPath(t *testing.T) string {
 // productionMetricAllowlist contains declared metrics that are intentionally not
 // written by the standard engine execution path on this host (e.g. experimental backends).
 var productionMetricAllowlist = map[string]string{
-	"quarrel_tpu_engine_initialized_total":   "TPU backend stub (Step 58/61)",
-	"quarrel_tpu_engine_failed_total":        "TPU backend stub (Step 58/61)",
-	"quarrel_tpu_inference_total":            "TPU backend stub (Step 58/61)",
-	"quarrel_tpu_inference_duration_seconds": "TPU backend stub (Step 58/61)",
-	"quarrel_tpu_tokens_generated_total":     "TPU backend stub (Step 58/61)",
-	"quarrel_tpu_tokens_per_second":          "TPU backend stub (Step 58/61)",
-	"quarrel_tpu_layer_latency_seconds":      "TPU backend stub (Step 58/61)",
-	"quarrel_tpu_memory_bytes":               "TPU backend stub (Step 58/61)",
-	"quarrel_tpu_dequantization_seconds":     "TPU backend stub (Step 58/61)",
-	"quarrel_tpu_attention_seconds":          "TPU backend stub (Step 58/61)",
-	"quarrel_tpu_sampling_seconds":           "TPU backend stub (Step 58/61)",
-	"quarrel_tpu_batch_size":                 "TPU backend stub (Step 58/61)",
 }
 
 // TestMetrics_WrittenByProductionCode verifies that every declared metric is written

@@ -40,11 +40,17 @@ type SearchResult struct {
 }
 
 // TurboQuantVector holds a compressed vector with polar quantization and 1-bit QJL residual.
+//
+// QJLWords is the packed 64-bit-word form of QJLBits, filled lazily by
+// RefreshTurboQuantWords (P0-03). It is derived state: the parity oracle
+// always reads QJLBits, and packing never changes the score. Callers may
+// leave it nil; only the accelerated popcount kernels use it.
 type TurboQuantVector struct {
 	ID       int
 	Codes    []int8
 	Scale    float32
 	QJLBits  []byte
+	QJLWords []uint64 // packed form of QJLBits, 1 bit per QJL byte bit, LSB-first
 	QJLScale float32
 	Norm     float32
 }

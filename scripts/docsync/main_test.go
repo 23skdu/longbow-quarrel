@@ -23,7 +23,7 @@ func TestCommandFlagsAreFound(t *testing.T) {
 		t.Fatalf("failed to read the command flags: %v", err)
 	}
 
-	for _, build := range []string{"cuda", "cpu", "metal", "tpu"} {
+	for _, build := range []string{"cuda", "cpu", "metal"} {
 		flags, ok := builds[build]
 		if !ok {
 			t.Fatalf("the %s build was not found", build)

@@ -53,6 +53,10 @@ func NewCPUEngine(modelPath string, cfg config.Config) (Engine, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to load GGUF: %w", err)
 	}
+	if err := validateModelFile(f); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
 
 	// Apply memory limit before any allocation
 	if cfg.MaxMemoryMB > 0 {

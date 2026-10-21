@@ -1,4 +1,4 @@
-//go:build (cuda && !(linux && amd64 && cgo)) || (metal && !darwin) || (tpu && !linux)
+//go:build (cuda && !(linux && amd64 && cgo)) || (metal && !darwin)
 
 package main
 
@@ -16,16 +16,14 @@ import (
 //
 //	main.go       linux && amd64 && cuda && cgo   -> CUDA
 //	main_metal.go darwin && metal                 -> Apple Metal
-//	main_tpu.go   linux && tpu                    -> Google TPU
 //	main_cpu.go   no backend tag                  -> CPU (default)
 //
-// The constraints below are the exact negation of those four main files, so
+// The constraints below are the exact negation of those three main files, so
 // at most one main is ever compiled into a given build.
 func main() {
 	fmt.Println("Longbow-Quarrel: the requested backend cannot be built for this platform.")
 	fmt.Println("  CPU   (default):              go build ./cmd/quarrel")
 	fmt.Println("  Metal (macOS):                 go build -tags metal ./cmd/quarrel")
 	fmt.Println("  CUDA  (Linux x86-64, cgo):    go build -tags cuda ./cmd/quarrel")
-	fmt.Println("  TPU   (Linux):                go build -tags tpu ./cmd/quarrel")
 	os.Exit(1)
 }

@@ -79,6 +79,10 @@ func (e *metalEngine) loadModel(path string) error {
 	if err != nil {
 		return err
 	}
+	if err := validateModelFile(f); err != nil {
+		_ = f.Close()
+		return err
+	}
 	e.model = f
 
 	// Direct lookup from KV
@@ -280,22 +284,25 @@ func (e *metalEngine) loadModel(path string) error {
 		logger.Log.Info("MOE shared expert FFN dimension", "expert_shared_feed_forward_length", e.config.ExpertSharedFeedForwardLength)
 	}
 
+	// Grouped-expert routing (the GPT-OSS style "pick a group, then pick
+	// the experts inside it") is not implemented. The metadata is reported
+	// so a model that needs it is visible in the log, but the router in
+	// layer_moe.go does a flat top-k over the expert logits.
 	if val, ok := getKV(f, "llama.expert_group_count", ""); ok {
-		e.config.ExpertGroupCount = int(toFloat64(val))
+		logger.Log.Warn("Model declares grouped-expert routing, which is not implemented; "+
+			"the router selects experts flat", "expert_group_count", int(toFloat64(val)))
 	}
-
 	if val, ok := getKV(f, "llama.expert_group_used_count", ""); ok {
-		e.config.ExpertGroupUsedCount = int(toFloat64(val))
+		logger.Log.Warn("Model declares grouped-expert routing, which is not implemented; "+
+			"the router selects experts flat", "expert_group_used_count", int(toFloat64(val)))
 	}
-
 	if val, ok := getKV(f, "llama.expert_weights_norm", ""); ok {
-		if norm, ok := val.(bool); ok {
-			e.config.ExpertWeightsNorm = norm
-		}
+		logger.Log.Warn("Model declares expert weight normalisation, which is not implemented",
+			"expert_weights_norm", val)
 	}
-
 	if val, ok := getKV(f, "llama.expert_weights_scale", ""); ok {
-		e.config.ExpertWeightsScale = float32(toFloat64(val))
+		logger.Log.Warn("Model declares an expert weight scale, which is not implemented",
+			"expert_weights_scale", toFloat64(val))
 	}
 
 	// Log MOE configuration summary if MOE is detected
@@ -361,36 +368,13 @@ func (e *metalEngine) loadModel(path string) error {
 	// Mamba layer detection for hybrid models
 	e.detectMambaLayers(f, *logger.Log)
 
+	// The model's declared attention precision is reported, not applied.
+	// Every backend in this repository computes the attention and the FFN
+	// in one fixed precision (F32 on the CPU, F16 activations with F32
+	// accumulators on the GPU), so there is no precision to select here.
+	// The KV cache precision *is* selectable, with -kv-cache-type.
 	if val, ok := f.KV["llama.attention.precision"]; ok {
-		if prec, ok := val.(string); ok {
-			switch prec {
-			case "f16":
-				e.config.PrecisionMode = config.PrecisionFP16
-				logger.Log.Info("Model precision mode set (metadata)", "mode", "FP16")
-			case "f32":
-				e.config.PrecisionMode = config.PrecisionF32FFN
-				logger.Log.Info("Model precision mode set (metadata)", "mode", "F32_FFN")
-			case "mixed":
-				e.config.PrecisionMode = config.PrecisionMixed
-				logger.Log.Info("Model precision mode set (metadata)", "mode", "Mixed")
-			default:
-				logger.Log.Info("Model unknown precision mode, using auto", "mode", prec)
-			}
-		} else {
-			e.config.PrecisionMode = config.PrecisionAuto
-		}
-	} else {
-		// Auto-detect based on dimension
-		if e.config.Dim < 1024 {
-			e.config.PrecisionMode = config.PrecisionF32FFN
-			logger.Log.Info("Model precision mode auto-detected", "mode", "F32_FFN", "dim", e.config.Dim)
-		} else if e.config.Dim >= 4096 {
-			e.config.PrecisionMode = config.PrecisionMixed
-			logger.Log.Info("Model precision mode auto-detected", "mode", "Mixed", "dim", e.config.Dim)
-		} else {
-			e.config.PrecisionMode = config.PrecisionFP16
-			logger.Log.Info("Model precision mode auto-detected", "mode", "FP16", "dim", e.config.Dim)
-		}
+		logger.Log.Info("Model declares an attention precision", "precision", val)
 	}
 
 	if val, ok := f.KV["tokenizer.ggml.bos_token_id"]; ok {
@@ -975,13 +959,11 @@ func (e *metalEngine) loadModel(path string) error {
 // InferString is a convenience method that takes a string prompt and returns generated text
 func (e *metalEngine) InferString(prompt string, tokensToGenerate int) (string, error) {
 	samplerConfig := SamplerConfig{
-		Temperature:      0.7,
-		TopK:             40,
-		TopP:             0.9,
-		RepPenalty:       1.0,
-		Seed:             0,
-		DebugActivations: false,
-		QualityMode:      false,
+		Temperature: 0.7,
+		TopK:        40,
+		TopP:        0.9,
+		RepPenalty:  1.0,
+		Seed:        0,
 	}
 
 	inputTokens := e.Tokenizer.Encode(prompt)

@@ -6,8 +6,10 @@ import (
 	"github.com/23skdu/longbow-quarrel/internal/mathx"
 )
 
-// DotFloat32 computes the dot product of two float32 vectors with 8-way loop unrolling.
-func DotFloat32(a, b []float32) float32 {
+// dotFloat32Scalar computes the dot product of two float32 vectors with
+// 8-way loop unrolling. It is the pure-Go reference and the parity
+// oracle for the native kernels; the exported DotFloat32 dispatches.
+func dotFloat32Scalar(a, b []float32) float32 {
 	n := len(a)
 	if len(b) < n {
 		n = len(b)
@@ -31,8 +33,11 @@ func DotFloat32(a, b []float32) float32 {
 	return sum
 }
 
-// L2Float32 computes squared Euclidean distance of two float32 vectors with 8-way loop unrolling.
-func L2Float32(a, b []float32) float32 {
+// l2Float32Scalar computes squared Euclidean distance of two float32
+// vectors with 8-way loop unrolling. It is the pure-Go reference and the
+// parity oracle for the native kernels; the exported L2Float32
+// dispatches.
+func l2Float32Scalar(a, b []float32) float32 {
 	n := len(a)
 	if len(b) < n {
 		n = len(b)
@@ -66,8 +71,48 @@ func L2Float32(a, b []float32) float32 {
 	return sum
 }
 
+// DotFloat32 computes the dot product of two float32 vectors.
+//
+// The runtime dispatches to the widest native kernel the CPU and the
+// build configuration support; dotFloat32Scalar on any other host. The
+// kernels agree with the scalar reference to 1e-4 (see
+// distance_parity_test.go).
+func DotFloat32(a, b []float32) float32 {
+	if len(a) < 16 || len(b) < 16 {
+		return dotFloat32Scalar(a, b)
+	}
+	if ks := kernelSetFor(); ks != nil && ks.dotFloat32 != nil {
+		return ks.dotFloat32(a, b)
+	}
+	return dotFloat32Scalar(a, b)
+}
+
+// L2Float32 computes the squared Euclidean distance of two float32
+// vectors. Dispatch mirrors DotFloat32.
+func L2Float32(a, b []float32) float32 {
+	if len(a) < 16 || len(b) < 16 {
+		return l2Float32Scalar(a, b)
+	}
+	if ks := kernelSetFor(); ks != nil && ks.l2Float32 != nil {
+		return ks.l2Float32(a, b)
+	}
+	return l2Float32Scalar(a, b)
+}
+
 // CosineFloat32 computes cosine similarity between two float32 vectors.
 func CosineFloat32(a, b []float32) float32 {
+	dot := dotFloat32Scalar(a, b)
+	normA := dotFloat32Scalar(a, a)
+	normB := dotFloat32Scalar(b, b)
+	if normA <= 0 || normB <= 0 {
+		return 0
+	}
+	return dot / float32(mathx.Sqrt(float64(normA*normB)))
+}
+
+// CosineFloat32Dispatch is the cosine similarity over the dispatched
+// kernel path (used where the caller wants the native kernels).
+func CosineFloat32Dispatch(a, b []float32) float32 {
 	dot := DotFloat32(a, b)
 	normA := DotFloat32(a, a)
 	normB := DotFloat32(b, b)
@@ -77,7 +122,13 @@ func CosineFloat32(a, b []float32) float32 {
 	return dot / float32(mathx.Sqrt(float64(normA*normB)))
 }
 
-// DotComplex128 computes the real part of the complex Hermitian inner product: Re(<a, b>) = sum(Re(a)*Re(b) + Im(a)*Im(b)).
+// DotComplex128 computes the real part of the complex Hermitian inner
+// product: Re(<a, b>) = sum(Re(a)*Re(b) + Im(a)*Im(b)).
+//
+// This interleaved accessor is the reference for the split-layout
+// (SoA) batch kernels the indexes use; complex128 rows converted with
+// ComplexSoAFromInterleaved produce the same result by construction
+// (see complex_soa_test.go).
 func DotComplex128(a, b []complex128) float64 {
 	n := len(a)
 	if len(b) < n {
@@ -98,7 +149,8 @@ func DotComplex128(a, b []complex128) float64 {
 	return sum
 }
 
-// L2Complex128 computes the squared Euclidean distance between two complex128 vectors: sum(|a_k - b_k|^2).
+// L2Complex128 computes the squared Euclidean distance between two
+// complex128 vectors: sum(|a_k - b_k|^2).
 func L2Complex128(a, b []complex128) float64 {
 	n := len(a)
 	if len(b) < n {
@@ -195,6 +247,10 @@ func CosineUint8(a, b *Uint8Vector) float32 {
 }
 
 // DotTurboQuant computes similarity using polar integer dot product + QJL 1-bit Hamming correlation.
+//
+// This is the scalar reference; quantized vectors can carry precomputed
+// QJL words (TurboQuantVector.QJLWords) so the traversal hot paths use
+// dotTurboQuantPrepared with word popcounts instead of re-packing bytes.
 func DotTurboQuant(a, b *TurboQuantVector) float32 {
 	n := len(a.Codes)
 	if len(b.Codes) < n {

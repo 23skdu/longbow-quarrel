@@ -29,59 +29,6 @@ func NewSampler(cfg SamplerConfig) *Sampler {
 	}
 }
 
-func (s *Sampler) SampleAdvanced(logits []float32, history []int, qualityMode bool) int {
-	if qualityMode {
-		return s.sampleWithQualityControl(logits, history)
-	}
-	if s.Config.Grammar != nil {
-		_ = s.Config.Grammar.Apply(logits)
-	}
-	return s.Sample(logits, history)
-}
-
-func (s *Sampler) sampleWithQualityControl(logits []float32, history []int) int {
-	if len(logits) == 0 {
-		return 0
-	}
-	if !s.validateLogits(logits) {
-		return s.findFirstValidToken(logits)
-	}
-
-	if s.Config.RepPenalty > 1.0 && len(history) > 0 {
-		s.applySmartRepetitionPenalty(logits, history)
-	}
-	if (s.Config.PresencePenalty != 0 || s.Config.FrequencyPenalty != 0) && len(history) > 0 {
-		s.applyPresenceAndFrequencyPenalty(logits, history)
-	}
-
-	temp := s.calculateAdaptiveTemperature(logits)
-	if temp == 0 {
-		return argMax(logits)
-	}
-
-	probs := s.applyTemperatureAndSoftmax(logits, temp)
-
-	candidates := s.filterValidCandidates(probs)
-	if len(candidates) == 0 {
-		return argMax(logits)
-	}
-
-	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].prob > candidates[j].prob
-	})
-
-	candidates = applyTopP(candidates, s.Config.TopP)
-	if s.Config.TopK > 0 {
-		candidates = applyTopK(candidates, s.Config.TopK)
-	}
-
-	if len(candidates) == 0 {
-		return argMax(logits)
-	}
-
-	return s.sampleFromCandidates(candidates)
-}
-
 func (s *Sampler) Sample(logits []float32, history []int) int {
 	if len(logits) == 0 {
 		return 0
@@ -287,69 +234,6 @@ func (s *Sampler) sampleFromCandidates(candidates []tokenProb) int {
 	}
 
 	return candidates[0].id
-}
-
-func (s *Sampler) calculateAdaptiveTemperature(logits []float32) float64 {
-	if len(logits) == 0 {
-		return s.Config.Temperature
-	}
-
-	maxLogit := logits[0]
-	sum := float64(0)
-	for _, v := range logits {
-		if v > maxLogit {
-			maxLogit = v
-		}
-		sum += mathx.Exp(float64(v - maxLogit))
-	}
-
-	entropy := float64(0)
-	for _, v := range logits {
-		prob := mathx.Exp(float64(v-maxLogit)) / sum
-		if prob > 0 {
-			entropy -= prob * mathx.Log(prob)
-		}
-	}
-
-	baseTemp := s.Config.Temperature
-	if entropy > 2.0 {
-		return baseTemp * 1.5
-	} else if entropy < 0.5 {
-		return mathx.Max(baseTemp*0.5, 0.1)
-	}
-
-	return baseTemp
-}
-
-func (s *Sampler) applySmartRepetitionPenalty(logits []float32, history []int) {
-	if len(history) == 0 {
-		return
-	}
-
-	freqMap := make(map[int]int)
-	windowSize := 32
-	start := len(history) - windowSize
-	if start < 0 {
-		start = 0
-	}
-
-	for i := start; i < len(history); i++ {
-		if history[i] < len(logits) {
-			freqMap[history[i]]++
-		}
-	}
-
-	for tokenID, freq := range freqMap {
-		if tokenID < len(logits) {
-			penalty := mathx.Pow(s.Config.RepPenalty, float64(freq))
-			val := logits[tokenID]
-			if val > 0 {
-				logits[tokenID] /= float32(penalty)
-			} else {
-				logits[tokenID] *= float32(penalty)
-			}
-		}
-	}
 }
 
 func (s *Sampler) applyRepetitionPenalty(logits []float32, history []int) {

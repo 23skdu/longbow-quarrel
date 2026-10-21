@@ -59,6 +59,7 @@ var (
 	DraftPaths       = flag.Int("draft-paths", 2, "How many parallel draft paths to generate per step")
 	imagePath        = flag.String("image", "", "Path to image file for VLM inference (optional)")
 	stopTokensFlag   = flag.String("stop-tokens", "", "Comma-separated list of stop token IDs (e.g. 2,13)")
+	kvCacheTypeFlag  = flag.String("kv-cache-type", "f16", "Precision of the KV cache: f16, tq1_0, tq2_0, fp8, q8_0")
 
 	// Multi-GPU Flags
 	devicesFlag  = flag.String("devices", "", "Comma-separated list of CUDA device IDs for multi-GPU (e.g. 0,1)")
@@ -128,6 +129,13 @@ func main() {
 	if *totalBlocks > 0 {
 		engineConfig.TotalBlocks = *totalBlocks
 	}
+	kvCacheType, err := engine.ParseKVCacheType(*kvCacheTypeFlag)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	engineConfig.KVCacheType = kvCacheType
+	engineConfig.MaxTokens = *numTokens
 	if *stopTokensFlag != "" {
 		for _, s := range strings.Split(*stopTokensFlag, ",") {
 			s = strings.TrimSpace(s)

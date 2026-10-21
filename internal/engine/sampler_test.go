@@ -100,9 +100,6 @@ func TestSampler_EmptyAndInvalidLogitsSafety(t *testing.T) {
 	if val := s.Sample([]float32{}, nil); val != 0 {
 		t.Errorf("Expected 0 for empty logits, got %d", val)
 	}
-	if val := s.SampleAdvanced([]float32{}, nil, true); val != 0 {
-		t.Errorf("Expected 0 for empty logits in advanced mode, got %d", val)
-	}
 
 	// 2. All NaNs should not panic
 	nanLogits := []float32{float32(math.NaN()), float32(math.NaN())}

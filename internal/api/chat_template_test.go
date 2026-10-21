@@ -31,6 +31,17 @@ func (t *templateTokenizer) Encode(s string) []int {
 	return tokens
 }
 
+// GetVocab reports the 256 byte values Encode emits: the API validates token
+// ids against the tokenizer's vocabulary, and a byte-level tokenizer whose
+// vocab list held only a handful of entries would reject its own output.
+func (t *templateTokenizer) GetVocab() []string {
+	vocab := make([]string, 256)
+	for i := range vocab {
+		vocab[i] = string(rune(i))
+	}
+	return vocab
+}
+
 // capturingEngine records the prompt it was given.
 type capturingEngine struct {
 	mockEngine

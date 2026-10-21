@@ -50,11 +50,6 @@ func main() {
 
 	conf := config.Default()
 	conf.KVCacheSize = 8192 // Need more for long battery
-	conf.DebugEmbedding = false
-	conf.DebugAttention = false
-	conf.DebugFFN = false
-	conf.DebugLayerOutput = false
-	conf.DebugLogits = false
 	conf.DebugMemory = false
 
 	fmt.Printf("Loading engine: %s...\n", *modelPath)

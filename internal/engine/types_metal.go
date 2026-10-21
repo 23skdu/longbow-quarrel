@@ -25,9 +25,6 @@ type metalEngine struct {
 	DraftEngine    Engine
 	SpeculativeMgr *SpeculativeManager
 
-	// Quality Evaluation
-	qualityEval *QualityEvaluator
-
 	// SSM Cache (Mamba)
 	SSMCache    []*MambaState
 	MambaLayers []*MambaLayer

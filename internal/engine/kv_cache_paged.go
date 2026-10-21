@@ -3,6 +3,7 @@ package engine
 import (
 	"encoding/binary"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -54,8 +55,8 @@ type PagedKVCache struct {
 	qjlRows    int
 
 	// Dynamic Block Scales for quantized KV cache (FP8 / Q8_0)
-	kScales [][]float32
-	vScales [][]float32
+	kScales []*device.Tensor
+	vScales []*device.Tensor
 
 	// StreamingLLM attention sink and sliding window configuration per sequence
 	streamingParams map[string]StreamingLLMParams
@@ -66,6 +67,55 @@ type PagedKVCache struct {
 	lastAccess    map[string]time.Time
 
 	initialized bool
+}
+
+// kvCacheDataType maps the configured KV cache type onto the element type
+// the device tensors are allocated with. F16 is the default: it is what the
+// GPU kernels read and write, and the F32 pool is only correct on the CPU.
+func kvCacheDataType(t config.KVCacheType) device.DataType {
+	switch t {
+	case config.KVCacheF32:
+		return device.DataTypeF32
+	case config.KVCacheTQ1_0:
+		return device.DataTypeTQ1_0
+	case config.KVCacheTQ2_0:
+		return device.DataTypeTQ2_0
+	case config.KVCacheFP8:
+		return device.DataTypeFP8
+	case config.KVCacheQ8_0:
+		return device.DataTypeQ8_0
+	case config.KVCacheF16:
+		return device.DataTypeF16
+	default:
+		return device.DataTypeF16
+	}
+}
+
+// kvCacheTypeName is the name of a KV cache type as it is spelled on the
+// command line.
+func kvCacheTypeName(t config.KVCacheType) string {
+	return t.String()
+}
+
+// ParseKVCacheType maps the -kv-cache-type flag onto a KV cache type.
+func ParseKVCacheType(name string) (config.KVCacheType, error) {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "", "f16":
+		return config.KVCacheF16, nil
+	case "f32":
+		return config.KVCacheF32, nil
+	case "tq1_0", "tq1":
+		return config.KVCacheTQ1_0, nil
+	case "tq2_0", "tq2":
+		return config.KVCacheTQ2_0, nil
+	case "fp8":
+		return config.KVCacheFP8, nil
+	case "q8_0", "q8":
+		return config.KVCacheQ8_0, nil
+	default:
+		return config.KVCacheF16, fmt.Errorf("unknown KV cache type %q: expected one of "+
+			"f32, f16, tq1_0, tq2_0, fp8, q8_0", name)
+	}
 }
 
 // OffloadedBlockData holds layer-wise tensor data for an offloaded physical block.
@@ -107,6 +157,30 @@ func (c *PagedKVCache) Init(ctx *device.Context, config config.Config) error {
 	c.kvHeads = config.KVHeads
 	c.headDim = config.HeadDim
 	c.layers = config.Layers
+
+	// The precision of the cache is selected with -kv-cache-type. It used
+	// to be left at the zero value, so the FP8 and Q8_0 pools and the
+	// quantized attention kernel could never be reached from a shipped
+	// binary.
+	c.Precision = kvCacheDataType(config.KVCacheType)
+
+	// Not every precision is implemented on every backend. The CPU
+	// reference attention reads the pool as float32; the CUDA kernels
+	// read the F16 pool, or a quantized pool through the quantized
+	// attention kernel. Asking for the wrong one is an error, not a
+	// silent reinterpretation of the bytes.
+	switch c.Precision {
+	case device.DataTypeFP8, device.DataTypeQ8_0:
+		if !ctx.SupportsQuantizedKVCache() {
+			return fmt.Errorf("the %s KV cache is only implemented on the CUDA backend",
+				kvCacheTypeName(config.KVCacheType))
+		}
+	case device.DataTypeF32:
+		if ctx.DeviceID() >= 0 {
+			return fmt.Errorf("the F32 KV cache is only implemented on the CPU backend; " +
+				"the GPU attention kernels read the F16 pool")
+		}
+	}
 
 	// Configurable block size
 	c.blockSize = 16 // Default to 16
@@ -204,15 +278,29 @@ func (c *PagedKVCache) Init(ctx *device.Context, config config.Config) error {
 		c.vPools[i] = v
 	}
 
-	c.kScales = make([][]float32, allocLayers)
-	c.vScales = make([][]float32, allocLayers)
+	// The quantization scales live on the device: the quantized store
+	// writes them and the quantized attention reads them, so a host
+	// round-trip per step would be both slow and, in the decode loop,
+	// an allocation.
+	c.kScales = make([]*device.Tensor, allocLayers)
+	c.vScales = make([]*device.Tensor, allocLayers)
 	for i := 0; i < allocLayers; i++ {
-		c.kScales[i] = make([]float32, c.totalBlocks)
-		c.vScales[i] = make([]float32, c.totalBlocks)
-		for b := 0; b < c.totalBlocks; b++ {
-			c.kScales[i][b] = 1.0
-			c.vScales[i][b] = 1.0
+		kScale := ctx.NewTensorFP32(1, capacity)
+		vScale := ctx.NewTensorFP32(1, capacity)
+		if kScale == nil || vScale == nil {
+			c.Free()
+			return fmt.Errorf("failed to allocate the quantization scales for layer %d", i)
 		}
+		// A scale of one is the identity: it is what an unwritten slot
+		// decodes to.
+		ones := make([]float32, capacity)
+		for j := range ones {
+			ones[j] = 1.0
+		}
+		_ = kScale.LoadFrom(ones)
+		_ = vScale.LoadFrom(ones)
+		c.kScales[i] = kScale
+		c.vScales[i] = vScale
 	}
 
 	// Initialize TurboQuant matrices from device context or fallbacks if available
@@ -249,11 +337,40 @@ func (c *PagedKVCache) StoreKVPagedBatch(layer int, k, v, physicalPositions *dev
 	kPool := c.kPools[layer]
 	vPool := c.vPools[layer]
 
-	if c.Precision == device.DataTypeTQ1_0 || c.Precision == device.DataTypeTQ2_0 {
-		c.encodeKVTurboQuant(k, v, kPool, vPool, physicalPositions)
-	} else {
-		c.ctx.StoreKVPagedBatch(k, v, kPool, vPool, physicalPositions, c.kvHeads*c.headDim, 1)
+	// The number of tokens, not the number of sequences: the store walks
+	// the tokens and their physical positions.
+	numTokens := k.Rows()
+	if numTokens == 0 {
+		numTokens = v.Rows()
 	}
+	if numTokens == 0 {
+		numTokens = physicalPositions.Cols()
+	}
+
+	switch c.Precision {
+	case device.DataTypeTQ1_0, device.DataTypeTQ2_0:
+		c.encodeKVTurboQuant(k, v, kPool, vPool, physicalPositions)
+	case device.DataTypeFP8, device.DataTypeQ8_0:
+		// The quantized pool holds one byte per element and the scale
+		// of every slot is written next to the codes.
+		kScales, vScales := c.scaleTensors(layer)
+		if err := c.ctx.StoreKVPagedBatchQuantized(k, v, kPool, vPool,
+			kScales, vScales, physicalPositions, c.kvHeads*c.headDim, numTokens,
+			c.Precision == device.DataTypeFP8); err != nil {
+			logger.Log.Error("failed to store the quantized KV cache", "layer", layer, "error", err)
+		}
+	default:
+		c.ctx.StoreKVPagedBatch(k, v, kPool, vPool, physicalPositions, c.kvHeads*c.headDim, numTokens)
+	}
+}
+
+// scaleTensors returns the K and V scale tensors of a layer, or nil when
+// the layer has none.
+func (c *PagedKVCache) scaleTensors(layer int) (kScales, vScales *device.Tensor) {
+	if layer < 0 || layer >= len(c.kScales) {
+		return nil, nil
+	}
+	return c.kScales[layer], c.vScales[layer]
 }
 
 // encodeKVTurboQuant encodes K/V tensors to TurboQuant format for paged storage.
@@ -863,16 +980,21 @@ func (c *PagedKVCache) Update(seqID string, layer, pos int, k, v *device.Tensor)
 	}
 
 	// Dynamic KV Cache Quantization downcast (FP8/INT8/Q8_0)
-	if kTarget.DataType() == device.DataTypeINT8 || kTarget.DataType() == device.DataTypeFP8 {
-		k.StoreKVQuantized(v, kTarget, vTarget, physPos, c.kvHeads, c.headDim, capacity)
+	switch c.Precision {
+	case device.DataTypeFP8, device.DataTypeQ8_0:
+		kScale, vScale := c.scaleTensors(layer)
+		if err := c.ctx.StoreKVPagedSlotQuantized(k, v, kTarget, vTarget, kScale, vScale, physPos,
+			c.kvHeads*c.headDim, c.Precision == device.DataTypeFP8); err != nil {
+			return err
+		}
 		precisionStr := "FP8"
 		compRatio := 4.0
-		if kTarget.DataType() == device.DataTypeINT8 {
+		if c.Precision == device.DataTypeQ8_0 {
 			precisionStr = "Q8_0"
 			compRatio = 3.8
 		}
 		metrics.RecordKVCacheQuantization(precisionStr, 1, compRatio)
-	} else {
+	default:
 		// Default FP16 Store
 		k.StoreKV(v, kTarget, vTarget, physPos, c.kvHeads, c.headDim, capacity)
 	}
@@ -1079,8 +1201,12 @@ func (c *PagedKVCache) Free() {
 	c.initialized = false
 }
 
-// GetBlockScales returns the scale factors for a given layer's quantized KV blocks.
-func (c *PagedKVCache) GetBlockScales(layer int) (kScales, vScales []float32) {
+// GetScaleTensors returns the device tensors that hold the quantization
+// scales of a layer, one scale per pool slot.
+//
+// They are only meaningful for a quantized cache: the quantized store
+// writes them and the quantized attention reads them.
+func (c *PagedKVCache) GetScaleTensors(layer int) (kScales, vScales *device.Tensor) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if layer >= 0 && layer < len(c.kScales) {

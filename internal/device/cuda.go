@@ -52,6 +52,8 @@ extern void cudaFusedQKVRope(cudaStream_t stream, const void* input, const void*
 extern void cudaFusedMLP(cudaStream_t stream, const void* input, const void* gateWeight, const void* upWeight, const void* downWeight, void* output, int batch, int dim, int hiddenDim);
 extern void cudaFusedRMSNormAdd(cudaStream_t stream, const void* input, const void* hidden, const void* weight, void* output, int batch, int dim, float eps);
 extern void cudaStoreKVPagedBatch(cudaStream_t stream, const float* k, const float* v, void* kPool, void* vPool, const float* physicalPositions, int kvDim, int numTokens);
+extern void cudaStoreKVPagedBatchQuantized(cudaStream_t stream, const float* k, const float* v, void* kPool, void* vPool, void* kScales, void* vScales, const float* physicalPositions, int kvDim, int numTokens, int isFP8);
+extern void cudaStoreKVPagedSlotQuantized(cudaStream_t stream, const float* k, const float* v, void* kPool, void* vPool, void* kScales, void* vScales, int slotIdx, int kvDim, int isFP8);
 extern void cudaPagedAttentionBatch(cudaStream_t stream, const float* q, const void* kPool, const void* vPool, float* output, const int* tokenPositions, const int* blockTables, const int* tokenToSeq, int maxBlocks, int heads, int kvHeads, int headDim, int blockSize, int numTokens, float scale);
 extern void cudaPagedAttentionTurboQuant(cudaStream_t stream, const float* q, const void* kPool, const void* vPool, float* output, const int* tokenPositions, const int* blockTables, const int* tokenToSeq, int maxBlocks, int heads, int kvHeads, int headDim, int blockSize, int numTokens, float scale, int qjlRows);
 
@@ -292,6 +294,12 @@ func (ctx *Context) NewTensor(rows, cols int, dtype DataType) (*Tensor, error) {
 		bytes = size * 2
 	case DataTypeF32, DataTypeI32:
 		bytes = size * 4
+	case DataTypeFP8, DataTypeINT8:
+		// The quantized KV pools hold one byte per element. They used to
+		// fall into the default case and take four bytes per element,
+		// which made the "FP8" cache twice the size of the F16 one it
+		// was supposed to halve.
+		bytes = size
 	default:
 		bytes = size * 4
 	}
@@ -1179,25 +1187,23 @@ func (ctx *Context) FlashAttentionPrefill(q, k, v, output *Tensor, batch, heads,
 	metrics.RecordFlashAttentionPrefill(time.Since(start), slidingWindow)
 }
 
-func (ctx *Context) PagedAttentionQuantized(q, kPool, vPool *Tensor, kScales, vScales []float32, output, tokenPositions, blockTables, tokenToSeq *Tensor, maxBlocks, heads, kvHeads, headDim, blockSize, numTokens int, scale float32, isFP8 bool) {
+// PagedAttentionQuantized runs the paged attention over a quantized cache
+// pool.
+//
+// The scales are the device tensors the quantized store wrote: one per
+// pool slot. They used to be host slices that were copied to the device
+// and freed on every call, which allocated memory inside the decode loop.
+func (ctx *Context) PagedAttentionQuantized(q, kPool, vPool, kScales, vScales *Tensor, output, tokenPositions, blockTables, tokenToSeq *Tensor, maxBlocks, heads, kvHeads, headDim, blockSize, numTokens int, scale float32, isFP8 bool) {
 	fp8Int := 0
 	if isFP8 {
 		fp8Int = 1
 	}
 	var kScalePtr, vScalePtr *C.float
-	if len(kScales) > 0 {
-		var dK unsafe.Pointer
-		C.cudaMalloc(&dK, C.size_t(len(kScales)*4))
-		C.cudaMemcpy(dK, unsafe.Pointer(&kScales[0]), C.size_t(len(kScales)*4), C.cudaMemcpyHostToDevice)
-		kScalePtr = (*C.float)(dK)
-		defer C.cudaFree(dK)
+	if kScales != nil {
+		kScalePtr = (*C.float)(kScales.devPtr)
 	}
-	if len(vScales) > 0 {
-		var dV unsafe.Pointer
-		C.cudaMalloc(&dV, C.size_t(len(vScales)*4))
-		C.cudaMemcpy(dV, unsafe.Pointer(&vScales[0]), C.size_t(len(vScales)*4), C.cudaMemcpyHostToDevice)
-		vScalePtr = (*C.float)(dV)
-		defer C.cudaFree(dV)
+	if vScales != nil {
+		vScalePtr = (*C.float)(vScales.devPtr)
 	}
 	C.cudaPagedAttentionQuantized(ctx.Ctx, (*C.float)(q.devPtr), kPool.devPtr, vPool.devPtr, kScalePtr, vScalePtr, (*C.float)(output.devPtr),
 		(*C.int)(tokenPositions.devPtr), (*C.int)(blockTables.devPtr), (*C.int)(tokenToSeq.devPtr),
@@ -1694,11 +1700,67 @@ func (c *Context) QKNormRMSNorm(q, k, qWeight, kWeight *Tensor, numTokens, numQH
 		C.int(numTokens), C.int(numQHeads), C.int(numKHeads), C.int(headDim), C.float(eps))
 }
 
+// SupportsQuantizedKVCache reports whether this backend can store the KV
+// cache in a quantized pool.
+//
+// Only the CUDA backend can: the quantized pool holds one byte per
+// element, the quantized store writes the codes and their scale, and the
+// quantized attention kernel reads them back.
+func (ctx *Context) SupportsQuantizedKVCache() bool {
+	return true
+}
+
 // StoreKVPagedBatch stores K and V projections into their respective physical blocks in the GPU cache pool.
 // The last argument is the number of *tokens*, not the number of
 // sequences: the kernel walks the tokens and their physical positions.
 func (c *Context) StoreKVPagedBatch(k, v, kCache, vCache, physicalPositions *Tensor, kvDim, numTokens int) {
 	C.cudaStoreKVPagedBatch(c.Ctx, (*C.float)(k.devPtr), (*C.float)(v.devPtr), kCache.devPtr, vCache.devPtr, (*C.float)(physicalPositions.devPtr), C.int(kvDim), C.int(numTokens))
+}
+
+// StoreKVPagedBatchQuantized stores K and V projections into a quantized
+// cache pool.
+//
+// The pool holds one byte per element. Each token is quantized with a
+// scale of its own, which the kernel writes into the scale tensor next to
+// the codes, so the attention kernel can undo the quantization.
+//
+// isFP8 selects the E4M3 format; otherwise the codes are symmetric int8.
+func (ctx *Context) StoreKVPagedBatchQuantized(k, v, kCache, vCache, kScales, vScales, physicalPositions *Tensor, kvDim, numTokens int, isFP8 bool) error {
+	fp8Int := 0
+	if isFP8 {
+		fp8Int = 1
+	}
+	var kScalePtr, vScalePtr unsafe.Pointer
+	if kScales != nil {
+		kScalePtr = kScales.devPtr
+	}
+	if vScales != nil {
+		vScalePtr = vScales.devPtr
+	}
+	C.cudaStoreKVPagedBatchQuantized(ctx.Ctx, (*C.float)(k.devPtr), (*C.float)(v.devPtr),
+		kCache.devPtr, vCache.devPtr, kScalePtr, vScalePtr,
+		(*C.float)(physicalPositions.devPtr), C.int(kvDim), C.int(numTokens), C.int(fp8Int))
+	return nil
+}
+
+// StoreKVPagedSlotQuantized stores one K/V row into one slot of a
+// quantized cache pool, with a scale of its own.
+func (ctx *Context) StoreKVPagedSlotQuantized(k, v, kCache, vCache, kScales, vScales *Tensor, slotIdx, kvDim int, isFP8 bool) error {
+	fp8Int := 0
+	if isFP8 {
+		fp8Int = 1
+	}
+	var kScalePtr, vScalePtr unsafe.Pointer
+	if kScales != nil {
+		kScalePtr = kScales.devPtr
+	}
+	if vScales != nil {
+		vScalePtr = vScales.devPtr
+	}
+	C.cudaStoreKVPagedSlotQuantized(ctx.Ctx, (*C.float)(k.devPtr), (*C.float)(v.devPtr),
+		kCache.devPtr, vCache.devPtr, kScalePtr, vScalePtr,
+		C.int(slotIdx), C.int(kvDim), C.int(fp8Int))
+	return nil
 }
 
 // StoreKVTurboQuant stores K and V in TurboQuant format to paged KV cache.

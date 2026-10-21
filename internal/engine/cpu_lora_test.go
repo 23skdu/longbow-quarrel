@@ -194,7 +194,9 @@ func TestCPUEngineListAdaptersIsSorted(t *testing.T) {
 // successful reload.
 func TestCPUEngineSwapModel(t *testing.T) {
 	dir := t.TempDir()
-	path := buildLoRAFile(t, dir, "model.gguf", 4, 2, 3, 8.0)
+	// The swap target has to be a model, not an adapter: SwapModel validates
+	// the tensor table and rejects a file with no embedding table.
+	path := buildTestGGUF(t, dir)
 
 	e := &CPUEngine{weights: &CPUWeights{}}
 	if err := e.SwapModel(path, config.Default()); err != nil {

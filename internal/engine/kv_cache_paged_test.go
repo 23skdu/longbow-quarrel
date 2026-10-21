@@ -1,8 +1,9 @@
-//go:build !cuda && !metal && !tpu
+//go:build !cuda && !metal
 
 package engine
 
 import (
+	"strings"
 	"testing"
 
 	conf "github.com/23skdu/longbow-quarrel/internal/config"
@@ -90,53 +91,65 @@ func TestPagedKVCache_Lifecycle(t *testing.T) {
 	// Float32 bits can be read as Int32.
 }
 
-func TestPagedKVCache_FP8_And_Q8(t *testing.T) {
+func TestPagedKVCache_QuantizedTypesNeedTheGPU(t *testing.T) {
 	ctx := device.NewContext()
 	defer ctx.Free()
 
-	// 1. Test FP8 Cache
-	cacheFP8 := &PagedKVCache{Precision: device.DataTypeFP8}
-	cfg := conf.Config{
-		KVHeads:    2,
-		HeadDim:    32,
-		Layers:     2,
-		WindowSize: 512,
+	// The quantized pools store one byte per element and the quantized
+	// attention kernel is a CUDA kernel. The CPU reference attention reads
+	// the pool as float32, so asking for a quantized cache on the CPU has
+	// to fail loudly rather than reinterpret the bytes.
+	for _, kt := range []conf.KVCacheType{conf.KVCacheFP8, conf.KVCacheQ8_0} {
+		cache := &PagedKVCache{}
+		cfg := conf.Config{
+			KVHeads:     2,
+			HeadDim:     32,
+			Layers:      2,
+			WindowSize:  512,
+			KVCacheType: kt,
+		}
+
+		err := cache.Init(ctx, cfg)
+		if err == nil {
+			cache.Free()
+			t.Fatalf("expected the %s KV cache to be rejected on the CPU backend", kt)
+		}
+		if !strings.Contains(err.Error(), "CUDA") {
+			t.Errorf("expected the error to name the CUDA backend, got: %v", err)
+		}
+	}
+}
+
+func TestPagedKVCache_KVCacheTypeReachesThePrecision(t *testing.T) {
+	ctx := device.NewContext()
+	defer ctx.Free()
+
+	// The precision of the pools is not a separate setting: it is the
+	// configured KV cache type, so -kv-cache-type reaches the allocation.
+	cases := []struct {
+		kt   conf.KVCacheType
+		want device.DataType
+	}{
+		{conf.KVCacheF16, device.DataTypeF16},
+		{conf.KVCacheTQ1_0, device.DataTypeTQ1_0},
+		{conf.KVCacheTQ2_0, device.DataTypeTQ2_0},
 	}
 
-	if err := cacheFP8.Init(ctx, cfg); err != nil {
-		t.Fatalf("Init FP8 cache failed: %v", err)
-	}
-	defer cacheFP8.Free()
-
-	k := ctx.NewTensorFP32(1, 2*32)
-	v := ctx.NewTensorFP32(1, 2*32)
-	kHost := make([]float32, 64)
-	vHost := make([]float32, 64)
-	for i := range kHost {
-		kHost[i] = float32(i) * 0.1
-		vHost[i] = -float32(i) * 0.1
-	}
-	_ = k.LoadFrom(kHost)
-	_ = v.LoadFrom(vHost)
-
-	if err := cacheFP8.Update("seq-fp8", 0, 0, k, v); err != nil {
-		t.Fatalf("FP8 Update failed: %v", err)
-	}
-	if len(cacheFP8.blockTables["seq-fp8"]) != 1 {
-		t.Errorf("expected 1 block in FP8 block table, got %d", len(cacheFP8.blockTables["seq-fp8"]))
-	}
-
-	// 2. Test Q8_0 Cache
-	cacheQ8 := &PagedKVCache{Precision: device.DataTypeQ8_0}
-	if err := cacheQ8.Init(ctx, cfg); err != nil {
-		t.Fatalf("Init Q8 cache failed: %v", err)
-	}
-	defer cacheQ8.Free()
-
-	if err := cacheQ8.Update("seq-q8", 0, 0, k, v); err != nil {
-		t.Fatalf("Q8 Update failed: %v", err)
-	}
-	if len(cacheQ8.blockTables["seq-q8"]) != 1 {
-		t.Errorf("expected 1 block in Q8 block table, got %d", len(cacheQ8.blockTables["seq-q8"]))
+	for _, tc := range cases {
+		cache := &PagedKVCache{}
+		cfg := conf.Config{
+			KVHeads:     2,
+			HeadDim:     32,
+			Layers:      1,
+			WindowSize:  128,
+			KVCacheType: tc.kt,
+		}
+		if err := cache.Init(ctx, cfg); err != nil {
+			t.Fatalf("Init failed for %v: %v", tc.kt, err)
+		}
+		if cache.Precision != tc.want {
+			t.Errorf("precision for %v = %v, want %v", tc.kt, cache.Precision, tc.want)
+		}
+		cache.Free()
 	}
 }

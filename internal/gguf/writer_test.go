@@ -213,17 +213,15 @@ func TestQuantizeRoundTrip(t *testing.T) {
 		}
 	}
 
-	// FP8 E4M3.
-	fp8, err := QuantizeToFP8E4M3(src)
-	if err != nil {
-		t.Fatalf("the FP8 quantization failed: %v", err)
+	// FP8 E4M3, through the live scalar codec in fp8.go.
+	fp8 := make([]byte, n)
+	fp8Back := make([]float32, n)
+	for i, v := range src {
+		fp8[i] = Float32ToFP8E4M3(v)
+		fp8Back[i] = FP8E4M3ToFloat32(fp8[i])
 	}
 	if len(fp8) != n {
 		t.Fatalf("the FP8 encoding is %d bytes, want %d", len(fp8), n)
-	}
-	fp8Back, err := DequantizeFromFP8E4M3(fp8)
-	if err != nil {
-		t.Fatalf("the FP8 dequantization failed: %v", err)
 	}
 	if len(fp8Back) != n {
 		t.Fatalf("the FP8 decoding produced %d values, want %d", len(fp8Back), n)

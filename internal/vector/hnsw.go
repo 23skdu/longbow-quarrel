@@ -4,17 +4,26 @@ import (
 	"container/heap"
 	"fmt"
 	"math/rand"
+	"sync"
 
 	"github.com/23skdu/longbow-quarrel/internal/mathx"
 )
 
-// HNSWNode represents a node in the HNSW graph.
+// HNSWNode represents a node in the graph.
 type HNSWNode struct {
 	ID        int
 	Neighbors [][]int // Per-layer list of neighbor IDs
 }
 
 // HNSWIndex implements Hierarchical Navigable Small World graph search.
+//
+// P0-03 wiring: the TurboQuant query is quantised and packed once per
+// Search (TurboPrep) instead of once per traversed edge; edge scoring
+// goes through scoreTurboPair (the AVX-2 / AVX-512 with VPOPCNTDQ pair
+// kernels when the runtime level provides them, dotTurboQuantPrepared
+// as the pure-Go oracle). Complex128 queries are converted once per
+// Search. The graph algorithm itself is byte-for-byte the reference
+// beam search.
 type HNSWIndex struct {
 	Dimension int
 	M         int     // Max outgoing edges per node
@@ -32,6 +41,14 @@ type HNSWIndex struct {
 	Uint8   []Uint8Vector
 	Complex [][]complex128
 	Turbo   []TurboQuantVector
+
+	// TurboQuant stored-vector word cache: QJLWords are filled lazily
+	// on the first turbo search; replacing the Turbo slice afterwards
+	// needs RefreshTurboQuantWords (or a fresh index) to re-enable the
+	// native pair kernels, otherwise scoring stays exact via the
+	// scalar byte path.
+	turboWordsOnce sync.Once
+	turboWordsDone bool
 }
 
 // NewHNSWIndex creates an empty HNSWIndex.
@@ -56,7 +73,74 @@ func NewHNSWIndex(dim, m, efSearch int, dtype DataType) *HNSWIndex {
 	}
 }
 
+// refreshTurboWords packs the stored TurboQuant vectors once per index
+// so edge traversal can use the word-popcount kernels.
+func (h *HNSWIndex) refreshTurboWords() {
+	if h.turboWordsDone {
+		return
+	}
+	h.turboWordsOnce.Do(func() {
+		for i := range h.Turbo {
+			RefreshTurboQuantWords(&h.Turbo[i])
+		}
+		h.turboWordsDone = true
+	})
+}
+
+// distanceClosure prepares the query once and returns a scorer from a
+// node id to its distance from the query. The semantics of every branch
+// match computeDistance.
+func (h *HNSWIndex) distanceClosure(query []float32) (func(nodeID int) float32, bool) {
+	ks := kernelSetFor()
+	switch h.DataType {
+	case TypeFloat32:
+		return func(nodeID int) float32 {
+			return L2Float32(query, h.Float32[nodeID])
+		}, true
+	case TypeUint8:
+		qU8 := QuantizeUint8(query, -1)
+		return func(nodeID int) float32 {
+			if nodeID < 0 || nodeID >= len(h.Uint8) {
+				return 0
+			}
+			return L2Uint8(&qU8, &h.Uint8[nodeID])
+		}, true
+	case TypeComplex128:
+		qC := Float32ToComplex128(query)
+		return func(nodeID int) float32 {
+			if nodeID < 0 || nodeID >= len(h.Complex) {
+				return 0
+			}
+			return float32(L2Complex128(qC, h.Complex[nodeID]))
+		}, true
+	case TypeTurboQuant:
+		h.refreshTurboWords()
+		rot := CreateIdentityMatrix(h.Dimension)
+		qjl := CreateRandomQJLMatrix(32, h.Dimension, 42)
+		qTQ := QuantizeTurboQuant(query, -1, rot, qjl, 32)
+		prep := PrepareTurboQuantQuery(&qTQ)
+		return func(nodeID int) float32 {
+			if nodeID < 0 || nodeID >= len(h.Turbo) {
+				return 0
+			}
+			v := &h.Turbo[nodeID]
+			dot := scoreTurboPair(ks, prep, v)
+			dist := (prep.Vec.Norm * prep.Vec.Norm) + (v.Norm * v.Norm) - (2.0 * dot)
+			if dist < 0 {
+				return 0
+			}
+			return dist
+		}, true
+	default:
+		// The reference computeDistance scores 0 for unknown dtypes.
+		return func(int) float32 { return 0 }, true
+	}
+}
+
 // computeDistance computes distance between vector node i and query.
+// Kept as the reference implementation: single-call scoring that
+// re-quantises the query each time (the shape P0-03 removes from the
+// traversal hot path).
 func (h *HNSWIndex) computeDistance(nodeID int, query []float32) float32 {
 	switch h.DataType {
 	case TypeFloat32:
@@ -166,14 +250,22 @@ func (h *HNSWIndex) Build(vectors [][]float32) error {
 	return nil
 }
 
-// Search queries the HNSW graph using greedy beam search.
+// Search queries the HNSW graph using greedy beam search. The graph
+// walk is identical to the reference implementation; the per-edge
+// distance comes from the prepared query closure instead of a fresh
+// quantisation per edge.
 func (h *HNSWIndex) Search(query []float32, k int) ([]SearchResult, error) {
 	if h.EnterNode == -1 || len(h.Nodes) == 0 {
 		return nil, fmt.Errorf("HNSW index is empty")
 	}
+	if k <= 0 {
+		return make([]SearchResult, 0), nil
+	}
+
+	distTo, _ := h.distanceClosure(query)
 
 	currObj := h.EnterNode
-	currDist := h.computeDistance(currObj, query)
+	currDist := distTo(currObj)
 
 	// 1. Navigate from top layer down to layer 1
 	for l := h.MaxLayer; l > 0; l-- {
@@ -181,7 +273,7 @@ func (h *HNSWIndex) Search(query []float32, k int) ([]SearchResult, error) {
 		for changed {
 			changed = false
 			for _, neighbor := range h.Nodes[currObj].Neighbors[l] {
-				d := h.computeDistance(neighbor, query)
+				d := distTo(neighbor)
 				if d < currDist {
 					currDist = d
 					currObj = neighbor
@@ -229,7 +321,7 @@ func (h *HNSWIndex) Search(query []float32, k int) ([]SearchResult, error) {
 		for _, neighbor := range h.Nodes[c.id].Neighbors[0] {
 			if !visited[neighbor] {
 				visited[neighbor] = true
-				d := h.computeDistance(neighbor, query)
+				d := distTo(neighbor)
 
 				if d < wPool[maxWIdx].dist || len(wPool) < h.EfSearch {
 					candidates = append(candidates, candidate{id: neighbor, dist: d})

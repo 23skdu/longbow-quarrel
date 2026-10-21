@@ -108,7 +108,7 @@ func TestNewEngine_RegistryHasNoMockFallback(t *testing.T) {
 	// Every registered creator must be a real backend.
 	for name := range engineCreators {
 		switch name {
-		case "cpu", "cuda", "metal", "tpu":
+		case "cpu", "cuda", "metal":
 		default:
 			t.Errorf("unexpected engine registered: %q", name)
 		}

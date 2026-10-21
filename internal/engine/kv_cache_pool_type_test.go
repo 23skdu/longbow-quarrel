@@ -1,4 +1,4 @@
-//go:build !metal && !tpu
+//go:build !metal
 
 package engine
 

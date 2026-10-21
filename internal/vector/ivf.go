@@ -4,12 +4,22 @@ import (
 	"container/heap"
 	"fmt"
 	"math/rand"
+	"runtime"
 	"sync"
 
 	"github.com/23skdu/longbow-quarrel/internal/mathx"
 )
 
 // IVFIndex implements Inverted File indexing with multi-probe search.
+//
+// P0-01/P0-02/P0-03 wiring: the assignment pass and the list scans run
+// through the native batch / multi-query kernels (with the pure-Go
+// reference as fallback and parity oracle), the query-side quantisation
+// happens once per Search instead of once per probe, and the cuda build
+// can stage rows and run the k-means assignment passes on the GPU
+// (P0-04). The public fields and semantics are unchanged: Search scores
+// by dot product over the probed lists and returns vector positions
+// (not stored IDs), as in the reference implementation.
 type IVFIndex struct {
 	Dimension     int
 	NumCentroids  int
@@ -23,6 +33,32 @@ type IVFIndex struct {
 	Uint8   []Uint8Vector
 	Complex [][]complex128
 	Turbo   []TurboQuantVector
+
+	// Accelerated views (built lazily, single-goroutine).
+	//
+	// centroidsFlat is one contiguous row-major centroid buffer and
+	// Centroids holds per-row views into it, so k-means updates through
+	// the views write straight into the flat backing. The multi-query
+	// L2 kernels need one base pointer per call (the cgo rules forbid
+	// arrays of pointers), which this layout provides without copies.
+	// centroidsUniform reports that every row is Dimension wide.
+	centroidsFlat    []float32
+	centroidsUniform bool
+	f32RowsUniform   bool
+	f32RowsChecked   bool
+
+	// TurboQuant query prep cache. The reference implementation
+	// created the seed-42 QJL matrix per probe; caching it yields the
+	// byte-identical matrix per Search.
+	qjlOnce   sync.Once
+	qjlMatrix []float32
+
+	// CUDA staging (cuda build tag only; never touched elsewhere).
+	gpuListMu sync.Mutex
+	gpuStore  interface{}
+	gpuLists  interface{}
+	gpuStaged bool
+	gpuFailed bool
 }
 
 // NewIVFIndex creates an IVFIndex.
@@ -45,6 +81,61 @@ func NewIVFIndex(dim, numCentroids, numProbes int, dtype DataType) *IVFIndex {
 	}
 }
 
+// buildCentroidViews fills the contiguous centroid buffer by sampling
+// the given rows and exposes the public Centroids as per-row views, so
+// k-means updates through the views write straight into the flat
+// backing the multi-query L2 kernels read.
+func (idx *IVFIndex) buildCentroidViews(floatVectors [][]float32, perm []int, numCentroids int) {
+	dim := idx.Dimension
+	flat := make([]float32, numCentroids*dim)
+	idx.Centroids = make([][]float32, numCentroids)
+	for c := 0; c < numCentroids; c++ {
+		row := flat[c*dim : (c+1)*dim]
+		idx.Centroids[c] = row
+		copy(row, floatVectors[perm[c]])
+	}
+	idx.centroidsFlat = flat
+	idx.centroidsUniform = dim > 0
+}
+
+// buildListPtrs was removed with the pointer-array design: the float32
+// list scans now gather row blocks into contiguous scratch (see
+// searchFloat32List below), which needs no cached pointer arrays.
+
+// qjlMatrixCached returns the seed-42 QJL matrix used by the TurboQuant
+// query prep (created once per index instead of once per probe).
+func (idx *IVFIndex) qjlMatrixCached() []float32 {
+	idx.qjlOnce.Do(func() {
+		idx.qjlMatrix = CreateRandomQJLMatrix(32, idx.Dimension, 42)
+	})
+	return idx.qjlMatrix
+}
+
+// gpuTryStage stages the float32 rows for the CUDA build. It always
+// returns false quickly when the hooks are absent (non-cuda builds) or
+// after any failure; callers must not retry after a failure.
+func (idx *IVFIndex) gpuTryStage(floatVectors [][]float32) bool {
+	if gpuStageFloat32 == nil {
+		return false
+	}
+	idx.gpuListMu.Lock()
+	defer idx.gpuListMu.Unlock()
+	if idx.gpuFailed {
+		return false
+	}
+	if idx.gpuStaged {
+		return true
+	}
+	store, ok := gpuStageFloat32(floatVectors, idx.Dimension)
+	if !ok {
+		idx.gpuFailed = true
+		return false
+	}
+	idx.gpuStore = store
+	idx.gpuStaged = true
+	return true
+}
+
 // Build trains centroids and assigns vectors to their nearest cluster.
 func (idx *IVFIndex) Build(floatVectors [][]float32) error {
 	n := len(floatVectors)
@@ -59,67 +150,293 @@ func (idx *IVFIndex) Build(floatVectors [][]float32) error {
 		idx.InvertedLists = make([][]int, numCentroids)
 	}
 
-	// 1. Initialize centroids by sampling vectors
+	// 1. Initialize centroids by sampling vectors. The rows are views
+	// into one contiguous buffer (centroidsFlat) so the multi-query L2
+	// kernels score against a single base pointer.
 	rng := rand.New(rand.NewSource(42)) // #nosec G404 -- deterministic fixed-seed PRNG for reproducible index/benchmark data; not security-sensitive
 	perm := rng.Perm(n)
-	idx.Centroids = make([][]float32, numCentroids)
-	for c := 0; c < numCentroids; c++ {
-		idx.Centroids[c] = make([]float32, idx.Dimension)
-		copy(idx.Centroids[c], floatVectors[perm[c]])
+	idx.buildCentroidViews(floatVectors, perm, numCentroids)
+
+	// Mini-batch sample positions: identical stride to the reference
+	// implementation so both k-means paths walk the same samples.
+	sampleCount := n
+	if sampleCount > 5000 {
+		sampleCount = 5000
+	}
+	sampleIdx := make([]int32, sampleCount)
+	for s := 0; s < sampleCount; s++ {
+		sampleIdx[s] = int32((s * 31) % n)
 	}
 
-	// 2. Perform 3 iterations of mini-batch k-means to settle centroids
-	clusterSums := make([][]float32, numCentroids)
-	clusterCounts := make([]int, numCentroids)
-	for iter := 0; iter < 3; iter++ {
-		for c := 0; c < numCentroids; c++ {
-			clusterSums[c] = make([]float32, idx.Dimension)
-			clusterCounts[c] = 0
-		}
-
-		sampleCount := n
-		if sampleCount > 5000 {
-			sampleCount = 5000
-		}
-		for s := 0; s < sampleCount; s++ {
-			vIdx := (s * 31) % n
-			v := floatVectors[vIdx]
-			bestC := 0
-			bestDist := float32(mathx.MaxFloat32)
-			for c := 0; c < numCentroids; c++ {
-				d := L2Float32(v, idx.Centroids[c])
-				if d < bestDist {
-					bestDist = d
-					bestC = c
-				}
-			}
-			for d := 0; d < idx.Dimension; d++ {
-				clusterSums[bestC][d] += v[d]
-			}
-			clusterCounts[bestC]++
-		}
-
-		for c := 0; c < numCentroids; c++ {
-			if clusterCounts[c] > 0 {
-				invCnt := 1.0 / float32(clusterCounts[c])
-				for d := 0; d < idx.Dimension; d++ {
-					idx.Centroids[c][d] = clusterSums[c][d] * invCnt
-				}
-			}
+	// 2. Mini-batch k-means (3 iterations). The CUDA build runs the
+	// assignment passes on the device when the rows staged there;
+	// otherwise the CPU path runs through the multi-query L2 kernels.
+	gpuOK := idx.gpuTryStage(floatVectors) &&
+		gpuKmeansAssign != nil && gpuFullAssign != nil
+	if gpuOK {
+		if !idx.gpuKmeans(sampleIdx, numCentroids) {
+			gpuOK = false
 		}
 	}
+	if !gpuOK {
+		idx.cpuKmeans(floatVectors, sampleIdx, numCentroids)
+	}
 
-	// 3. Assign all vectors to nearest centroid
+	// 3. Assign all vectors to nearest centroid.
 	for c := 0; c < numCentroids; c++ {
 		idx.InvertedLists[c] = make([]int, 0, n/numCentroids)
 	}
 
-	var assignMu sync.Mutex
-	numWorkers := 4
-	chunk := (n + numWorkers - 1) / numWorkers
-	var wg sync.WaitGroup
+	assigned := false
+	if gpuOK {
+		if best, ok := gpuFullAssign(idx.gpuStore, idx.Dimension, idx.Centroids); ok {
+			for i, b := range best {
+				if int(b) >= 0 && int(b) < numCentroids {
+					idx.InvertedLists[b] = append(idx.InvertedLists[b], i)
+				}
+			}
+			assigned = true
+		}
+	}
+	if !assigned {
+		idx.cpuAssignAll(floatVectors, numCentroids)
+	}
 
-	for w := 0; w < numWorkers; w++ {
+	idx.Float32 = floatVectors
+
+	// Record once whether the stored rows are scannable through the
+	// gather+batch path (uniform dimension). Build is single-goroutine.
+	idx.f32RowsUniform = idx.Dimension > 0
+	for i := range idx.Float32 {
+		if len(idx.Float32[i]) < idx.Dimension {
+			idx.f32RowsUniform = false
+			break
+		}
+	}
+
+	// Stage the freshly built lists for the CUDA scan hook.
+	if idx.gpuStaged && gpuStageLists != nil {
+		idx.gpuListMu.Lock()
+		idx.gpuLists, _ = gpuStageLists(idx.gpuStore, idx.InvertedLists)
+		idx.gpuListMu.Unlock()
+	}
+	return nil
+}
+
+// gpuKmeans runs the mini-batch iterations on the device. Returns false
+// to fall back to the CPU path on any rejection.
+func (idx *IVFIndex) gpuKmeans(sampleIdx []int32, numCentroids int) bool {
+	dim := idx.Dimension
+	for iter := 0; iter < 3; iter++ {
+		sums := make([]float32, numCentroids*dim)
+		counts := make([]int32, numCentroids)
+		if !gpuKmeansAssign(idx.gpuStore, sampleIdx, dim, idx.Centroids, sums, counts) {
+			return false
+		}
+		for c := 0; c < numCentroids; c++ {
+			if counts[c] > 0 {
+				invCnt := 1.0 / float32(counts[c])
+				base := c * dim
+				for d := 0; d < dim; d++ {
+					idx.Centroids[c][d] = sums[base+d] * invCnt
+				}
+			}
+		}
+	}
+	return true
+}
+
+// kmeansAcc holds one worker's partial mini-batch accumulators.
+type kmeansAcc struct {
+	sums   []float32
+	counts []int32
+}
+
+// scoreSampleCentroids returns the nearest-centroid index for a block
+// of samples: best[si] is the centroid with minimal squared L2. It
+// returns false when the caller must use the scalar loop (no multi-query
+// kernel, ragged centroids, mismatching dims).
+//
+// Orientation: every sample is a "query" (numQ = m in the kernel
+// contract) and the centroids are the scored rows (count =
+// numCentroids); out holds m * numCentroids squared distances.
+func (idx *IVFIndex) scoreSampleCentroids(vs [][]float32, best []int, dim, numCentroids int, ks *distanceKernelSet, qs []float32, out []float32) bool {
+	m := len(vs)
+	if m == 0 || best == nil || len(best) < m {
+		return false
+	}
+	if ks == nil || ks.mqL2Float32 == nil || !idx.centroidsUniform ||
+		idx.centroidsFlat == nil || dim <= 0 || numCentroids <= 0 ||
+		len(qs) < m*dim || len(out) < m*numCentroids ||
+		len(idx.centroidsFlat) < numCentroids*dim {
+		return false
+	}
+	for si := 0; si < m; si++ {
+		if len(vs[si]) != dim {
+			return false
+		}
+		copy(qs[si*dim:(si+1)*dim], vs[si])
+	}
+	if !ks.mqL2Float32(qs, m, idx.centroidsFlat, dim, numCentroids, out) {
+		return false
+	}
+	for si := 0; si < m; si++ {
+		base := si * numCentroids
+		bestC := -1
+		bestDist := float32(0)
+		for c := 0; c < numCentroids; c++ {
+			d := out[base+c]
+			if bestC < 0 || d < bestDist {
+				bestC = c
+				bestDist = d
+			}
+		}
+		best[si] = bestC
+	}
+	return true
+}
+
+// cpuKmeans is the parallel CPU mini-batch k-means: identical sample
+// stride and iteration count as the reference implementation. The
+// multi-query L2 kernels replace the two-level scalar loop when the
+// runtime level provides them.
+func (idx *IVFIndex) cpuKmeans(floatVectors [][]float32, sampleIdx []int32, numCentroids int) {
+	dim := idx.Dimension
+	ks := kernelSetFor()
+
+	for iter := 0; iter < 3; iter++ {
+		workers := runtime.GOMAXPROCS(0)
+		if workers > len(sampleIdx) {
+			workers = len(sampleIdx)
+		}
+		if workers == 0 {
+			continue
+		}
+		chunk := (len(sampleIdx) + workers - 1) / workers
+		accs := make([]kmeansAcc, workers)
+		var wg sync.WaitGroup
+		for w := 0; w < workers; w++ {
+			s := w * chunk
+			e := s + chunk
+			if s >= len(sampleIdx) {
+				break
+			}
+			if e > len(sampleIdx) {
+				e = len(sampleIdx)
+			}
+			wg.Add(1)
+			go func(s, e, w int) {
+				defer wg.Done()
+				acc := kmeansAcc{
+					sums:   make([]float32, numCentroids*dim),
+					counts: make([]int32, numCentroids),
+				}
+				accs[w] = acc
+
+				// Block scratch: 256 samples at a time against all
+				// centroids in one multi-query call.
+				const mqBlock = 256
+				best := make([]int, mqBlock)
+				qs := make([]float32, mqBlock*dim)
+				out := make([]float32, mqBlock*numCentroids)
+
+				for bi := s; bi < e; bi += mqBlock {
+					be := bi + mqBlock
+					if be > e {
+						be = e
+					}
+					block := make([][]float32, be-bi)
+					for si := bi; si < be; si++ {
+						block[si-bi] = floatVectors[sampleIdx[si]]
+					}
+					if len(block) > 0 && idx.scoreSampleCentroids(block, best, dim, numCentroids, ks, qs, out) {
+						for si := bi; si < be; si++ {
+							idx.kmeansAdd(acc.sums, acc.counts, best[si-bi], dim, block[si-bi])
+						}
+						continue
+					}
+					for si := bi; si < be; si++ {
+						v := block[si-bi]
+						bestC := 0
+						bestDist := float32(mathx.MaxFloat32)
+						for c := 0; c < numCentroids; c++ {
+							d := l2Float32Scalar(v, idx.Centroids[c])
+							if d < bestDist {
+								bestDist = d
+								bestC = c
+							}
+						}
+						idx.kmeansAdd(acc.sums, acc.counts, bestC, dim, v)
+					}
+				}
+			}(s, e, w)
+		}
+		wg.Wait()
+
+		// Fold the worker accumulators, then update centroids exactly
+		// like the reference implementation.
+		var sums []float32
+		counts := make([]int32, numCentroids)
+		for w := range accs {
+			if accs[w].counts == nil {
+				continue
+			}
+			for c := 0; c < numCentroids; c++ {
+				counts[c] += accs[w].counts[c]
+			}
+		}
+		sums = make([]float32, numCentroids*dim)
+		for w := range accs {
+			if accs[w].sums == nil {
+				continue
+			}
+			for i := range sums {
+				sums[i] += accs[w].sums[i]
+			}
+		}
+		for c := 0; c < numCentroids; c++ {
+			if counts[c] > 0 {
+				invCnt := 1.0 / float32(counts[c])
+				base := c * dim
+				for d := 0; d < dim; d++ {
+					idx.Centroids[c][d] = sums[base+d] * invCnt
+				}
+			}
+		}
+	}
+}
+
+// kmeansAdd folds one sample into a worker's local accumulators.
+func (idx *IVFIndex) kmeansAdd(sums []float32, counts []int32, bestC, dim int, v []float32) {
+	if bestC < 0 || bestC >= len(counts) {
+		return
+	}
+	base := bestC * dim
+	for d := 0; d < dim; d++ {
+		sums[base+d] += v[d]
+	}
+	counts[bestC]++
+}
+
+// cpuAssignAll assigns every vector to its nearest centroid through the
+// multi-query L2 kernels (fallback: the scalar reference). Workers fill
+// local lists; the merge runs in worker id order after the join, which
+// keeps every vector in exactly one list (the reference merged under a
+// mutex in completion order, so contents are identical and the order is
+// now deterministic).
+func (idx *IVFIndex) cpuAssignAll(floatVectors [][]float32, numCentroids int) {
+	n := len(floatVectors)
+	dim := idx.Dimension
+	ks := kernelSetFor()
+
+	workers := runtime.GOMAXPROCS(0)
+	if workers > n {
+		workers = n
+	}
+	chunk := (n + workers - 1) / workers
+	localAll := make([][][]int, workers)
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
 		start := w * chunk
 		end := start + chunk
 		if start >= n {
@@ -128,42 +445,71 @@ func (idx *IVFIndex) Build(floatVectors [][]float32) error {
 		if end > n {
 			end = n
 		}
-
 		wg.Add(1)
-		go func(s, e int) {
+		go func(s, e, w int) {
 			defer wg.Done()
 			localLists := make([][]int, numCentroids)
-			for i := s; i < e; i++ {
-				v := floatVectors[i]
-				bestC := 0
-				bestDist := float32(mathx.MaxFloat32)
-				for c := 0; c < numCentroids; c++ {
-					d := L2Float32(v, idx.Centroids[c])
-					if d < bestDist {
-						bestDist = d
-						bestC = c
-					}
-				}
-				localLists[bestC] = append(localLists[bestC], i)
-			}
+			localAll[w] = localLists
 
-			assignMu.Lock()
-			for c := 0; c < numCentroids; c++ {
-				idx.InvertedLists[c] = append(idx.InvertedLists[c], localLists[c]...)
+			const mqBlock = 256
+			best := make([]int, mqBlock)
+			qs := make([]float32, mqBlock*dim)
+			out := make([]float32, mqBlock*numCentroids)
+
+			for bi := s; bi < e; bi += mqBlock {
+				be := bi + mqBlock
+				if be > e {
+					be = e
+				}
+				block := make([][]float32, be-bi)
+				for si := bi; si < be; si++ {
+					block[si-bi] = floatVectors[si]
+				}
+				if len(block) > 0 && idx.scoreSampleCentroids(block, best, dim, numCentroids, ks, qs, out) {
+					for si := bi; si < be; si++ {
+						bestC := best[si-bi]
+						if bestC < 0 || bestC >= numCentroids {
+							bestC = 0
+						}
+						localLists[bestC] = append(localLists[bestC], si)
+					}
+					continue
+				}
+				for si := bi; si < be; si++ {
+					v := block[si-bi]
+					bestC := 0
+					bestDist := float32(mathx.MaxFloat32)
+					for c := 0; c < numCentroids; c++ {
+						d := l2Float32Scalar(v, idx.Centroids[c])
+						if d < bestDist {
+							bestDist = d
+							bestC = c
+						}
+					}
+					localLists[bestC] = append(localLists[bestC], si)
+				}
 			}
-			assignMu.Unlock()
-		}(start, end)
+		}(start, end, w)
 	}
 	wg.Wait()
 
-	idx.Float32 = floatVectors
-	return nil
+	for w := range localAll {
+		if localAll[w] == nil {
+			continue
+		}
+		for c := 0; c < numCentroids; c++ {
+			idx.InvertedLists[c] = append(idx.InvertedLists[c], localAll[w][c]...)
+		}
+	}
 }
 
 // Search performs a multi-probe search on the IVF index.
 func (idx *IVFIndex) Search(query []float32, k int) ([]SearchResult, error) {
 	if len(idx.Centroids) == 0 {
 		return nil, fmt.Errorf("IVF index has not been built")
+	}
+	if k <= 0 {
+		return make([]SearchResult, 0), nil
 	}
 
 	// 1. Find nearest centroids (probes)
@@ -176,7 +522,8 @@ func (idx *IVFIndex) Search(query []float32, k int) ([]SearchResult, error) {
 		cDistances[c] = centroidDist{id: c, dist: L2Float32(query, idx.Centroids[c])}
 	}
 
-	// Sort or select top numProbes centroids
+	// Sort or select top numProbes centroids (same selection network as
+	// the reference implementation).
 	numProbes := idx.NumProbes
 	if numProbes > len(cDistances) {
 		numProbes = len(cDistances)
@@ -191,67 +538,195 @@ func (idx *IVFIndex) Search(query []float32, k int) ([]SearchResult, error) {
 		cDistances[i], cDistances[minIdx] = cDistances[minIdx], cDistances[i]
 	}
 
-	// 2. Scan only vectors inside the probed inverted lists
-	h := &resultHeap{}
-	heap.Init(h)
-
+	probedIDs := make([]int32, numProbes)
 	for p := 0; p < numProbes; p++ {
-		cID := cDistances[p].id
-		list := idx.InvertedLists[cID]
+		probedIDs[p] = int32(cDistances[p].id)
+	}
 
-		switch idx.DataType {
-		case TypeFloat32:
-			for _, vID := range list {
-				score := DotFloat32(query, idx.Float32[vID])
-				if h.Len() < k {
-					heap.Push(h, SearchResult{ID: vID, Score: score})
-				} else if score > (*h)[0].Score {
-					(*h)[0] = SearchResult{ID: vID, Score: score}
-					heap.Fix(h, 0)
-				}
+	// GPU list scan (cuda build; one launch covers all probed lists).
+	if res, ok := idx.gpuSearchLists(query, k, probedIDs); ok {
+		return res, nil
+	}
+
+	// 2. Scan the probed inverted lists. Query-side quantisation
+	// happens once per Search (the reference re-did it per probe).
+	ks := kernelSetFor()
+
+	switch idx.DataType {
+	case TypeComplex128:
+		qComp := Float32ToComplex128(query)
+		probeHeaps := make([]resultHeap, numProbes)
+		idx.runProbes(numProbes, probedIDs, k, func(p, cID int, h *resultHeap) {
+			for _, vID := range idx.InvertedLists[cID] {
+				heapAdd(h, vID, float32(DotComplex128(qComp, idx.Complex[vID])), k)
 			}
-		case TypeUint8:
-			qQuant := QuantizeUint8(query, -1)
-			for _, vID := range list {
-				score := DotUint8(&qQuant, &idx.Uint8[vID])
-				if h.Len() < k {
-					heap.Push(h, SearchResult{ID: vID, Score: score})
-				} else if score > (*h)[0].Score {
-					(*h)[0] = SearchResult{ID: vID, Score: score}
-					heap.Fix(h, 0)
-				}
+		}, probeHeaps)
+		return mergeHeaps(probeHeaps, k), nil
+	case TypeUint8:
+		qQuant := QuantizeUint8(query, -1)
+		probeHeaps := make([]resultHeap, numProbes)
+		idx.runProbes(numProbes, probedIDs, k, func(p, cID int, h *resultHeap) {
+			for _, vID := range idx.InvertedLists[cID] {
+				heapAdd(h, vID, DotUint8(&qQuant, &idx.Uint8[vID]), k)
 			}
-		case TypeComplex128:
-			qComp := Float32ToComplex128(query)
-			for _, vID := range list {
-				score := float32(DotComplex128(qComp, idx.Complex[vID]))
-				if h.Len() < k {
-					heap.Push(h, SearchResult{ID: vID, Score: score})
-				} else if score > (*h)[0].Score {
-					(*h)[0] = SearchResult{ID: vID, Score: score}
-					heap.Fix(h, 0)
+		}, probeHeaps)
+		return mergeHeaps(probeHeaps, k), nil
+	case TypeTurboQuant:
+		rot := CreateIdentityMatrix(idx.Dimension)
+		qjl := idx.qjlMatrixCached()
+		qTQ := QuantizeTurboQuant(query, -1, rot, qjl, 32)
+		tqPrep := PrepareTurboQuantQuery(&qTQ)
+		probeHeaps := make([]resultHeap, numProbes)
+		idx.runProbes(numProbes, probedIDs, k, func(p, cID int, h *resultHeap) {
+			for _, vID := range idx.InvertedLists[cID] {
+				if vID < 0 || vID >= len(idx.Turbo) {
+					continue
 				}
+				heapAdd(h, vID, scoreTurboPair(ks, tqPrep, &idx.Turbo[vID]), k)
 			}
-		case TypeTurboQuant:
-			rot := CreateIdentityMatrix(idx.Dimension)
-			qjl := CreateRandomQJLMatrix(32, idx.Dimension, 42)
-			qTQ := QuantizeTurboQuant(query, -1, rot, qjl, 32)
-			for _, vID := range list {
-				score := DotTurboQuant(&qTQ, &idx.Turbo[vID])
-				if h.Len() < k {
-					heap.Push(h, SearchResult{ID: vID, Score: score})
-				} else if score > (*h)[0].Score {
-					(*h)[0] = SearchResult{ID: vID, Score: score}
-					heap.Fix(h, 0)
-				}
+		}, probeHeaps)
+		return mergeHeaps(probeHeaps, k), nil
+	default:
+		// float32 and unknown dtypes: gather-block batch scan. Rows of
+		// each probed list are copied (≤ batchScoreBlock at a time)
+		// into per-goroutine contiguous scratch and scored with one
+		// batch-kernel call per block; the scratch is pooled, so
+		// steady-state scans allocate nothing. Lists with out-of-range
+		// ids, a ragged store, or a query longer than the stored dim
+		// fall back to the scalar per-vector loop, matching the
+		// reference result for result.
+		probeHeaps := make([]resultHeap, numProbes)
+		dim := idx.Dimension
+		gatherable := idx.f32RowsUniform && dim > 0 && len(query) <= dim
+		var scratch sync.Pool
+		if gatherable {
+			scratch.New = func() interface{} {
+				return make([]float32, batchScoreBlock*dim)
 			}
 		}
+		idx.runProbes(numProbes, probedIDs, k, func(p, cID int, h *resultHeap) {
+			list := idx.InvertedLists[cID]
+			if len(list) == 0 {
+				return
+			}
+			if gatherable && idx.listIdsInBounds(list) {
+				g := scratch.Get().([]float32)
+				idx.searchFloat32Gather(ks, h, query, list, g, dim, k)
+				scratch.Put(g)
+				return
+			}
+			for _, vID := range list {
+				if vID < 0 || vID >= len(idx.Float32) {
+					continue
+				}
+				heapAdd(h, vID, DotFloat32(query, idx.Float32[vID]), k)
+			}
+		}, probeHeaps)
+		return mergeHeaps(probeHeaps, k), nil
 	}
+}
 
+// listIdsInBounds reports that every id of the list indexes Float32.
+func (idx *IVFIndex) listIdsInBounds(list []int) bool {
+	for _, vID := range list {
+		if vID < 0 || vID >= len(idx.Float32) {
+			return false
+		}
+	}
+	return true
+}
+
+// searchFloat32Gather scores one probed list through the gather+batch
+// path. Rows are copied into gather (contiguous, stride dim) in blocks
+// of batchScoreBlock; each block is scored with one kernel call and the
+// scores land in the heap in list order, so the heap contents are
+// identical to the per-vector reference loop.
+func (idx *IVFIndex) searchFloat32Gather(ks *distanceKernelSet, h *resultHeap, query []float32, list []int, gather []float32, dim, k int) {
+	var buf [batchScoreBlock]float32
+	for start := 0; start < len(list); start += batchScoreBlock {
+		end := start + batchScoreBlock
+		if end > len(list) {
+			end = len(list)
+		}
+		count := end - start
+		for j := 0; j < count; j++ {
+			copy(gather[j*dim:(j+1)*dim], idx.Float32[list[start+j]][:dim])
+		}
+		scoreFloat32Batch(ks, true, query, gather[:count*dim], dim, count, buf[:])
+		for j, sc := range buf[:count] {
+			heapAdd(h, list[start+j], sc, k)
+		}
+	}
+}
+
+// runProbes fans the probe scans out over goroutines (one per probe,
+// capped at NumProbes of work at a time) and collects every probe's
+// heap. scan scores a single probed list into h and is data-type
+// specific.
+func (idx *IVFIndex) runProbes(numProbes int, probedIDs []int32, k int, scan func(p, cID int, h *resultHeap), probeHeaps []resultHeap) {
+	var wg sync.WaitGroup
+	// Cap the concurrency at the worker count; probes beyond that just
+	// share the pool (the heap merge at the end is order-independent).
+	limit := runtime.GOMAXPROCS(0)
+	if limit > numProbes {
+		limit = numProbes
+	}
+	sem := make(chan struct{}, limit)
+	for p := 0; p < numProbes; p++ {
+		cID := int(probedIDs[p])
+		if cID < 0 || cID >= len(idx.InvertedLists) {
+			continue
+		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(p, cID int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			h := &resultHeap{}
+			heap.Init(h)
+			scan(p, cID, h)
+			probeHeaps[p] = *h
+		}(p, cID)
+	}
+	wg.Wait()
+}
+
+// gpuSearchLists scores the probed lists with one CUDA launch when the
+// index staged for it. Falls back silently (ok=false) otherwise.
+func (idx *IVFIndex) gpuSearchLists(query []float32, k int, probedIDs []int32) ([]SearchResult, bool) {
+	if len(probedIDs) == 0 || k <= 0 || gpuScanListsFloat32 == nil || gpuQPackedFloat32 == nil {
+		return nil, false
+	}
+	idx.gpuListMu.Lock()
+	staged := idx.gpuStore != nil && idx.gpuLists != nil
+	idx.gpuListMu.Unlock()
+	if !staged {
+		return nil, false
+	}
+	qs, ok := gpuQPackedFloat32([][]float32{query})
+	if !ok {
+		return nil, false
+	}
+	scores, counts, ok := gpuScanListsFloat32(idx.gpuStore, idx.gpuLists, qs, probedIDs)
+	if !ok {
+		return nil, false
+	}
+	offset := 0
+	h := &resultHeap{}
+	heap.Init(h)
+	for i, cID := range probedIDs {
+		count := int(counts[i])
+		if int(cID) < len(idx.InvertedLists) {
+			list := idx.InvertedLists[cID]
+			for j := 0; j < count && j < len(list); j++ {
+				heapAdd(h, list[j], scores[offset+j], k)
+			}
+		}
+		offset += count
+	}
 	results := make([]SearchResult, h.Len())
-	for i := len(results) - 1; i >= 0; i-- {
-		results[i] = heap.Pop(h).(SearchResult)
+	for ri := len(results) - 1; ri >= 0; ri-- {
+		results[ri] = heap.Pop(h).(SearchResult)
 	}
-
-	return results, nil
+	return results, true
 }

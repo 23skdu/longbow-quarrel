@@ -10,8 +10,6 @@ type SamplerConfig struct {
 	PresencePenalty  float64
 	FrequencyPenalty float64
 	Seed             int64
-	DebugActivations bool
-	QualityMode      bool
 	SequenceID       uint64
 	Grammar          *sampler.Grammar
 	MinP             float64

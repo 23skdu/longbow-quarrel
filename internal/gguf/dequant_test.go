@@ -248,32 +248,6 @@ func TestDequantizeBlock_AllTypes(t *testing.T) {
 	}
 }
 
-func TestFP8_TensorHelpers(t *testing.T) {
-	data := []float32{1.0, -0.5, 2.0, 0.0}
-	shape := []int{2, 2}
-	tensor, err := NewFP8Tensor(data, shape, FP8E4M3)
-	if err != nil {
-		t.Fatalf("NewFP8Tensor failed: %v", err)
-	}
-	if tensor.ByteSize() != 4 {
-		t.Errorf("expected byte size 4, got %d", tensor.ByteSize())
-	}
-	f32, err := tensor.ToFloat32()
-	if err != nil {
-		t.Fatalf("ToFloat32 failed: %v", err)
-	}
-	if len(f32) != 4 {
-		t.Errorf("expected 4 floats, got %d", len(f32))
-	}
-
-	if FP8E4M3SizeBytes(100) != 100 {
-		t.Errorf("unexpected FP8E4M3SizeBytes")
-	}
-	if FP8E5M2SizeBytes(100) != 100 {
-		t.Errorf("unexpected FP8E5M2SizeBytes")
-	}
-}
-
 func TestGGUF_GetGapTensors(t *testing.T) {
 	f := &GGUFFile{
 		Data:       make([]byte, 5*1024*1024),

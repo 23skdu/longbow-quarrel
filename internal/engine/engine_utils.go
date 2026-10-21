@@ -4,11 +4,35 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/23skdu/longbow-quarrel/internal/mathx"
-
 	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/gguf"
 )
+
+// validateModelFile rejects a GGUF file the engine cannot run before any
+// tensor is touched: a tensor table whose offsets do not describe the data
+// behind it, or a model without the embedding table every backend dereferences
+// on its first forward pass.
+//
+// Without this check a corrupt offset or a missing token_embd.weight surfaces
+// as a nil dereference deep in the forward pass; with it the load fails with
+// the tensor's name.
+func validateModelFile(f *gguf.GGUFFile) error {
+	analyzer := gguf.NewMetadataAnalyzer(f)
+
+	issues, err := analyzer.ValidateTensors()
+	if err != nil {
+		return fmt.Errorf("failed to validate the model's tensor table: %w", err)
+	}
+	if len(issues) > 0 {
+		return fmt.Errorf("model file has an invalid tensor table: %s", issues[0])
+	}
+
+	if missing := analyzer.FindMissingTensors([]string{"token_embd.weight"}); len(missing) > 0 {
+		return fmt.Errorf("model file is missing a required tensor: %s", strings.Join(missing, ", "))
+	}
+
+	return nil
+}
 
 func getKV(f *gguf.GGUFFile, keys ...string) (interface{}, bool) {
 	// First, try all provided keys directly
@@ -239,20 +263,9 @@ func ExtractModelConfig(f *gguf.GGUFFile) config.Config {
 	if val, ok := getKV(f, arch+".expert_shared_feed_forward_length", "llama.expert_shared_feed_forward_length"); ok {
 		cfg.ExpertSharedFeedForwardLength = int(toFloat64(val))
 	}
-	if val, ok := getKV(f, arch+".expert_group_count", "llama.expert_group_count"); ok {
-		cfg.ExpertGroupCount = int(toFloat64(val))
-	}
-	if val, ok := getKV(f, arch+".expert_group_used_count", "llama.expert_group_used_count"); ok {
-		cfg.ExpertGroupUsedCount = int(toFloat64(val))
-	}
-	if val, ok := getKV(f, arch+".expert_weights_norm", "llama.expert_weights_norm"); ok {
-		if norm, ok := val.(bool); ok {
-			cfg.ExpertWeightsNorm = norm
-		}
-	}
-	if val, ok := getKV(f, arch+".expert_weights_scale", "llama.expert_weights_scale"); ok {
-		cfg.ExpertWeightsScale = float32(toFloat64(val))
-	}
+	// Grouped-expert routing is not implemented; see the note in
+	// engine.go. The metadata is not copied into the configuration,
+	// because a field nothing reads is a lie.
 	if arch == "nemo" || arch == "nemotron" {
 		cfg.IsMOE = true
 	}
@@ -279,6 +292,28 @@ func ExtractModelConfig(f *gguf.GGUFFile) config.Config {
 	}
 
 	return cfg
+}
+
+// checkMLAQLoRARank compares the low-rank query projection rank the model
+// declares (q_lora_rank) with the rank the weights actually have.
+//
+// The MLA query projection has two stages when the model declares a rank:
+// a projection down to q_lora_rank columns, a normalisation of those
+// columns, and a projection back up to the head dimension. A model whose
+// metadata and weights disagree computes the wrong query, silently, so the
+// mismatch is an error rather than a warning.
+//
+// A rank of zero means the model does not declare one, and a weight with
+// no columns means the tensor was not loaded; neither is a mismatch.
+func checkMLAQLoRARank(declared, weightCols int) error {
+	if declared <= 0 || weightCols <= 0 {
+		return nil
+	}
+	if declared != weightCols {
+		return fmt.Errorf("the model declares q_lora_rank %d but the low-rank query projection has %d columns",
+			declared, weightCols)
+	}
+	return nil
 }
 
 func toFloat64(v interface{}) float64 {
@@ -369,290 +404,4 @@ func isNeededTensor(name string) bool {
 		}
 	}
 	return false
-}
-
-// NewQualityEvaluatorSimple creates a quality evaluator without tokenizer (for basic metrics)
-func NewQualityEvaluatorSimple() *QualityEvaluator {
-	return &QualityEvaluator{tokenizer: nil}
-}
-
-// PerplexityResult holds perplexity calculation results
-type PerplexityResult struct {
-	Perplexity  float64
-	TotalTokens int
-	AvgLogProb  float64
-}
-
-// CalculatePerplexity computes perplexity for a sequence of tokens
-func (qe *QualityEvaluator) CalculatePerplexity(tokens []int) PerplexityResult {
-	if len(tokens) < 2 {
-		return PerplexityResult{Perplexity: 1.0, TotalTokens: len(tokens), AvgLogProb: 0.0}
-	}
-
-	// Simplified perplexity calculation
-	totalLogProb := 0.0
-	validTokens := 0
-
-	for i := 1; i < len(tokens); i++ {
-		logProb := -0.5 - 0.1*float64(i%3)
-		totalLogProb += logProb
-		validTokens++
-	}
-
-	avgLogProb := totalLogProb / float64(validTokens)
-	perplexity := mathx.Exp(-avgLogProb)
-
-	return PerplexityResult{
-		Perplexity:  perplexity,
-		TotalTokens: validTokens,
-		AvgLogProb:  avgLogProb,
-	}
-}
-
-// BLEUScore holds BLEU evaluation results
-type BLEUScore struct {
-	BLEU1     float64
-	BLEU2     float64
-	BLEU3     float64
-	BLEU4     float64
-	Precision []float64
-}
-
-// CalculateBLEU computes BLEU score between candidate and reference texts
-func (qe *QualityEvaluator) CalculateBLEU(candidate, reference string) BLEUScore {
-	if qe.tokenizer == nil {
-		// Simple character-based BLEU for testing without tokenizer
-		return qe.calculateBLEUSimple(candidate, reference)
-	}
-
-	candTokens := qe.tokenizer.Encode(candidate)
-	refTokens := qe.tokenizer.Encode(reference)
-
-	// Simplified BLEU calculation for n-grams 1-4
-	maxN := 4
-	precisions := make([]float64, maxN)
-
-	for n := 1; n <= maxN; n++ {
-		candNGrams := getNGrams(candTokens, n)
-		refNGrams := getNGrams(refTokens, n)
-
-		// Count matching n-grams
-		matches := 0
-		for candNGram := range candNGrams {
-			if refNGrams[candNGram] > 0 {
-				matches++
-			}
-		}
-
-		// Calculate precision
-		if len(candNGrams) > 0 {
-			precisions[n-1] = float64(matches) / float64(len(candNGrams))
-		} else {
-			precisions[n-1] = 0.0
-		}
-	}
-
-	// Calculate BLEU scores (simplified geometric mean)
-	bleu1 := precisions[0]
-	bleu2 := mathx.Sqrt(precisions[0] * precisions[1])
-	bleu3 := mathx.Pow(precisions[0]*precisions[1]*precisions[2], 1.0/3.0)
-	bleu4 := mathx.Pow(precisions[0]*precisions[1]*precisions[2]*precisions[3], 1.0/4.0)
-
-	// Apply brevity penalty (simplified)
-	bp := 1.0
-	if len(candTokens) < len(refTokens) {
-		bp = mathx.Exp(1.0 - float64(len(refTokens))/float64(len(candTokens)))
-	}
-
-	return BLEUScore{
-		BLEU1:     bleu1 * bp,
-		BLEU2:     bleu2 * bp,
-		BLEU3:     bleu3 * bp,
-		BLEU4:     bleu4 * bp,
-		Precision: precisions,
-	}
-}
-
-// ROUGEScore holds ROUGE evaluation results
-type ROUGEScore struct {
-	ROUGE1_F1 float64
-	ROUGE2_F1 float64
-	ROUGEL_F1 float64
-	Precision float64
-	Recall    float64
-	F1        float64
-}
-
-// CalculateROUGE computes ROUGE score between candidate and reference texts
-func (qe *QualityEvaluator) CalculateROUGE(candidate, reference string) ROUGEScore {
-	if qe.tokenizer == nil {
-		// Simple character-based ROUGE for testing without tokenizer
-		return qe.calculateROUGESimple(candidate, reference)
-	}
-
-	candTokens := qe.tokenizer.Encode(candidate)
-	refTokens := qe.tokenizer.Encode(reference)
-
-	// Calculate unigram overlap (ROUGE-1)
-	candUnigrams := make(map[int]int)
-	refUnigrams := make(map[int]int)
-
-	for _, token := range candTokens {
-		candUnigrams[token]++
-	}
-	for _, token := range refTokens {
-		refUnigrams[token]++
-	}
-
-	unigramMatches := 0
-	for token, count := range candUnigrams {
-		if refCount, exists := refUnigrams[token]; exists {
-			unigramMatches += min(count, refCount)
-		}
-	}
-
-	precision := float64(unigramMatches) / float64(len(candTokens))
-	recall := float64(unigramMatches) / float64(len(refTokens))
-	f1 := 2.0 * precision * recall / (precision + recall)
-
-	if mathx.IsNaN(f1) {
-		f1 = 0.0
-	}
-
-	return ROUGEScore{
-		ROUGE1_F1: f1,
-		ROUGE2_F1: 0.0, // Simplified - would need bigram calculation
-		ROUGEL_F1: f1,  // Simplified - using unigram as approximation
-		Precision: precision,
-		Recall:    recall,
-		F1:        f1,
-	}
-}
-
-// calculateBLEUSimple provides a basic character-based BLEU calculation for testing
-func (qe *QualityEvaluator) calculateBLEUSimple(candidate, reference string) BLEUScore {
-	if candidate == reference {
-		// Perfect match
-		return BLEUScore{
-			BLEU1:     1.0,
-			BLEU2:     1.0,
-			BLEU3:     1.0,
-			BLEU4:     1.0,
-			Precision: []float64{1.0, 1.0, 1.0, 1.0},
-		}
-	}
-
-	// Simple n-gram matching at character level
-	maxN := 4
-	precisions := make([]float64, maxN)
-
-	candChars := []rune(candidate)
-	refChars := []rune(reference)
-
-	for n := 1; n <= maxN; n++ {
-		candNGrams := getCharNGrams(candChars, n)
-		refNGrams := getCharNGrams(refChars, n)
-
-		matches := 0
-		for candNGram := range candNGrams {
-			if refNGrams[candNGram] > 0 {
-				matches++
-			}
-		}
-
-		if len(candNGrams) > 0 {
-			precisions[n-1] = float64(matches) / float64(len(candNGrams))
-		} else {
-			precisions[n-1] = 0.0
-		}
-	}
-
-	// Calculate BLEU scores
-	bleu1 := precisions[0]
-	bleu2 := mathx.Sqrt(precisions[0] * precisions[1])
-	bleu3 := mathx.Pow(precisions[0]*precisions[1]*precisions[2], 1.0/3.0)
-	bleu4 := mathx.Pow(precisions[0]*precisions[1]*precisions[2]*precisions[3], 1.0/4.0)
-
-	// Brevity penalty
-	bp := 1.0
-	if len(candidate) < len(reference) {
-		bp = mathx.Exp(1.0 - float64(len(reference))/float64(len(candidate)))
-	}
-
-	return BLEUScore{
-		BLEU1:     bleu1 * bp,
-		BLEU2:     bleu2 * bp,
-		BLEU3:     bleu3 * bp,
-		BLEU4:     bleu4 * bp,
-		Precision: precisions,
-	}
-}
-
-// Helper functions for n-gram calculation
-func getNGrams(tokens []int, n int) map[string]int {
-	nGrams := make(map[string]int)
-	for i := 0; i <= len(tokens)-n; i++ {
-		key := fmt.Sprintf("%v", tokens[i:i+n])
-		nGrams[key]++
-	}
-	return nGrams
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-// calculateROUGESimple provides a basic character-based ROUGE calculation for testing
-func (qe *QualityEvaluator) calculateROUGESimple(candidate, reference string) ROUGEScore {
-	candChars := []rune(candidate)
-	refChars := []rune(reference)
-
-	// Create character frequency maps
-	candUnigrams := make(map[rune]int)
-	refUnigrams := make(map[rune]int)
-
-	for _, char := range candChars {
-		candUnigrams[char]++
-	}
-	for _, char := range refChars {
-		refUnigrams[char]++
-	}
-
-	// Calculate matches
-	unigramMatches := 0
-	for char, count := range candUnigrams {
-		if refCount, exists := refUnigrams[char]; exists {
-			unigramMatches += min(count, refCount)
-		}
-	}
-
-	precision := float64(unigramMatches) / float64(len(candChars))
-	recall := float64(unigramMatches) / float64(len(refChars))
-	f1 := 2.0 * precision * recall / (precision + recall)
-
-	if mathx.IsNaN(f1) {
-		f1 = 0.0
-	}
-
-	return ROUGEScore{
-		ROUGE1_F1: f1,
-		ROUGE2_F1: 0.0, // Not implemented for character-level
-		ROUGEL_F1: f1,  // Same as ROUGE-1 for character level
-		Precision: precision,
-		Recall:    recall,
-		F1:        f1,
-	}
-}
-
-// Helper function for character n-gram extraction
-func getCharNGrams(chars []rune, n int) map[string]int {
-	nGrams := make(map[string]int)
-	for i := 0; i <= len(chars)-n; i++ {
-		key := string(chars[i : i+n])
-		nGrams[key]++
-	}
-	return nGrams
 }

@@ -16,8 +16,11 @@ func TestDefault(t *testing.T) {
 	if cfg.RopeTheta != 10000.0 {
 		t.Errorf("expected RopeTheta 10000.0, got %v", cfg.RopeTheta)
 	}
-	if cfg.PrecisionMode != PrecisionAuto {
-		t.Errorf("expected PrecisionMode PrecisionAuto, got %v", cfg.PrecisionMode)
+	if cfg.MaxTokens != 64 {
+		t.Errorf("expected MaxTokens 64, got %d", cfg.MaxTokens)
+	}
+	if cfg.KVCacheType != KVCacheF16 {
+		t.Errorf("expected KVCacheType KVCacheF16, got %v", cfg.KVCacheType)
 	}
 }
 
@@ -105,19 +108,18 @@ func TestValidate(t *testing.T) {
 	}
 }
 
-func TestPrecisionModeConstants(t *testing.T) {
-	// Verify precision mode constants are ordered correctly
-	if PrecisionAuto != 0 {
-		t.Errorf("expected PrecisionAuto to be 0, got %d", PrecisionAuto)
+func TestKVCacheTypeConstants(t *testing.T) {
+	// The KV cache type is selected with -kv-cache-type, so every value
+	// has to be distinguishable and reachable.
+	seen := map[KVCacheType]bool{}
+	for _, kt := range []KVCacheType{KVCacheF32, KVCacheF16, KVCacheTQ1_0, KVCacheTQ2_0, KVCacheFP8, KVCacheQ8_0} {
+		if seen[kt] {
+			t.Errorf("duplicate KVCacheType value %d", kt)
+		}
+		seen[kt] = true
 	}
-	if PrecisionFP16 != 1 {
-		t.Errorf("expected PrecisionFP16 to be 1, got %d", PrecisionFP16)
-	}
-	if PrecisionF32FFN != 2 {
-		t.Errorf("expected PrecisionF32FFN to be 2, got %d", PrecisionF32FFN)
-	}
-	if PrecisionMixed != 3 {
-		t.Errorf("expected PrecisionMixed to be 3, got %d", PrecisionMixed)
+	if len(seen) != 6 {
+		t.Errorf("expected 6 distinct KV cache types, got %d", len(seen))
 	}
 }
 
@@ -135,7 +137,7 @@ func TestConfigFields(t *testing.T) {
 		Eps:                           1e-5,
 		RopeTheta:                     10000.0,
 		WindowSize:                    4096,
-		PrecisionMode:                 PrecisionFP16,
+		KVCacheType:                   KVCacheFP8,
 		KVCacheSize:                   8192,
 		IsMOE:                         true,
 		ExpertCount:                   128,
@@ -143,17 +145,6 @@ func TestConfigFields(t *testing.T) {
 		ExpertSharedCount:             1,
 		ExpertFeedForwardLength:       4096,
 		ExpertSharedFeedForwardLength: 14336,
-		ExpertGroupCount:              8,
-		ExpertGroupUsedCount:          4,
-		ExpertWeightsNorm:             true,
-		ExpertWeightsScale:            1.0,
-		DebugDequant:                  true,
-		DebugActivations:              true,
-		DebugEmbedding:                true,
-		DebugAttention:                true,
-		DebugFFN:                      true,
-		DebugLayerOutput:              true,
-		DebugLogits:                   true,
 		DebugMemory:                   true,
 	}
 

@@ -74,6 +74,11 @@ func NewcudaEngine(modelPath string, cfg config.Config) (Engine, error) {
 		cudaEngineFailed.WithLabelValues("unknown", "gguf_load_failed").Inc()
 		return nil, fmt.Errorf("failed to load GGUF: %w", err)
 	}
+	if err := validateModelFile(f); err != nil {
+		_ = f.Close()
+		cudaEngineFailed.WithLabelValues("unknown", "invalid_model").Inc()
+		return nil, err
+	}
 
 	arch := "unknown"
 	if v, ok := f.KV["general.architecture"].(string); ok {
@@ -324,6 +329,10 @@ func (e *cudaEngine) SwapModel(newModelPath string, newConfig config.Config) err
 
 	f, err := gguf.LoadFile(newModelPath)
 	if err != nil {
+		return fmt.Errorf("failed to load new GGUF: %w", err)
+	}
+	if err := validateModelFile(f); err != nil {
+		_ = f.Close()
 		return fmt.Errorf("failed to load new GGUF: %w", err)
 	}
 	e.model = f
@@ -758,6 +767,9 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 			qBW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_q_b.weight", layer))
 			var qAll *device.Tensor
 			if qAW != nil && qBW != nil {
+				if err := checkMLAQLoRARank(e.config.QLoRARank, qAW.Cols()); err != nil {
+					return nil, fmt.Errorf("layer %d: %w", layer, err)
+				}
 				cQ, _ := ctx.MatmulF16(normed, qAW)
 				qANormW, _ := e.cuda.GetWeightTensor(fmt.Sprintf("blk.%d.attn_q_a_norm.weight", layer))
 				if qANormW != nil {
@@ -872,12 +884,16 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 		// walks the tokens and their physical positions. The batch size
 		// was passed instead, so only the first token of each sequence
 		// ever reached the cache and the rest of it stayed uninitialised.
-		ctx.StoreKVPagedBatch(k, v, kCache, vCache, physPosTensor, kvHeads*headDim, numTokens)
+		//
+		// The store goes through the cache, which knows the precision of
+		// the pool: a quantized pool needs the codes and their scale,
+		// not the F16 values.
+		e.cache.StoreKVPagedBatch(layer, k, v, physPosTensor)
 		physPosTensor.ReturnToPool()
 
 		// Attention — use quantized path if cache is FP8/Q8_0
 		if e.cache != nil && (e.cache.Precision == device.DataTypeFP8 || e.cache.Precision == device.DataTypeQ8_0) {
-			kScales, vScales := e.cache.GetBlockScales(layer)
+			kScales, vScales := e.cache.GetScaleTensors(layer)
 			isFP8 := e.cache.Precision == device.DataTypeFP8
 			scale := float32(1.0 / mathx.Sqrt(float64(headDim)))
 			ctx.PagedAttentionQuantized(q, kCache, vCache, kScales, vScales, attnOut, tokenPosTensor, blockTableTensor, tokenToSeqTensor, maxBlocks, heads, kvHeads, headDim, e.cache.blockSize, batchSize, scale, isFP8)

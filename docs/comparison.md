@@ -98,7 +98,6 @@ Comprehensive comparison of Longbow-Quarrel against the top LLM inference engine
 | CPU (ARM64) | ✅ NEON | ✅ NEON | ❌ | ✅ | ❌ |
 | NVIDIA CUDA | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Apple Metal | ✅ | ✅ | ❌ | ✅ | ❌ |
-| Google TPU | ✅ (WIP) | ❌ | ❌ | ❌ | ✅ |
 | AMD ROCm | ❌ | ✅ | ✅ | ❌ | ❌ |
 | Intel Arc | ❌ | ✅ (Vulkan) | ❌ | ❌ | ❌ |
 | WebGPU | ❌ | ✅ (demo) | ❌ | ❌ | ❌ |

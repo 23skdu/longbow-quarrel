@@ -596,6 +596,29 @@ func (c *Context) NewTensorFP32(rows, cols int) *Tensor {
 	return c.newTensorFP32Internal(rows, cols)
 }
 
+// SupportsQuantizedKVCache reports whether this backend can store the KV
+// cache in a quantized pool.
+//
+// The Metal store and attention kernels read and write the pool as packed
+// half-precision values, so there is no quantized pool on this backend.
+func (c *Context) SupportsQuantizedKVCache() bool {
+	return false
+}
+
+// StoreKVPagedBatchQuantized stores K and V into a quantized pool. The
+// Metal backend has no quantized pool; the paged cache rejects the
+// quantized KV cache types before it gets here.
+func (c *Context) StoreKVPagedBatchQuantized(k, v, kCache, vCache, kScales, vScales, physicalPositions *Tensor, kvDim, numTokens int, isFP8 bool) error {
+	return fmt.Errorf("the Metal backend cannot store the KV cache in a quantized pool")
+}
+
+// StoreKVPagedSlotQuantized stores one K/V row into a quantized pool. The
+// Metal backend has no quantized pool; the paged cache rejects the
+// quantized KV cache types before it gets here.
+func (c *Context) StoreKVPagedSlotQuantized(k, v, kCache, vCache, kScales, vScales *Tensor, slotIdx, kvDim int, isFP8 bool) error {
+	return fmt.Errorf("the Metal backend cannot store the KV cache in a quantized pool")
+}
+
 // NewPagedKVPool allocates the paged KV cache pool for one layer.
 //
 // The Metal store and attention kernels read and write the pool as packed

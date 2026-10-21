@@ -1,4 +1,4 @@
-//go:build !cuda && !tpu && !metal
+//go:build !cuda && !metal
 
 package engine
 

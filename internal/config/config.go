@@ -5,23 +5,49 @@ import (
 	"strings"
 )
 
-type PrecisionMode int
-
-const (
-	PrecisionAuto PrecisionMode = iota
-	PrecisionFP16
-	PrecisionF32FFN
-	PrecisionMixed
-)
-
+// KVCacheType selects the precision of the KV cache pools.
+//
+// The paged cache reads this when it allocates its pools, so every value
+// here is reachable from a shipped binary: the CLI sets it with
+// -kv-cache-type and the engines honour it.
+//
+// The zero value is F16, the precision every backend can read and write.
 type KVCacheType int
 
 const (
-	KVCacheF32 KVCacheType = iota
-	KVCacheF16
+	KVCacheF16 KVCacheType = iota
+	KVCacheF32
 	KVCacheTQ1_0
 	KVCacheTQ2_0
+	// KVCacheFP8 stores the KV cache as FP8-E4M3 with a per-block scale.
+	// It halves the cache again relative to F16, at the cost of the
+	// quantisation error of a 4-bit exponent format.
+	KVCacheFP8
+	// KVCacheQ8_0 stores the KV cache as block-quantised 8-bit integers
+	// with a per-block scale.
+	KVCacheQ8_0
 )
+
+// String is the name of the KV cache type as it is spelled on the command
+// line.
+func (t KVCacheType) String() string {
+	switch t {
+	case KVCacheF16:
+		return "f16"
+	case KVCacheF32:
+		return "f32"
+	case KVCacheTQ1_0:
+		return "tq1_0"
+	case KVCacheTQ2_0:
+		return "tq2_0"
+	case KVCacheFP8:
+		return "fp8"
+	case KVCacheQ8_0:
+		return "q8_0"
+	default:
+		return "unknown"
+	}
+}
 
 type Config struct {
 	Architecture string
@@ -34,32 +60,35 @@ type Config struct {
 	HeadDim      int
 	VocabSize    int
 	SeqLen       int
-	MaxTokens    int
-	Eps          float32
-	RopeTheta    float32
-	WindowSize   int
-	EOSTokenID   int
-	StopTokens   []int
+	// MaxTokens is the number of tokens to generate when a request does
+	// not ask for a specific number. It is the default the REST API uses
+	// when "max_tokens" is absent or zero.
+	MaxTokens  int
+	Eps        float32
+	RopeTheta  float32
+	WindowSize int
+	EOSTokenID int
+	// StopTokens are the token ids that end a generation. The CLI sets
+	// them with -stop-tokens and the REST API accepts them per request.
+	StopTokens []int
 
-	PrecisionMode PrecisionMode
-	KVCacheType   KVCacheType
-	KVCacheSize   int
+	KVCacheType KVCacheType
+	KVCacheSize int
 
 	ExpertCount                   int
 	ExpertUsedCount               int
 	ExpertSharedCount             int
 	ExpertFeedForwardLength       int
 	ExpertSharedFeedForwardLength int
-	ExpertGroupCount              int
-	ExpertGroupUsedCount          int
-	ExpertWeightsNorm             bool
-	ExpertWeightsScale            float32
 	IsMOE                         bool
 	IsHybrid                      bool
 	MambaLayerPattern             string
 
 	// DeepSeek MLA (Multi-Head Latent Attention) configuration
-	IsMLA      bool
+	IsMLA bool
+	// QLoRARank is the rank of the low-rank query projection (q_lora_rank).
+	// When it is greater than zero the model declares a two-stage query
+	// projection, and the engine checks the weights against it.
 	QLoRARank  int // q_lora_rank
 	KVLoRARank int // kv_lora_rank
 	QKNDim     int // qk_nope_head_dim
@@ -78,15 +107,8 @@ type Config struct {
 	Gemma4SlidingPattern    []bool  // Per-layer sliding window pattern (true=sliding, false=full)
 	FinalLogitSoftcapping   float32 // e.g. 30.0 for Gemma4
 
-	DebugDequant     bool
-	DebugActivations bool
-
-	DebugEmbedding   bool
-	DebugAttention   bool
-	DebugFFN         bool
-	DebugLayerOutput bool
-	DebugLogits      bool
-
+	// DebugMemory makes the CPU engine report its allocator statistics
+	// while it runs.
 	DebugMemory bool
 
 	// Phase 2: Continuous Batching & Paged Attention
@@ -243,17 +265,12 @@ func (c *Config) NeedsPagedAttention() bool {
 func Default() Config {
 	return Config{
 		SeqLen:        2048,
+		MaxTokens:     64,
 		Eps:           1e-5,
 		RopeTheta:     10000.0,
 		EOSTokenID:    2,
-		PrecisionMode: PrecisionAuto,
-
-		DebugEmbedding:   false,
-		DebugAttention:   false,
-		DebugFFN:         false,
-		DebugLayerOutput: false,
-		DebugLogits:      false,
-		DebugMemory:      false,
+		KVCacheType:   KVCacheF16,
+		DebugMemory:   false,
 
 		// Speculative decoding is off unless a draft model is given.
 		SpeculativeDraftLength: 4,

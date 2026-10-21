@@ -1,4 +1,4 @@
-//go:build !metal && !cuda && !tpu
+//go:build !metal && !cuda
 
 package device
 

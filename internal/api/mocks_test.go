@@ -56,4 +56,10 @@ type mockTokenizer struct{}
 
 func (m *mockTokenizer) Encode(s string) []int { return []int{10} }
 func (m *mockTokenizer) Decode(t []int) string { return "test response" }
-func (m *mockTokenizer) GetVocab() []string    { return []string{"test", "vocab"} }
+
+// GetVocab returns a vocabulary that contains the id Encode produces. The
+// API rejects token ids the tokenizer's own vocabulary does not have, so a
+// fixture that encodes to id 10 must report at least 11 entries.
+func (m *mockTokenizer) GetVocab() []string {
+	return []string{"test", "vocab", "a", "b", "c", "d", "e", "f", "g", "h", "i", "j"}
+}

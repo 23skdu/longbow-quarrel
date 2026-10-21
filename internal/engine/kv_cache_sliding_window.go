@@ -68,10 +68,10 @@ func (c *SlidingWindowKVCache) Init(ctx *device.Context, cfg config.Config) erro
 	}
 
 	// Determine data type
-	dt := device.DataTypeF32
+	dt := device.DataTypeF16
 	switch cfg.KVCacheType {
-	case config.KVCacheF16:
-		dt = device.DataTypeF16
+	case config.KVCacheF32:
+		dt = device.DataTypeF32
 	case config.KVCacheTQ1_0:
 		dt = device.DataTypeTQ1_0
 	case config.KVCacheTQ2_0:

@@ -1,4 +1,4 @@
-//go:build !cuda && !metal && !tpu
+//go:build !cuda && !metal
 
 package main
 
@@ -49,6 +49,7 @@ var (
 	cpuBlockSize     = flag.Int("block-size", 16, "Paged attention block size")
 	cpuTotalBlocks   = flag.Int("total-blocks", 256, "Total number of physical blocks in paged cache")
 	cpuStopTokens    = flag.String("stop-tokens", "", "Comma-separated list of stop token IDs (e.g. 2,13)")
+	cpuKVCacheType   = flag.String("kv-cache-type", "f16", "Precision of the KV cache: f32, f16, tq1_0, tq2_0, fp8, q8_0")
 )
 
 // GPU-offload flags are accepted for command-line compatibility with the CUDA
@@ -126,6 +127,13 @@ func main() {
 	if *cpuTotalBlocks > 0 {
 		engineConfig.TotalBlocks = *cpuTotalBlocks
 	}
+	kvCacheType, err := engine.ParseKVCacheType(*cpuKVCacheType)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	engineConfig.KVCacheType = kvCacheType
+	engineConfig.MaxTokens = *cpuNumTokens
 	if *cpuStopTokens != "" {
 		for _, s := range strings.Split(*cpuStopTokens, ",") {
 			s = strings.TrimSpace(s)

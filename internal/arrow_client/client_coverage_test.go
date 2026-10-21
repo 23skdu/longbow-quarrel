@@ -157,49 +157,6 @@ func startTestFlightServer(t *testing.T, srv *testFlightServer) (*FlightClient, 
 	return client, cleanup
 }
 
-func TestMockFlightClient_AdditionalCoverage(t *testing.T) {
-	ctx := context.Background()
-	mock := NewMockFlightClient()
-
-	// 1. DoGet when not connected
-	if _, err := mock.DoGet(ctx, []string{"id1"}); err == nil || !strings.Contains(err.Error(), "not connected") {
-		t.Errorf("expected not connected error from DoGet, got: %v", err)
-	}
-
-	// 2. Connect, then DoGet with non-existent id
-	if err := mock.Connect(ctx); err != nil {
-		t.Fatalf("connect failed: %v", err)
-	}
-	if _, err := mock.DoGet(ctx, []string{"nonexistent"}); err == nil || !strings.Contains(err.Error(), "not found") {
-		t.Errorf("expected not found error from DoGet, got: %v", err)
-	}
-
-	// 3. Disconnect, then GetSchema
-	if err := mock.Close(); err != nil {
-		t.Fatalf("close failed: %v", err)
-	}
-	if _, err := mock.GetSchema(ctx); err == nil || !strings.Contains(err.Error(), "not connected") {
-		t.Errorf("expected not connected error from GetSchema, got: %v", err)
-	}
-
-	// 4. GetFlightInfo when not connected
-	if _, err := mock.GetFlightInfo(ctx, "path1"); err == nil || !strings.Contains(err.Error(), "not connected") {
-		t.Errorf("expected not connected error from GetFlightInfo, got: %v", err)
-	}
-
-	// 5. Connect, then GetFlightInfo
-	if err := mock.Connect(ctx); err != nil {
-		t.Fatalf("connect failed: %v", err)
-	}
-	info, err := mock.GetFlightInfo(ctx, "path1")
-	if err != nil {
-		t.Errorf("GetFlightInfo failed: %v", err)
-	}
-	if info == nil {
-		t.Error("expected non-nil flight info")
-	}
-}
-
 func TestFlightClient_Close_WhenNil(t *testing.T) {
 	fc, err := NewFlightClient("127.0.0.1", 3000, "127.0.0.1", 3001)
 	if err != nil {

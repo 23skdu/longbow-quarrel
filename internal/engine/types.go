@@ -119,14 +119,6 @@ func (s *MambaState) Free() {
 	}
 }
 
-// QualityEvaluator provides metrics for evaluating generated text quality
-type QualityEvaluator struct {
-	tokenizer interface {
-		Encode(text string) []int
-		Decode(ids []int) string
-	}
-}
-
 type SequenceStatus int
 
 const (

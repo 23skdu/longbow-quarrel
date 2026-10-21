@@ -204,6 +204,43 @@ type CompletionResponse struct {
 	} `json:"choices"`
 }
 
+// defaultMaxTokens is the number of tokens generated for a request that
+// does not ask for a specific number. The engine's configuration wins
+// when it sets one; otherwise this is used.
+const defaultMaxTokens = 64
+
+// maxTokensFor returns the number of tokens to generate for a request.
+// A request that names a number gets it; a request that does not gets the
+// engine's configured default.
+func (s *Server) maxTokensFor(eng engine.Engine, requested int) int {
+	if requested > 0 {
+		return requested
+	}
+	if eng != nil {
+		if n := eng.Config().MaxTokens; n > 0 {
+			return n
+		}
+	}
+	return defaultMaxTokens
+}
+
+// encodePrompt tokenizes a prompt and rejects any token id the selected
+// engine's vocabulary does not have. An out-of-range id is a 400 at the API
+// boundary: inside the engine it is either a silent clamp to token 0, which
+// turns into nonsense output, or a read past the end of a quantized embedding
+// row. The mismatch happens for real — the clearest case is a model hot-swap
+// that leaves the old tokenizer serving ids the new model has no rows for.
+func (s *Server) encodePrompt(eng engine.Engine, prompt string) ([]int, error) {
+	tokens := s.Tokenizer.Encode(prompt)
+
+	vocabSize := eng.Config().VocabSize
+	if vocabSize <= 0 {
+		vocabSize = len(s.Tokenizer.GetVocab())
+	}
+
+	return device.ValidateInputTokens(tokens, vocabSize)
+}
+
 func (s *Server) CompletionsHandler(w http.ResponseWriter, r *http.Request) {
 	ctx, span := telemetry.StartSpan(r.Context(), "CompletionsHandler")
 	defer span.End()
@@ -237,8 +274,6 @@ func (s *Server) CompletionsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tokens := s.Tokenizer.Encode(req.Prompt)
-
 	samplerCfg := engine.SamplerConfig{
 		Temperature: req.Temperature,
 		TopP:        0.95,
@@ -259,7 +294,13 @@ func (s *Server) CompletionsHandler(w http.ResponseWriter, r *http.Request) {
 	// accepted and then ignored.
 	eng := s.engineFor(req.Speculative, req.DraftK)
 
-	resTokens, err := eng.Infer(tokens, req.MaxTokens, samplerCfg)
+	tokens, err := s.encodePrompt(eng, req.Prompt)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	resTokens, err := eng.Infer(tokens, s.maxTokensFor(eng, req.MaxTokens), samplerCfg)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -466,13 +507,6 @@ func (s *Server) ChatCompletionsHandler(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	tokens := s.Tokenizer.Encode(prompt)
-
-	maxTokens := req.MaxTokens
-	if maxTokens <= 0 {
-		maxTokens = 64
-	}
-
 	topP := req.TopP
 	if topP <= 0 {
 		topP = 0.95
@@ -496,6 +530,13 @@ func (s *Server) ChatCompletionsHandler(w http.ResponseWriter, r *http.Request) 
 	// A request that asks for speculative decoding uses the speculative
 	// engine, which is the same target model with a draft model attached.
 	eng := s.engineFor(req.Speculative, req.DraftK)
+	maxTokens := s.maxTokensFor(eng, req.MaxTokens)
+
+	tokens, err := s.encodePrompt(eng, prompt)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	if req.Stream {
 		flusher, ok := w.(http.Flusher)

@@ -56,7 +56,6 @@ var buildFiles = map[string][]string{
 	"cuda":  {"cmd/quarrel/main.go"},
 	"cpu":   {"cmd/quarrel/main_cpu.go"},
 	"metal": {"cmd/quarrel/main_metal.go"},
-	"tpu":   {"cmd/quarrel/main_tpu.go"},
 }
 
 // commandDirs are the directories whose commands the documentation

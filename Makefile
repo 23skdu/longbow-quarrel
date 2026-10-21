@@ -5,18 +5,16 @@
 #   - CPU (linux/amd64, linux/arm64): Pure Go with SIMD fallbacks
 #   - Metal (darwin/arm64, darwin/amd64): Apple Metal GPU acceleration
 #   - NVIDIA (linux/amd64): CUDA/cuBLAS acceleration
-#   - TPU (linux/amd64): Google TPU/XLA acceleration
 # =============================================================================
 
 .PHONY: all bench bench-emlgo bench-emlgo-all bench-simd bench-simd-all \
 	build changelog check check-sec clean cpu cpu-darwin-amd64 \
 	cpu-darwin-arm64 cpu-linux-amd64 cpu-linux-arm64 deps docker-all \
-	docker-cpu docker-metal docker-nvidia docker-tpu docker-webui fmt help \
+	docker-cpu docker-metal docker-nvidia docker-webui fmt help \
 	lint metal metal-darwin-amd64 metal-darwin-arm64 nvidia nvidia-cuda \
 	package-dist race release release-darwin release-docker release-linux \
 	simd-avx2 simd-avx512 simd-scalar test test-all test-cuda test-emlfast \
-	test-emlgo test-metal test-simd test-simd-fuzz test-simd-quick test-tpu \
-	tpu tpu-xla verify-env
+	test-emlgo test-metal test-simd test-simd-fuzz test-simd-quick verify-env
 
 # Default target
 all: cpu
@@ -44,9 +42,8 @@ QUARREL_TEST_PARALLEL ?= 4
 export GOMAXPROCS ?= $(QUARREL_TEST_PARALLEL)
 export GOMEMLIMIT ?= 2GiB
 
-# CUDA/TPU specific
+# CUDA specific
 CUDA_PATH ?= /usr/local/cuda
-TPU_PATH ?= /usr/local/tpu
 
 # SIMD options (auto-detect unless specified)
 # SIMD_LEVEL and the SIMD_TAGS_* table live with the simd-* build targets
@@ -116,14 +113,18 @@ nvidia-cuda: internal/device/libcuda_kernels.a
 		-ldflags "$(CUDA_LDFLAGS) -X main.Version=$(VERSION) -X main.BuildTime=$(BUILD_TIME)" \
 		-o $(BIN_DIR)/$(BINARY_NAME)-linux-amd64-cuda ./cmd/quarrel
 
-# TPU builds (linux/amd64)
-tpu: tpu-xla
-
-tpu-xla:
-	@echo "Building $(BINARY_NAME) for linux/amd64 (TPU)..."
-	CGO_ENABLED=1 GOOS=linux GOARCH=amd64 $(GO) build -tags tpu \
-		-ldflags "$(LDFLAGS) -X main.Version=$(VERSION) -X main.BuildTime=$(BUILD_TIME)" \
-		-o $(BIN_DIR)/$(BINARY_NAME)-linux-amd64-tpu ./cmd/quarrel
+# internal/vector CUDA kernels (P0-01 batch inverted-list scoring,
+# P0-02 complex SoA batch, P0-04 mini-batch k-means). vector_cuda.go
+# links this archive when the `cuda` tag is set:
+#   make internal/vector/libvector_cuda_kernels.a
+#   go test -tags cuda ./internal/vector/
+internal/vector/libvector_cuda_kernels.a: internal/vector/cuda_vector_kernels.cu
+	@echo "Compiling internal/vector CUDA kernels..."
+	nvcc -c -O3 -std=c++14 -arch=sm_86 -Xcompiler -fPIC \
+		internal/vector/cuda_vector_kernels.cu \
+		-o internal/vector/cuda_vector_kernels.o
+	ar rcs internal/vector/libvector_cuda_kernels.a internal/vector/cuda_vector_kernels.o
+	rm -f internal/vector/cuda_vector_kernels.o
 
 # =============================================================================
 # SIMD-specific builds (x86 with AVX512/AVX2 fallbacks)
@@ -183,11 +184,7 @@ docker-webui:
 	@echo "Building Docker image for WebUI..."
 	docker build -f Dockerfile.webui -t $(BINARY_NAME):webui .
 
-docker-tpu:
-	@echo "Building Docker image for TPU..."
-	docker build -f Dockerfile.tpu -t $(BINARY_NAME):tpu .
-
-docker-all: docker-cpu docker-nvidia docker-tpu
+docker-all: docker-cpu docker-nvidia
 
 # =============================================================================
 # Development
@@ -208,9 +205,6 @@ test-cuda:
 
 test-metal:
 	$(GO) test -v -tags metal -p $(QUARREL_TEST_PARALLEL) -timeout 5m ./...
-
-test-tpu:
-	$(GO) test -v -tags tpu -p $(QUARREL_TEST_PARALLEL) -timeout 5m ./...
 
 # SIMD tests (AVX-512/AVX-2)
 test-simd:
@@ -354,7 +348,6 @@ help:
 	@echo "  cpu-*        Build for specific CPU platform"
 	@echo "  metal       Build Metal GPU versions (darwin)"
 	@echo "  nvidia      Build NVIDIA CUDA version"
-	@echo "  tpu         Build Google TPU version"
 	@echo "  simd-*      Build with specific SIMD level"
 	@echo "  docker-*    Build Docker images"
 	@echo "  test        Run tests"
@@ -370,7 +363,6 @@ help:
 	@echo "Build examples:"
 	@echo "  make cpu                    # Build CPU versions"
 	@echo "  make nvidia               # Build CUDA version"
-	@echo "  make tpu                  # Build TPU version"
 	@echo "  make simd-avx512          # Build with AVX-512"
 	@echo "  make docker-nvidia         # Build CUDA Docker image"
 	@echo ""

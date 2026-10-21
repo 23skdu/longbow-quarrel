@@ -1,4 +1,4 @@
-//go:build darwin && metal && !cuda && !tpu
+//go:build darwin && metal && !cuda
 
 package main
 
@@ -48,6 +48,7 @@ var (
 	DraftLength   = flag.Int("draft-length", 4, "How many tokens the draft model proposes per step")
 	DraftPaths    = flag.Int("draft-paths", 2, "How many parallel draft paths to generate per step")
 	stopTokensFlag = flag.String("stop-tokens", "", "Comma-separated list of stop token IDs (e.g. 2,13)")
+	kvCacheTypeFlag = flag.String("kv-cache-type", "f16", "Precision of the KV cache: f16, tq1_0, tq2_0, fp8, q8_0")
 )
 
 func main() {
@@ -137,7 +138,14 @@ func main() {
 		MaxBatchSize: *maxBatchSize,
 		BlockSize:    *blockSize,
 		TotalBlocks:  *totalBlocks,
+		MaxTokens:    *numTokens,
 	}
+	kvCacheType, err := engine.ParseKVCacheType(*kvCacheTypeFlag)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	engineConfig.KVCacheType = kvCacheType
 	if *ActivationLog != "" {
 		engineConfig.ActivationLogPath = *ActivationLog
 	}
