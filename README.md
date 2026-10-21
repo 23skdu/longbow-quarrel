@@ -2,28 +2,6 @@
 
 # Longbow-Quarrel
 
-**Latest release: v0.3.0** (`git tag 0.3.0`). `main` is ahead of that tag with
-unreleased engine, CI and dependency work — see [docs/roadmap.md](docs/roadmap.md)
-for what has landed and what is still planned.
-
-> ### ⚠️ Known state of `main`
->
-> Two full-tree audits of `main` (October 2026) found that the project did
-> **not** ship a working CPU binary, that its CI `lint` job was **red**, that
-> the OpenAI-compatible REST API was **never started**, that the macOS Metal
-> build **did not compile**, and that the CI pipeline itself had been
-> **disabled on the repository since 2026-09-04**. All of that is fixed: the
-> CPU binary runs real inference, the REST API is served, the Metal build
-> compiles, and the pipeline is green on every job.
->
-> **The roadmap.** Every defect the roadmap listed is closed: the CUDA
-> engine preserves the caller's configuration, every produced metric is
-> written by production code, the Metal backend compiles and has a CPU
-> parity test, the TPU backend has been deleted rather than left
-> unbuildable, and the ~4,750 lines of dead code are gone behind a gate
-> that fails when a new one appears. What is still open — the planned
-> features and the vector-search performance targets — is in
-> [docs/roadmap.md](docs/roadmap.md).
 
 High-performance, memory-efficient LLM inference engine written in Go with native GPU acceleration (Apple Silicon Metal, NVIDIA CUDA) and optimized CPU SIMD vectorization (AVX-512, AVX2, ARM NEON).
 
