@@ -10,6 +10,11 @@ import (
 	"github.com/23skdu/longbow-quarrel/internal/device"
 )
 
+// FuzzKVCacheUpdate fuzzes the sliding window cache.
+//
+// The fuzz target used to fuzz the contiguous TensorKVCache, which was
+// deleted when the paged cache replaced it, so the target did not compile
+// and never ran.
 func FuzzKVCacheUpdate(f *testing.F) {
 	// Add some seed corpus
 	f.Add(0, 0)
@@ -30,9 +35,12 @@ func FuzzKVCacheUpdate(f *testing.F) {
 		defer ctx.Free()
 
 		config := conf.Config{Layers: 2, WindowSize: 32, KVHeads: 2, HeadDim: 8}
-		cache := &TensorKVCache{}
+		cache := &SlidingWindowKVCache{}
 		if err := cache.Init(ctx, config); err != nil {
-			t.Skipf("Init failed (likely OOM or device issue): %v", err)
+			// A failure to initialise the cache is a defect, not a
+			// reason to skip: a skip inside a fuzz target discards the
+			// seed, so the corpus never grows for that input.
+			t.Fatalf("the cache failed to initialise: %v", err)
 		}
 		defer cache.Free()
 
@@ -45,24 +53,23 @@ func FuzzKVCacheUpdate(f *testing.F) {
 		for i := range data {
 			data[i] = rand.Float32()
 		}
-		kIn.LoadFrom(data)
-		vIn.LoadFrom(data)
+		_ = kIn.LoadFrom(data)
+		_ = vIn.LoadFrom(data)
 
 		err := cache.Update("seq-0", layer, pos, kIn, vIn)
 
-		// Basic invariant check
+		// The invariants: a layer outside the range is an error, a
+		// negative position is an error, and everything else is stored.
 		if layer < 0 || layer >= config.Layers {
 			if err == nil {
 				t.Errorf("Expected error for invalid layer %d", layer)
 			}
-		} else if pos < 0 || pos >= config.WindowSize {
+		} else if pos < 0 {
 			if err == nil {
-				t.Errorf("Expected error for invalid pos %d (size %d)", pos, config.WindowSize)
+				t.Errorf("Expected error for invalid pos %d", pos)
 			}
-		} else {
-			if err != nil {
-				t.Errorf("Unexpected error for valid update layer=%d pos=%d: %v", layer, pos, err)
-			}
+		} else if err != nil {
+			t.Errorf("Unexpected error for valid update layer=%d pos=%d: %v", layer, pos, err)
 		}
 	})
 }

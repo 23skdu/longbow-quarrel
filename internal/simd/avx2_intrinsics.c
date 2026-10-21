@@ -215,9 +215,14 @@ void fp32_to_fp16_avx2(const float* src, uint16_t* dst, long n) {
         
         uint16_t h;
         if (exp == 0) {
-            h = 0;
+            /* A zero keeps its sign: -0 is not +0. */
+            h = (uint16_t)(sign << 15);
         } else if (exp == 255) {
-            h = (uint16_t)(sign << 15) | 0x7C00 | (uint16_t)(mant >> 9);
+            /* The mantissa is shifted by thirteen bits, not nine: the
+               float32 mantissa has twenty-three bits and the float16
+               mantissa has ten. With nine the mantissa bits landed in the
+               exponent field and every NaN became an infinity. */
+            h = (uint16_t)(sign << 15) | 0x7C00 | (uint16_t)(mant >> 13);
         } else {
             int new_exp = (int)exp - 127 + 15;
             if (new_exp >= 31) {

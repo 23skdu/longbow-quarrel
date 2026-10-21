@@ -113,7 +113,11 @@ func fp32ToFp16(f float32) uint16 {
 	case 0:
 		return uint16(sign << 15) // #nosec G115
 	case 255:
-		return uint16((sign << 15) | 0x7C00 | (mant >> 9)) // #nosec G115
+		// The mantissa is shifted by thirteen bits, not nine: the
+		// float32 mantissa has twenty-three bits and the float16 mantissa
+		// has ten. With nine the mantissa bits landed in the exponent
+		// field and every NaN became an infinity.
+		return uint16((sign << 15) | 0x7C00 | (mant >> 13)) // #nosec G115
 	}
 
 	newExp := int(exp) - 127 + 15

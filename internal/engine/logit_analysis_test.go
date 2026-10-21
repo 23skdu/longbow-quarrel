@@ -66,7 +66,8 @@ func TestLogitEntropyCalculation(t *testing.T) {
 				minOfFloat32(tt.logits),
 				meanOfFloat32(tt.logits),
 				rmsOfFloat32(tt.logits),
-				hasNaN(tt.logits),
+				countNonFinite(tt.logits),
+				countNonFinite(tt.logits),
 				hasExtremeValues(tt.logits),
 				entropy > 2.0, // flat if high entropy
 			)
@@ -163,7 +164,8 @@ func TestLogitDistributionRange(t *testing.T) {
 				audit.Min,
 				audit.Mean,
 				audit.RMS,
-				audit.HasNaN,
+				audit.NumNaNs,
+				audit.NumInfs,
 				audit.HasExtremeValues,
 				audit.IsFlat,
 			)
@@ -510,4 +512,17 @@ func hasExtremeValues(arr []float32) bool {
 		}
 	}
 	return false
+}
+
+// countNonFinite counts the values that are not finite. The logit audit
+// records how many NaNs and how many infinities there were, not whether
+// there was one.
+func countNonFinite(arr []float32) int {
+	count := 0
+	for _, v := range arr {
+		if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
+			count++
+		}
+	}
+	return count
 }

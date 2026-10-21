@@ -265,9 +265,15 @@ func Fp32ToFp16(src []float32, dst []uint16) {
 		var h uint16
 		switch exp {
 		case 0:
-			h = 0
+			// A zero keeps its sign: -0 is not +0.
+			h = uint16(sign << 15)
 		case 255:
-			h = uint16(sign<<15) | 0x7C00 | uint16(mant>>9)
+			// An infinity keeps an infinity and a NaN keeps a NaN. The
+			// mantissa is shifted by thirteen bits, not nine: the
+			// float32 mantissa has twenty-three bits and the float16
+			// mantissa has ten. With nine the mantissa bits landed in
+			// the exponent field and every NaN became an infinity.
+			h = uint16(sign<<15) | 0x7C00 | uint16(mant>>13)
 		default:
 			newExp := int(exp) - 127 + 15
 			if newExp >= 31 {

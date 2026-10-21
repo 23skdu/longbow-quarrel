@@ -1,5 +1,4 @@
 //go:build darwin && metal
-// +build darwin,metal
 
 package engine
 
@@ -39,13 +38,77 @@ func TestMetalEngineInternalState(t *testing.T) {
 	}
 }
 
+// generateMistralMockGGUF writes a small Mistral-style model: grouped
+// query attention with eight key heads and a rope base of a hundred
+// thousand.
+//
+// The helper was missing: the test that calls it never compiled, because
+// nothing built the Metal test files. The Metal type check now vets the
+// test files as well, which is how the gap was found.
+func generateMistralMockGGUF(path string) error {
+	const (
+		vocab   = 8
+		dim     = 64
+		heads   = 8
+		kvHeads = 8
+		headDim = 8
+		layers  = 1
+		ffnDim  = 32
+	)
+
+	attnDim := heads * headDim
+	kvDim := kvHeads * headDim
+
+	zeros := func(n int) []byte { return make([]byte, n*4) }
+
+	kv := map[string]interface{}{
+		"general.architecture":                   "llama",
+		"general.alignment":                      uint32(32),
+		"llama.block_count":                      uint32(layers),
+		"llama.embedding_length":                 uint32(dim),
+		"llama.attention.head_count":             uint32(heads),
+		"llama.attention.head_count_kv":          uint32(kvHeads),
+		"llama.feed_forward_length":              uint32(ffnDim),
+		"llama.rope.dimension_count":             uint32(headDim),
+		"llama.rope.freq_base":                   float32(100000),
+		"llama.context_length":                   uint32(256),
+		"llama.vocab_size":                       uint32(vocab),
+		"llama.attention.layer_norm_rms_epsilon": float32(1e-5),
+		"tokenizer.ggml.tokens":                  []string{"a", "b", "c", "d", "e", "f", "g", "h"},
+		"tokenizer.ggml.scores":                  []float32{0, -1, -2, -3, -4, -5, -6, -7},
+		"tokenizer.ggml.token_type":              []int32{2, 1, 1, 1, 1, 1, 1, 1},
+	}
+
+	tensors := []gguf.TensorData{
+		{Name: "token_embd.weight", Dimensions: []uint64{uint64(dim), uint64(vocab)}, Type: gguf.GGMLTypeF32, Data: zeros(dim * vocab)},
+		{Name: "output_norm.weight", Dimensions: []uint64{uint64(dim)}, Type: gguf.GGMLTypeF32, Data: zeros(dim)},
+		{Name: "output.weight", Dimensions: []uint64{uint64(dim), uint64(vocab)}, Type: gguf.GGMLTypeF32, Data: zeros(dim * vocab)},
+	}
+
+	for l := 0; l < layers; l++ {
+		prefix := "blk." + string(rune('0'+l)) + "."
+		tensors = append(tensors,
+			gguf.TensorData{Name: prefix + "attn_norm.weight", Dimensions: []uint64{uint64(dim)}, Type: gguf.GGMLTypeF32, Data: zeros(dim)},
+			gguf.TensorData{Name: prefix + "attn_q.weight", Dimensions: []uint64{uint64(dim), uint64(attnDim)}, Type: gguf.GGMLTypeF32, Data: zeros(attnDim * dim)},
+			gguf.TensorData{Name: prefix + "attn_k.weight", Dimensions: []uint64{uint64(dim), uint64(kvDim)}, Type: gguf.GGMLTypeF32, Data: zeros(kvDim * dim)},
+			gguf.TensorData{Name: prefix + "attn_v.weight", Dimensions: []uint64{uint64(dim), uint64(kvDim)}, Type: gguf.GGMLTypeF32, Data: zeros(kvDim * dim)},
+			gguf.TensorData{Name: prefix + "attn_output.weight", Dimensions: []uint64{uint64(attnDim), uint64(dim)}, Type: gguf.GGMLTypeF32, Data: zeros(dim * attnDim)},
+			gguf.TensorData{Name: prefix + "ffn_norm.weight", Dimensions: []uint64{uint64(dim)}, Type: gguf.GGMLTypeF32, Data: zeros(dim)},
+			gguf.TensorData{Name: prefix + "ffn_gate.weight", Dimensions: []uint64{uint64(dim), uint64(ffnDim)}, Type: gguf.GGMLTypeF32, Data: zeros(ffnDim * dim)},
+			gguf.TensorData{Name: prefix + "ffn_up.weight", Dimensions: []uint64{uint64(dim), uint64(ffnDim)}, Type: gguf.GGMLTypeF32, Data: zeros(ffnDim * dim)},
+			gguf.TensorData{Name: prefix + "ffn_down.weight", Dimensions: []uint64{uint64(ffnDim), uint64(dim)}, Type: gguf.GGMLTypeF32, Data: zeros(dim * ffnDim)},
+		)
+	}
+
+	return gguf.WriteFile(path, kv, tensors, 32)
+}
+
 func TestMistralMetadataSupport(t *testing.T) {
 	modelPath := "test_mistral_metadata.gguf"
 	if err := generateMistralMockGGUF(modelPath); err != nil {
 		t.Fatalf("Failed to generate Mistral mock: %v", err)
 	}
 	defer os.Remove(modelPath)
-
 	conf := config.Default()
 	ctx := device.NewContext()
 	defer ctx.Free()

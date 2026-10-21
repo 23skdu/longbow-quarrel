@@ -97,6 +97,18 @@ for pkg in $PKGS; do
   fi
 done
 
+# The test files are type-checked too. `go build` does not compile them,
+# so a Metal test file with a compile error was never noticed: the whole
+# Metal test suite is behind a build tag that only macOS selects.
+for pkg in $PKGS; do
+  out=$("$GO" vet -tags metal "$pkg" 2>&1)
+  if [[ $? -ne 0 ]]; then
+    echo "--- $pkg (tests)"
+    echo "$out" | sed 's/^/    /'
+    FAILED=1
+  fi
+done
+
 if [[ $FAILED -ne 0 ]]; then
   echo "metalcheck: FAILED - the Metal backend does not type-check"
   exit 1

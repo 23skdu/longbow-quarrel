@@ -94,56 +94,65 @@ func TestAttention_CausalMask(t *testing.T) {
 	ctx := NewContext()
 	defer ctx.Free()
 
-	// Simple test: 3 tokens, 1 head, head_dim=4
-	seqLen := 3
-	heads := 1
-	kvHeads := 1
-	headDim := 4
+	// Four positions, one head, head_dim=4. The attention is asked for the
+	// third position, so it may only see the first three values. The
+	// fourth value is enormous: if the mask were missing, it would drag
+	// the result with it.
+	const (
+		ctxLen   = 4
+		pos      = 2
+		heads    = 1
+		kvHeads  = 1
+		headDim  = 4
+		farValue = 1000.0
+	)
 
-	// Create Q, K, V tensors
-	q := ctx.NewTensorPooled(seqLen, heads*headDim)
-	k := ctx.NewTensorPooled(seqLen, kvHeads*headDim)
-	v := ctx.NewTensorPooled(seqLen, kvHeads*headDim)
+	q := ctx.NewTensorPooled(ctxLen, heads*headDim)
+	k := ctx.NewTensorPooled(ctxLen, kvHeads*headDim)
+	v := ctx.NewTensorPooled(ctxLen, kvHeads*headDim)
 
-	// Fill with simple patterns
-	qData := make([]float32, seqLen*heads*headDim)
-	kData := make([]float32, seqLen*kvHeads*headDim)
-	vData := make([]float32, seqLen*kvHeads*headDim)
-
-	for i := 0; i < seqLen*heads*headDim; i++ {
+	// The queries and the keys are equal, so every attended position gets
+	// the same score and the attention is the mean of the values it
+	// attends to.
+	qData := make([]float32, ctxLen*heads*headDim)
+	kData := make([]float32, ctxLen*kvHeads*headDim)
+	vData := make([]float32, ctxLen*kvHeads*headDim)
+	for i := range qData {
 		qData[i] = 1.0
 	}
-	for i := 0; i < seqLen*kvHeads*headDim; i++ {
+	for i := range kData {
 		kData[i] = 1.0
-		vData[i] = float32(i % seqLen) // Different value per position
 	}
+	for i := range vData {
+		vData[i] = float32(i + 1)
+	}
+	vData[len(vData)-1] = farValue
 
-	q.LoadFrom(qData)
-	k.LoadFrom(kData)
-	v.LoadFrom(vData)
+	if err := q.LoadFrom(qData); err != nil {
+		t.Fatalf("failed to load the queries: %v", err)
+	}
+	if err := k.LoadFrom(kData); err != nil {
+		t.Fatalf("failed to load the keys: %v", err)
+	}
+	if err := v.LoadFrom(vData); err != nil {
+		t.Fatalf("failed to load the values: %v", err)
+	}
 	ctx.Synchronize()
 
-	// Call attention kernel - the kernel internally applies causal masking
-	// based on the position and context length
-	result := q.Attention(k, v, seqLen-1, heads, kvHeads, headDim, seqLen, seqLen)
+	result := q.Attention(k, v, pos, heads, kvHeads, headDim, ctxLen, ctxLen)
 	ctx.Synchronize()
 
-	// Read back result
 	resultData := result.ToHost()
-	t.Logf("Attention result shape: [%d, %d]", result.Rows(), result.Cols())
-	t.Logf("Result values: %v", resultData[:min(len(resultData), 16)])
-
-	// Causal mask test: token at position i should only attend to positions 0..i
-	t.Log("Causal mask test: Token at position i should only attend to positions 0..i")
-	t.Log("Expected attention pattern:")
-	t.Log("  Token 0: attends to [0]")
-	t.Log("  Token 1: attends to [0, 1]")
-	t.Log("  Token 2: attends to [0, 1, 2]")
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
+	if len(resultData) != heads*headDim {
+		t.Fatalf("the attention returned %d values, want %d", len(resultData), heads*headDim)
 	}
-	return b
+
+	// The mean of the three attended values: (1 + 2 + 3) / 3.
+	want := float32(2.0)
+	for i, got := range resultData {
+		if math.Abs(float64(got-want)) > 0.05 {
+			t.Errorf("the output %d is %v, want %v (the mean of the values the mask allows)",
+				i, got, want)
+		}
+	}
 }

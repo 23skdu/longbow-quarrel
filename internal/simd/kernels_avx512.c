@@ -296,8 +296,11 @@ void fp32_to_fp16_avx512(const float* src, uint16_t* dst, int n) {
         float f = src[i]; uint32_t bits; memcpy(&bits, &f, 4);
         uint32_t s=bits>>31, e=(bits>>23)&0xFF, m=bits&0x7FFFFF;
         uint16_t h;
-        if(e==0) h=0;
-        else if(e==255) h=(uint16_t)(s<<15)|0x7C00|(uint16_t)(m>>9);
+        /* A zero keeps its sign. The mantissa is shifted by thirteen bits,
+           not nine: with nine the mantissa bits landed in the exponent
+           field and every NaN became an infinity. */
+        if(e==0) h=(uint16_t)(s<<15);
+        else if(e==255) h=(uint16_t)(s<<15)|0x7C00|(uint16_t)(m>>13);
         else { int ne=(int)e-127+15; if(ne>=31) h=(uint16_t)(s<<15)|0x7C00;
             else if(ne<=0){uint32_t sh=(uint32_t)(1-ne), m2=m|0x800000;h=(uint16_t)(s<<15)|(uint16_t)(m2>>(9+sh));}
             else h=(uint16_t)(s<<15)|(uint16_t)(ne<<10)|(uint16_t)(m>>13); }

@@ -180,9 +180,13 @@ func TestFp32ToFp16AVX2(t *testing.T) {
 				var expected uint16
 				switch exp {
 				case 0:
-					expected = 0
+					// A zero keeps its sign.
+					expected = uint16(sign << 15)
 				case 255:
-					expected = uint16(sign<<15) | 0x7C00 | uint16(mant>>9)
+					// The mantissa is shifted by thirteen bits: with nine
+					// the mantissa bits landed in the exponent field and
+					// every NaN became an infinity.
+					expected = uint16(sign<<15) | 0x7C00 | uint16(mant>>13)
 				default:
 					newExp := int(exp) - 127 + 15
 					if newExp >= 31 {

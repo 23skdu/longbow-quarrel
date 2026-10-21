@@ -372,12 +372,36 @@ func TestFp32ToFp16EdgeCases(t *testing.T) {
 	dst := make([]uint16, len(src))
 	Fp32ToFp16(src, dst)
 
-	for i, v := range dst {
-		if math.Float32frombits(uint32(v)) == math.Float32frombits(0xFFFF) {
-			continue
+	// The encodings of the values the format names exactly.
+	want := map[int]uint16{
+		0: 0x0000, // +0
+		1: 0x8000, // -0
+		2: 0x3E00, // 1.5
+		3: 0xBE00, // -1.5
+		5: 0x7BFF, // the largest finite half
+		6: 0xFBFF, // the largest negative finite half
+		7: 0x7C00, // +Inf
+		8: 0xFC00, // -Inf
+	}
+	for i, code := range want {
+		if dst[i] != code {
+			t.Errorf("%v encoded as 0x%04X, want 0x%04X", src[i], dst[i], code)
 		}
-		if math.IsNaN(float64(src[i])) && v&0x7E00 == 0x7E00 {
-			continue
+	}
+
+	// The NaN has to stay a NaN: an exponent of all ones and a mantissa
+	// that is not zero.
+	if dst[9]&0x7C00 != 0x7C00 || dst[9]&0x03FF == 0 {
+		t.Errorf("NaN encoded as 0x%04X, want an exponent of all ones and a non-zero mantissa", dst[9])
+	}
+
+	// The values that survive the round trip have to come back.
+	for _, i := range []int{2, 3, 4, 5, 6} {
+		decoded := make([]float32, 1)
+		Fp16ToFp32(dst[i:i+1], decoded)
+		back := decoded[0]
+		if math.Abs(float64(back-src[i])) > 1e-3*math.Max(1, math.Abs(float64(src[i]))) {
+			t.Errorf("%v round-tripped through 0x%04X to %v", src[i], dst[i], back)
 		}
 	}
 }
@@ -894,11 +918,31 @@ func TestFusedMLP_EdgeCases(t *testing.T) {
 }
 
 func TestSwiGLU_Clamping(t *testing.T) {
-	gate := []float32{15.0, -15.0, 0.0}
-	up := []float32{1.0, 1.0, 1.0}
-	out := make([]float32, 3)
+	// The gate is clamped to [-10, 10] before the sigmoid, so a gate
+	// beyond the clamp gives the same answer as the clamp itself.
+	gate := []float32{15.0, -15.0, 0.0, 10.0, -10.0}
+	up := []float32{1.0, 1.0, 1.0, 1.0, 1.0}
+	out := make([]float32, len(gate))
 	SwiGLU(gate, up, out)
-	swigluScalar(gate, up, out)
+
+	clamped := []float32{10.0, -10.0, 0.0, 10.0, -10.0}
+	for i := range gate {
+		sigmoid := float32(1.0) / (float32(1.0) + float32(math.Exp(float64(-clamped[i]))))
+		want := up[i] * clamped[i] * sigmoid
+		if math.Abs(float64(out[i]-want)) > 1e-5 {
+			t.Errorf("the output %d is %v, want %v (the gate %v clamped to %v)",
+				i, out[i], want, gate[i], clamped[i])
+		}
+	}
+
+	// The scalar reference has to agree with the kernel.
+	scalar := make([]float32, len(gate))
+	swigluScalar(gate, up, scalar)
+	for i := range gate {
+		if math.Abs(float64(out[i]-scalar[i])) > 1e-6 {
+			t.Errorf("the output %d is %v, the scalar reference says %v", i, out[i], scalar[i])
+		}
+	}
 }
 
 func TestFp32ToFp16_DefaultScalar(t *testing.T) {

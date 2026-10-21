@@ -120,7 +120,11 @@ func fp32ToFp16Value(f float32) uint16 {
 	if exp == 0 {
 		h = 0
 	} else if exp == 255 {
-		h = uint16(sign<<15) | 0x7C00 | uint16(mant>>9)
+		// The mantissa is shifted by thirteen bits, not nine: the
+		// float32 mantissa has twenty-three bits and the float16 mantissa
+		// has ten. With nine the mantissa bits landed in the exponent
+		// field and every NaN became an infinity.
+		h = uint16(sign<<15) | 0x7C00 | uint16(mant>>13)
 	} else {
 		newExp := int(exp) - 127 + 15
 		if newExp >= 31 {

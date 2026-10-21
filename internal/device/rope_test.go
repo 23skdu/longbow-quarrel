@@ -53,13 +53,23 @@ func TestRoPE_Precision(t *testing.T) {
 
 	// 4. Verify
 	got := ten.ToHost()
+	if len(got) != len(expected) {
+		t.Fatalf("the kernel returned %d values, want %d", len(got), len(expected))
+	}
 
+	// The mismatch used to be reported with t.Logf, which does not fail the
+	// test: the RoPE precision regression this test exists to catch was
+	// reported and then ignored.
+	mismatches := 0
 	for i := 0; i < len(got); i++ {
 		if math.Abs(float64(got[i]-expected[i])) > 1.5e-2 {
-			t.Logf("Mismatch at index %d: got %f, want %f", i, got[i], expected[i])
-			if i > 10 {
-				break
-			} // Don't spam
+			mismatches++
+			if mismatches <= 10 {
+				t.Errorf("mismatch at index %d: got %f, want %f", i, got[i], expected[i])
+			}
 		}
+	}
+	if mismatches > 0 {
+		t.Errorf("%d of %d values differ from the reference", mismatches, len(got))
 	}
 }
