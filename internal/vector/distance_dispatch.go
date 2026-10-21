@@ -34,13 +34,6 @@ type distanceKernelSet struct {
 	batchL2Float32  func(q []float32, rows []float32, stride, count int, out []float32) bool
 	batchDotFloat32 func(q []float32, rows []float32, stride, count int, out []float32) bool
 
-	// The gather variants score the rows an index list names, which is
-	// what an inverted list is: a list of row numbers, not a block of
-	// contiguous rows. The caller used to copy every candidate into a
-	// buffer, and the copy cost as much as the distance.
-	batchL2Float32Gather  func(q []float32, rows []float32, indices []int32, stride, count int, out []float32) bool
-	batchDotFloat32Gather func(q []float32, rows []float32, indices []int32, stride, count int, out []float32) bool
-
 	// complex128 stored split (SoA). re/im are contiguous arrays of
 	// stride dim: row i lives at re[i*dim:(i+1)*dim].
 	dotComplexSoA func(qRe, qIm []float64, re, im []float64, dim int, start, end int, out []float64) bool
@@ -95,24 +88,6 @@ func kernelSetFor() *distanceKernelSet {
 // DotFloat32 / L2Float32 dispatchers live in distance.go; this file
 // holds only the plumbing (kernel sets, batch scoring helpers, scalar
 // oracles for the structured layouts).
-
-// scoreFloat32Gather scores the rows an index list names.
-//
-// It is the inverted-list scan: the list holds row numbers, and the rows
-// are read through the indices instead of being copied into a buffer
-// first.
-//
-// Returns false when the native path is rejected, so the caller scores
-// with the scalar reference.
-func scoreFloat32Gather(ks *distanceKernelSet, dot bool, q []float32, rows []float32, indices []int32, stride, count int, out []float32) bool {
-	if ks == nil {
-		return false
-	}
-	if dot {
-		return ks.batchDotFloat32Gather != nil && ks.batchDotFloat32Gather(q, rows, indices, stride, count, out)
-	}
-	return ks.batchL2Float32Gather != nil && ks.batchL2Float32Gather(q, rows, indices, stride, count, out)
-}
 
 // scoreFloat32Batch scores a contiguous row block against q with the
 // native kernel, or with the scalar reference. Row j of the block is

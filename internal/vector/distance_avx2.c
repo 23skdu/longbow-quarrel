@@ -94,29 +94,6 @@ void vec_batch_dot_f32_avx2(const float* q, const float* rows, long rowStride, i
     }
 }
 
-// The gather variants score the rows an index list names.
-//
-// An inverted list is a list of row numbers, not a block of contiguous
-// rows, so the caller used to copy every candidate into a buffer before
-// it could be scored. The copy is as expensive as the distance: for a
-// 250k index with sixteen probes it moves twelve megabytes per query.
-// Reading the rows through the indices does the same work without it.
-void vec_batch_l2_f32_gather_avx2(const float* q, const float* rows, const int32_t* indices,
-                                  long rowStride, int dim, int m, float* out) {
-    for (int j = 0; j < m; j++) {
-        const float* row = rows + (size_t)indices[j] * (size_t)rowStride;
-        out[j] = vec_l2_f32_avx2_inline(q, row, dim);
-    }
-}
-
-void vec_batch_dot_f32_gather_avx2(const float* q, const float* rows, const int32_t* indices,
-                                   long rowStride, int dim, int m, float* out) {
-    for (int j = 0; j < m; j++) {
-        const float* row = rows + (size_t)indices[j] * (size_t)rowStride;
-        out[j] = vec_dot_f32_avx2_inline(q, row, dim);
-    }
-}
-
 // ---- complex128 split (SoA) storage, float64 math ----------------------
 //
 // The public complex128 storage interleaves (re, im) pairs, which stops

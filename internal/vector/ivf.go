@@ -48,14 +48,27 @@ type IVFIndex struct {
 	f32RowsChecked   bool
 
 	// f32Flat is the rows of the index in one contiguous buffer, with
-	// the rows at a fixed stride. The scan needs it: the cgo rules
-	// forbid an array of row pointers, so the gather kernels address
-	// the rows through one base pointer and a stride. Without it the
-	// scan had to copy every candidate into a scratch buffer, and the
-	// copy cost as much as the distance.
-	f32Flat    []float32
-	f32FlatOK  bool
-	f32FlatDim int
+	// the rows at a fixed stride. The cgo rules forbid an array of row
+	// pointers, so a kernel can only address the rows through one base
+	// pointer and a stride.
+	//
+	// The rows are stored **in the order of the inverted lists**: the
+	// vectors of a list are next to each other. The scan then reads a
+	// contiguous range, the prefetcher follows it, and the memory
+	// bandwidth of the scan is the bandwidth of a sequential read. The
+	// rows of a list are otherwise scattered over the whole index, and
+	// the scan was reading twelve megabytes per query out of memory
+	// that the prefetcher could not follow.
+	//
+	// f32Order maps a position in the flat buffer to the id of the
+	// vector it holds, and f32ListStart holds the position each list
+	// starts at. The ids the search returns are the original ones.
+	f32Flat      []float32
+	f32FlatOK    bool
+	f32FlatDim   int
+	f32Order     []int
+	f32ListStart []int
+	f32Pos       []int
 
 	// TurboQuant query prep cache. The reference implementation
 	// created the seed-42 QJL matrix per probe; caching it yields the
@@ -237,17 +250,25 @@ func (idx *IVFIndex) Build(floatVectors [][]float32) error {
 	return nil
 }
 
-// buildFlatFloat32 copies the rows into one contiguous buffer and makes
-// the rows views into it.
+// buildFlatFloat32 copies the rows into one contiguous buffer, in the
+// order of the inverted lists, and makes the rows views into it.
 //
 // The copy is the price of the layout: the cgo rules forbid passing an
 // array of row pointers to C, so a kernel can only address the rows
 // through one base pointer and a stride. The copy is made once, at build
-// time, and the scan then reads the rows where they are.
+// time.
+//
+// The order is the point. The vectors of a list are next to each other in
+// the buffer, so the scan of a list reads a contiguous range: the
+// prefetcher follows it and the scan runs at the bandwidth of a
+// sequential read. The ids the search returns are the original ones, and
+// f32Order maps a position in the buffer back to the vector it holds.
 func (idx *IVFIndex) buildFlatFloat32() {
 	idx.f32Flat = nil
 	idx.f32FlatOK = false
 	idx.f32FlatDim = 0
+	idx.f32Order = nil
+	idx.f32ListStart = nil
 
 	dim := idx.Dimension
 	if dim <= 0 || len(idx.Float32) == 0 {
@@ -259,18 +280,63 @@ func (idx *IVFIndex) buildFlatFloat32() {
 		}
 	}
 
-	flat := make([]float32, len(idx.Float32)*dim)
-	rows := make([][]float32, len(idx.Float32))
+	// The order: the lists, one after the other.
+	order := make([]int, 0, len(idx.Float32))
+	starts := make([]int, len(idx.InvertedLists)+1)
+	seen := make([]bool, len(idx.Float32))
+	for c, list := range idx.InvertedLists {
+		starts[c] = len(order)
+		for _, id := range list {
+			if id < 0 || id >= len(idx.Float32) || seen[id] {
+				continue
+			}
+			seen[id] = true
+			order = append(order, id)
+		}
+	}
+	starts[len(idx.InvertedLists)] = len(order)
+
+	// A vector that is in no list goes at the end: the search never
+	// reaches it, but the store has to hold every row.
 	for i := range idx.Float32 {
+		if !seen[i] {
+			order = append(order, i)
+		}
+	}
+
+	flat := make([]float32, len(order)*dim)
+	rows := make([][]float32, len(order))
+	pos := make([]int, len(idx.Float32))
+	for i, id := range order {
 		row := flat[i*dim : (i+1)*dim : (i+1)*dim]
-		copy(row, idx.Float32[i][:dim])
+		copy(row, idx.Float32[id][:dim])
 		rows[i] = row
+		pos[id] = i
 	}
 
 	idx.Float32 = rows
 	idx.f32Flat = flat
 	idx.f32FlatDim = dim
 	idx.f32FlatOK = true
+	idx.f32Order = order
+	idx.f32ListStart = starts
+	idx.f32Pos = pos
+}
+
+// float32Row returns the row of a vector id.
+//
+// The rows are stored in the order of the inverted lists, so the position
+// of a vector in the store is not its id. The mapping is what turns one
+// into the other.
+func (idx *IVFIndex) float32Row(id int) []float32 {
+	if id < 0 || id >= len(idx.f32Pos) {
+		return nil
+	}
+	pos := idx.f32Pos[id]
+	if pos < 0 || pos >= len(idx.Float32) {
+		return nil
+	}
+	return idx.Float32[pos]
 }
 
 // gpuKmeans runs the mini-batch iterations on the device. Returns false
@@ -649,13 +715,9 @@ func (idx *IVFIndex) Search(query []float32, k int) ([]SearchResult, error) {
 		dim := idx.Dimension
 		gatherable := idx.f32RowsUniform && dim > 0 && len(query) <= dim
 		var scratch sync.Pool
-		var idScratch sync.Pool
 		if gatherable {
 			scratch.New = func() interface{} {
 				return make([]float32, batchScoreBlock*dim)
-			}
-			idScratch.New = func() interface{} {
-				return make([]int32, batchScoreBlock)
 			}
 		}
 		idx.runProbes(numProbes, probedIDs, k, func(p, cID int, h *resultHeap) {
@@ -664,14 +726,14 @@ func (idx *IVFIndex) Search(query []float32, k int) ([]SearchResult, error) {
 				return
 			}
 			if gatherable && idx.listIdsInBounds(list) {
-				// The rows are read where they are, through the index
-				// list: the gather kernel takes the row numbers and
-				// addresses the rows itself. Copying them into a
-				// scratch buffer first cost as much as the distance.
+				// The rows of a list are next to each other in the
+				// store, so the scan of a list is a contiguous read:
+				// the prefetcher follows it. The rows used to be
+				// scattered over the whole index, and the scan read
+				// twelve megabytes per query out of memory it could
+				// not follow.
 				if idx.f32FlatOK {
-					ids := idScratch.Get().([]int32)
-					idx.searchFloat32GatherIndexed(ks, h, query, list, ids, dim, k)
-					idScratch.Put(ids)
+					idx.searchFloat32Contiguous(ks, h, query, cID, dim, k)
 					return
 				}
 				g := scratch.Get().([]float32)
@@ -680,10 +742,11 @@ func (idx *IVFIndex) Search(query []float32, k int) ([]SearchResult, error) {
 				return
 			}
 			for _, vID := range list {
-				if vID < 0 || vID >= len(idx.Float32) {
+				row := idx.float32Row(vID)
+				if row == nil {
 					continue
 				}
-				heapAdd(h, vID, DotFloat32(query, idx.Float32[vID]), k)
+				heapAdd(h, vID, DotFloat32(query, row), k)
 			}
 		}, probeHeaps)
 		return mergeHeaps(probeHeaps, k), nil
@@ -700,32 +763,36 @@ func (idx *IVFIndex) listIdsInBounds(list []int) bool {
 	return true
 }
 
-// searchFloat32GatherIndexed scores one probed list through the gather
-// kernel: the rows are read where they are, through the row numbers of
-// the list.
+// searchFloat32Contiguous scores one probed list out of the contiguous
+// store.
 //
-// The scores land in the heap in list order, so the heap contents are
-// identical to the per-vector reference loop.
-func (idx *IVFIndex) searchFloat32GatherIndexed(ks *distanceKernelSet, h *resultHeap, query []float32, list []int, ids []int32, dim, k int) {
+// The rows of a list are next to each other in the store, so the scan is
+// a contiguous read and the prefetcher follows it. The scores land in the
+// heap with the original ids, so the heap contents are identical to the
+// per-vector reference loop.
+func (idx *IVFIndex) searchFloat32Contiguous(ks *distanceKernelSet, h *resultHeap, query []float32, cID, dim, k int) {
+	list := idx.InvertedLists[cID]
+	if len(list) == 0 {
+		return
+	}
+	start := idx.f32ListStart[cID]
+	if start < 0 || start+len(list) > len(idx.f32Order) {
+		return
+	}
+
 	var buf [batchScoreBlock]float32
-	for start := 0; start < len(list); start += batchScoreBlock {
-		end := start + batchScoreBlock
-		if end > len(list) {
-			end = len(list)
+	for offset := 0; offset < len(list); offset += batchScoreBlock {
+		count := len(list) - offset
+		if count > batchScoreBlock {
+			count = batchScoreBlock
 		}
-		count := end - start
+		pos := start + offset
+		rows := idx.f32Flat[pos*dim : (pos+count)*dim]
+		// The batch scorer falls back to the scalar reference when the
+		// native path rejects the shape.
+		scoreFloat32Batch(ks, true, query, rows, dim, count, buf[:])
 		for j := 0; j < count; j++ {
-			ids[j] = int32(list[start+j])
-		}
-		if !scoreFloat32Gather(ks, true, query, idx.f32Flat, ids[:count], dim, count, buf[:]) {
-			// The native path rejected the shape: score the block with
-			// the scalar reference.
-			for j := 0; j < count; j++ {
-				buf[j] = DotFloat32(query, idx.Float32[list[start+j]])
-			}
-		}
-		for j, sc := range buf[:count] {
-			heapAdd(h, list[start+j], sc, k)
+			heapAdd(h, idx.f32Order[pos+j], buf[j], k)
 		}
 	}
 }
@@ -744,7 +811,11 @@ func (idx *IVFIndex) searchFloat32Gather(ks *distanceKernelSet, h *resultHeap, q
 		}
 		count := end - start
 		for j := 0; j < count; j++ {
-			copy(gather[j*dim:(j+1)*dim], idx.Float32[list[start+j]][:dim])
+			row := idx.float32Row(list[start+j])
+			if row == nil {
+				continue
+			}
+			copy(gather[j*dim:(j+1)*dim], row[:dim])
 		}
 		scoreFloat32Batch(ks, true, query, gather[:count*dim], dim, count, buf[:])
 		for j, sc := range buf[:count] {

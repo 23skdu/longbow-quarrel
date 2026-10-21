@@ -424,6 +424,83 @@ __global__ void vecFullAssignKernel(const float* __restrict__ rows, long stride,
     best[vid] = bestC;
 }
 
+// The assignment: one warp per row, the centroids in shared memory.
+//
+// The kernel before this one gave every *thread* a row and had it read
+// every centroid. Two things went wrong with that: the threads of a warp
+// read thirty-two different rows, so every load touched thirty-two cache
+// lines, and the centroids were read from the global memory once per
+// thread. The assignment of 250,000 rows to 500 centroids took 1.1
+// seconds -- longer than the same work on the CPU.
+//
+// Here a warp reads one row: the loads are coalesced, the distance to a
+// centroid is a warp reduction (no barrier), and the centroids come from
+// the shared memory, so the global traffic is the rows and nothing else.
+#define VEC_ASSIGN_WARPS 8
+#define VEC_CENTROID_TILE 16
+
+__global__ void vecFullAssignWarpKernel(const float* __restrict__ rows, long stride,
+                                        int dim, const float* __restrict__ centroids,
+                                        int numCentroids, int count,
+                                        int* __restrict__ best) {
+    extern __shared__ float tile[];
+
+    const int lane = threadIdx.x & 31;
+    const int warp = threadIdx.x >> 5;
+    const int warpsPerBlock = (int)blockDim.x >> 5;
+    const int vid = blockIdx.x * warpsPerBlock + warp;
+
+    // The warp stays in the loop even when it has no row: the barrier
+    // below is a barrier of the whole block.
+    const bool active = vid < count;
+    const float* rr = rows + (size_t)(active ? vid : 0) * (size_t)stride;
+    int bestC = -1;
+    float bestD = 0.0f;
+
+    for (int base = 0; base < numCentroids; base += VEC_CENTROID_TILE) {
+        const int tileCount = min(VEC_CENTROID_TILE, numCentroids - base);
+
+        // The tile is loaded cooperatively. The barrier is outside the
+        // "return" above: the whole block has to reach it, and the
+        // threads whose row is past the end have to stay in the loop.
+        __syncthreads();
+        for (int i = threadIdx.x; i < tileCount * dim; i += (int)blockDim.x) {
+            const int c = i / dim;
+            tile[i] = centroids[(size_t)(base + c) * (size_t)dim + (size_t)(i - c * dim)];
+        }
+        __syncthreads();
+
+        for (int c = 0; c < tileCount; ++c) {
+            if (!active) {
+                continue;
+            }
+            const float* cc = tile + c * dim;
+            float d = 0.0f;
+            for (int j = lane; j < dim; j += 32) {
+                float diff = rr[j] - cc[j];
+                d = fmaf(diff, diff, d);
+            }
+            // The warp reduction: no barrier, and the result is in every
+            // lane.
+            for (int offset = 16; offset > 0; offset >>= 1) {
+                d += __shfl_down_sync(0xffffffff, d, offset);
+            }
+            if (lane == 0 && (bestC < 0 || d < bestD)) {
+                bestC = base + c;
+                bestD = d;
+            }
+            // The best centroid is kept in the first lane; it is
+            // broadcast after the tile.
+            bestC = __shfl_sync(0xffffffff, bestC, 0);
+            bestD = __shfl_sync(0xffffffff, bestD, 0);
+        }
+    }
+
+    if (lane == 0) {
+        best[vid] = bestC;
+    }
+}
+
 // ---------------------------------------------------------------------
 // extern C wrappers (called from vector_cuda.go cgo glue)
 // ---------------------------------------------------------------------
@@ -586,10 +663,26 @@ int vectorFullAssignF32(const float* rows, long stride, int dim,
         count <= 0) {
         return 1;
     }
-    dim3 block(256);
-    dim3 grid((count + (int)block.x - 1) / (int)block.x);
-    vecFullAssignKernel<<<grid, block>>>(rows, stride, dim, centroids,
-                                         numCentroids, count, best);
+    // The warp kernel needs the centroids in shared memory: a tile of
+    // sixteen rows of `dim` floats.
+    const size_t tileBytes = (size_t)VEC_CENTROID_TILE * (size_t)dim * sizeof(float);
+    if (dim > 0 && tileBytes <= 48 * 1024) {
+        if (cudaFuncSetAttribute(vecFullAssignWarpKernel,
+                                 cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                 48 * 1024) != cudaSuccess) {
+            // Not fatal: the default carve-out is 48 KB.
+        }
+        const int threads = 32 * VEC_ASSIGN_WARPS;
+        dim3 block(threads);
+        dim3 grid((count + VEC_ASSIGN_WARPS - 1) / VEC_ASSIGN_WARPS);
+        vecFullAssignWarpKernel<<<grid, block, tileBytes>>>(rows, stride, dim, centroids,
+                                                            numCentroids, count, best);
+    } else {
+        dim3 block(256);
+        dim3 grid((count + (int)block.x - 1) / (int)block.x);
+        vecFullAssignKernel<<<grid, block>>>(rows, stride, dim, centroids,
+                                             numCentroids, count, best);
+    }
     if (cudaGetLastError() != cudaSuccess) {
         return 3;
     }

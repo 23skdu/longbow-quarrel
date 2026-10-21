@@ -251,7 +251,7 @@ func bruteIVFExpected(idx *IVFIndex, query []float32, k int) []SearchResult {
 			continue
 		}
 		for _, vID := range list {
-			heapAdd(h, vID, dotFloat32Scalar(query, idx.Float32[vID]), k)
+			heapAdd(h, vID, dotFloat32Scalar(query, idx.float32Row(vID)), k)
 		}
 	}
 	out := make([]SearchResult, h.Len())
