@@ -9,22 +9,14 @@ import (
 	"github.com/23skdu/longbow-quarrel/internal/config"
 )
 
-func getTestModelPath() string {
-	if path := os.Getenv("QUARREL_TEST_MODEL"); path != "" {
-		return path
-	}
-	return "smollm2.gguf"
-}
-
 func FuzzCUDAEngineCreation(f *testing.F) {
 	if os.Getenv("SKIP_CUDA_TEST") != "" {
 		f.Skip("Skipping CUDA fuzz test")
 	}
 
-	modelPath := getTestModelPath()
-	if _, err := os.Stat(modelPath); os.IsNotExist(err) {
-		f.Skipf("Test model not found: %s", modelPath)
-	}
+	// The model is built here, so the target runs on any machine with a
+	// GPU. It used to look for a file on disk.
+	modelPath := buildTestGGUF(f, f.TempDir())
 
 	e, err := NewEngine(modelPath, config.Config{KVCacheSize: 2048})
 	if err != nil {
@@ -51,10 +43,9 @@ func FuzzCUDAInference(f *testing.F) {
 		f.Skip("Skipping CUDA fuzz test")
 	}
 
-	modelPath := getTestModelPath()
-	if _, err := os.Stat(modelPath); os.IsNotExist(err) {
-		f.Skipf("Test model not found: %s", modelPath)
-	}
+	// The model is built here, so the target runs on any machine with a
+	// GPU. It used to look for a file on disk.
+	modelPath := buildTestGGUF(f, f.TempDir())
 
 	cfg := config.Config{
 		KVCacheSize: 2048,
@@ -159,10 +150,9 @@ func FuzzCUDAPromptProcessing(f *testing.F) {
 		f.Skip("Skipping CUDA fuzz test")
 	}
 
-	modelPath := getTestModelPath()
-	if _, err := os.Stat(modelPath); os.IsNotExist(err) {
-		f.Skipf("Test model not found: %s", modelPath)
-	}
+	// The model is built here, so the target runs on any machine with a
+	// GPU. It used to look for a file on disk.
+	modelPath := buildTestGGUF(f, f.TempDir())
 
 	cfg := config.Config{
 		KVCacheSize: 2048,
@@ -202,10 +192,9 @@ func FuzzCUDAKVCacheHandling(f *testing.F) {
 		f.Skip("Skipping CUDA fuzz test")
 	}
 
-	modelPath := getTestModelPath()
-	if _, err := os.Stat(modelPath); os.IsNotExist(err) {
-		f.Skipf("Test model not found: %s", modelPath)
-	}
+	// The model is built here, so the target runs on any machine with a
+	// GPU. It used to look for a file on disk.
+	modelPath := buildTestGGUF(f, f.TempDir())
 
 	e, err := NewEngine(modelPath, config.Config{KVCacheSize: 2048})
 	if err != nil {

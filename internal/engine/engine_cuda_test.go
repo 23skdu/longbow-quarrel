@@ -17,10 +17,10 @@ func TestCUDAEngineCreation(t *testing.T) {
 		t.Skip("Skipping CUDA test")
 	}
 
-	modelPath := getTestModelPath()
-	if _, err := os.Stat(modelPath); os.IsNotExist(err) {
-		t.Skipf("Test model not found: %s", modelPath)
-	}
+	// The model is built here, with the GGUF writer, so the test runs on
+	// any machine with a GPU. It used to look for a file on disk, which
+	// is why the CUDA hot path was uncovered.
+	modelPath := buildTestGGUF(t, t.TempDir())
 
 	cfg := config.Config{
 		KVCacheSize: 2048,
@@ -44,10 +44,10 @@ func TestCUDAInference(t *testing.T) {
 		t.Skip("Skipping CUDA test")
 	}
 
-	modelPath := getTestModelPath()
-	if _, err := os.Stat(modelPath); os.IsNotExist(err) {
-		t.Skipf("Test model not found: %s", modelPath)
-	}
+	// The model is built here, with the GGUF writer, so the test runs on
+	// any machine with a GPU. It used to look for a file on disk, which
+	// is why the CUDA hot path was uncovered.
+	modelPath := buildTestGGUF(t, t.TempDir())
 
 	cfg := config.Config{
 		KVCacheSize: 2048,
@@ -140,10 +140,10 @@ func TestCUDAKVCache(t *testing.T) {
 		t.Skip("Skipping CUDA test")
 	}
 
-	modelPath := getTestModelPath()
-	if _, err := os.Stat(modelPath); os.IsNotExist(err) {
-		t.Skipf("Test model not found: %s", modelPath)
-	}
+	// The model is built here, with the GGUF writer, so the test runs on
+	// any machine with a GPU. It used to look for a file on disk, which
+	// is why the CUDA hot path was uncovered.
+	modelPath := buildTestGGUF(t, t.TempDir())
 
 	cfg := config.Config{
 		KVCacheSize: 512,
@@ -167,10 +167,10 @@ func TestCUDAPromptProcessing(t *testing.T) {
 		t.Skip("Skipping CUDA test")
 	}
 
-	modelPath := getTestModelPath()
-	if _, err := os.Stat(modelPath); os.IsNotExist(err) {
-		t.Skipf("Test model not found: %s", modelPath)
-	}
+	// The model is built here, with the GGUF writer, so the test runs on
+	// any machine with a GPU. It used to look for a file on disk, which
+	// is why the CUDA hot path was uncovered.
+	modelPath := buildTestGGUF(t, t.TempDir())
 
 	cfg := config.Config{
 		KVCacheSize: 2048,
@@ -224,10 +224,10 @@ func TestCUDAOutputValidation(t *testing.T) {
 		t.Skip("Skipping CUDA test")
 	}
 
-	modelPath := getTestModelPath()
-	if _, err := os.Stat(modelPath); os.IsNotExist(err) {
-		t.Skipf("Test model not found: %s", modelPath)
-	}
+	// The model is built here, with the GGUF writer, so the test runs on
+	// any machine with a GPU. It used to look for a file on disk, which
+	// is why the CUDA hot path was uncovered.
+	modelPath := buildTestGGUF(t, t.TempDir())
 
 	cfg := config.Config{
 		KVCacheSize: 2048,
@@ -285,10 +285,10 @@ func TestCUDAEngineConfig(t *testing.T) {
 		{KVCacheSize: 2048},
 	}
 
-	modelPath := getTestModelPath()
-	if _, err := os.Stat(modelPath); os.IsNotExist(err) {
-		t.Skipf("Test model not found: %s", modelPath)
-	}
+	// The model is built here, with the GGUF writer, so the test runs on
+	// any machine with a GPU. It used to look for a file on disk, which
+	// is why the CUDA hot path was uncovered.
+	modelPath := buildTestGGUF(t, t.TempDir())
 
 	for _, cfg := range testConfigs {
 		t.Run("", func(t *testing.T) {
@@ -306,10 +306,7 @@ func TestCUDAEngineConfig(t *testing.T) {
 }
 
 func BenchmarkCUDAInference(b *testing.B) {
-	modelPath := getTestModelPath()
-	if _, err := os.Stat(modelPath); os.IsNotExist(err) {
-		b.Skipf("Test model not found: %s", modelPath)
-	}
+	modelPath := buildTestGGUF(b, b.TempDir())
 
 	cfg := config.Config{
 		KVCacheSize: 2048,

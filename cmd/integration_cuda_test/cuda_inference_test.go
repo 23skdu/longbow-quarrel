@@ -10,25 +10,19 @@ import (
 
 	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/engine"
+	"github.com/23skdu/longbow-quarrel/internal/testmodel"
 	"github.com/23skdu/longbow-quarrel/internal/tokenizer"
 )
-
-func getTestModelPath() string {
-	if path := os.Getenv("QUARREL_TEST_MODEL"); path != "" {
-		return path
-	}
-	return "smollm2.gguf"
-}
 
 func TestCUDAInferenceSmoke(t *testing.T) {
 	if os.Getenv("SKIP_CUDA_TEST") != "" {
 		t.Skip("Skipping CUDA integration test")
 	}
 
-	modelPath := getTestModelPath()
-	if _, err := os.Stat(modelPath); os.IsNotExist(err) {
-		t.Skipf("Test model not found: %s", modelPath)
-	}
+	// The model is built here, so the test runs on any machine with a
+	// GPU. It used to look for a file on disk, which is why the CUDA
+	// integration path was never covered.
+	modelPath := testmodel.Build(t, t.TempDir())
 
 	cfg := config.Config{
 		KVCacheSize: 2048,
@@ -92,10 +86,10 @@ func TestCUDALongContextInference(t *testing.T) {
 		t.Skip("Skipping CUDA integration test")
 	}
 
-	modelPath := getTestModelPath()
-	if _, err := os.Stat(modelPath); os.IsNotExist(err) {
-		t.Skipf("Test model not found: %s", modelPath)
-	}
+	// The model is built here, so the test runs on any machine with a
+	// GPU. It used to look for a file on disk, which is why the CUDA
+	// integration path was never covered.
+	modelPath := testmodel.Build(t, t.TempDir())
 
 	cfg := config.Config{
 		KVCacheSize: 4096,
@@ -153,10 +147,10 @@ func TestCUDABatchInference(t *testing.T) {
 		t.Skip("Skipping CUDA integration test")
 	}
 
-	modelPath := getTestModelPath()
-	if _, err := os.Stat(modelPath); os.IsNotExist(err) {
-		t.Skipf("Test model not found: %s", modelPath)
-	}
+	// The model is built here, so the test runs on any machine with a
+	// GPU. It used to look for a file on disk, which is why the CUDA
+	// integration path was never covered.
+	modelPath := testmodel.Build(t, t.TempDir())
 
 	cfg := config.Config{
 		KVCacheSize: 2048,
@@ -217,10 +211,10 @@ func TestCUDASamplingVariety(t *testing.T) {
 		t.Skip("Skipping CUDA integration test")
 	}
 
-	modelPath := getTestModelPath()
-	if _, err := os.Stat(modelPath); os.IsNotExist(err) {
-		t.Skipf("Test model not found: %s", modelPath)
-	}
+	// The model is built here, so the test runs on any machine with a
+	// GPU. It used to look for a file on disk, which is why the CUDA
+	// integration path was never covered.
+	modelPath := testmodel.Build(t, t.TempDir())
 
 	cfg := config.Config{
 		KVCacheSize: 2048,
@@ -286,10 +280,10 @@ func TestCUDAModelInfo(t *testing.T) {
 		t.Skip("Skipping CUDA integration test")
 	}
 
-	modelPath := getTestModelPath()
-	if _, err := os.Stat(modelPath); os.IsNotExist(err) {
-		t.Skipf("Test model not found: %s", modelPath)
-	}
+	// The model is built here, so the test runs on any machine with a
+	// GPU. It used to look for a file on disk, which is why the CUDA
+	// integration path was never covered.
+	modelPath := testmodel.Build(t, t.TempDir())
 
 	cfg := config.Config{
 		KVCacheSize: 2048,
@@ -326,10 +320,10 @@ func TestCUDARepetitionHandling(t *testing.T) {
 		t.Skip("Skipping CUDA integration test")
 	}
 
-	modelPath := getTestModelPath()
-	if _, err := os.Stat(modelPath); os.IsNotExist(err) {
-		t.Skipf("Test model not found: %s", modelPath)
-	}
+	// The model is built here, so the test runs on any machine with a
+	// GPU. It used to look for a file on disk, which is why the CUDA
+	// integration path was never covered.
+	modelPath := testmodel.Build(t, t.TempDir())
 
 	cfg := config.Config{
 		KVCacheSize: 2048,
@@ -391,10 +385,10 @@ func TestCUDAE2EMetrics(t *testing.T) {
 		t.Skip("Skipping CUDA integration test")
 	}
 
-	modelPath := getTestModelPath()
-	if _, err := os.Stat(modelPath); os.IsNotExist(err) {
-		t.Skipf("Test model not found: %s", modelPath)
-	}
+	// The model is built here, so the test runs on any machine with a
+	// GPU. It used to look for a file on disk, which is why the CUDA
+	// integration path was never covered.
+	modelPath := testmodel.Build(t, t.TempDir())
 
 	cfg := config.Config{
 		KVCacheSize: 2048,
@@ -463,10 +457,7 @@ func TestCUDAE2EMetrics(t *testing.T) {
 }
 
 func BenchmarkCUDAFullPipeline(b *testing.B) {
-	modelPath := getTestModelPath()
-	if _, err := os.Stat(modelPath); os.IsNotExist(err) {
-		b.Skipf("Test model not found: %s", modelPath)
-	}
+	modelPath := testmodel.Build(b, b.TempDir())
 
 	cfg := config.Config{
 		KVCacheSize: 2048,
@@ -516,10 +507,10 @@ func TestCUDANumericalStability(t *testing.T) {
 		t.Skip("Skipping CUDA integration test")
 	}
 
-	modelPath := getTestModelPath()
-	if _, err := os.Stat(modelPath); os.IsNotExist(err) {
-		t.Skipf("Test model not found: %s", modelPath)
-	}
+	// The model is built here, so the test runs on any machine with a
+	// GPU. It used to look for a file on disk, which is why the CUDA
+	// integration path was never covered.
+	modelPath := testmodel.Build(t, t.TempDir())
 
 	cfg := config.Config{
 		KVCacheSize: 2048,
