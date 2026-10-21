@@ -56,9 +56,9 @@ func runKernelAllocs(ks *distanceKernelSet) func() {
 	}
 	mqF32 := func() {
 		if ks != nil {
-			scoreMQFloat32(ks, false, qs4, 4, rows16, 64, 16, outF32)
+			scoreMQFloat32(ks, false, qs4, 4, 64, rows16, 64, 16, outF32)
 		} else {
-			scoreMQFloat32All(false, qs4, 4, rows16, 64, 16, outF32)
+			scoreMQFloat32All(false, qs4, 4, 64, rows16, 64, 16, outF32)
 		}
 	}
 	csoa := func() {

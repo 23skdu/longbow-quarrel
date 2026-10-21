@@ -268,11 +268,11 @@ func TestKernelParityMQF32(t *testing.T) {
 					want = append(want, scalarBlockScores(true, q, rows, tc.stride, tc.count)...)
 				}
 				out := make([]float32, tc.numQ*tc.count)
-				if !scoreMQFloat32(ks, false, qs, tc.numQ, rows, tc.stride, tc.count, out) {
+				if !scoreMQFloat32(ks, false, qs, tc.numQ, tc.dim, rows, tc.stride, tc.count, out) {
 					t.Fatalf("%s: mqDot rejected a legal block", entry.name)
 				}
 				closeBlock(t, "mqDot", out, want, parityTolF32)
-				if !scoreMQFloat32(ks, true, qs, tc.numQ, rows, tc.stride, tc.count, out) {
+				if !scoreMQFloat32(ks, true, qs, tc.numQ, tc.dim, rows, tc.stride, tc.count, out) {
 					t.Fatalf("%s: mqL2 rejected a legal block", entry.name)
 				}
 				for qi := 0; qi < tc.numQ; qi++ {
@@ -285,7 +285,7 @@ func TestKernelParityMQF32(t *testing.T) {
 			rows := parityRows(4, 16, rng)
 			qs := parityRows(3, 16, rng)
 			out := make([]float32, 12)
-			if !scoreMQFloat32All(false, qs, 3, rows, 16, 4, out) {
+			if !scoreMQFloat32All(false, qs, 3, 16, rows, 16, 4, out) {
 				t.Fatalf("scalar MQ fallback rejected a legal block")
 			}
 			closeBlock(t, "mqScalar", out, func() []float32 {
@@ -295,22 +295,74 @@ func TestKernelParityMQF32(t *testing.T) {
 				}
 				return w
 			}(), 1e-9) // same arithmetic: exact
-			if scoreMQFloat32All(true, qs[:17], 2, rows, 16, 4, out) {
-				t.Fatalf("scalar MQ accepted len(qs)%%numQ != 0")
+			if scoreMQFloat32All(true, qs[:17], 2, 16, rows, 16, 4, out) {
+				t.Fatalf("scalar MQ accepted a query buffer shorter than numQ*dim")
 			}
-			if scoreMQFloat32All(false, qs, 3, rows, 16, 4, out[:2]) {
+			if scoreMQFloat32All(false, qs, 3, 16, rows, 16, 4, out[:2]) {
 				t.Fatalf("scalar MQ accepted small out")
 			}
 			// Kernel rejects.
-			if scoreMQFloat32(ks, false, qs, 5, rows, 16, 4, out) {
-				t.Fatalf("kernel MQ accepted len(qs)%%numQ != 0")
+			if scoreMQFloat32(ks, false, qs, 5, 16, rows, 16, 4, out) {
+				t.Fatalf("kernel MQ accepted a query buffer shorter than numQ*dim")
 			}
-			if scoreMQFloat32(ks, false, qs, 3, rows, 16, 4, out[:11]) {
+			if scoreMQFloat32(ks, false, qs, 3, 20, rows, 16, 4, out) {
+				t.Fatalf("kernel MQ accepted a row stride shorter than the dimension")
+			}
+			if scoreMQFloat32(ks, false, qs, 3, 16, rows, 16, 4, out[:11]) {
 				t.Fatalf("kernel MQ accepted small out")
 			}
-			if scoreMQFloat32(ks, false, qs, 3, rows, 12, 4, out) {
+			if scoreMQFloat32(ks, false, qs, 3, 16, rows, 12, 4, out) {
 				t.Fatalf("kernel MQ accepted stride < dim")
 			}
+		})
+	}
+}
+
+// TestKernelParityMQF32PartialBlock checks that a block that does not
+// fill the query buffer is scored against the queries it holds.
+//
+// The kernel took the dimension from the length of the query buffer, so
+// a buffer that held more queries than the block used was either
+// rejected or scored against the wrong vectors. The k-means and the
+// assignment of the index both pack their queries that way: a block of
+// 256 queries in a buffer of 256, with the last block of a worker
+// holding fewer.
+func TestKernelParityMQF32PartialBlock(t *testing.T) {
+	rng := rand.New(rand.NewSource(43))
+	for _, entry := range []struct {
+		name string
+		set  *distanceKernelSet
+	}{
+		{"avx2", avx2KernelSet},
+		{"avx512", avx512KernelSet},
+	} {
+		t.Run(entry.name, func(t *testing.T) {
+			ks := kernelOrSkip(t, entry.set, entry.name)
+			const (
+				buffer = 8
+				numQ   = 3
+				dim    = 16
+				count  = 4
+				stride = 16
+			)
+			rows := parityRows(count, stride, rng)
+			// The buffer holds eight queries; the block scores three.
+			qs := make([]float32, buffer*dim)
+			want := make([]float32, 0, numQ*count)
+			for qi := 0; qi < buffer; qi++ {
+				q := parityQuery(dim, rng)
+				copy(qs[qi*dim:(qi+1)*dim], q)
+				if qi < numQ {
+					// The oracle's first argument is the dot product,
+					// not the L2.
+					want = append(want, scalarBlockScores(false, q, rows, stride, count)...)
+				}
+			}
+			out := make([]float32, numQ*count)
+			if !scoreMQFloat32(ks, true, qs, numQ, dim, rows, stride, count, out) {
+				t.Fatalf("%s: mqL2 rejected a partial block", entry.name)
+			}
+			closeBlock(t, "mqPartial", out, want, parityTolF32)
 		})
 	}
 }

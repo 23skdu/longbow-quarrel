@@ -29,6 +29,7 @@
 #include <math.h>
 #include <stdint.h>
 #include <stddef.h>
+#include <limits.h>
 
 // ---------------------------------------------------------------------
 // Score primitives
@@ -656,12 +657,208 @@ int vectorKmeansAssignF32(const float* rows, long stride, int dim,
     return vectorSync();
 }
 
+// The tiled assignment: one warp per row, one lane per centroid.
+//
+// The warp kernel above reduces the distance to a centroid across the
+// thirty-two lanes, so every centroid costs a five-step shuffle chain
+// and the chain is serial: the assignment of 250,000 rows to 500
+// centroids took 271 milliseconds, and most of it was the shuffles
+// waiting for each other.
+//
+// Here the thirty-two lanes of the warp each own one centroid and
+// compute its distance alone. There is no reduction per centroid, only
+// one per tile of thirty-two.
+//
+// The centroids are read from a transposed copy: the lane reads the
+// element of its own centroid, and the thirty-two lanes of a warp read
+// thirty-two consecutive elements. In the centroid-major layout they
+// would read thirty-two addresses a row apart, and every load would
+// touch thirty-two cache lines. The transpose is done once per
+// assignment, and it is a tiled transpose through the shared memory.
+//
+// The row is staged in the shared memory once per block. The distance
+// is still the exact squared difference: the difference of the two
+// values is squared and accumulated. The ||q||^2 - 2q.c + ||c||^2 form
+// would be faster still, but it cancels: the result of a subtraction of
+// three large numbers is not the small distance the assignment compares.
+#define VEC_TILE_WARPS 4
+#define VEC_TILE_CENTROIDS 32
+#define VEC_TILE_CHUNK 4
+#define VEC_TILE_ROWS 4
+
+// vecTransposeCentroids writes the centroids out[j * numCentroids + c].
+__global__ void vecTransposeCentroids(const float* __restrict__ centroids,
+                                       int dim, int numCentroids,
+                                       float* __restrict__ out) {
+    // A 32 x 32 tile through the shared memory. The padding keeps the
+    // writes of the transposed copy off the same bank.
+    __shared__ float tile[32][33];
+
+    // The block is 32 x 32: the x index walks the dimension and the y
+    // index the centroids.
+    const int tx = threadIdx.x;
+    const int ty = threadIdx.y;
+    const int c0 = blockIdx.x * 32;
+    const int j0 = blockIdx.y * 32;
+
+    const int c = c0 + ty;
+    const int j = j0 + tx;
+    tile[ty][tx] = (c < numCentroids && j < dim)
+                       ? centroids[(size_t)c * (size_t)dim + (size_t)j]
+                       : 0.0f;
+    __syncthreads();
+
+    // The write: the thirty-two lanes of a warp write thirty-two
+    // consecutive centroids of one dimension step.
+    const int jj = ty;
+    const int cc = c0 + tx;
+    if (cc < numCentroids && j0 + jj < dim) {
+        out[(size_t)(j0 + jj) * (size_t)numCentroids + (size_t)cc] = tile[tx][jj];
+    }
+}
+
+__global__ void vecFullAssignTileKernel(const float* __restrict__ rows, long stride,
+                                        int dim, const float* __restrict__ cT,
+                                        int numCentroids, int count,
+                                        int* __restrict__ best) {
+    extern __shared__ float tileSmem[];
+
+    const int lane = threadIdx.x & 31;
+    const int warp = threadIdx.x >> 5;
+    const int warpsPerBlock = (int)blockDim.x >> 5;
+    const int rowBase = blockIdx.x * warpsPerBlock * VEC_TILE_ROWS;
+    const int first = rowBase + warp * VEC_TILE_ROWS;
+
+    float* svec = tileSmem;
+
+    // The block's rows, staged once.
+    for (int i = threadIdx.x; i < warpsPerBlock * VEC_TILE_ROWS * dim;
+         i += (int)blockDim.x) {
+        const int w = i / dim;
+        const int j = i - w * dim;
+        const int v = rowBase + w;
+        svec[i] = (v < count) ? rows[(size_t)v * (size_t)stride + (size_t)j] : 0.0f;
+    }
+    __syncthreads();
+
+    // Each warp owns four rows and each lane one centroid. The four
+    // rows share the centroid element they read, so the centroid data
+    // is read once for four rows: the traffic through the L2 is a
+    // quarter of what it was when a warp owned one row.
+    const float* vrow = svec + warp * VEC_TILE_ROWS * dim;
+    int bestC[VEC_TILE_ROWS];
+    float bestD[VEC_TILE_ROWS];
+#pragma unroll
+    for (int i = 0; i < VEC_TILE_ROWS; ++i) {
+        bestC[i] = -1;
+        bestD[i] = 0.0f;
+    }
+
+    for (int base = 0; base < numCentroids; base += VEC_TILE_CENTROIDS) {
+        const int tileCount = min(VEC_TILE_CENTROIDS, numCentroids - base);
+        float d[VEC_TILE_ROWS];
+#pragma unroll
+        for (int i = 0; i < VEC_TILE_ROWS; ++i) {
+            d[i] = 0.0f;
+        }
+
+        if (lane < tileCount) {
+            for (int j0 = 0; j0 < dim; j0 += VEC_TILE_CHUNK) {
+                float vchunk[VEC_TILE_ROWS][VEC_TILE_CHUNK];
+#pragma unroll
+                for (int i = 0; i < VEC_TILE_ROWS; ++i) {
+#pragma unroll
+                    for (int jj = 0; jj < VEC_TILE_CHUNK; ++jj) {
+                        vchunk[i][jj] = (j0 + jj < dim) ? vrow[i * dim + j0 + jj] : 0.0f;
+                    }
+                }
+#pragma unroll
+                for (int jj = 0; jj < VEC_TILE_CHUNK; ++jj) {
+                    if (j0 + jj < dim) {
+                        const float cv = cT[(size_t)(j0 + jj) * (size_t)numCentroids +
+                                            (size_t)(base + lane)];
+#pragma unroll
+                        for (int i = 0; i < VEC_TILE_ROWS; ++i) {
+                            const float diff = vchunk[i][jj] - cv;
+                            d[i] = fmaf(diff, diff, d[i]);
+                        }
+                    }
+                }
+            }
+        }
+
+        // One reduction per tile and per row: the lanes hold the
+        // distances of the thirty-two centroids of the tile. The
+        // smaller index wins a tie, the way the CPU path does.
+#pragma unroll
+        for (int i = 0; i < VEC_TILE_ROWS; ++i) {
+            float tileD = (lane < tileCount) ? d[i] : INFINITY;
+            int tileC = (lane < tileCount) ? base + lane : INT_MAX;
+#pragma unroll
+            for (int offset = 16; offset > 0; offset >>= 1) {
+                const float otherD = __shfl_down_sync(0xffffffff, tileD, offset);
+                const int otherC = __shfl_down_sync(0xffffffff, tileC, offset);
+                if (otherD < tileD || (otherD == tileD && otherC < tileC)) {
+                    tileD = otherD;
+                    tileC = otherC;
+                }
+            }
+            if (lane == 0 &&
+                (bestC[i] < 0 || tileD < bestD[i] ||
+                 (tileD == bestD[i] && tileC < bestC[i]))) {
+                bestC[i] = tileC;
+                bestD[i] = tileD;
+            }
+        }
+    }
+
+    if (lane == 0) {
+#pragma unroll
+        for (int i = 0; i < VEC_TILE_ROWS; ++i) {
+            const int v = first + i;
+            if (v < count) {
+                best[v] = bestC[i];
+            }
+        }
+    }
+}
+
 int vectorFullAssignF32(const float* rows, long stride, int dim,
                         const float* centroids, int numCentroids, int count,
                         int* best) {
     if (!rows || !centroids || !best || dim <= 0 || numCentroids <= 0 ||
         count <= 0) {
         return 1;
+    }
+    // The tiled kernel stages the block's rows in the shared memory and
+    // reads the centroids from a transposed copy.
+    const size_t rowBytes = (size_t)VEC_TILE_WARPS * VEC_TILE_ROWS * (size_t)dim * sizeof(float);
+    if (dim > 0 && rowBytes <= 48 * 1024) {
+        float* cT = NULL;
+        if (cudaMalloc(&cT, (size_t)dim * (size_t)numCentroids * sizeof(float)) != cudaSuccess) {
+            cT = NULL;
+        }
+        if (cT != NULL) {
+            dim3 tBlock(32, 32);
+            dim3 tGrid((numCentroids + 31) / 32, (dim + 31) / 32);
+            vecTransposeCentroids<<<tGrid, tBlock>>>(centroids, dim, numCentroids, cT);
+            if (cudaGetLastError() != cudaSuccess) {
+                cudaFree(cT);
+                return 3;
+            }
+            const int threads = 32 * VEC_TILE_WARPS;
+            dim3 block(threads);
+            const int rowsPerBlock = VEC_TILE_WARPS * VEC_TILE_ROWS;
+            dim3 grid((count + rowsPerBlock - 1) / rowsPerBlock);
+            vecFullAssignTileKernel<<<grid, block, rowBytes>>>(
+                rows, stride, dim, cT, numCentroids, count, best);
+            const cudaError_t err = cudaGetLastError();
+            cudaFree(cT);
+            if (err != cudaSuccess) {
+                return 3;
+            }
+            return vectorSync();
+        }
     }
     // The warp kernel needs the centroids in shared memory: a tile of
     // sixteen rows of `dim` floats.

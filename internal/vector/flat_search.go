@@ -386,9 +386,9 @@ func (idx *FlatIndex) batchSearchFloat32MQ(ks *distanceKernelSet, qm []float32, 
 				view := out[:numQ*m]
 				var ok bool
 				if l2 {
-					ok = ks.mqL2Float32(qm, numQ, block, stride, m, view)
+					ok = ks.mqL2Float32(qm, numQ, dim, block, stride, m, view)
 				} else {
-					ok = ks.mqDotFloat32(qm, numQ, block, stride, m, view)
+					ok = ks.mqDotFloat32(qm, numQ, dim, block, stride, m, view)
 				}
 				for qi := 0; qi < numQ; qi++ {
 					if !ok {

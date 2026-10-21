@@ -307,12 +307,44 @@ func (idx *IVFIndex) buildFlatFloat32() {
 	flat := make([]float32, len(order)*dim)
 	rows := make([][]float32, len(order))
 	pos := make([]int, len(idx.Float32))
-	for i, id := range order {
-		row := flat[i*dim : (i+1)*dim : (i+1)*dim]
-		copy(row, idx.Float32[id][:dim])
-		rows[i] = row
-		pos[id] = i
+
+	// The copy is spread over the workers. The destination is a
+	// contiguous range per worker, and the source is read in the order
+	// of the lists, so the reads are scattered and the writes are
+	// sequential. One goroutine did the whole thing, and the copy of
+	// the 384 MB of a 250k x 384 index took 143 milliseconds of the
+	// build.
+	workers := runtime.GOMAXPROCS(0)
+	if workers > len(order) {
+		workers = len(order)
 	}
+	if workers < 1 {
+		workers = 1
+	}
+	chunk := (len(order) + workers - 1) / workers
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		start := w * chunk
+		end := start + chunk
+		if start >= len(order) {
+			break
+		}
+		if end > len(order) {
+			end = len(order)
+		}
+		wg.Add(1)
+		go func(start, end int) {
+			defer wg.Done()
+			for i := start; i < end; i++ {
+				id := order[i]
+				row := flat[i*dim : (i+1)*dim : (i+1)*dim]
+				copy(row, idx.Float32[id][:dim])
+				rows[i] = row
+				pos[id] = i
+			}
+		}(start, end)
+	}
+	wg.Wait()
 
 	idx.Float32 = rows
 	idx.f32Flat = flat
@@ -393,7 +425,7 @@ func (idx *IVFIndex) scoreSampleCentroids(vs [][]float32, best []int, dim, numCe
 		}
 		copy(qs[si*dim:(si+1)*dim], vs[si])
 	}
-	if !ks.mqL2Float32(qs, m, idx.centroidsFlat, dim, numCentroids, out) {
+	if !ks.mqL2Float32(qs, m, dim, idx.centroidsFlat, dim, numCentroids, out) {
 		return false
 	}
 	for si := 0; si < m; si++ {

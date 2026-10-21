@@ -332,7 +332,8 @@ build adds the wider ones.
 | IVF, float32 | 11.1 ms | 54.8 ms | 1.10 ms (911 QPS) |
 | IVF, TurboQuant | 29.3 ms | 132 ms | 2.65 ms (377 QPS) |
 | IVF, complex128 | 65.3 ms | 288 ms | 5.76 ms (174 QPS) |
-| IVF build (float32) | 242 ms | 687 ms | — |
+| IVF build (float32, CPU) | 249 ms | 618 ms | — |
+| IVF build (float32, CUDA) | 146 ms | 416 ms | — |
 | HNSW, float32 (50,000 nodes) | 1.40 ms | 1.88 ms | 37.7 µs (26,525 QPS) |
 | HNSW, TurboQuant (50,000 nodes) | 2.07 ms | 3.09 ms | 61.9 µs (16,156 QPS) |
 | HNSW, complex128 (50,000 nodes) | 2.36 ms | 4.83 ms | 96.6 µs (10,350 QPS) |
@@ -349,7 +350,7 @@ The HNSW numbers are the ones the matrix at 50,000 nodes, measured with
 | **P0-01** | 250k IVF query under 500 µs | **222 µs** at 128 dimensions, **1.10 ms** at 384 (911 QPS) | at 128 |
 | **P0-02** | 250k complex128 flat search above 500 QPS | **25 QPS** single, **172 QPS** batched | no — and the target is not reachable: the scan reads 1.5 GB, so 500 QPS would need 750 GB/s |
 | **P0-03** | TurboQuant HNSW above 10,000 QPS, 7.8× compression | **16,156 QPS** at 50,000 nodes; the compression is kept | yes |
-| **P0-04** | IVF construction on 250k×384 under 50 ms | **687 ms** on the CPU, 640 ms with the GPU k-means (the transfer of the 384 MB dataset is 135 ms of it) | no |
+| **P0-04** | IVF construction on 250k×384 under 50 ms | **618 ms** on the CPU, **416 ms** with the GPU (the transfer of the 384 MB dataset is 159 ms of it) | no |
 | **P0-05** | a million-vector index inside a 256 MB working set | the store is memory mapped and the Go heap stays flat: 100,000 × 384 vectors load into a 150 MB file and the heap does not grow | yes |
 
 The implementations the criteria ask for are in the tree: the AVX2 and
@@ -360,12 +361,27 @@ real/imaginary planes for the complex type (`complex_soa.go`), the
 asymmetric TurboQuant distance with a lookup table
 (`turboquant_adc.go`) and the memory-mapped store (`mmapstore.go`).
 
-Two things were rewritten while these numbers were measured. The GPU
+Three things were rewritten while these numbers were measured. The GPU
 assignment kernel gave every *thread* a row, and the threads of a warp
 read thirty-two different rows, so every load touched thirty-two cache
 lines; it now gives every *warp* a row and keeps the centroids in shared
 memory. The assignment of 250,000 rows to 500 centroids went from 1.1
 seconds to 240 ms, and the whole build from 1.5 seconds to 640 ms.
+
+The warp kernel then turned out to spend most of its time waiting for
+itself: it reduced the distance to a centroid across the thirty-two
+lanes, so every centroid cost a five-step shuffle chain and the chain
+was serial. The kernel now gives every *lane* one centroid and computes
+its distance alone, so there is one reduction per tile of thirty-two
+instead of one per centroid, and the centroids are read from a
+transposed copy, where the thirty-two lanes of a warp read thirty-two
+consecutive elements instead of thirty-two addresses a row apart. The
+assignment went from 271 ms to 115 ms.
+
+The flat buffer, the copy of the rows into the order the lists are
+scanned in, was made by one goroutine: 384 MB of scattered reads and
+sequential writes took 153 ms of the build. It is spread over the
+workers now, and it takes 35 ms.
 
 The HNSW search rebuilt the TurboQuant rotation and the QJL matrix for
 every query: two allocations of 147,000 and 12,000 floats each, which

@@ -67,11 +67,11 @@ func init() {
 		batchTurboDot: func(q *TurboPrep, packed *TurboPackedColumns, start, end int, out []float32) bool {
 			return callBatchTurboAVX2(q, packed, start, end, out)
 		},
-		mqDotFloat32: func(qs []float32, numQ int, rows []float32, stride, count int, out []float32) bool {
-			return callMQF32AVX2(false, qs, numQ, rows, stride, count, out)
+		mqDotFloat32: func(qs []float32, numQ, dim int, rows []float32, stride, count int, out []float32) bool {
+			return callMQF32AVX2(false, qs, numQ, dim, rows, stride, count, out)
 		},
-		mqL2Float32: func(qs []float32, numQ int, rows []float32, stride, count int, out []float32) bool {
-			return callMQF32AVX2(true, qs, numQ, rows, stride, count, out)
+		mqL2Float32: func(qs []float32, numQ, dim int, rows []float32, stride, count int, out []float32) bool {
+			return callMQF32AVX2(true, qs, numQ, dim, rows, stride, count, out)
 		},
 		mqDotComplexSoA: func(qsRe, qsIm []float64, numQ int, re, im []float64, dim, start, end int, out []float32) bool {
 			return callMQCSoAAVX2(false, qsRe, qsIm, numQ, re, im, dim, start, end, out)
@@ -236,14 +236,17 @@ func minFast(a, b int) int {
 }
 
 // callMQF32AVX2 runs the AVX-2 multi-query shared-scan kernel. qs holds
-// numQ queries laid out back to back (dim = len(qs)/numQ); out is
-// [numQ][end-start].
-func callMQF32AVX2(l2 bool, qs []float32, numQ int, rows []float32, stride, count int, out []float32) bool {
-	if numQ <= 0 || numQ > len(qs) || len(qs)%numQ != 0 {
+// numQ queries of dim floats laid out back to back; out is
+// [numQ][count].
+//
+// The dimension is passed in: the query buffer may be longer than the
+// block of queries in it, and deriving the dimension from the length of
+// the buffer would have the kernel read the queries of the next block.
+func callMQF32AVX2(l2 bool, qs []float32, numQ, dim int, rows []float32, stride, count int, out []float32) bool {
+	if numQ <= 0 || dim <= 0 || len(qs) < numQ*dim {
 		return false
 	}
-	dim := len(qs) / numQ
-	if dim == 0 || stride < dim || count <= 0 || len(rows) < count*stride || len(out) < numQ*count {
+	if stride < dim || count <= 0 || len(rows) < count*stride || len(out) < numQ*count {
 		return false
 	}
 	if l2 {

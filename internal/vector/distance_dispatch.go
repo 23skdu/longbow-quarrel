@@ -48,9 +48,10 @@ type distanceKernelSet struct {
 	// Multi-query shared-scan kernels (BatchSearch): one call scores
 	// numQ queries against count contiguous rows and writes out in
 	// [numQ][count] order (out[q*count+r]). qs holds numQ queries of
-	// dim = len(qs)/numQ laid out back to back.
-	mqDotFloat32    func(qs []float32, numQ int, rows []float32, stride, count int, out []float32) bool
-	mqL2Float32     func(qs []float32, numQ int, rows []float32, stride, count int, out []float32) bool
+	// dim floats laid out back to back; the buffer may be longer than
+	// the block of queries in it.
+	mqDotFloat32    func(qs []float32, numQ, dim int, rows []float32, stride, count int, out []float32) bool
+	mqL2Float32     func(qs []float32, numQ, dim int, rows []float32, stride, count int, out []float32) bool
 	mqDotComplexSoA func(qsRe, qsIm []float64, numQ int, re, im []float64, dim, start, end int, out []float32) bool
 	mqL2ComplexSoA  func(qsRe, qsIm []float64, numQ int, re, im []float64, dim, start, end int, out []float32) bool
 }
@@ -126,26 +127,30 @@ func scoreFloat32Batch(ks *distanceKernelSet, dot bool, q []float32, rows []floa
 // scoreMQFloat32runs the multi-query float32 block kernel; returns
 // false when the native path is rejected so the caller scores with the
 // per-query path.
-func scoreMQFloat32(ks *distanceKernelSet, l2 bool, qs []float32, numQ int, rows []float32, stride, count int, out []float32) bool {
-	if ks == nil || numQ <= 0 || count <= 0 || len(qs)%numQ != 0 {
+//
+// The dimension is a parameter, not something derived from the length of
+// the query buffer: a caller that packs fewer queries than the buffer
+// holds would otherwise have the kernel read the queries of the next
+// block.
+func scoreMQFloat32(ks *distanceKernelSet, l2 bool, qs []float32, numQ, dim int, rows []float32, stride, count int, out []float32) bool {
+	if ks == nil || numQ <= 0 || dim <= 0 || count <= 0 || len(qs) < numQ*dim {
 		return false
 	}
 	if l2 && ks.mqL2Float32 != nil {
-		return ks.mqL2Float32(qs, numQ, rows, stride, count, out)
+		return ks.mqL2Float32(qs, numQ, dim, rows, stride, count, out)
 	}
 	if !l2 && ks.mqDotFloat32 != nil {
-		return ks.mqDotFloat32(qs, numQ, rows, stride, count, out)
+		return ks.mqDotFloat32(qs, numQ, dim, rows, stride, count, out)
 	}
 	return false
 }
 
 // scoreMQFloat32All is the scalar multi-query fallback: every query
 // scores every row with the scalar reference, results out[q*count+r].
-func scoreMQFloat32All(l2 bool, qs []float32, numQ int, rows []float32, stride, count int, out []float32) bool {
-	if numQ <= 0 || count <= 0 || len(qs)%numQ != 0 || len(out) < numQ*count {
+func scoreMQFloat32All(l2 bool, qs []float32, numQ, dim int, rows []float32, stride, count int, out []float32) bool {
+	if numQ <= 0 || dim <= 0 || count <= 0 || len(qs) < numQ*dim || len(out) < numQ*count {
 		return false
 	}
-	dim := len(qs) / numQ
 	if dim != stride {
 		return false
 	}

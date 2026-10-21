@@ -110,6 +110,14 @@ func init() {
 
 // ---- staging --------------------------------------------------------
 
+// gpuStageFloat32CUDA copies the rows into one contiguous block and
+// uploads it.
+//
+// A copy out of page-locked memory runs at about three times the rate
+// of a copy out of pageable memory, but the page-locked memory has to
+// be allocated first, and allocating 384 MB of it takes longer than
+// the copy saves. A build happens once, so the pageable copy is the
+// cheaper one.
 func gpuStageFloat32CUDA(rows [][]float32, dim int) (interface{}, bool) {
 	if dim <= 0 || len(rows) == 0 {
 		return nil, false
