@@ -97,9 +97,9 @@ the gap for each blocker are in
 
 | Blocker | The implementation | The target | Measured |
 |---------|--------------------|-----------|----------|
-| **P0-01** | AVX2 and AVX-512 distance kernels (`internal/vector/distance_avx2.c`, `distance_avx512.c`), the CUDA batch kernel for the inverted-list scoring (`cuda_vector_kernels.cu`) and the reordered store, where the rows of a list are next to each other | `L2Float32` below 15 % of the CPU; 250k IVF query under 500 µs | the kernel is 6 % of the search; the query is 240 µs at 128 dimensions and 1.18 ms at 384 |
-| **P0-02** | the complex type is stored as split real and imaginary planes (`complex_soa.go`) and the CUDA batch path uses them | 250k `complex128` flat search above 500 QPS | 18 QPS single, 137 QPS batched |
-| **P0-03** | the asymmetric TurboQuant distance with a lookup table (`turboquant_adc.go`) | TurboQuant HNSW above 10,000 QPS, keeping the 7.8× compression | 1,106 QPS at 50,000 nodes; the compression is kept |
+| **P0-01** | AVX2 and AVX-512 distance kernels (`internal/vector/distance_avx2.c`, `distance_avx512.c`), the CUDA batch kernel for the inverted-list scoring (`cuda_vector_kernels.cu`) and the reordered store, where the rows of a list are next to each other | `L2Float32` below 15 % of the CPU; 250k IVF query under 500 µs | the kernel is 6 % of the search; the query is 222 µs at 128 dimensions and 1.10 ms at 384 |
+| **P0-02** | the complex type is stored as split real and imaginary planes (`complex_soa.go`) and the CUDA batch path uses them | 250k `complex128` flat search above 500 QPS | 25 QPS single, 172 QPS batched; the target needs 750 GB/s and is not reachable for a 1.5 GB scan |
+| **P0-03** | the asymmetric TurboQuant distance with a lookup table (`turboquant_adc.go`) and the query matrices built once per index instead of once per query | TurboQuant HNSW above 10,000 QPS, keeping the 7.8× compression | **16,156 QPS** at 50,000 nodes; the compression is kept |
 | **P0-04** | the mini-batch k-means on the device (`cuda_vector_kernels.cu`), the multi-query L2 kernel for the assignment and the warp-per-row assignment kernel | IVF construction on 250k×384 under 50 ms | 622 ms on the CPU, 640 ms with the GPU (the transfer of the 384 MB dataset is 135 ms of it) |
 | **P0-05** | the memory-mapped store with pre-faulting and page-eviction hints (`mmapstore.go`) | a million-vector index inside a 256 MB working set | the store is memory mapped and the Go heap stays flat: 100,000 × 384 vectors load into a 150 MB file and the heap does not grow |
 

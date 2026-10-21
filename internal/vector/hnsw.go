@@ -49,6 +49,28 @@ type HNSWIndex struct {
 	// scalar byte path.
 	turboWordsOnce sync.Once
 	turboWordsDone bool
+
+	// The TurboQuant matrices of the query quantisation. They are
+	// deterministic -- the identity rotation and the seed-42 QJL matrix --
+	// and the distance closure used to rebuild them for every search: two
+	// allocations of 147,000 and 12,000 floats per query, which cost more
+	// than the whole traversal.
+	turboRotOnce sync.Once
+	turboRot     []float32
+	turboQJLOnce sync.Once
+	turboQJL     []float32
+}
+
+// turboMatrices returns the rotation and the QJL matrix of the
+// TurboQuant query quantisation, building them once.
+func (h *HNSWIndex) turboMatrices() ([]float32, []float32) {
+	h.turboRotOnce.Do(func() {
+		h.turboRot = CreateIdentityMatrix(h.Dimension)
+	})
+	h.turboQJLOnce.Do(func() {
+		h.turboQJL = CreateRandomQJLMatrix(32, h.Dimension, 42)
+	})
+	return h.turboRot, h.turboQJL
 }
 
 // NewHNSWIndex creates an empty HNSWIndex.
@@ -115,8 +137,7 @@ func (h *HNSWIndex) distanceClosure(query []float32) (func(nodeID int) float32, 
 		}, true
 	case TypeTurboQuant:
 		h.refreshTurboWords()
-		rot := CreateIdentityMatrix(h.Dimension)
-		qjl := CreateRandomQJLMatrix(32, h.Dimension, 42)
+		rot, qjl := h.turboMatrices()
 		qTQ := QuantizeTurboQuant(query, -1, rot, qjl, 32)
 		prep := PrepareTurboQuantQuery(&qTQ)
 		return func(nodeID int) float32 {
