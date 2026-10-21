@@ -64,9 +64,12 @@ func TestContinuousBatchManager_Edge_Cases(t *testing.T) {
 
 	// 2. Test Step with no requests (empty and non-empty paths)
 	cache := &PagedKVCache{}
-	desc, _ := cm.Step(4, cache, nil)
-	if desc == nil {
-		t.Log("Step returned nil descriptor for an empty queue (expected)")
+	desc, err := cm.Step(4, cache, nil)
+	if err != nil {
+		t.Errorf("a step with an empty queue failed: %v", err)
+	}
+	if desc != nil {
+		t.Errorf("a step with an empty queue returned the descriptor %v", desc)
 	}
 
 	cm.AbortAll(nil)

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/23skdu/longbow-quarrel/internal/metrics"
+	"github.com/23skdu/longbow-quarrel/internal/promtest"
 )
 
 func TestNumericalStability_Metrics_Recording(t *testing.T) {
@@ -216,16 +217,26 @@ func TestNumericalStability_Under_Large_Values(t *testing.T) {
 }
 
 func TestMetrics_NumericalInstability_Recording(t *testing.T) {
-	t.Run("Metrics package exists", func(t *testing.T) {
-		_ = metrics.RecordNumericalInstability
+	t.Run("Record numerical instability", func(t *testing.T) {
+		before := promtest.Value(t, "numerical_instability",
+			metrics.NumericalInstability.WithLabelValues("rmsnorm", "nan"))
+		metrics.RecordNumericalInstability("rmsnorm", 1, 1)
+		promtest.RequireDelta(t, "numerical_instability",
+			metrics.NumericalInstability.WithLabelValues("rmsnorm", "nan"), before, 1)
 	})
 
 	t.Run("Record validation error", func(t *testing.T) {
-		_ = metrics.RecordValidationError
+		before := promtest.Value(t, "validation_errors",
+			metrics.ValidationErrors.WithLabelValues("test", "a validation error"))
+		metrics.RecordValidationError("test", "a validation error")
+		promtest.RequireDelta(t, "validation_errors",
+			metrics.ValidationErrors.WithLabelValues("test", "a validation error"), before, 1)
 	})
 
 	t.Run("Record context length", func(t *testing.T) {
-		_ = metrics.RecordContextLength
+		before := promtest.Value(t, "context_length", metrics.ContextLengthHistogram)
+		metrics.RecordContextLength(4096)
+		promtest.RequireDelta(t, "context_length", metrics.ContextLengthHistogram, before, 1)
 	})
 }
 

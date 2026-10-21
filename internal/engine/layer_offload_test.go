@@ -7,6 +7,7 @@ import (
 
 	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/metrics"
+	"github.com/23skdu/longbow-quarrel/internal/promtest"
 )
 
 func TestApplyLayerCPU_Basic(t *testing.T) {
@@ -103,7 +104,16 @@ func TestLayerOffloadMetrics(t *testing.T) {
 	cpuLayers := totalLayers - gpuLayers
 
 	metrics.RecordLayerOffload(modelName, gpuLayers, cpuLayers)
-	// Verify metrics call executes safely without panic
+
+	// The gauge holds the split the engine reported.
+	gpu := promtest.Value(t, "gpu_layers_active", metrics.GPULayersActive.WithLabelValues(modelName))
+	cpu := promtest.Value(t, "cpu_layers_active", metrics.CPULayersActive.WithLabelValues(modelName))
+	if gpu != float64(gpuLayers) {
+		t.Errorf("the gauge holds %v GPU layers, want %d", gpu, gpuLayers)
+	}
+	if cpu != float64(cpuLayers) {
+		t.Errorf("the gauge holds %v CPU layers, want %d", cpu, cpuLayers)
+	}
 }
 
 func FuzzApplyLayerCPU(f *testing.F) {

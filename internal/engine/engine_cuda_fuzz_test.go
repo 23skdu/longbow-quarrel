@@ -34,7 +34,10 @@ func FuzzCUDAEngineCreation(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, kvCacheSize int) {
 		if kvCacheSize < 1 || kvCacheSize > 8192 {
-			t.Skip("Invalid KV cache size")
+			// A skip inside a fuzz target discards the seed, so the corpus
+			// never grows for this input. A plain return is what the
+			// invalid-input path needs.
+			return
 		}
 
 		if e == nil {
@@ -65,19 +68,34 @@ func FuzzCUDAInference(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, numTokens int, temp float64, topK int, topP float64, repPenalty float64) {
 		if numTokens < 1 || numTokens > 100 {
-			t.Skip("Invalid number of tokens")
+			// A skip inside a fuzz target discards the seed, so the corpus
+			// never grows for this input. A plain return is what the
+			// invalid-input path needs.
+			return
 		}
 		if temp < 0 || temp > 2 {
-			t.Skip("Invalid temperature")
+			// A skip inside a fuzz target discards the seed, so the corpus
+			// never grows for this input. A plain return is what the
+			// invalid-input path needs.
+			return
 		}
 		if topK < 1 || topK > 100 {
-			t.Skip("Invalid topK")
+			// A skip inside a fuzz target discards the seed, so the corpus
+			// never grows for this input. A plain return is what the
+			// invalid-input path needs.
+			return
 		}
 		if topP < 0 || topP > 1 {
-			t.Skip("Invalid topP")
+			// A skip inside a fuzz target discards the seed, so the corpus
+			// never grows for this input. A plain return is what the
+			// invalid-input path needs.
+			return
 		}
 		if repPenalty < 0.5 || repPenalty > 2 {
-			t.Skip("Invalid repetition penalty")
+			// A skip inside a fuzz target discards the seed, so the corpus
+			// never grows for this input. A plain return is what the
+			// invalid-input path needs.
+			return
 		}
 
 		tokens := []int{1, 2, 3}
@@ -98,13 +116,22 @@ func FuzzCUDAInference(f *testing.F) {
 func FuzzCUDASampler(f *testing.F) {
 	f.Fuzz(func(t *testing.T, seed int64, temp float64, topK int, topP float64) {
 		if temp < 0 || temp > 2 {
-			t.Skip("Invalid temperature")
+			// A skip inside a fuzz target discards the seed, so the corpus
+			// never grows for this input. A plain return is what the
+			// invalid-input path needs.
+			return
 		}
 		if topK < 1 || topK > 100 {
-			t.Skip("Invalid topK")
+			// A skip inside a fuzz target discards the seed, so the corpus
+			// never grows for this input. A plain return is what the
+			// invalid-input path needs.
+			return
 		}
 		if topP < 0 || topP > 1 {
-			t.Skip("Invalid topP")
+			// A skip inside a fuzz target discards the seed, so the corpus
+			// never grows for this input. A plain return is what the
+			// invalid-input path needs.
+			return
 		}
 
 		sampler := NewSampler(SamplerConfig{
@@ -188,7 +215,10 @@ func FuzzCUDAKVCacheHandling(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, cacheSize int) {
 		if cacheSize < 128 || cacheSize > 4096 {
-			t.Skip("Invalid cache size")
+			// A skip inside a fuzz target discards the seed, so the corpus
+			// never grows for this input. A plain return is what the
+			// invalid-input path needs.
+			return
 		}
 
 		tokens := []int{1, 2, 3, 4, 5}

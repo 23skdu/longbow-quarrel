@@ -343,6 +343,9 @@ func TestGemma4HybridAttention(t *testing.T) {
 }
 
 func TestGemma4SlidingWindowMetrics(t *testing.T) {
+	// The sliding window metrics count the tokens that wrapped around
+	// the window. The metric itself is in internal/metrics; here the
+	// counting is what the metric is built on, so it is checked.
 	windowSize := 4096
 	wrappedTokens := 0
 	for pos := 0; pos < windowSize*2; pos++ {
@@ -350,5 +353,7 @@ func TestGemma4SlidingWindowMetrics(t *testing.T) {
 			wrappedTokens++
 		}
 	}
-	t.Logf("Sliding window metrics: window=%d, wrapped=%d/%d", windowSize, wrappedTokens, windowSize)
+	if wrappedTokens != windowSize-1 {
+		t.Errorf("%d of the %d tokens wrapped, want %d", wrappedTokens, windowSize*2, windowSize-1)
+	}
 }

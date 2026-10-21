@@ -2,101 +2,195 @@ package tokenizer
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
+
+	"github.com/23skdu/longbow-quarrel/internal/gguf"
 )
 
-const mistralModelPath = "/Users/rsd/.ollama/models/blobs/sha256-f5074b1221da0f5a2910d33b642efa5b9eb58cfdddca1c79e16d7ad28aa2b31f"
+// The tests used to load a Mistral model from a hard-coded path on the
+// machine of the developer who wrote them:
+//
+//	/Users/rsd/.ollama/models/blobs/sha256-f5074b...
+//
+// The file is not in the repository and not on any other machine, so every
+// one of these tests skipped everywhere, including in CI: five tests that
+// never ran.
+//
+// The model is now built here, with the GGUF writer, so the tests run
+// everywhere.
 
-func TestTokenizer_Mistral_RealLoad(t *testing.T) {
-	if _, err := os.Stat(mistralModelPath); os.IsNotExist(err) {
-		t.Skipf("Mistral model not found at %s", mistralModelPath)
+// writeMistralLikeModel writes a small model with a Mistral-like
+// vocabulary: the sentencepiece pieces of a handful of words, the
+// beginning-of-string and end-of-string control tokens, and the merges
+// that join the pieces into words.
+func writeMistralLikeModel(t *testing.T) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "mistral-like.gguf")
+
+	// The pieces: the control tokens first, so that the ids match the
+	// ones the Mistral vocabulary uses (1 is <s>, 2 is </s>).
+	//
+	// A sentencepiece vocabulary holds every piece twice: once with the
+	// space marker and once without. The encoder marks the space before
+	// a word, so the word at the start of the text needs the unmarked
+	// piece.
+	tokens := []string{
+		"<unk>", "<s>", "</s>",
+		"▁The", "▁capital", "▁of", "▁France", "▁is", "▁Paris", ".",
+		"The", "capital", "of", "France", "is", "Paris", "?", "▁?",
+	}
+	scores := make([]float32, len(tokens))
+	for i := range scores {
+		scores[i] = float32(-i)
+	}
+	// The token types: 1 is a normal token, 2 is the unknown token, 3 is
+	// a control token.
+	types := make([]int32, len(tokens))
+	for i := range types {
+		types[i] = 1
+	}
+	types[0] = 2
+	types[1] = 3
+	types[2] = 3
+
+	kv := map[string]interface{}{
+		"general.architecture":            "llama",
+		"tokenizer.ggml.model":            "llama",
+		"tokenizer.ggml.tokens":           tokens,
+		"tokenizer.ggml.scores":           scores,
+		"tokenizer.ggml.token_type":       types,
+		"tokenizer.ggml.bos_token_id":     uint32(1),
+		"tokenizer.ggml.eos_token_id":     uint32(2),
+		"tokenizer.ggml.unknown_token_id": uint32(0),
 	}
 
-	tok, err := New(mistralModelPath)
+	if err := gguf.WriteFile(path, kv, nil, 32); err != nil {
+		t.Fatalf("failed to write the model: %v", err)
+	}
+	return path
+}
+
+func TestTokenizer_Mistral_RealLoad(t *testing.T) {
+	path := writeMistralLikeModel(t)
+
+	tok, err := New(path)
 	if err != nil {
 		t.Fatalf("Failed to load tokenizer: %v", err)
 	}
 
 	if len(tok.Tokens) == 0 {
-		t.Errorf("Tokenizer loaded 0 tokens")
+		t.Error("Tokenizer loaded 0 tokens")
 	}
-	t.Logf("Loaded %d tokens", len(tok.Tokens))
+	if got := len(tok.Vocab); got == 0 {
+		t.Error("Tokenizer loaded an empty vocabulary")
+	}
 }
 
 func TestTokenizer_Mistral_DecodeSpecific(t *testing.T) {
-	if _, err := os.Stat(mistralModelPath); os.IsNotExist(err) {
-		t.Skip("Mistral model not found")
-	}
-	tok, _ := New(mistralModelPath)
+	path := writeMistralLikeModel(t)
 
-	tokensToTest := []int{31980, 9445}
-	for _, id := range tokensToTest {
-		text := tok.Decode([]int{id})
-		t.Logf("Token %d decodes to: %q", id, text)
+	tok, err := New(path)
+	if err != nil {
+		t.Fatalf("Failed to load tokenizer: %v", err)
+	}
+
+	// The control tokens and the first word of the vocabulary. The
+	// sentencepiece marker is a space when it is decoded.
+	cases := map[int]string{
+		1: "<s>",
+		2: "</s>",
+		3: " The",
+	}
+	for id, want := range cases {
+		if got := tok.Decode([]int{id}); got != want {
+			t.Errorf("the token %d decodes to %q, want %q", id, got, want)
+		}
 	}
 }
 
 func TestTokenizer_Mistral_SpecialTokens(t *testing.T) {
-	if _, err := os.Stat(mistralModelPath); os.IsNotExist(err) {
-		t.Skip("Mistral model not found")
+	path := writeMistralLikeModel(t)
+
+	tok, err := New(path)
+	if err != nil {
+		t.Fatalf("Failed to load tokenizer: %v", err)
 	}
-	tok, _ := New(mistralModelPath)
 
-	// Mistral Standard:
-	// 1 = BOS
-	// 2 = EOS
-	// ? = UNK (Often 0 or none)
-
-	bos := tok.Decode([]int{1})
-	eos := tok.Decode([]int{2})
-
-	t.Logf("BOS (1): %q", bos)
-	t.Logf("EOS (2): %q", eos)
-
-	// Check if ID 1 maps to a known BOS string in vocab if possible, or just empty string if special control token?
-	// Mistral usually treats 1 as <s> and 2 as </s> but they might not decode to visible text depending on logic.
+	// The end-of-string token has to be known to the tokenizer: the
+	// decode loops stop on it.
+	eos := tok.GetEOSTokenIDs()
+	if len(eos) == 0 {
+		t.Fatal("the tokenizer knows no end-of-string token")
+	}
+	found := false
+	for _, id := range eos {
+		if id == 2 {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the end-of-string tokens are %v, want the token 2 in them", eos)
+	}
 }
 
 func TestTokenizer_Mistral_RoundTrip(t *testing.T) {
-	if _, err := os.Stat(mistralModelPath); os.IsNotExist(err) {
-		t.Skip("Mistral model not found")
+	path := writeMistralLikeModel(t)
+
+	tok, err := New(path)
+	if err != nil {
+		t.Fatalf("Failed to load tokenizer: %v", err)
 	}
-	tok, _ := New(mistralModelPath)
 
 	input := "The capital of France is Paris."
 	ids := tok.Encode(input)
+	if len(ids) == 0 {
+		t.Fatal("the encoder produced no tokens")
+	}
 	decoded := tok.Decode(ids)
 
-	t.Logf("Input: %q", input)
-	t.Logf("IDs: %v", ids)
-	t.Logf("Decoded: %q", decoded)
-
-	// Note: Spacing might vary (e.g. leading space), so we check similarity or exact match
-	// Mistral tokenizer often adds a leading space dummy prefix?
-	if decoded != input && decoded != " "+input {
-		// Strict check might fail if tokenizer is implemented differently, so we log for now.
-		t.Logf("Warning: Roundtrip mismatch. Expected %q, got %q", input, decoded)
+	// The pieces carry the sentencepiece marker, so the round trip
+	// restores the spaces.
+	want := "The capital of France is Paris."
+	if decoded != want {
+		t.Errorf("the round trip of %q gave %q", input, decoded)
 	}
 }
 
 func TestTokenizer_Mistral_PromptFormat(t *testing.T) {
-	if _, err := os.Stat(mistralModelPath); os.IsNotExist(err) {
-		t.Skip("Mistral model not found")
+	path := writeMistralLikeModel(t)
+
+	tok, err := New(path)
+	if err != nil {
+		t.Fatalf("Failed to load tokenizer: %v", err)
 	}
-	tok, _ := New(mistralModelPath)
 
-	prompt := "[INST] What is the capital of France? [/INST]"
+	prompt := "The capital of France?"
 	ids := tok.Encode(prompt)
+	if len(ids) == 0 {
+		t.Fatal("the encoder produced no tokens")
+	}
 
-	t.Logf("Prompt: %q", prompt)
-	t.Logf("IDs: %v", ids)
-
-	// Verify that [INST] is not split into [ I N S T ]
-	// [INST] should be a single token or specific sequence.
-	// For Mistral, [INST] is not a single special token in the vocab usually, it's text.
-	// Wait, actually strict Mistral instruction format uses control tokens OR text.
-	// Let's see what it produces.
-
+	// The question has to survive the round trip, and the pieces have to
+	// be the ones of the vocabulary: a tokenizer that split the text into
+	// single characters would decode to the same string.
 	decoded := tok.Decode(ids)
-	t.Logf("Decoded: %q", decoded)
+	if decoded != prompt {
+		t.Errorf("the round trip of %q gave %q", prompt, decoded)
+	}
+	for _, id := range ids {
+		if id != 3 && id < 3 {
+			t.Errorf("the encoder produced the control token %d for %q", id, prompt)
+		}
+	}
+}
+
+func TestTokenizer_Mistral_ModelFileIsTemporary(t *testing.T) {
+	// The model the tests use is written into the test's temporary
+	// directory, so no test leaves a file behind.
+	path := writeMistralLikeModel(t)
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("the model was not written: %v", err)
+	}
 }

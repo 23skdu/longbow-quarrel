@@ -157,14 +157,23 @@ func TestAttentionOutputProjection_Comparison(t *testing.T) {
 	ctx.Synchronize()
 
 	outputDataF16 := outputF16.ToHost()
+	if len(outputDataF16) != N {
+		t.Fatalf("the projection returned %d values, want %d", len(outputDataF16), N)
+	}
 
-	// Log F16 results
-	t.Logf("F16 Linear Transformation:")
-	t.Logf("  Output[0]: %.6f", outputDataF16[0])
-	t.Logf("  Output max: %.6f", findMax(outputDataF16))
-
-	// Note: Q4K comparison would require constructing equivalent Q4K weights
-	// which is complex. This test establishes F16 baseline.
+	// The weight is uniform, so every output is the sum of the input
+	// scaled by 0.01.
+	want := 0.0
+	for _, v := range inputData {
+		want += float64(v) * 0.01
+	}
+	for i, got := range outputDataF16 {
+		// The weight and the activations are half precision, so the
+		// tolerance is the precision of the format.
+		if math.Abs(float64(got)-want) > 1e-2*math.Max(1, math.Abs(want)) {
+			t.Errorf("the output %d is %v, want %v", i, got, want)
+		}
+	}
 }
 
 func findMax(data []float32) float32 {

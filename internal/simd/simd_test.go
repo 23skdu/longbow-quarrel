@@ -193,7 +193,12 @@ func TestSoftmaxVeryLargeInput(t *testing.T) {
 }
 
 func TestSwiGLUEmpty(t *testing.T) {
-	SwiGLU([]float32{}, []float32{}, make([]float32, 0))
+	// An empty batch writes nothing and does not panic.
+	out := make([]float32, 0)
+	SwiGLU([]float32{}, []float32{}, out)
+	if len(out) != 0 {
+		t.Errorf("the empty SwiGLU wrote %d values", len(out))
+	}
 }
 
 func TestSoftmaxPreservesOrder(t *testing.T) {
@@ -512,7 +517,17 @@ func TestRoPE(t *testing.T) {
 }
 
 func TestRoPEEmpty(t *testing.T) {
+	// An empty tensor is not rotated and does not panic.
 	RoPE(nil, nil, 0, 0, 0, 0, 10000.0)
+
+	// The same for a tensor with no heads.
+	data := []float32{1.0, 2.0, 3.0, 4.0}
+	RoPE(data, nil, 0, 0, 0, 0, 10000.0)
+	for i, v := range data {
+		if v != float32(i+1) {
+			t.Errorf("the RoPE of an empty rotation changed the value %d to %v", i, v)
+		}
+	}
 }
 
 func TestFusedAttention(t *testing.T) {
@@ -896,6 +911,49 @@ func TestAVX2Wrappers(t *testing.T) {
 	dst16Large := make([]uint16, 32)
 	Fp32ToFp16AVX2(dstLarge, dst16Large)
 
+	// The scalar path and the vector path have to agree.
+	half1 := []uint16{0x3C00, 0x4000} // 1.0 and 2.0
+	half1f := make([]float32, 2)
+	Fp16ToFp32AVX2(half1, half1f)
+	if half1f[0] != 1.0 || half1f[1] != 2.0 {
+		t.Errorf("the halfs converted to %v, want [1 2]", half1f)
+	}
+
+	half2 := make([]uint16, 2)
+	Fp32ToFp16AVX2(half1f, half2)
+	if half2[0] != 0x3C00 || half2[1] != 0x4000 {
+		t.Errorf("the floats encoded as %v, want [0x3C00 0x4000]", half2)
+	}
+
+	// The softmax works in place and has to produce a distribution: the
+	// values sum to one.
+	probs := []float32{1.0, 2.0, 3.0}
+	SoftmaxAVX2(probs)
+	sum := float32(0)
+	for _, v := range probs {
+		if v < 0 {
+			t.Errorf("the softmax produced the negative probability %v", v)
+		}
+		sum += v
+	}
+	if math.Abs(float64(sum-1)) > 1e-5 {
+		t.Errorf("the softmax sums to %v, want 1", sum)
+	}
+
+	// The same for the vector path.
+	large := make([]float32, 32)
+	for i := range large {
+		large[i] = float32(i)
+	}
+	SoftmaxAVX2(large)
+	sum = 0
+	for _, v := range large {
+		sum += v
+	}
+	if math.Abs(float64(sum-1)) > 1e-5 {
+		t.Errorf("the softmax sums to %v, want 1", sum)
+	}
+
 	// Mismatched / empty lengths
 	SoftmaxAVX2(nil)
 	SwiGLUAVX2(nil, nil, nil)
@@ -907,6 +965,11 @@ func TestFusedMLP_EdgeCases(t *testing.T) {
 	// Empty inputs
 	out := make([]float32, 2)
 	FusedMLP(nil, nil, nil, nil, out, 0, 0, 0)
+	for i, v := range out {
+		if v != 0 {
+			t.Errorf("the empty FusedMLP wrote %v at %d", v, i)
+		}
+	}
 
 	// Valid batch with gate clamping >10 and <-10
 	in := []float32{1.0, 2.0}
@@ -915,6 +978,19 @@ func TestFusedMLP_EdgeCases(t *testing.T) {
 	downW := []float32{1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0}
 	out2 := make([]float32, 2)
 	FusedMLP(in, gateW, upW, downW, out2, 1, 2, 4)
+
+	// The gate is clamped to [-10, 10] before the sigmoid, and the
+	// weights are all one, so the output is the sum of the activated
+	// gates.
+	want := 0.0
+	for _, g := range []float64{10, -10, 2, -2} {
+		want += g / (1 + math.Exp(-g))
+	}
+	for i, got := range out2 {
+		if math.Abs(float64(got)-want) > 1e-3 {
+			t.Errorf("the output %d is %v, want %v", i, got, want)
+		}
+	}
 }
 
 func TestSwiGLU_Clamping(t *testing.T) {
@@ -961,7 +1037,17 @@ func TestFp32ToFp16_DefaultScalar(t *testing.T) {
 	}
 	dst := make([]uint16, len(src))
 	Fp32ToFp16(src, dst)
-	fp32ToFp16Scalar(src, dst)
+
+	// The scalar reference has to agree with the kernel on every one of
+	// the special values.
+	scalar := make([]uint16, len(src))
+	fp32ToFp16Scalar(src, scalar)
+	for i := range dst {
+		if dst[i] != scalar[i] {
+			t.Errorf("the value %v encoded as 0x%04X, the scalar reference says 0x%04X",
+				src[i], dst[i], scalar[i])
+		}
+	}
 }
 
 func TestVecDotF32_And_VecFMAF32(t *testing.T) {

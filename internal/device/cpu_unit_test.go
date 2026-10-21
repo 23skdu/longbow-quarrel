@@ -78,7 +78,13 @@ func TestCPU_ContextOps(t *testing.T) {
 }
 
 func TestCPU_AllocatedBytes(t *testing.T) {
-	// For CPU, memory tracking might be disabled or pooled.
-	// We'll just verify the call doesn't panic.
-	_ = CPUAllocatedBytes()
+	// The counter is the number of bytes the allocator holds. It cannot
+	// be negative, and it cannot grow when nothing is allocated.
+	before := CPUAllocatedBytes()
+	if before < 0 {
+		t.Errorf("the allocator reports %d bytes, want a count of bytes", before)
+	}
+	if after := CPUAllocatedBytes(); after < 0 {
+		t.Errorf("the allocator reports %d bytes, want a count of bytes", after)
+	}
 }

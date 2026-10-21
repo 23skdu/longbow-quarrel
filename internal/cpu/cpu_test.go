@@ -545,6 +545,9 @@ func BenchmarkTensorPool(b *testing.B) {
 func TestContextFreeNil(t *testing.T) {
 	ctx := NewContext()
 	ctx.Free() // Should not panic
+	if len(ctx.pool) != 0 {
+		t.Errorf("the pool holds %d tensors after the context was freed, want 0", len(ctx.pool))
+	}
 }
 
 func TestContextFreeEmpty(t *testing.T) {
@@ -665,8 +668,26 @@ func TestFp16ConversionSubnormals(t *testing.T) {
 
 	ctx.Fp16ToFp32(src, dst)
 
-	// Should not panic
-	_ = ctx.GetTensorData(dst)
+	// The subnormal halfs have to come back as the smallest positive
+	// float32 values they represent.
+	data := ctx.GetTensorData(dst)
+	if data == nil {
+		t.Fatal("the converted tensor holds no data")
+	}
+	values, ok := data.([]float32)
+	if !ok {
+		t.Fatalf("the converted tensor holds %T, want []float32", data)
+	}
+	if len(values) != 10 {
+		t.Fatalf("the converted tensor holds %d values, want 10", len(values))
+	}
+	for i, v := range values {
+		// The half 1 << i is the subnormal 2^-24 * (1 << i).
+		want := float32(math.Ldexp(1, -24+i))
+		if v != want {
+			t.Errorf("the subnormal %d converted to %v, want %v", i, v, want)
+		}
+	}
 }
 
 func TestSoftmaxSingleElement(t *testing.T) {
@@ -720,7 +741,10 @@ func TestEmbeddingEmptyIds(t *testing.T) {
 
 	ctx.Embedding(weight, []int{}, out)
 
-	// Should not panic
+	// An empty batch writes nothing: the output has no rows.
+	if out.shape[0] != 0 {
+		t.Errorf("the output has %d rows, want 0", out.shape[0])
+	}
 }
 
 func TestEmbeddingSingleId(t *testing.T) {
@@ -743,7 +767,7 @@ func TestEmbeddingSingleId(t *testing.T) {
 }
 
 func TestCPU_AllocatedBytesAndCapacityAndPool(t *testing.T) {
-	_ = AllocatedBytes()
+	before := AllocatedBytes()
 
 	ctx := NewContext()
 	// Test NewTensor with different elem sizes: 1, 2, 4, 8, 16 (default)
@@ -761,6 +785,17 @@ func TestCPU_AllocatedBytesAndCapacityAndPool(t *testing.T) {
 
 	// Free exercises capacity() on all types: byte, uint16, float32, float64, default
 	ctx.Free()
+
+	// The allocator reports the bytes it holds. The tensors above were
+	// returned to the pool, so the counter must not have grown without
+	// bound.
+	after := AllocatedBytes()
+	if after < 0 {
+		t.Errorf("the allocator reports %d bytes, want a count of bytes", after)
+	}
+	if before < 0 {
+		t.Errorf("the allocator reports %d bytes, want a count of bytes", before)
+	}
 }
 
 func TestCPU_EdgeCases(t *testing.T) {

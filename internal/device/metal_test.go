@@ -181,11 +181,16 @@ func TestConcurrency(t *testing.T) {
 		}
 
 		// Wait for completion
+		created := 0
 		for i := 0; i < count; i++ {
-			<-done
+			if <-done {
+				created++
+			}
 		}
 
-		t.Log("Parallel tensor creation completed")
+		if created != count {
+			t.Errorf("%d of the %d tensors were created, want %d", created, count, count)
+		}
 	})
 }
 

@@ -3,6 +3,7 @@
 package device
 
 import (
+	"math"
 	"testing"
 )
 
@@ -56,5 +57,33 @@ func TestTurboQuant_NumericalParity_TQ1_0(t *testing.T) {
 	ctx.Synchronize()
 
 	metalK := kFetch.ToHostF32()
-	t.Logf("Metal[0:5]: %v", metalK[0:5])
+	if len(metalK) != headDim {
+		t.Fatalf("the cache returned %d values, want %d", len(metalK), headDim)
+	}
+
+	// The TurboQuant codec is lossy, so the round trip is compared with
+	// the original the way a lossy codec is: the reconstruction has to be
+	// closer to the input than a cache full of zeros is, and it has to
+	// hold something at all.
+	totalError := 0.0
+	totalMagnitude := 0.0
+	nonZero := 0
+	for i, got := range metalK {
+		if math.IsNaN(float64(got)) || math.IsInf(float64(got), 0) {
+			t.Fatalf("the value %d is %v", i, got)
+		}
+		totalError += math.Abs(float64(got - inputK[i]))
+		totalMagnitude += math.Abs(float64(inputK[i]))
+		if got != 0 {
+			nonZero++
+		}
+	}
+
+	if nonZero == 0 {
+		t.Error("the TurboQuant cache holds nothing but zeros")
+	}
+	if totalError >= totalMagnitude {
+		t.Errorf("the round trip is no better than a cache full of zeros: the error is %v and the input is %v",
+			totalError, totalMagnitude)
+	}
 }

@@ -1,10 +1,31 @@
-// Command vacuous_tests reports Go test functions that cannot fail because
-// their body (and every t.Run subtest they spawn) contains no assertion and
-// never hands *testing.T to a helper.
+// Command vacuous_tests reports Go test functions that cannot fail.
+//
+// A test cannot fail when its body (and every t.Run subtest it spawns)
+// contains no assertion: no t.Error, no t.Fatal, no require/assert call
+// and no helper that asserts. Such a test is a test in name only: it
+// passes whatever the code under test does.
 //
 // The list of known offenders lives in scripts/vacuous_tests_allowlist.txt.
 // CI fails when a test that is not on that list cannot fail, so the debt can
 // only shrink.
+//
+// What counts as an assertion:
+//
+//   - t.Error, t.Errorf, t.Fatal, t.Fatalf, t.Fail, t.FailNow
+//   - a require.* or assert.* call
+//   - a call to a helper that takes the *testing.T and asserts itself,
+//     in this package or in another one
+//
+// What does not:
+//
+//   - t.Skip, t.Skipf, t.SkipNow. A test that only skips is not a test
+//     that passes, it is a test that did not run.
+//   - a helper that only logs.
+//
+// The helper bodies are resolved transitively: a test that calls a helper
+// which calls another helper which asserts is not vacuous. The helper map
+// is built from every Go file in the module, so a helper in a test-only
+// package (internal/promtest) counts as well.
 //
 // Usage:
 //
@@ -24,7 +45,7 @@ import (
 	"strings"
 )
 
-// assertNames are *testing.T methods that make a test fail (or skip).
+// assertNames are *testing.T methods that make a test fail.
 var assertNames = map[string]bool{
 	"Error":   true,
 	"Errorf":  true,
@@ -32,12 +53,17 @@ var assertNames = map[string]bool{
 	"Fatalf":  true,
 	"Fail":    true,
 	"FailNow": true,
+}
+
+// skipNames are *testing.T methods that stop a test without failing it.
+// A test whose only action is a skip did not run.
+var skipNames = map[string]bool{
 	"Skip":    true,
 	"Skipf":   true,
 	"SkipNow": true,
 }
 
-// helperNames are *testing.T methods that neither assert nor prove anything
+// helperOnlyNames are *testing.T methods that neither assert nor prove anything
 // on their own; a test that only calls these is still vacuous.
 var helperOnlyNames = map[string]bool{
 	"Helper":   true,
@@ -47,6 +73,75 @@ var helperOnlyNames = map[string]bool{
 	"Deadline": true,
 	"Name":     true,
 	"Parallel": true,
+}
+
+// modulePath is the import path of the module. It maps an import path
+// onto the directory that holds it.
+const modulePath = "github.com/23skdu/longbow-quarrel"
+
+// packageInfo is what is known about one package in the module.
+type packageInfo struct {
+	// helpers maps a function name onto its declaration. It holds the
+	// functions whose first parameter is a testing handle.
+	helpers map[string]*ast.FuncDecl
+	// imports maps an import alias onto its import path.
+	imports map[string]string
+	// interfaces holds the interfaces the package declares, by name. A
+	// helper that takes one of them takes a testing handle.
+	interfaces map[string]*ast.InterfaceType
+}
+
+// helperSignature reports whether the function takes a testing handle as
+// its first parameter: a *testing.T, a testing.TB, or an interface with
+// Errorf or Fatalf (which is how a test-only helper package spells it).
+func helperSignature(fn *ast.FuncDecl, interfaces map[string]*ast.InterfaceType) bool {
+	if fn.Type.Params == nil || len(fn.Type.Params.List) == 0 {
+		return false
+	}
+	field := fn.Type.Params.List[0]
+	return isTestingHandle(field.Type, interfaces)
+}
+
+func isTestingHandle(expr ast.Expr, interfaces map[string]*ast.InterfaceType) bool {
+	switch t := expr.(type) {
+	case *ast.StarExpr:
+		// *testing.T or *testing.B
+		sel, ok := t.X.(*ast.SelectorExpr)
+		if !ok {
+			return false
+		}
+		pkg, ok := sel.X.(*ast.Ident)
+		return ok && pkg.Name == "testing" && (sel.Sel.Name == "T" || sel.Sel.Name == "B" || sel.Sel.Name == "TB")
+	case *ast.SelectorExpr:
+		// testing.TB
+		pkg, ok := t.X.(*ast.Ident)
+		return ok && pkg.Name == "testing" && t.Sel.Name == "TB"
+	case *ast.InterfaceType:
+		// An interface with Errorf or Fatalf is a testing handle: that is
+		// what internal/promtest declares.
+		return interfaceHasAssertion(t)
+	case *ast.Ident:
+		// A named interface: promtest.TestingT.
+		iface, ok := interfaces[t.Name]
+		if !ok {
+			return false
+		}
+		return interfaceHasAssertion(iface)
+	}
+	return false
+}
+
+func interfaceHasAssertion(iface *ast.InterfaceType) bool {
+	for _, method := range iface.Methods.List {
+		if len(method.Names) == 0 {
+			continue
+		}
+		name := method.Names[0].Name
+		if name == "Errorf" || name == "Fatalf" || name == "Error" || name == "Fatal" {
+			return true
+		}
+	}
+	return false
 }
 
 func main() {
@@ -153,74 +248,151 @@ func writeAllowlist(path string, keys []string) error {
 	return os.WriteFile(path, []byte(b.String()), 0o600) // #nosec G306
 }
 
+// scan walks the module, collects the helper functions of every package
+// and reports the test functions that cannot fail.
 func scan(root string) ([]string, error) {
-	var keys []string
 	fset := token.NewFileSet()
+
+	// The helper map, per package directory.
+	packages := map[string]*packageInfo{}
+
+	// The test functions, per file.
+	type testFunc struct {
+		key string
+		fn  *ast.FuncDecl
+		dir string
+	}
+	var tests []testFunc
+
+	// The helper candidates, checked once the whole module is known: a
+	// helper may take an interface that another file of its package
+	// declares.
+	type helperCandidate struct {
+		fn  *ast.FuncDecl
+		pkg *packageInfo
+	}
+	var candidates []helperCandidate
+
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
 		if info.IsDir() {
 			name := info.Name()
-			if name == ".git" || name == "node_modules" || name == "vendor" {
+			if name == ".git" || name == "node_modules" || name == "vendor" || name == "bin" {
 				return filepath.SkipDir
 			}
 			return nil
 		}
-		if !strings.HasSuffix(path, "_test.go") {
+		if !strings.HasSuffix(path, ".go") {
 			return nil
 		}
 		file, perr := parser.ParseFile(fset, path, nil, parser.ParseComments)
 		if perr != nil {
 			return nil // unparseable files are somebody else's problem
 		}
+
+		dir := filepath.Dir(path)
+		pkg, ok := packages[dir]
+		if !ok {
+			pkg = &packageInfo{
+				helpers:    map[string]*ast.FuncDecl{},
+				imports:    map[string]string{},
+				interfaces: map[string]*ast.InterfaceType{},
+			}
+			packages[dir] = pkg
+		}
 		for _, decl := range file.Decls {
-			fn, ok := decl.(*ast.FuncDecl)
-			if !ok || fn.Recv != nil || fn.Body == nil {
+			gen, ok := decl.(*ast.GenDecl)
+			if !ok || gen.Tok != token.TYPE {
 				continue
 			}
-			if !strings.HasPrefix(fn.Name.Name, "Test") {
+			for _, spec := range gen.Specs {
+				ts, ok := spec.(*ast.TypeSpec)
+				if !ok {
+					continue
+				}
+				iface, ok := ts.Type.(*ast.InterfaceType)
+				if !ok {
+					continue
+				}
+				pkg.interfaces[ts.Name.Name] = iface
+			}
+		}
+		for _, imp := range file.Imports {
+			path := strings.Trim(imp.Path.Value, `"`)
+			alias := ""
+			if imp.Name != nil {
+				alias = imp.Name.Name
+			} else {
+				alias = path
+				if idx := strings.LastIndex(alias, "/"); idx >= 0 {
+					alias = alias[idx+1:]
+				}
+			}
+			pkg.imports[alias] = path
+		}
+
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			candidates = append(candidates, helperCandidate{fn: fn, pkg: pkg})
+			if fn.Recv != nil || !strings.HasPrefix(fn.Name.Name, "Test") {
 				continue
 			}
 			if !takesTestingT(fn) {
 				continue
 			}
-			if !asserted(fn.Body) {
-				rel, rerr := filepath.Rel(root, path)
-				if rerr != nil {
-					rel = path
-				}
-				keys = append(keys, filepath.ToSlash(rel)+":"+fn.Name.Name)
+			rel, rerr := filepath.Rel(root, path)
+			if rerr != nil {
+				rel = path
 			}
+			tests = append(tests, testFunc{
+				key: filepath.ToSlash(rel) + ":" + fn.Name.Name,
+				fn:  fn,
+				dir: dir,
+			})
 		}
 		return nil
 	})
-	return keys, err
+	if err != nil {
+		return nil, err
+	}
+
+	for _, candidate := range candidates {
+		if helperSignature(candidate.fn, candidate.pkg.interfaces) {
+			candidate.pkg.helpers[candidate.fn.Name.Name] = candidate.fn
+		}
+	}
+
+	var keys []string
+	for _, test := range tests {
+		resolver := &resolver{
+			root:     root,
+			packages: packages,
+			current:  test.dir,
+			visiting: map[string]bool{},
+		}
+		if !resolver.asserted(test.fn.Body) {
+			keys = append(keys, test.key)
+		}
+	}
+	return keys, nil
 }
 
-func takesTestingT(fn *ast.FuncDecl) bool {
-	if fn.Type.Params == nil || len(fn.Type.Params.List) != 1 {
-		return false
-	}
-	field := fn.Type.Params.List[0]
-	if len(field.Names) != 1 || field.Names[0].Name != "t" {
-		return false
-	}
-	star, ok := field.Type.(*ast.StarExpr)
-	if !ok {
-		return false
-	}
-	sel, ok := star.X.(*ast.SelectorExpr)
-	if !ok {
-		return false
-	}
-	pkg, ok := sel.X.(*ast.Ident)
-	return ok && pkg.Name == "testing" && sel.Sel.Name == "T"
+// resolver answers "can this body fail?" with the helper map in hand.
+type resolver struct {
+	root     string
+	packages map[string]*packageInfo
+	current  string
+	visiting map[string]bool
 }
 
 // asserted reports whether b can make the test fail, either directly or
 // through a t.Run subtest that itself can fail.
-func asserted(b *ast.BlockStmt) bool {
+func (r *resolver) asserted(b *ast.BlockStmt) bool {
 	if b == nil {
 		return false
 	}
@@ -242,7 +414,7 @@ func asserted(b *ast.BlockStmt) bool {
 			// excluded, and those are handled above.
 			return true
 		}
-		if isAssertCall(n) {
+		if r.isAssertCall(n) {
 			direct = true
 			return false
 		}
@@ -265,7 +437,7 @@ func asserted(b *ast.BlockStmt) bool {
 		if !ok {
 			return true
 		}
-		if asserted(lit.Body) {
+		if r.asserted(lit.Body) {
 			subtests = true
 			return false
 		}
@@ -274,16 +446,8 @@ func asserted(b *ast.BlockStmt) bool {
 	return subtests
 }
 
-func isTRun(call *ast.CallExpr) bool {
-	sel, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok || sel.Sel.Name != "Run" {
-		return false
-	}
-	id, ok := sel.X.(*ast.Ident)
-	return ok && id.Name == "t"
-}
-
-func isAssertCall(n ast.Node) bool {
+// isAssertCall reports whether the call can fail the test.
+func (r *resolver) isAssertCall(n ast.Node) bool {
 	call, ok := n.(*ast.CallExpr)
 	if !ok {
 		return false
@@ -294,23 +458,119 @@ func isAssertCall(n ast.Node) bool {
 		if id, ok := sel.X.(*ast.Ident); ok && (id.Name == "require" || id.Name == "assert") {
 			return true
 		}
-		// t.Error(...), t.Fatal(...), t.Skip(...)
+		// t.Error(...), t.Fatal(...)
 		if id, ok := sel.X.(*ast.Ident); ok && id.Name == "t" {
 			if assertNames[sel.Sel.Name] {
 				return true
 			}
-			if helperOnlyNames[sel.Sel.Name] {
+			if skipNames[sel.Sel.Name] || helperOnlyNames[sel.Sel.Name] {
 				return false
 			}
 		}
 	}
 
-	// helper(t, ...) / helper(t): handing the testing.T to a helper means the
-	// helper decides whether the test passes.
+	// A helper that takes the testing handle decides whether the test
+	// passes. The helper body is resolved, so a helper that only logs does
+	// not count.
 	if len(call.Args) > 0 {
 		if id, ok := call.Args[0].(*ast.Ident); ok && id.Name == "t" {
-			return true
+			return r.helperAsserts(call)
 		}
 	}
 	return false
+}
+
+// helperAsserts resolves the helper a call refers to and reports whether
+// its body can fail the test.
+func (r *resolver) helperAsserts(call *ast.CallExpr) bool {
+	switch fun := call.Fun.(type) {
+	case *ast.Ident:
+		// A call in this package.
+		return r.packageAsserts(r.current, fun.Name)
+	case *ast.SelectorExpr:
+		// A call in another package: promtest.RequireDelta(t, ...).
+		id, ok := fun.X.(*ast.Ident)
+		if !ok {
+			return false
+		}
+		pkg, ok := r.packages[r.current]
+		if !ok {
+			return false
+		}
+		importPath, ok := pkg.imports[id.Name]
+		if !ok {
+			return false
+		}
+		dir := r.dirForImport(importPath)
+		if dir == "" {
+			return false
+		}
+		return r.packageAsserts(dir, fun.Sel.Name)
+	}
+	return false
+}
+
+// dirForImport maps an import path onto the directory that holds it.
+func (r *resolver) dirForImport(importPath string) string {
+	if importPath == modulePath {
+		return r.root
+	}
+	if !strings.HasPrefix(importPath, modulePath+"/") {
+		return ""
+	}
+	rel := strings.TrimPrefix(importPath, modulePath+"/")
+	return filepath.Join(r.root, rel)
+}
+
+// packageAsserts reports whether the named function of a package can fail
+// the test.
+func (r *resolver) packageAsserts(dir, name string) bool {
+	pkg, ok := r.packages[dir]
+	if !ok {
+		return false
+	}
+	fn, ok := pkg.helpers[name]
+	if !ok {
+		return false
+	}
+
+	key := dir + ":" + name
+	if r.visiting[key] {
+		// A cycle: assume it asserts, so a recursive helper does not
+		// make every test that calls it vacuous.
+		return true
+	}
+	r.visiting[key] = true
+	defer delete(r.visiting, key)
+
+	return r.asserted(fn.Body)
+}
+
+func takesTestingT(fn *ast.FuncDecl) bool {
+	if fn.Type.Params == nil || len(fn.Type.Params.List) != 1 {
+		return false
+	}
+	field := fn.Type.Params.List[0]
+	if len(field.Names) != 1 || field.Names[0].Name != "t" {
+		return false
+	}
+	star, ok := field.Type.(*ast.StarExpr)
+	if !ok {
+		return false
+	}
+	sel, ok := star.X.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	pkg, ok := sel.X.(*ast.Ident)
+	return ok && pkg.Name == "testing" && sel.Sel.Name == "T"
+}
+
+func isTRun(call *ast.CallExpr) bool {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "Run" {
+		return false
+	}
+	id, ok := sel.X.(*ast.Ident)
+	return ok && id.Name == "t"
 }

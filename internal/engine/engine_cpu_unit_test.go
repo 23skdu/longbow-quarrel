@@ -86,8 +86,13 @@ func TestCPUEngine_ForwardBatch(t *testing.T) {
 func TestCPUEngine_Lifecycle(t *testing.T) {
 	ctx := device.NewContext()
 	e := &CPUEngine{ctx: ctx, cache: &PagedKVCache{}}
-	_ = e.cache.Init(ctx, config.Config{Layers: 1})
+	if err := e.cache.Init(ctx, config.Config{Layers: 1}); err != nil {
+		t.Fatalf("the cache failed to initialise: %v", err)
+	}
 	e.Close() // Should not panic
+	if e.cache.initialized {
+		t.Error("the cache is still initialised after the engine was closed")
+	}
 }
 
 func TestCPUEngine_PrefillAndKVCache(t *testing.T) {

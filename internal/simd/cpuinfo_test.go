@@ -46,8 +46,21 @@ func TestReadCPUFlags(t *testing.T) {
 	if flags == "" {
 		t.Skip("not on Linux/Darwin or CPU info not available")
 	}
-	if !strings.Contains(flags, "avx2") && !strings.Contains(flags, "asimd") && !strings.Contains(flags, "neon") {
-		t.Logf("No SIMD flags found: %s", flags[:min(len(flags), 200)])
+
+	// The flags have to name the instruction sets the detection claims.
+	// The two paths read the file differently: the detection looks at the
+	// runtime, the flags come from /proc/cpuinfo or sysctl. If they
+	// disagree, one of them is wrong.
+	if HasAVX2() && !strings.Contains(flags, "avx2") && !strings.Contains(flags, "AVX2") {
+		t.Errorf("the CPU reports AVX2 but the flags do not mention it: %s", flags[:min(len(flags), 200)])
+	}
+	if HasAVX512() && !strings.Contains(flags, "avx512f") && !strings.Contains(flags, "AVX512F") {
+		t.Errorf("the CPU reports AVX-512 but the flags do not mention it: %s", flags[:min(len(flags), 200)])
+	}
+
+	// A flag line that names nothing is a failure, not a curiosity.
+	if !strings.ContainsAny(flags, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ") {
+		t.Errorf("the flags hold no flag at all: %q", flags)
 	}
 }
 

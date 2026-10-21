@@ -73,9 +73,17 @@ func TestContinuousBatchManager_AbortAll(t *testing.T) {
 }
 
 func TestContinuousBatchManager_Preemption(t *testing.T) {
-	// Dummy for coverage
 	mgr := NewContinuousBatchManager()
-	_, _ = mgr.Step(0, nil, nil)
+
+	// A batch size of zero leaves no room for anything: the step must
+	// not build a descriptor.
+	desc, err := mgr.Step(0, nil, nil)
+	if err != nil {
+		t.Errorf("a step with a batch size of zero failed: %v", err)
+	}
+	if desc != nil {
+		t.Errorf("a step with a batch size of zero returned a descriptor: %v", desc)
+	}
 }
 
 func TestContinuousBatchManager_ChunkedPrefill(t *testing.T) {

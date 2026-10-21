@@ -468,9 +468,10 @@ func TestMMapCloseIsIdempotent(t *testing.T) {
 func TestOpenCountForSelf(t *testing.T) {
 	got := OpenCountFor("/proc/self/exe")
 	if got < 0 {
-		t.Skip("fd probe unavailable")
+		// The probe reads /proc/self/fd, which only exists on Linux.
+		if runtime.GOOS != "linux" {
+			t.Skip("the file descriptor probe is Linux only")
+		}
+		t.Fatalf("the file descriptor probe failed on Linux: %d", got)
 	}
-	// The launcher of the test binary holds /proc/self/exe somewhere;
-	// anything positive or zero is fine, correctness is: no error.
-	_ = got
 }

@@ -22,16 +22,28 @@ func FuzzPagedKVCache_TurboQuant(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, heads, headDim, layers, windowSize int) {
 		if heads <= 0 || heads > 64 {
-			t.Skip("Invalid heads")
+			// A skip inside a fuzz target discards the seed, so the corpus
+			// never grows for this input. A plain return is what the
+			// invalid-input path needs.
+			return
 		}
 		if headDim <= 0 || headDim > 512 {
-			t.Skip("Invalid headDim")
+			// A skip inside a fuzz target discards the seed, so the corpus
+			// never grows for this input. A plain return is what the
+			// invalid-input path needs.
+			return
 		}
 		if layers <= 0 || layers > 32 {
-			t.Skip("Invalid layers")
+			// A skip inside a fuzz target discards the seed, so the corpus
+			// never grows for this input. A plain return is what the
+			// invalid-input path needs.
+			return
 		}
 		if windowSize < 16 || windowSize > 4096 {
-			t.Skip("Invalid windowSize")
+			// A skip inside a fuzz target discards the seed, so the corpus
+			// never grows for this input. A plain return is what the
+			// invalid-input path needs.
+			return
 		}
 
 		ctx := device.NewContext()
