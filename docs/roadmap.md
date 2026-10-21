@@ -105,12 +105,12 @@ the gap for each blocker are in
 
 The gap that dominates the rest is the memory bandwidth of the scan. At
 250k × 384 with sixteen probes the scan reads twelve megabytes per
-query, and that is the floor for a float32 store: the query cannot go
-below the time it takes to read the data it has to look at. The next
-step is a half-precision store for the scan, which would halve the
-traffic. The second gap is the bandwidth of the complex type, which is
-four times that of float32 on the CPU — the float32 path the GPU
-already has is the answer.
+query, and at 1.10 ms that is the rate a sequential read of that size
+gets out of this host's memory: the query is at the floor of what a
+float32 store can do. Two things would take it under the target — a
+store in half precision, or fewer probes. The second gap is the
+bandwidth of the complex type, which is four times that of float32 on
+the CPU — the float32 path the GPU already has is the answer.
 
 The verification matrix for these: the consolidated suite keeps all its
 gates green, `internal/vector` stays at or above 80 % coverage (it is at
@@ -215,6 +215,7 @@ Cutting a tag is a release decision, not a documentation edit.
 | **Speculative decoding** | Wired end to end through `-draft-model` and the API's `speculative` field, with the correct `min(1, p_target/p_draft)` acceptance rule and a residual correction. |
 | **The multi-device flags** | `-devices 0,1`, `-tp-size 2` and `-pp-stages 2` now exit with an error instead of pretending to shard a model. The managers that could have done it are deleted: the inference engine loads the whole model onto one device. |
 | **The audits and the activation logger** | Made real: `-activation-log` writes the activations as JSON, and the health audit reports on the logit distribution. |
+| **The vector search** | The distances have hand-written AVX2 and AVX-512 kernels, the complex type is stored as split planes, the TurboQuant distance is asymmetric with a lookup table, the index is memory mapped and the GPU has batch kernels for the scan and the k-means. The inverted list is stored in the order it is scanned, so the scan is a sequential read, and the TurboQuant query matrices are built once per index instead of once per query. The TurboQuant HNSW search runs at 16,156 queries per second. |
 | **The observability surface** | 133 Prometheus metrics, a Grafana dashboard over all of them, and a drift checker that fails the build when the dashboard, the Helm chart and the code disagree. Every metric is written by production code, and a static test says so. |
 | **The configuration** | Every field of `config.Config` is either read or gone. The precision mode, the seven debug switches and the grouped-expert metadata were write-only; they are deleted or reported in the log. The stop tokens can be set from the command line and from the API, the maximum token count is the engine's default, and the KV cache type is a setting that reaches the allocation. |
 | **The dead code** | The Arrow Flight client, the multi-GPU managers, the NCCL wrapper, the second radix cache, the FP8 and TurboQuant quantizers, the quality evaluator and the mock engine in the production package are gone: about 4,750 lines. What is left is a gate: the reachability analysis fails the build when a new unreachable function appears. |

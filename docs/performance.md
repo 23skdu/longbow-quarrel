@@ -375,11 +375,14 @@ they are built once. The TurboQuant HNSW search went from 1,106 QPS to
 
 What is missing is the *speed*. The gap that dominates is the memory
 bandwidth of the scan: at 250k × 384 with sixteen probes the scan reads
-twelve megabytes per query, and that is the floor for a float32 store —
-the query cannot go below the time it takes to read the data it has to
-look at. The next step is a half-precision store for the scan, which
-would halve the traffic. The second gap is that the complex type is
-four times the bandwidth of float32; the GPU already has a float32 path.
+twelve megabytes per query, and at 1.10 ms that is the rate a sequential
+read of that size gets out of this host's memory. The query is at the
+floor of what a float32 store can do: it cannot go below the time it
+takes to read the data it has to look at. Two things would take it under
+the target — a store in half precision (half the traffic) or fewer
+probes (less traffic, and less recall). The second gap is that the
+complex type is four times the bandwidth of float32; the GPU already has
+a float32 path.
 
 The measurements above are the ones this document claims, and the
 commands above reproduce them.
