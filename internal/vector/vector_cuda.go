@@ -31,6 +31,7 @@ int  vectorCudaInit(void);
 void* vectorMalloc(size_t bytes);
 void  vectorFree(void* p);
 int   vectorUpload(void* dst, const void* src, size_t bytes);
+int   vectorUploadChunked(void* dst, const void* src, size_t bytes, int chunks);
 int   vectorDownload(void* dst, const void* src, size_t bytes);
 int   vectorMemset32(void* dst, size_t bytes);
 int   vectorSync(void);
@@ -136,7 +137,9 @@ func gpuStageFloat32CUDA(rows [][]float32, dim int) (interface{}, bool) {
 	if dev == nil {
 		return nil, false
 	}
-	if C.vectorUpload(dev, unsafe.Pointer(&host[0]), bytes) != 0 {
+	// The copy is split into chunks: the driver stages one while the
+	// device takes the last.
+	if C.vectorUploadChunked(dev, unsafe.Pointer(&host[0]), bytes, 8) != 0 {
 		C.vectorFree(dev)
 		return nil, false
 	}

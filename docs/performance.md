@@ -333,7 +333,7 @@ build adds the wider ones.
 | IVF, TurboQuant | 29.3 ms | 132 ms | 2.65 ms (377 QPS) |
 | IVF, complex128 | 65.3 ms | 288 ms | 5.76 ms (174 QPS) |
 | IVF build (float32, CPU) | 249 ms | 618 ms | — |
-| IVF build (float32, CUDA) | 146 ms | 416 ms | — |
+| IVF build (float32, CUDA) | 123 ms | 317 ms | — |
 | HNSW, float32 (50,000 nodes) | 1.40 ms | 1.88 ms | 37.7 µs (26,525 QPS) |
 | HNSW, TurboQuant (50,000 nodes) | 2.07 ms | 3.09 ms | 61.9 µs (16,156 QPS) |
 | HNSW, complex128 (50,000 nodes) | 2.36 ms | 4.83 ms | 96.6 µs (10,350 QPS) |
@@ -350,7 +350,7 @@ The HNSW numbers are the ones the matrix at 50,000 nodes, measured with
 | **P0-01** | 250k IVF query under 500 µs | **222 µs** at 128 dimensions, **1.10 ms** at 384 (911 QPS) | at 128 |
 | **P0-02** | 250k complex128 flat search above 500 QPS | **25 QPS** single, **172 QPS** batched | no — and the target is not reachable: the scan reads 1.5 GB, so 500 QPS would need 750 GB/s |
 | **P0-03** | TurboQuant HNSW above 10,000 QPS, 7.8× compression | **16,156 QPS** at 50,000 nodes; the compression is kept | yes |
-| **P0-04** | IVF construction on 250k×384 under 50 ms | **618 ms** on the CPU, **416 ms** with the GPU (the transfer of the 384 MB dataset is 159 ms of it) | no |
+| **P0-04** | IVF construction on 250k×384 under 50 ms | **618 ms** on the CPU, **317 ms** with the GPU (the transfer of the 384 MB dataset is 150 ms of it) | no |
 | **P0-05** | a million-vector index inside a 256 MB working set | the store is memory mapped and the Go heap stays flat: 100,000 × 384 vectors load into a 150 MB file and the heap does not grow | yes |
 
 The implementations the criteria ask for are in the tree: the AVX2 and
@@ -382,6 +382,19 @@ The flat buffer, the copy of the rows into the order the lists are
 scanned in, was made by one goroutine: 384 MB of scattered reads and
 sequential writes took 153 ms of the build. It is spread over the
 workers now, and it takes 35 ms.
+
+The upload of the dataset to the device went through the staging buffer
+the driver owns, and the driver could only stage so much of it at a
+time. The copy is split into eight chunks on eight streams now, so the
+driver stages one while the device takes the last: the staging of the
+384 MB went from 159 ms to 150 ms.
+
+The k-means pass gave every thread a sample and had it read every
+centroid from the global memory, so the thirty-two threads of a warp
+read thirty-two different centroids and every load touched thirty-two
+cache lines. A warp reads one sample now, the thirty-two lanes split
+its dimension and the centroids come from the shared memory: the pass
+over the five thousand samples went from 37 ms to 5 ms.
 
 The HNSW search rebuilt the TurboQuant rotation and the QJL matrix for
 every query: two allocations of 147,000 and 12,000 floats each, which

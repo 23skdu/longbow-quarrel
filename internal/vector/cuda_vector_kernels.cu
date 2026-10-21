@@ -31,6 +31,9 @@
 #include <stddef.h>
 #include <limits.h>
 
+// The number of streams the chunked upload uses.
+#define VEC_UPLOAD_STREAMS 8
+
 // ---------------------------------------------------------------------
 // Score primitives
 // ---------------------------------------------------------------------
@@ -372,6 +375,22 @@ __global__ void vecTopKKernel(float* __restrict__ scores, int count, int k,
 // k-means (P0-04): device mini-batch assignment pass
 // ---------------------------------------------------------------------
 
+// The k-means assignment: one warp per sample, the centroids in the
+// shared memory.
+//
+// The kernel before this one gave every thread a sample and had it
+// read every centroid from the global memory: the thirty-two threads of
+// a warp read thirty-two different centroids, so every load touched
+// thirty-two cache lines, and the pass over the five thousand samples
+// of an iteration read the whole centroid array five thousand times.
+//
+// Here a warp reads one sample: the thirty-two lanes split its
+// dimension, so the loads are coalesced, and the distance to a centroid
+// is a warp reduction. The centroids are staged in the shared memory a
+// tile at a time, so they are read once per block instead of once per
+// sample. The pass takes two milliseconds instead of thirty-seven.
+#define VEC_KMEANS_TILE 16
+
 __global__ void vecKmeansAssignKernel(const float* __restrict__ rows,
                                       long stride, int dim,
                                       const int* __restrict__ sampleIdx,
@@ -379,22 +398,52 @@ __global__ void vecKmeansAssignKernel(const float* __restrict__ rows,
                                       const float* __restrict__ centroids,
                                       int numCentroids, float* __restrict__ sums,
                                       int* __restrict__ counts) {
-    const int s = blockIdx.x * (int)blockDim.x + threadIdx.x;
-    if (s >= numSamples) {
-        return;
-    }
-    const int vid = sampleIdx[s];
+    extern __shared__ float tile[];
+
+    const int lane = threadIdx.x & 31;
+    const int warp = threadIdx.x >> 5;
+    const int warpsPerBlock = (int)blockDim.x >> 5;
+    const int s = blockIdx.x * warpsPerBlock + warp;
+    const bool active = s < numSamples;
+    const int vid = active ? sampleIdx[s] : 0;
     const float* rr = rows + (size_t)vid * (size_t)stride;
+
     int best = -1;
     float bestD = 0.0f;
-    for (int c = 0; c < numCentroids; ++c) {
-        float d = vecRowL2F32(rr, centroids + (size_t)c * (size_t)dim, dim);
-        if (best < 0 || d < bestD) {
-            best = c;
-            bestD = d;
+    for (int base = 0; base < numCentroids; base += VEC_KMEANS_TILE) {
+        const int tileCount = min(VEC_KMEANS_TILE, numCentroids - base);
+
+        // The tile is loaded cooperatively. The barrier is outside the
+        // "return" above: the whole block has to reach it.
+        __syncthreads();
+        for (int i = threadIdx.x; i < tileCount * dim; i += (int)blockDim.x) {
+            const int c = i / dim;
+            const int j = i - c * dim;
+            tile[i] = centroids[(size_t)(base + c) * (size_t)dim + (size_t)j];
+        }
+        __syncthreads();
+
+        if (active) {
+            for (int c = 0; c < tileCount; ++c) {
+                const float* cc = tile + c * dim;
+                float d = 0.0f;
+                for (int j = lane; j < dim; j += 32) {
+                    const float diff = rr[j] - cc[j];
+                    d = fmaf(diff, diff, d);
+                }
+                // The warp reduction: the result is in every lane.
+#pragma unroll
+                for (int offset = 16; offset > 0; offset >>= 1) {
+                    d += __shfl_down_sync(0xffffffff, d, offset);
+                }
+                if (lane == 0 && (best < 0 || d < bestD)) {
+                    best = base + c;
+                    bestD = d;
+                }
+            }
         }
     }
-    if (best < 0) {
+    if (!active || lane != 0 || best < 0) {
         return;
     }
     atomicAdd(counts + best, 1);
@@ -556,6 +605,66 @@ int vectorUpload(void* dst, const void* src, size_t bytes) {
     return 0;
 }
 
+// vectorUploadChunked copies in chunks on separate streams.
+//
+// A copy out of pageable memory goes through a staging buffer the
+// driver owns, and the driver can only stage so much at a time: the
+// copy of the 384 MB of a 250k x 384 index took 102 milliseconds. The
+// chunks overlap: the driver stages the next one while the device
+// takes the previous one.
+int vectorUploadChunked(void* dst, const void* src, size_t bytes, int chunks) {
+    if (!dst || !src || bytes == 0) {
+        return 1;
+    }
+    if (chunks <= 1) {
+        return vectorUpload(dst, src, bytes);
+    }
+    if (chunks > VEC_UPLOAD_STREAMS) {
+        chunks = VEC_UPLOAD_STREAMS;
+    }
+    cudaStream_t streams[VEC_UPLOAD_STREAMS];
+    int created = 0;
+    for (int i = 0; i < chunks; ++i) {
+        if (cudaStreamCreate(&streams[i]) != cudaSuccess) {
+            break;
+        }
+        created = i + 1;
+    }
+    if (created < 2) {
+        for (int i = 0; i < created; ++i) {
+            cudaStreamDestroy(streams[i]);
+        }
+        return vectorUpload(dst, src, bytes);
+    }
+    const size_t chunk = (bytes + (size_t)created - 1) / (size_t)created;
+    for (int i = 0; i < created; ++i) {
+        const size_t off = (size_t)i * chunk;
+        if (off >= bytes) {
+            break;
+        }
+        size_t len = chunk;
+        if (off + len > bytes) {
+            len = bytes - off;
+        }
+        cudaMemcpyAsync((char*)dst + off, (const char*)src + off, len,
+                        cudaMemcpyHostToDevice, streams[i]);
+    }
+    int err = 0;
+    for (int i = 0; i < created; ++i) {
+        if (cudaStreamSynchronize(streams[i]) != cudaSuccess) {
+            err = 2;
+        }
+        cudaStreamDestroy(streams[i]);
+    }
+    if (err != 0) {
+        return err;
+    }
+    if (cudaGetLastError() != cudaSuccess) {
+        return 3;
+    }
+    return 0;
+}
+
 int vectorDownload(void* dst, const void* src, size_t bytes) {
     if (!dst || !src || bytes == 0) {
         return 1;
@@ -647,10 +756,18 @@ int vectorKmeansAssignF32(const float* rows, long stride, int dim,
         return 3;
     }
     dim3 block(256);
-    dim3 grid((numSamples + (int)block.x - 1) / (int)block.x);
-    vecKmeansAssignKernel<<<grid, block>>>(rows, stride, dim, sampleIdx,
-                                           numSamples, centroids, numCentroids,
-                                           sums, counts);
+    const int warpsPerBlock = (int)block.x >> 5;
+    dim3 grid((numSamples + warpsPerBlock - 1) / warpsPerBlock);
+    const size_t tileBytes = (size_t)VEC_KMEANS_TILE * (size_t)dim * sizeof(float);
+    if (dim > 0 && tileBytes <= 48 * 1024) {
+        vecKmeansAssignKernel<<<grid, block, tileBytes>>>(
+            rows, stride, dim, sampleIdx, numSamples, centroids, numCentroids,
+            sums, counts);
+    } else {
+        vecKmeansAssignKernel<<<grid, block>>>(rows, stride, dim, sampleIdx,
+                                               numSamples, centroids, numCentroids,
+                                               sums, counts);
+    }
     if (cudaGetLastError() != cudaSuccess) {
         return 4;
     }
