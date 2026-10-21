@@ -50,10 +50,17 @@ type distanceKernelSet struct {
 	// [numQ][count] order (out[q*count+r]). qs holds numQ queries of
 	// dim floats laid out back to back; the buffer may be longer than
 	// the block of queries in it.
-	mqDotFloat32    func(qs []float32, numQ, dim int, rows []float32, stride, count int, out []float32) bool
-	mqL2Float32     func(qs []float32, numQ, dim int, rows []float32, stride, count int, out []float32) bool
-	mqDotComplexSoA func(qsRe, qsIm []float64, numQ int, re, im []float64, dim, start, end int, out []float32) bool
-	mqL2ComplexSoA  func(qsRe, qsIm []float64, numQ int, re, im []float64, dim, start, end int, out []float32) bool
+	mqDotFloat32 func(qs []float32, numQ, dim int, rows []float32, stride, count int, out []float32) bool
+	mqL2Float32  func(qs []float32, numQ, dim int, rows []float32, stride, count int, out []float32) bool
+	// The same, with the queries in the outer loop. The search wants
+	// the rows in the outer loop, the assignment of an index wants the
+	// queries there: there the queries are the vectors and the rows
+	// the centroids, and the other order reads the whole query block
+	// once per centroid.
+	mqDotFloat32QueriesOuter func(qs []float32, numQ, dim int, rows []float32, stride, count int, out []float32) bool
+	mqL2Float32QueriesOuter  func(qs []float32, numQ, dim int, rows []float32, stride, count int, out []float32) bool
+	mqDotComplexSoA          func(qsRe, qsIm []float64, numQ int, re, im []float64, dim, start, end int, out []float32) bool
+	mqL2ComplexSoA           func(qsRe, qsIm []float64, numQ int, re, im []float64, dim, start, end int, out []float32) bool
 }
 
 var (

@@ -367,6 +367,43 @@ func TestKernelParityMQF32PartialBlock(t *testing.T) {
 	}
 }
 
+// TestKernelParityMQF32QueriesOuter checks the kernel with the queries
+// in the outer loop: the assignment of an index uses it, and there the
+// queries are the vectors and the rows are the centroids.
+func TestKernelParityMQF32QueriesOuter(t *testing.T) {
+	rng := rand.New(rand.NewSource(47))
+	for _, entry := range []struct {
+		name string
+		set  *distanceKernelSet
+	}{
+		{"avx2", avx2KernelSet},
+		{"avx512", avx512KernelSet},
+	} {
+		t.Run(entry.name, func(t *testing.T) {
+			ks := kernelOrSkip(t, entry.set, entry.name)
+			for _, tc := range []struct {
+				numQ, count, dim, stride int
+			}{
+				{1, 16, 16, 16}, {3, 9, 17, 17}, {4, 15, 63, 63}, {2, 512, 64, 64},
+			} {
+				rows := parityRows(tc.count, tc.stride, rng)
+				qs := make([]float32, 0, tc.numQ*tc.dim)
+				want := make([]float32, 0, tc.numQ*tc.count)
+				for qi := 0; qi < tc.numQ; qi++ {
+					q := parityQuery(tc.dim, rng)
+					qs = append(qs, q...)
+					want = append(want, scalarBlockScores(false, q, rows, tc.stride, tc.count)...)
+				}
+				out := make([]float32, tc.numQ*tc.count)
+				if !ks.mqL2Float32QueriesOuter(qs, tc.numQ, tc.dim, rows, tc.stride, tc.count, out) {
+					t.Fatalf("%s: mqL2QueriesOuter rejected a legal block", entry.name)
+				}
+				closeBlock(t, "mqQOuter", out, want, parityTolF32)
+			}
+		})
+	}
+}
+
 func TestKernelParityComplexSoA(t *testing.T) {
 	rng := rand.New(rand.NewSource(51))
 	for _, entry := range []struct {

@@ -15,6 +15,8 @@ void vec_batch_dot_c128_soa_avx512(const double* qRe, const double* qIm, const d
 void vec_batch_l2_c128_soa_avx512(const double* qRe, const double* qIm, const double* re, const double* im, int dim, int m, double* out);
 void vec_mq_dot_f32_avx512(const float* qs, int numQ, const float* rows, long rowStride, int dim, int m, float* out);
 void vec_mq_l2_f32_avx512(const float* qs, int numQ, const float* rows, long rowStride, int dim, int m, float* out);
+void vec_mq_dot_f32_avx512_qouter(const float* qs, int numQ, const float* rows, long rowStride, int dim, int m, float* out);
+void vec_mq_l2_f32_avx512_qouter(const float* qs, int numQ, const float* rows, long rowStride, int dim, int m, float* out);
 void vec_mq_dot_c128_soa_avx512(const double* qsRe, const double* qsIm, int numQ, const double* re, const double* im, int dim, int m, float* out);
 void vec_mq_l2_c128_soa_avx512(const double* qsRe, const double* qsIm, int numQ, const double* re, const double* im, int dim, int m, float* out);
 float vec_turbo_dot_avx512(const int8_t* aCodes, const int8_t* bCodes, const uint64_t* aWords, const uint64_t* bWords, int dim, int wordsPerRow, int totalBits, float scaleA, float scaleB, float qjlScaleA, float qjlScaleB);
@@ -32,6 +34,8 @@ void vec_batch_dot_c128_soa_avx2(const double* qRe, const double* qIm, const dou
 void vec_batch_l2_c128_soa_avx2(const double* qRe, const double* qIm, const double* re, const double* im, int dim, int m, double* out);
 void vec_mq_dot_f32_avx2(const float* qs, int numQ, const float* rows, long rowStride, int dim, int m, float* out);
 void vec_mq_l2_f32_avx2(const float* qs, int numQ, const float* rows, long rowStride, int dim, int m, float* out);
+void vec_mq_dot_f32_avx2_qouter(const float* qs, int numQ, const float* rows, long rowStride, int dim, int m, float* out);
+void vec_mq_l2_f32_avx2_qouter(const float* qs, int numQ, const float* rows, long rowStride, int dim, int m, float* out);
 void vec_mq_dot_c128_soa_avx2(const double* qsRe, const double* qsIm, int numQ, const double* re, const double* im, int dim, int m, float* out);
 void vec_mq_l2_c128_soa_avx2(const double* qsRe, const double* qsIm, int numQ, const double* re, const double* im, int dim, int m, float* out);
 float vec_turbo_dot_avx2(const int8_t* aCodes, const int8_t* bCodes, const uint64_t* aWords, const uint64_t* bWords, int dim, int wordsPerRow, int totalBits, float scaleA, float scaleB, float qjlScaleA, float qjlScaleB);
@@ -79,6 +83,12 @@ func init() {
 			},
 			mqL2Float32: func(qs []float32, numQ, dim int, rows []float32, stride, count int, out []float32) bool {
 				return callMQF32AVX512(true, qs, numQ, dim, rows, stride, count, out)
+			},
+			mqDotFloat32QueriesOuter: func(qs []float32, numQ, dim int, rows []float32, stride, count int, out []float32) bool {
+				return callMQF32AVX512QOuter(false, qs, numQ, dim, rows, stride, count, out)
+			},
+			mqL2Float32QueriesOuter: func(qs []float32, numQ, dim int, rows []float32, stride, count int, out []float32) bool {
+				return callMQF32AVX512QOuter(true, qs, numQ, dim, rows, stride, count, out)
 			},
 			mqDotComplexSoA: func(qsRe, qsIm []float64, numQ int, re, im []float64, dim, start, end int, out []float32) bool {
 				return callMQCSoAAVX512(false, qsRe, qsIm, numQ, re, im, dim, start, end, out)
@@ -132,6 +142,12 @@ func init() {
 			},
 			mqL2Float32: func(qs []float32, numQ, dim int, rows []float32, stride, count int, out []float32) bool {
 				return callMQF32AVX2(true, qs, numQ, dim, rows, stride, count, out)
+			},
+			mqDotFloat32QueriesOuter: func(qs []float32, numQ, dim int, rows []float32, stride, count int, out []float32) bool {
+				return callMQF32AVX2QOuter(false, qs, numQ, dim, rows, stride, count, out)
+			},
+			mqL2Float32QueriesOuter: func(qs []float32, numQ, dim int, rows []float32, stride, count int, out []float32) bool {
+				return callMQF32AVX2QOuter(true, qs, numQ, dim, rows, stride, count, out)
 			},
 			mqDotComplexSoA: func(qsRe, qsIm []float64, numQ int, re, im []float64, dim, start, end int, out []float32) bool {
 				return callMQCSoAAVX2(false, qsRe, qsIm, numQ, re, im, dim, start, end, out)
@@ -230,6 +246,36 @@ func callMQF32AVX512(l2 bool, qs []float32, numQ, dim int, rows []float32, strid
 		)
 	} else {
 		C.vec_mq_dot_f32_avx512(
+			(*C.float)(unsafe.Pointer(&qs[0])),
+			C.int(numQ),
+			(*C.float)(unsafe.Pointer(&rows[0])),
+			C.long(stride), C.int(dim), C.int(count),
+			(*C.float)(unsafe.Pointer(&out[0])),
+		)
+	}
+	return true
+}
+
+// callMQF32AVX512QOuter runs the AVX-512 multi-query kernel with the
+// queries in the outer loop: the assignment of an index uses it, and
+// there the queries are the vectors.
+func callMQF32AVX512QOuter(l2 bool, qs []float32, numQ, dim int, rows []float32, stride, count int, out []float32) bool {
+	if numQ <= 0 || dim <= 0 || len(qs) < numQ*dim {
+		return false
+	}
+	if stride < dim || count <= 0 || len(rows) < count*stride || len(out) < numQ*count {
+		return false
+	}
+	if l2 {
+		C.vec_mq_l2_f32_avx512_qouter(
+			(*C.float)(unsafe.Pointer(&qs[0])),
+			C.int(numQ),
+			(*C.float)(unsafe.Pointer(&rows[0])),
+			C.long(stride), C.int(dim), C.int(count),
+			(*C.float)(unsafe.Pointer(&out[0])),
+		)
+	} else {
+		C.vec_mq_dot_f32_avx512_qouter(
 			(*C.float)(unsafe.Pointer(&qs[0])),
 			C.int(numQ),
 			(*C.float)(unsafe.Pointer(&rows[0])),
@@ -441,6 +487,35 @@ func callMQF32AVX2(l2 bool, qs []float32, numQ, dim int, rows []float32, stride,
 		)
 	} else {
 		C.vec_mq_dot_f32_avx2(
+			(*C.float)(unsafe.Pointer(&qs[0])),
+			C.int(numQ),
+			(*C.float)(unsafe.Pointer(&rows[0])),
+			C.long(stride), C.int(dim), C.int(count),
+			(*C.float)(unsafe.Pointer(&out[0])),
+		)
+	}
+	return true
+}
+
+// callMQF32AVX2QOuter runs the AVX-2 multi-query kernel with the
+// queries in the outer loop.
+func callMQF32AVX2QOuter(l2 bool, qs []float32, numQ, dim int, rows []float32, stride, count int, out []float32) bool {
+	if numQ <= 0 || dim <= 0 || len(qs) < numQ*dim {
+		return false
+	}
+	if stride < dim || count <= 0 || len(rows) < count*stride || len(out) < numQ*count {
+		return false
+	}
+	if l2 {
+		C.vec_mq_l2_f32_avx2_qouter(
+			(*C.float)(unsafe.Pointer(&qs[0])),
+			C.int(numQ),
+			(*C.float)(unsafe.Pointer(&rows[0])),
+			C.long(stride), C.int(dim), C.int(count),
+			(*C.float)(unsafe.Pointer(&out[0])),
+		)
+	} else {
+		C.vec_mq_dot_f32_avx2_qouter(
 			(*C.float)(unsafe.Pointer(&qs[0])),
 			C.int(numQ),
 			(*C.float)(unsafe.Pointer(&rows[0])),

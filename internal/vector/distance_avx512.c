@@ -339,3 +339,110 @@ void vec_mq_l2_c128_soa_avx512(const double* qsRe, const double* qsIm, int numQ,
         }
     }
 }
+
+// ---- multi-query, the queries in the outer loop -------------------------
+//
+// The kernel above walks the rows in the outer loop, which is what the
+// search wants. The assignment of an index wants the opposite: there
+// the queries are the vectors and the rows are the centroids, and the
+// order above reads the whole query block once per centroid.
+
+void vec_mq_dot_f32_avx512_qouter(const float* qs, int numQ, const float* rows, long rowStride, int dim, int m, float* out) {
+    int q = 0;
+    for (; q <= numQ - 4; q += 4) {
+        const float* q0 = qs + (long)(q + 0) * dim;
+        const float* q1 = qs + (long)(q + 1) * dim;
+        const float* q2 = qs + (long)(q + 2) * dim;
+        const float* q3 = qs + (long)(q + 3) * dim;
+        for (int r = 0; r < m; r++) {
+            const float* row = rows + (size_t)r * (size_t)rowStride;
+            __m512 s0 = _mm512_setzero_ps();
+            __m512 s1 = _mm512_setzero_ps();
+            __m512 s2 = _mm512_setzero_ps();
+            __m512 s3 = _mm512_setzero_ps();
+            int i = 0;
+            for (; i <= dim - 16; i += 16) {
+                __m512 rv = _mm512_loadu_ps(&row[i]);
+                s0 = _mm512_fmadd_ps(_mm512_loadu_ps(&q0[i]), rv, s0);
+                s1 = _mm512_fmadd_ps(_mm512_loadu_ps(&q1[i]), rv, s1);
+                s2 = _mm512_fmadd_ps(_mm512_loadu_ps(&q2[i]), rv, s2);
+                s3 = _mm512_fmadd_ps(_mm512_loadu_ps(&q3[i]), rv, s3);
+            }
+            float acc0 = vec_hsum16_avx512(s0);
+            float acc1 = vec_hsum16_avx512(s1);
+            float acc2 = vec_hsum16_avx512(s2);
+            float acc3 = vec_hsum16_avx512(s3);
+            for (; i < dim; i++) {
+                float rv = row[i];
+                acc0 += q0[i] * rv;
+                acc1 += q1[i] * rv;
+                acc2 += q2[i] * rv;
+                acc3 += q3[i] * rv;
+            }
+            out[(long)(q + 0) * m + r] = acc0;
+            out[(long)(q + 1) * m + r] = acc1;
+            out[(long)(q + 2) * m + r] = acc2;
+            out[(long)(q + 3) * m + r] = acc3;
+        }
+    }
+    for (; q < numQ; q++) {
+        const float* qq = qs + (long)q * dim;
+        for (int r = 0; r < m; r++) {
+            out[(long)q * m + r] = vec_dot_f32_avx512_inline(qq, rows + (size_t)r * (size_t)rowStride, dim);
+        }
+    }
+}
+
+void vec_mq_l2_f32_avx512_qouter(const float* qs, int numQ, const float* rows, long rowStride, int dim, int m, float* out) {
+    int q = 0;
+    for (; q <= numQ - 4; q += 4) {
+        const float* q0 = qs + (long)(q + 0) * dim;
+        const float* q1 = qs + (long)(q + 1) * dim;
+        const float* q2 = qs + (long)(q + 2) * dim;
+        const float* q3 = qs + (long)(q + 3) * dim;
+        for (int r = 0; r < m; r++) {
+            const float* row = rows + (size_t)r * (size_t)rowStride;
+            __m512 s0 = _mm512_setzero_ps();
+            __m512 s1 = _mm512_setzero_ps();
+            __m512 s2 = _mm512_setzero_ps();
+            __m512 s3 = _mm512_setzero_ps();
+            int i = 0;
+            for (; i <= dim - 16; i += 16) {
+                __m512 rv = _mm512_loadu_ps(&row[i]);
+                __m512 d0 = _mm512_sub_ps(_mm512_loadu_ps(&q0[i]), rv);
+                __m512 d1 = _mm512_sub_ps(_mm512_loadu_ps(&q1[i]), rv);
+                __m512 d2 = _mm512_sub_ps(_mm512_loadu_ps(&q2[i]), rv);
+                __m512 d3 = _mm512_sub_ps(_mm512_loadu_ps(&q3[i]), rv);
+                s0 = _mm512_fmadd_ps(d0, d0, s0);
+                s1 = _mm512_fmadd_ps(d1, d1, s1);
+                s2 = _mm512_fmadd_ps(d2, d2, s2);
+                s3 = _mm512_fmadd_ps(d3, d3, s3);
+            }
+            float acc0 = vec_hsum16_avx512(s0);
+            float acc1 = vec_hsum16_avx512(s1);
+            float acc2 = vec_hsum16_avx512(s2);
+            float acc3 = vec_hsum16_avx512(s3);
+            for (; i < dim; i++) {
+                float rv = row[i];
+                float d0 = q0[i] - rv;
+                float d1 = q1[i] - rv;
+                float d2 = q2[i] - rv;
+                float d3 = q3[i] - rv;
+                acc0 += d0 * d0;
+                acc1 += d1 * d1;
+                acc2 += d2 * d2;
+                acc3 += d3 * d3;
+            }
+            out[(long)(q + 0) * m + r] = acc0;
+            out[(long)(q + 1) * m + r] = acc1;
+            out[(long)(q + 2) * m + r] = acc2;
+            out[(long)(q + 3) * m + r] = acc3;
+        }
+    }
+    for (; q < numQ; q++) {
+        const float* qq = qs + (long)q * dim;
+        for (int r = 0; r < m; r++) {
+            out[(long)q * m + r] = vec_l2_f32_avx512_inline(qq, rows + (size_t)r * (size_t)rowStride, dim);
+        }
+    }
+}

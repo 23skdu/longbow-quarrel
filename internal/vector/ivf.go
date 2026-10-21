@@ -413,7 +413,7 @@ func (idx *IVFIndex) scoreSampleCentroids(vs [][]float32, best []int, dim, numCe
 	if m == 0 || best == nil || len(best) < m {
 		return false
 	}
-	if ks == nil || ks.mqL2Float32 == nil || !idx.centroidsUniform ||
+	if ks == nil || !idx.centroidsUniform ||
 		idx.centroidsFlat == nil || dim <= 0 || numCentroids <= 0 ||
 		len(qs) < m*dim || len(out) < m*numCentroids ||
 		len(idx.centroidsFlat) < numCentroids*dim {
@@ -425,7 +425,16 @@ func (idx *IVFIndex) scoreSampleCentroids(vs [][]float32, best []int, dim, numCe
 		}
 		copy(qs[si*dim:(si+1)*dim], vs[si])
 	}
-	if !ks.mqL2Float32(qs, m, dim, idx.centroidsFlat, dim, numCentroids, out) {
+	// The queries are the outer loop here: the vectors of a block stay
+	// in the L1 while every centroid is scored against them. The other
+	// order reads the whole block once per centroid.
+	scored := false
+	if ks.mqL2Float32QueriesOuter != nil {
+		scored = ks.mqL2Float32QueriesOuter(qs, m, dim, idx.centroidsFlat, dim, numCentroids, out)
+	} else if ks.mqL2Float32 != nil {
+		scored = ks.mqL2Float32(qs, m, dim, idx.centroidsFlat, dim, numCentroids, out)
+	}
+	if !scored {
 		return false
 	}
 	for si := 0; si < m; si++ {
