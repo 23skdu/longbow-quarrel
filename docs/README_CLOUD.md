@@ -103,11 +103,11 @@ would have scraped nothing.
 
 ### Multi-Device Parallelism
 
-> **Not available.** The managers in `internal/device/multi_gpu.go` —
-> tensor parallelism (AllReduce, AllGather, Broadcast) and pipeline
-> parallelism — are implemented and unit-tested, but the inference engine
-> does not use them: it loads the whole model onto a single device and
-> never calls a collective.
+> **Not available.** The tensor-parallel and pipeline-parallel
+> managers were implemented and unit-tested, and the inference engine
+> never used them: it loads the whole model onto a single device and
+> never calls a collective. They have been deleted, so there is no code
+> that looks like it shards a model and does not.
 >
 > `-devices` with a *single* device id does work: it selects the CUDA
 > device the engine runs on. `-devices 0,1`, `-tp-size 2` and

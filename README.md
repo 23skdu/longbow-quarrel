@@ -16,15 +16,14 @@ for what has landed and what is still planned.
 > CPU binary runs real inference, the REST API is served, the Metal build
 > compiles, and the pipeline is green on every job.
 >
-> **Still outstanding — the remaining P1/P2 items are listed in full in
-> [docs/roadmap.md](docs/roadmap.md).** The four P0 items recorded there
-> are all closed: the CUDA engine now preserves the caller's
-> configuration, every produced metric is written by production code or
-> explicitly allowlisted, the Metal backend compiles and has a CPU parity
-> test, and the TPU backend has been deleted rather than left unbuildable.
->
-> The engine also had ~4,750 lines of dead code; the deletion and wiring
-> pass that removes it is recorded in the roadmap.
+> **The roadmap.** Every defect the roadmap listed is closed: the CUDA
+> engine preserves the caller's configuration, every produced metric is
+> written by production code, the Metal backend compiles and has a CPU
+> parity test, the TPU backend has been deleted rather than left
+> unbuildable, and the ~4,750 lines of dead code are gone behind a gate
+> that fails when a new one appears. What is still open — the planned
+> features and the vector-search performance targets — is in
+> [docs/roadmap.md](docs/roadmap.md).
 
 High-performance, memory-efficient LLM inference engine written in Go with native GPU acceleration (Apple Silicon Metal, NVIDIA CUDA) and optimized CPU SIMD vectorization (AVX-512, AVX2, ARM NEON).
 
@@ -67,7 +66,7 @@ see [docs/dependencies.md](docs/dependencies.md).
 - **Engine Health Audit:** Every forward pass audits its own logit distribution. A model that produces NaNs, infinities, extreme values or a flat distribution is reported in the log and in the Prometheus metrics (`logit_nan_count_total`, `logit_flat_distribution_total`, `logit_max_value`, and the rest) — all of which were previously permanently zero.
 - **Activation Logging:** `quarrel -activation-log <path>` writes a JSON file with the embedding, the per-layer activations (peak magnitude, a sample, and the NaN and Inf counts of each tensor) and the final logits, so a broken layer can be found.
 - **Speculative Decoding:** A smaller draft model proposes the next tokens and the target model verifies them in one forward pass, with the standard `min(1, p_target/p_draft)` acceptance test and a residual-distribution correction. Enable it with `-draft-model <path>`; the draft model runs on the CPU so the GPU memory stays with the target.
-- **Distributed Inference (Arrow Flight):** A Flight client, a master engine, a remote worker engine and a Flight server for single-request inference. The **sharded** tensor forward is *not* implemented on the worker side: the worker rejects it with `Unimplemented` rather than silently returning zeroed activations. See `docs/roadmap.md` (Step 57) for the exact boundary.
+- **Distributed Inference (Arrow Flight):** A Flight **server** for single-request inference. The client, the master engine and the remote worker engine have been deleted: they were never reachable from a shipped binary. The **sharded** tensor forward is *not* implemented: the worker rejects it with `Unimplemented` rather than silently returning zeroed activations. See `docs/roadmap.md` for the exact boundary.
 
 ---
 

@@ -73,10 +73,9 @@ Comprehensive comparison of Longbow-Quarrel against the top LLM inference engine
 | Streaming output | ✅ | ✅ | ✅ | ✅ | ✅ |
 | OpenAI-compatible API | ✅ | ✅ | ✅ | ✅ | ✅ |
 
-> **Multi-GPU.** The tensor-parallel and pipeline-parallel managers are
-> implemented in `internal/device/multi_gpu.go` with NCCL, but the
-> inference engine does not use them: it loads the whole model onto one
-> device. `-devices 0,1`, `-tp-size 2` and `-pp-stages 2` exit with an
+> **Multi-GPU.** The tensor-parallel and pipeline-parallel managers
+> were never used by the inference engine, which loads the whole model
+> onto one device, and they have been deleted. `-devices 0,1`, `-tp-size 2` and `-pp-stages 2` exit with an
 > error rather than pretending to shard the model. A single device can be
 > selected with `-devices N`.
 

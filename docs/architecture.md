@@ -167,7 +167,6 @@ two build-tagged implementations:
 ```
 internal/
   api/             # HTTP & Arrow Flight RPC servers
-  arrow_client/    # Arrow Flight client: the tensors, the control messages
   config/          # Model and runtime configurations
   device/          # Hardware abstractions (CUDA, Metal, CPU)
   engine/
@@ -179,7 +178,7 @@ internal/
     interface.go   # Core engine interface contracts
     kv_cache.go    # Contiguous & sliding window KV cache
     kv_cache_paged.go # Paged virtual memory KV cache
-    kv_cache_sliding_window.go # Sliding window KV cache with attention sink
+    kv_cache_sliding_window.go # The sliding window KV cache
     lora.go        # LoRA adapter management
     prompt_cache.go # Radix-tree prefix caching
     prompt_wrapper.go # Jinja2 chat template renderer
@@ -190,8 +189,7 @@ internal/
     dequant_simd.go# SIMD dequant + zero-copy MatVecMul for all quant formats
     fp8.go         # The FP8 E4M3 and E5M2 conversions
     quantize.go    # The Q4_K encoder
-    quantize_fp8.go, quantize_q6k.go, quantize_q8_0.go # The other encoders
-    quantize_turboquant.go # The TurboQuant encoder
+    quantize_q6k.go, quantize_q8_0.go # The other encoders
     reader.go      # Binary GGUF parser & tensor mmap indexer
     writer.go      # The GGUF writer: the other half of the reader
   mathx/           # Pluggable math backend: stdlib `math` vs `emlgo` (`-tags emlgo`)
