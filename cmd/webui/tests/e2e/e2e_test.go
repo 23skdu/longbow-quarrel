@@ -136,7 +136,10 @@ func TestAPIEndpointsIntegration(t *testing.T) {
 	})
 
 	t.Run("Stream endpoint sets SSE headers", func(t *testing.T) {
-		body := `{"prompt": "Hello", "max_tokens": 10, "stream": true}`
+		// The stream endpoint takes no "stream" field: it is the stream
+		// endpoint. The body is decoded strictly, so an unknown field is
+		// a 400 rather than a silently ignored typo.
+		body := `{"prompt": "Hello", "max_tokens": 10}`
 		req := httptest.NewRequest(http.MethodPost, "/api/stream", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()

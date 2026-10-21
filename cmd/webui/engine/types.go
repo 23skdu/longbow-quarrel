@@ -3,6 +3,8 @@ package engine
 import (
 	"context"
 	"errors"
+
+	"github.com/23skdu/longbow-quarrel/internal/engine"
 )
 
 // ErrQueueFull is returned by an adapter when the request queue is saturated.
@@ -48,6 +50,35 @@ type EngineAdapter interface {
 	UnloadModel(modelPath string)
 	HotSwapModel(oldModelPath, newModelPath string) error
 	Close()
+}
+
+// AdapterInfo describes a LoRA adapter that is loaded.
+//
+// The engine's own AdapterInfo is the same shape, so the WebUI does not
+// need a second type: the adapters report what the engine reports.
+type AdapterInfo = engine.AdapterInfo
+
+// AdapterLister is implemented by the adapters that can list the LoRA
+// adapters of the loaded models.
+//
+// It is an optional interface: an adapter that cannot list the adapters
+// simply does not implement it, and the browser shows an empty list.
+type AdapterLister interface {
+	ListAdapters() []AdapterInfo
+}
+
+// ListAdapters returns the LoRA adapters of every loaded model, or an
+// empty list when the backend cannot report them.
+func ListAdapters() []AdapterInfo {
+	lister, ok := GetAdapter().(AdapterLister)
+	if !ok {
+		return []AdapterInfo{}
+	}
+	adapters := lister.ListAdapters()
+	if adapters == nil {
+		return []AdapterInfo{}
+	}
+	return adapters
 }
 
 func GetAdapter() EngineAdapter {

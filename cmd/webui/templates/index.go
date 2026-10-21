@@ -3,23 +3,27 @@
 package templates
 
 import (
+	"fmt"
 	"html/template"
 	"io"
 )
 
-var indexTemplate = `
-<!DOCTYPE html>
-<html lang="en">
-<head>
+// The page is composed of parts.
+//
+// It used to be one template string: a change to the sidebar meant
+// finding the right place in a hundred and eighty lines of markup, and
+// nothing could be reused. The parts are parsed into one template set,
+// so a part can be rendered on its own.
+const (
+	headTemplate = `<head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Longbow-Quarrel WebUI</title>
     <link rel="stylesheet" href="/static/css/main.css">
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-</head>
-<body>
-    <div id="app">
-        <header class="header">
+</head>`
+
+	headerTemplate = `<header class="header">
             <div class="header-left">
                 <h1>Longbow-Quarrel</h1>
                 <span class="version">v0.0.1</span>
@@ -44,8 +48,9 @@ var indexTemplate = `
                 </button>
             </div>
         </header>
-        <main class="main-container">
-            <aside class="sidebar" id="sidebar">
+        `
+
+	sidebarTemplate = `<aside class="sidebar" id="sidebar">
                 <div class="sidebar-section">
                     <h2>Model</h2>
                     <select id="modelSelect" class="select-input">
@@ -60,6 +65,18 @@ var indexTemplate = `
                             <span class="info-label">Quantization</span>
                             <span class="info-value" id="modelQuant">--</span>
                         </div>
+                    </div>
+                </div>
+                <div class="sidebar-section">
+                    <h2>Gallery</h2>
+                    <div class="model-gallery" id="modelGallery">
+                        <p class="gallery-empty">No models loaded</p>
+                    </div>
+                </div>
+                <div class="sidebar-section">
+                    <h2>Adapters</h2>
+                    <div class="adapter-list" id="adapterList">
+                        <p class="gallery-empty">No adapters loaded</p>
                     </div>
                 </div>
                 <div class="sidebar-section">
@@ -122,7 +139,9 @@ var indexTemplate = `
                     </div>
                 </div>
             </aside>
-            <section class="chat-section">
+            `
+
+	chatTemplate = `<section class="chat-section">
                 <div class="chat-container" id="chatContainer">
                     <div class="welcome-message">
                         <div class="welcome-icon">
@@ -176,23 +195,60 @@ var indexTemplate = `
                         </div>
                     </div>
                 </div>
-            </section>
+            </section>`
+
+	scriptsTemplate = `<script src="/static/js/websocket.js"></script>
+    <script src="/static/js/ui.js"></script>
+`
+)
+
+var indexTemplate = `<!DOCTYPE html>
+<html lang="en">
+{{template "head" .}}
+<body>
+    <div id="app">
+{{template "header" .}}
+        <main class="main-container">
+{{template "sidebar" .}}
+{{template "chat" .}}
         </main>
     </div>
-    <script src="/static/js/websocket.js"></script>
-    <script src="/static/js/ui.js"></script>
+{{template "scripts" .}}
 </body>
 </html>
 `
 
 var tmpl *template.Template
 
+// InitTemplates parses the parts of the page.
 func InitTemplates() error {
-	var err error
-	tmpl, err = template.New("index").Parse(indexTemplate)
-	return err
+	set := template.New("index")
+	for name, src := range map[string]string{
+		"head":    headTemplate,
+		"header":  headerTemplate,
+		"sidebar": sidebarTemplate,
+		"chat":    chatTemplate,
+		"scripts": scriptsTemplate,
+	} {
+		if _, err := set.New(name).Parse(src); err != nil {
+			return fmt.Errorf("the %s template: %w", name, err)
+		}
+	}
+	parsed, err := set.Parse(indexTemplate)
+	if err != nil {
+		return err
+	}
+	tmpl = parsed
+	return nil
 }
 
+// RenderIndex writes the page.
+//
+// The template is nil until InitTemplates has run, and executing a nil
+// template panics: a request for the index took the whole server down.
 func RenderIndex(w io.Writer) error {
+	if tmpl == nil {
+		return fmt.Errorf("the templates are not initialized")
+	}
 	return tmpl.Execute(w, nil)
 }

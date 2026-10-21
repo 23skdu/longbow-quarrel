@@ -218,6 +218,49 @@ jobs:
           GOMEMLIMIT: 2GiB
         run: go test -race -timeout 900s -count=1 ./internal/device/... ./internal/simd/... ./internal/vlm/... ./internal/vector/... ./internal/gguf/... ./internal/ollama/... ./internal/mathx/... ./internal/config/... ./internal/cpu/... ./internal/logger/... ./internal/models/... ./internal/telemetry/... ./internal/promtest/...
 
+  # ===== WEBUI BROWSER TESTS =====
+  # The browser tests were in the repository and could not run: there was
+  # no package.json, the configuration pointed at a directory that does
+  # not exist and at a port the server does not listen on, and no job
+  # started the server.
+  webui-browser:
+    name: WebUI Browser Tests
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      - name: Install the browser test dependencies
+        working-directory: cmd/webui/tests
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+
+      - name: Run the browser tests
+        working-directory: cmd/webui/tests
+        env:
+          WEBUI_PORT: '8080'
+          WEBUI_HOST: '127.0.0.1'
+          WEBUI_API_KEY: 'qk_ci_browser_test'
+        run: npx playwright test
+
+      - name: Upload the test report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: webui-browser-report
+          path: cmd/webui/tests/playwright-report
+
   # ===== ALTERNATIVE BUILD CONFIGURATIONS =====
   # The repository has three build configurations that the default build
   # does not cover: the emlgo math backend, the emlfast backend and the
@@ -983,7 +1026,7 @@ jobs:
   notify:
     name: Notify Results
     runs-on: ubuntu-latest
-    needs: [lint, build, webui, metal-build, metal-tests, coverage, bench-gate, benchmarks, security, avx512, cuda-compile, docker, compose-lint, ghcr-publish, build-artifacts, release-candidate, fuzz-tests]
+    needs: [lint, build, webui, webui-browser, metal-build, metal-tests, coverage, bench-gate, benchmarks, security, avx512, cuda-compile, docker, compose-lint, ghcr-publish, build-artifacts, release-candidate, fuzz-tests]
     if: always()
 
     steps:

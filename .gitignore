@@ -17,6 +17,10 @@ comp*
 *.json
 !grafana/*.json
 !cmd/webui/api/*.yaml
+# The browser test dependencies are pinned in the repository: the CI
+# runs "npm ci", which needs the lock file.
+!cmd/webui/tests/package.json
+!cmd/webui/tests/package-lock.json
 *.exe
 *.dll
 *.so

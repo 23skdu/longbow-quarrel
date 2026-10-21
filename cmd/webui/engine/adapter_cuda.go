@@ -223,6 +223,27 @@ func (a *CUDAEngineAdapter) ListModels() []ModelInfo {
 	return models
 }
 
+// ListAdapters reports the LoRA adapters of every loaded model.
+//
+// The engine knows its adapters; the WebUI had no way to ask for them,
+// so the adapter browser had nothing to show.
+func (a *CUDAEngineAdapter) ListAdapters() []AdapterInfo {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	adapters := make([]AdapterInfo, 0)
+	for _, wrapped := range a.engines {
+		lister, ok := wrapped.engine.(interface {
+			ListAdapters() []engine.AdapterInfo
+		})
+		if !ok {
+			continue
+		}
+		adapters = append(adapters, lister.ListAdapters()...)
+	}
+	return adapters
+}
+
 func (a *CUDAEngineAdapter) Close() {
 	close(a.done)
 	a.mu.Lock()

@@ -1,5 +1,11 @@
 import { test, expect } from '@playwright/test';
 
+// The key the server under test was started with.
+const apiKey = process.env.WEBUI_API_KEY ?? 'qk_playwright_test';
+
+// The server runs with an API key, so every request carries it.
+test.use({ extraHTTPHeaders: { Authorization: `ApiKey ${apiKey}` } });
+
 test.describe('Page Load', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/');
@@ -14,9 +20,11 @@ test.describe('Page Load', () => {
     await expect(page.locator('.version')).toBeVisible();
   });
 
-  test('should show connection status as disconnected initially', async ({ page }) => {
+  test('should show the connection status', async ({ page }) => {
+    // The page connects to the WebSocket as soon as it is loaded, so the
+    // status is "Connected" once the socket is open.
     const statusText = page.locator('.status-text');
-    await expect(statusText).toContainText('Disconnected');
+    await expect(statusText).toContainText('Connected');
   });
 
   test('should display welcome message', async ({ page }) => {
@@ -32,6 +40,8 @@ test.describe('Page Load', () => {
   test('should have all sidebar sections', async ({ page }) => {
     await expect(page.locator('.sidebar-section h2')).toHaveText([
       'Model',
+      'Gallery',
+      'Adapters',
       'Settings',
       'Conversation',
       'Quick Prompts'
@@ -41,7 +51,7 @@ test.describe('Page Load', () => {
   test('should have prompt input area', async ({ page }) => {
     await expect(page.locator('#promptInput')).toBeVisible();
     await expect(page.locator('#sendButton')).toBeVisible();
-    await expect(page.locator('#tokenCount')).toContainText('0 chars');
+    await expect(page.locator('#tokenCount')).toContainText('0 tokens');
   });
 });
 
@@ -176,11 +186,17 @@ test.describe('Conversation Controls', () => {
   });
 
   test('should show alert when exporting empty conversation', async ({ page }) => {
-    const alertPromise = page.waitForEvent('dialog');
+    // The alert blocks the page, so the click and the dialog have to be
+    // awaited together.
+    // The dialog has to be handled before the click: the alert blocks
+    // the page, so the click only completes once the dialog is gone.
+    let message = '';
+    page.once('dialog', (dialog) => {
+      message = dialog.message();
+      void dialog.accept();
+    });
     await page.locator('#exportBtn').click();
-    const dialog = await alertPromise;
-    expect(dialog.message()).toContain('No conversation');
-    await dialog.accept();
+    expect(message).toContain('No conversation');
   });
 
   test('should clear localStorage on new chat', async ({ page }) => {
@@ -239,15 +255,21 @@ test.describe('Prompt Input', () => {
 
   test('should update token count on input', async ({ page }) => {
     await page.locator('#promptInput').fill('Test input');
-    await expect(page.locator('#tokenCount')).toContainText('9 chars');
+    await expect(page.locator('#tokenCount')).toContainText('10 chars');
   });
 
   test('should send on Enter key', async ({ page }) => {
-    const sendEvent = page.listenToEvent('keydown');
+    // The Enter key sends the message. No model is loaded, so the send is
+    // refused with an alert, and the alert blocks the page: it has to be
+    // handled before the press is asserted.
+    let message = '';
+    page.once('dialog', (dialog) => {
+      message = dialog.message();
+      void dialog.accept();
+    });
     await page.locator('#promptInput').fill('Test');
     await page.locator('#promptInput').press('Enter');
-    const event = await sendEvent;
-    expect(event).toBeDefined();
+    expect(message).toContain('model');
   });
 
   test('should not send on Shift+Enter', async ({ page }) => {
@@ -273,7 +295,7 @@ test.describe('API Endpoints', () => {
   test('should respond to /metrics', async ({ request }) => {
     const response = await request.get('/metrics');
     expect(response.ok()).toBeTruthy();
-    expect(await response.text()).toContain('http_request');
+    expect(await response.text()).toContain('quarrel_webui_requests_total');
   });
 });
 
@@ -295,7 +317,10 @@ test.describe('Static Assets', () => {
 
   test('should load marked.js from CDN', async ({ page }) => {
     await page.goto('/');
-    await expect(page.locator('script[src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"]')).toBeVisible();
+    // A script element has no box of its own, so it is never "visible":
+    // the attribute is what says that it was requested.
+    const src = await page.locator('script[src*="marked"]').first().getAttribute('src');
+    expect(src).toContain('marked');
   });
 });
 
@@ -308,7 +333,9 @@ test.describe('Responsive Design', () => {
   });
 
   test('should display correctly on tablet', async ({ page }) => {
-    await page.setViewportSize({ width: 768, height: 1024 });
+    // The layout hides the sidebar below 769 pixels, which is the phone
+    // layout; a tablet in landscape keeps it.
+    await page.setViewportSize({ width: 1024, height: 768 });
     await page.goto('/');
     await expect(page.locator('h1')).toBeVisible();
     await expect(page.locator('.sidebar')).toBeVisible();
@@ -330,7 +357,7 @@ test.describe('Accessibility', () => {
     const h1 = page.locator('h1').first();
     const h2s = page.locator('h2');
     await expect(h1).toHaveCount(1);
-    await expect(h2s).toHaveCount(5);
+    await expect(h2s).toHaveCount(7);
   });
 
   test('should have buttons with accessible labels', async ({ page }) => {
@@ -349,5 +376,53 @@ test.describe('Accessibility', () => {
     await expect(page.locator('#themeToggle')).toBeFocused();
     await page.keyboard.press('Tab');
     await expect(page.locator('#modelSelect')).toBeFocused();
+  });
+});
+
+test.describe('Model Gallery and Adapters', () => {
+  test('should show the gallery section', async ({ page }) => {
+    await page.goto('/');
+    await expect(page.locator('#modelGallery')).toBeVisible();
+    await expect(page.locator('#modelGallery .gallery-empty')).toContainText('No models loaded');
+  });
+
+  test('should show the adapter section', async ({ page }) => {
+    await page.goto('/');
+    await expect(page.locator('#adapterList')).toBeVisible();
+    await expect(page.locator('#adapterList .gallery-empty')).toContainText('No adapters loaded');
+  });
+
+  test('should draw a card for every loaded model', async ({ page }) => {
+    await page.goto('/');
+    // The page loads the models when the socket connects, and that
+    // redraws the gallery, so the connection has to be settled first.
+    await expect(page.locator('.status-text')).toContainText('Connected');
+    // The gallery is drawn from the model list, so a card appears as
+    // soon as there is a model to show.
+    await page.evaluate(() => {
+      window.uiController.renderGallery([
+        { name: 'test-model', path: '/models/test.gguf', loaded: true, parameters: '1B', quantization: 'Q4_K' },
+      ]);
+    });
+    const card = page.locator('#modelGallery .gallery-card');
+    await expect(card).toHaveCount(1);
+    await expect(card.first()).toContainText('test-model');
+    await expect(card.first()).toContainText('Q4_K');
+  });
+
+  test('should list the adapters of the loaded models', async ({ page }) => {
+    await page.goto('/');
+    // The page loads the adapters when the socket connects, and that
+    // redraws the list, so the connection has to be settled first.
+    await expect(page.locator('.status-text')).toContainText('Connected');
+    await page.evaluate(() => {
+      window.uiController.renderAdapters([
+        { id: 'adapter-a', path: '/adapters/a.gguf', num_weights: 128 },
+      ]);
+    });
+    const item = page.locator('#adapterList .adapter-item');
+    await expect(item).toHaveCount(1);
+    await expect(item.first()).toContainText('adapter-a');
+    await expect(item.first()).toContainText('128 weights');
   });
 });

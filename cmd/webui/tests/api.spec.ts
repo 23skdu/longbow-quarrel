@@ -1,5 +1,12 @@
 import { test, expect } from '@playwright/test';
 
+// The key the server under test was started with.
+const apiKey = process.env.WEBUI_API_KEY ?? 'qk_playwright_test';
+
+// The server runs with an API key, so every request carries it. The
+// tests that check the authentication override it.
+test.use({ extraHTTPHeaders: { Authorization: `ApiKey ${apiKey}` } });
+
 test.describe('API Generate Endpoint', () => {
   test('should return 400 for invalid request body', async ({ request }) => {
     const response = await request.post('/api/generate', {
@@ -120,6 +127,22 @@ test.describe('API Models Endpoint', () => {
     });
     expect(response.status()).toBe(401);
   });
+
+  test('should require authentication for the adapter list', async ({ request }) => {
+    const response = await request.get('/api/adapters', {
+      headers: { 'Authorization': 'ApiKey invalid-key' }
+    });
+    expect(response.status()).toBe(401);
+  });
+
+  test('should list the adapters with a valid key', async ({ request }) => {
+    const response = await request.get('/api/adapters', {
+      headers: { 'Authorization': `ApiKey ${apiKey}` }
+    });
+    expect(response.ok()).toBeTruthy();
+    const adapters = await response.json();
+    expect(Array.isArray(adapters)).toBeTruthy();
+  });
 });
 
 test.describe('Authentication', () => {
@@ -132,14 +155,14 @@ test.describe('Authentication', () => {
 
   test('should accept valid API key', async ({ request }) => {
     const response = await request.get('/api/models', {
-      headers: { 'Authorization': 'ApiKey qk_test123' }
+      headers: { 'Authorization': `ApiKey ${apiKey}` }
     });
-    expect(response.ok() || response.status() === 401).toBeTruthy();
+    expect(response.ok()).toBeTruthy();
   });
 
   test('should accept API key via query parameter', async ({ request }) => {
-    const response = await request.get('/api/models?api_key=qk_test123');
-    expect(response.ok() || response.status() === 401).toBeTruthy();
+    const response = await request.get(`/api/models?api_key=${apiKey}`);
+    expect(response.ok()).toBeTruthy();
   });
 });
 

@@ -11,6 +11,9 @@ class UIController {
         this.initEventListeners();
         this.initWebSocket();
         this.applyTheme();
+        // The conversation was saved when the page was closed and never
+        // read back: the history was empty on every reload.
+        this.loadConversation();
     }
 
     initElements() {
@@ -48,6 +51,12 @@ class UIController {
             this.saveSettings();
             this.updateModelInfo();
         });
+
+        // The top-k and the maximum token count were never saved: the
+        // settings that were written to the local storage held the
+        // values the page was loaded with.
+        this.topKInput.addEventListener('input', () => this.saveSettings());
+        this.maxTokensInput.addEventListener('input', () => this.saveSettings());
 
         document.getElementById('newChatBtn').addEventListener('click', () => this.newChat());
         document.getElementById('clearHistoryBtn').addEventListener('click', () => this.clearHistory());
@@ -93,6 +102,7 @@ class UIController {
             this.connectionStatus.classList.add('connected');
             statusText.textContent = 'Connected';
             this.loadModels();
+            this.loadAdapters();
         } else if (status === 'disconnected') {
             statusText.textContent = 'Disconnected';
         } else if (status === 'generating') {
@@ -122,9 +132,126 @@ class UIController {
                 this.modelSelect.value = this.settings.model;
                 this.updateModelInfo();
             }
+
+            this.renderGallery(models);
         } catch (error) {
             console.error('Failed to load models:', error);
         }
+    }
+
+    // renderGallery draws the loaded models as cards.
+    //
+    // The models were only in a dropdown, so a model that was loaded was
+    // invisible once the dropdown was closed.
+    renderGallery(models) {
+        const gallery = document.getElementById('modelGallery');
+        if (!gallery) {
+            return;
+        }
+
+        gallery.innerHTML = '';
+        if (!models || models.length === 0) {
+            const empty = document.createElement('p');
+            empty.className = 'gallery-empty';
+            empty.textContent = 'No models loaded';
+            gallery.appendChild(empty);
+            return;
+        }
+
+        models.forEach(model => {
+            const card = document.createElement('div');
+            card.className = 'gallery-card';
+            if (model.loaded) {
+                card.classList.add('gallery-card-loaded');
+            }
+
+            const name = document.createElement('div');
+            name.className = 'gallery-card-name';
+            name.textContent = model.name || model.path || '(unnamed)';
+            card.appendChild(name);
+
+            const path = document.createElement('div');
+            path.className = 'gallery-card-path';
+            path.textContent = model.path || '';
+            card.appendChild(path);
+
+            const meta = document.createElement('div');
+            meta.className = 'gallery-card-meta';
+            const parts = [];
+            if (model.parameters) {
+                parts.push(model.parameters);
+            }
+            if (model.quantization) {
+                parts.push(model.quantization);
+            }
+            if (model.loaded) {
+                parts.push('loaded');
+            }
+            meta.textContent = parts.join(' · ');
+            card.appendChild(meta);
+
+            gallery.appendChild(card);
+        });
+    }
+
+    // loadAdapters lists the LoRA adapters of the loaded models.
+    async loadAdapters() {
+        const list = document.getElementById('adapterList');
+        if (!list) {
+            return;
+        }
+
+        try {
+            const response = await fetch('/api/adapters');
+            if (!response.ok) {
+                throw new Error('the adapter list is not available');
+            }
+            const adapters = await response.json();
+            this.renderAdapters(adapters);
+        } catch (error) {
+            console.error('Failed to load adapters:', error);
+        }
+    }
+
+    // renderAdapters draws the LoRA adapters of the loaded models.
+    renderAdapters(adapters) {
+        const list = document.getElementById('adapterList');
+        if (!list) {
+            return;
+        }
+
+        list.innerHTML = '';
+        if (!adapters || adapters.length === 0) {
+            const empty = document.createElement('p');
+            empty.className = 'gallery-empty';
+            empty.textContent = 'No adapters loaded';
+            list.appendChild(empty);
+            return;
+        }
+
+        adapters.forEach(adapter => {
+            const item = document.createElement('div');
+            item.className = 'adapter-item';
+
+            const id = document.createElement('div');
+            id.className = 'adapter-id';
+            id.textContent = adapter.id || '(unnamed)';
+            item.appendChild(id);
+
+            const path = document.createElement('div');
+            path.className = 'adapter-path';
+            path.textContent = adapter.path || '';
+            item.appendChild(path);
+
+            if (typeof adapter.num_weights === 'number') {
+                const count = document.createElement('div');
+                count.className = 'adapter-weights';
+                count.textContent = adapter.num_weights + ' weights';
+                item.appendChild(count);
+            }
+
+            list.appendChild(item);
+        });
     }
 
     updateModelInfo() {
@@ -418,6 +545,14 @@ class UIController {
     }
 
     saveConversation() {
+        // An empty conversation is not written over a stored one. The
+        // page saves the conversation when it is unloaded, so a page that
+        // was loaded with an empty history would otherwise erase the
+        // history that was there.
+        if (this.conversation.length === 0) {
+            return;
+        }
+
         try {
             localStorage.setItem('quarrelConversation', JSON.stringify(this.conversation));
         } catch (e) {

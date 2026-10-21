@@ -21,10 +21,32 @@ The stack is deliberately minimal:
 | Concern | Implementation |
 |---|---|
 | HTTP routing | `net/http` (`http.ServeMux`) |
-| Templating | `html/template` (stdlib) |
+| Templating | `html/template` (stdlib), composed from parts |
 | WebSocket | `github.com/gorilla/websocket` |
 | Metrics | `github.com/prometheus/client_golang` |
 | Front-end | Plain HTML, CSS and JavaScript served from `cmd/webui/static/` |
+| Browser tests | `@playwright/test` |
+
+### The template is composed from parts
+
+`cmd/webui/templates/index.go` holds the page as five parts — the head,
+the header, the sidebar, the chat and the scripts — parsed into one
+template set. It used to be one string of a hundred and eighty lines, in
+which a change to the sidebar meant finding the right place by eye.
+
+### The front-end has no framework, and no build step
+
+The plan proposed React, and separately Svelte or Vue. The
+implementation is plain JavaScript, and that is the decision: a
+component framework needs a bundler, and the WebUI is built and shipped
+as a static directory of files that a Go binary serves. The cost of a
+framework is a `node_modules` directory in the image and a build step in
+every release; the benefit is a component model the three hundred lines
+of `static/js/ui.js` do not need yet.
+
+The model gallery and the LoRA adapter browser are in the sidebar, drawn
+by `UIController.renderGallery` and `UIController.renderAdapters` from
+`/api/models` and `/api/adapters`.
 
 ## 2. Build and run
 
@@ -83,6 +105,7 @@ Registered in `cmd/webui/main.go`.
 | Route | Purpose |
 |---|---|
 | `GET /api/models` | List the loaded models |
+| `GET /api/adapters` | List the LoRA adapters of the loaded models |
 | `POST /api/generate` | Generate a completion |
 | `POST /api/stream` | Stream a completion (SSE) |
 | `POST /api/hotswap` | Swap the loaded model |
@@ -151,6 +174,30 @@ go vet  -tags webui ./...
 go test -tags webui ./...
 ```
 
+### The browser tests
+
+The browser tests are in `cmd/webui/tests` and run with Playwright:
+
+```bash
+cd cmd/webui/tests
+npm ci
+npx playwright install --with-deps chromium
+npx playwright test
+```
+
+They start the server themselves (the `webServer` block of
+`playwright.config.ts`) and run against it. The CI job
+`webui-browser` does the same.
+
+The tests used to be in the repository and unable to run: there was no
+`package.json`, the configuration pointed at a directory that did not
+exist and at a port the server did not listen on, and nothing started
+the server. They had never run, and they found four defects when they
+did: every API endpoint answered 404 (the router mounted the API under
+`/api/` without stripping the prefix), the settings were not saved, the
+conversation was never read back from the local storage, and the
+WebUI's own metrics were never counted.
+
 | Suite | What it covers |
 |---|---|
 | `config/config_test.go` | The environment overlay |
@@ -158,6 +205,8 @@ go test -tags webui ./...
 | `handlers/handlers_test.go` | The HTTP handlers |
 | `handlers/fuzz_test.go` | Fuzzing of the request parsing |
 | `tests/e2e/e2e_test.go` | End-to-end HTTP behaviour |
+| `routes_test.go` | The routes, through the real router |
+| `tests/*.spec.ts` | The browser tests (Playwright) |
 
 The e2e suite used to be excluded from CI because it did not compile — it
 referenced `handlers.Config` and `handlers.ModelInfo`, which had moved to

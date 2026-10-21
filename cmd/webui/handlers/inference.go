@@ -118,6 +118,26 @@ func ModelsHandler(cfg config.Config) http.HandlerFunc {
 	}
 }
 
+// AdaptersHandler lists the LoRA adapters of the loaded models.
+//
+// The engine could list them all along: the WebUI had no way to ask, so
+// the adapter browser in the UI had nothing to show.
+func AdaptersHandler(cfg config.Config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		adapters := engine.ListAdapters()
+
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(adapters); err != nil {
+			log.Printf("ERROR: failed to encode adapters: %v", err)
+		}
+	}
+}
+
 // maxRequestBodyBytes bounds the JSON body a client may send. Prompts are
 // small in practice, so anything larger is either a mistake or an attempt to
 // exhaust server memory. The limit is applied before decoding so an oversized
@@ -133,9 +153,26 @@ const maxRequestBodyBytes = 1 << 20 // 1 MiB
 // always recoverable with errors.As. A decode error therefore falls back to
 // checking whether ContentLength alone already exceeds the limit, and any
 // MaxBytesError still propagating is honoured directly.
+// writeJSONError answers with a JSON error document.
+//
+// The errors used to be written with http.Error, which sends
+// text/plain: a client that parses the body as JSON gets a syntax error
+// instead of the message.
+func writeJSONError(w http.ResponseWriter, status int, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(map[string]string{"error": message}); err != nil {
+		log.Printf("ERROR: failed to encode the error response: %v", err)
+	}
+}
+
 func decodeJSONBody(w http.ResponseWriter, r *http.Request, v any) error {
 	limited := http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 	dec := json.NewDecoder(limited)
+
+	// An unknown field is a typo in a parameter name, and a typo that
+	// is silently ignored is worse than a rejected request.
+	dec.DisallowUnknownFields()
 
 	err := dec.Decode(v)
 	if err == nil {
@@ -148,11 +185,11 @@ func decodeJSONBody(w http.ResponseWriter, r *http.Request, v any) error {
 		r.ContentLength > maxRequestBodyBytes
 
 	if tooLarge {
-		http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
+		writeJSONError(w, http.StatusRequestEntityTooLarge, "Request body too large")
 		return err
 	}
 
-	http.Error(w, "Invalid request body", http.StatusBadRequest)
+	writeJSONError(w, http.StatusBadRequest, "Invalid request body")
 	return err
 }
 
@@ -165,6 +202,11 @@ func GenerateHandler(cfg config.Config) http.HandlerFunc {
 
 		var req GenerateRequest
 		if err := decodeJSONBody(w, r, &req); err != nil {
+			return
+		}
+
+		if req.Prompt == "" {
+			writeJSONError(w, http.StatusBadRequest, "The prompt is empty")
 			return
 		}
 
@@ -262,6 +304,11 @@ func StreamHandler(cfg config.Config) http.HandlerFunc {
 		// rather than a 200 with a text/event-stream body.
 		var req GenerateRequest
 		if err := decodeJSONBody(w, r, &req); err != nil {
+			return
+		}
+
+		if req.Prompt == "" {
+			writeJSONError(w, http.StatusBadRequest, "The prompt is empty")
 			return
 		}
 

@@ -7,6 +7,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 var (
@@ -37,12 +38,21 @@ var (
 	}, []string{"type"})
 )
 
+// MetricsHandler counts the scrape and serves the metrics.
+//
+// It used to only count: the /metrics route served the raw Prometheus
+// handler, so the WebUI's own counters never had a child and were not
+// even exported.
 func MetricsHandler() http.HandlerFunc {
+	promHandler := promhttp.Handler()
+
 	return func(w http.ResponseWriter, r *http.Request) {
 		activeConnections.Inc()
 		defer activeConnections.Dec()
 
 		totalRequests.WithLabelValues("default", r.URL.Path).Inc()
+
+		promHandler.ServeHTTP(w, r)
 	}
 }
 

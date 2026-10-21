@@ -72,14 +72,16 @@ test.describe('WebSocket Connection', () => {
   });
 
   test('should send inference payload with correct structure', async ({ page }) => {
-    const payloadSent: any[] = [];
-    await page.evaluate(() => {
+    // The array has to live in the browser: a variable of the test is
+    // not visible inside page.evaluate.
+    const payloadSent = await page.evaluate(() => {
+      const sent: any[] = [];
       const ws = new WebSocketClient('ws://localhost:8080/ws');
-      const originalSend = ws.send.bind(ws);
       ws.send = (type: string, payload: any) => {
-        payloadSent.push({ type, payload });
+        sent.push({ type, payload });
       };
       ws.inference({ prompt: 'test', temperature: 0.7 });
+      return sent;
     });
     expect(payloadSent.length).toBe(1);
     expect(payloadSent[0].type).toBe('inference');
@@ -192,14 +194,20 @@ test.describe('UIController', () => {
   test('should show alert when sending without model', async ({ page }) => {
     await page.evaluate(() => {
       window.uiController.modelSelect.value = '';
+      // The send is refused before the model is even looked at when
+      // there is no prompt.
+      window.uiController.promptInput.value = 'hello';
     });
-    const alertPromise = page.waitForEvent('dialog');
-    page.evaluate(() => {
+    let message = '';
+    page.once('dialog', (dialog) => {
+      message = dialog.message();
+      void dialog.accept();
+    });
+    await page.evaluate(() => {
       window.uiController.handleSend();
     });
-    const dialog = await alertPromise;
-    expect(dialog.message()).toContain('select a model');
-    await dialog.accept();
+    expect(message).toContain('model');
+    expect(message).toContain('select a model');
   });
 });
 
@@ -282,7 +290,14 @@ test.describe('Settings Persistence', () => {
 
   test('should save model selection', async ({ page }) => {
     await page.evaluate(() => {
-      window.uiController.modelSelect.value = 'test-model';
+      // A select can only hold one of its options, so the option has to
+      // exist before it can be selected.
+      const select = window.uiController.modelSelect as HTMLSelectElement;
+      const option = document.createElement('option');
+      option.value = 'test-model';
+      option.textContent = 'test-model';
+      select.appendChild(option);
+      select.value = 'test-model';
       window.uiController.saveSettings();
     });
     const settings = await page.evaluate(() => 
@@ -319,6 +334,6 @@ test.describe('Input Behavior', () => {
 
   test('should update token count dynamically', async ({ page }) => {
     await page.locator('#promptInput').fill('Count me!');
-    await expect(page.locator('#tokenCount')).toContainText('10 chars');
+    await expect(page.locator('#tokenCount')).toContainText('9 chars');
   });
 });
