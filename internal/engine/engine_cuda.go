@@ -66,6 +66,14 @@ type cudaEngine struct {
 
 	// stopTokens is the configured stop-token set, built once at construction.
 	stopTokens map[int]struct{}
+
+	// workspaces holds the persistent decode buffers, one per shape. A
+	// captured CUDA graph holds the address of every buffer it touches,
+	// so the tensors of a decode pass have to be allocated once and
+	// reused: a forward that allocates them per call would replay into
+	// whatever the pool handed out last time.
+	workspaceMu sync.Mutex
+	workspaces  map[string]*device.DecodeWorkspace
 }
 
 func NewcudaEngine(modelPath string, cfg config.Config) (Engine, error) {
@@ -283,6 +291,12 @@ func (e *cudaEngine) Close() {
 	if e.cache != nil {
 		e.cache.Free()
 	}
+	e.workspaceMu.Lock()
+	for _, workspace := range e.workspaces {
+		workspace.Free()
+	}
+	e.workspaces = nil
+	e.workspaceMu.Unlock()
 	if e.cuda != nil {
 		e.cuda.Free()
 	}
@@ -532,13 +546,73 @@ func (e *cudaEngine) runBatchLoop() {
 	}
 }
 
+// decodeWorkspace returns the persistent buffers for a shape, building them
+// the first time the shape is seen.
+// maxDecodeWorkspaces is the number of shapes the engine keeps the
+// persistent decode buffers for.
+const maxDecodeWorkspaces = 8
+
+func (e *cudaEngine) decodeWorkspace(shape device.DecodeWorkspaceShape) (*device.DecodeWorkspace, error) {
+	key := fmt.Sprintf("%d/%d/%d/%d/%d/%d",
+		shape.NumTokens, shape.Dim, shape.HiddenDim, shape.BatchSize, shape.MaxBlocks, shape.VocabSize)
+
+	e.workspaceMu.Lock()
+	defer e.workspaceMu.Unlock()
+
+	if e.workspaces == nil {
+		e.workspaces = make(map[string]*device.DecodeWorkspace)
+	}
+	if workspace, ok := e.workspaces[key]; ok {
+		return workspace, nil
+	}
+
+	workspace, err := device.NewDecodeWorkspace(e.ctx, shape)
+	if err != nil {
+		return nil, err
+	}
+	e.workspaces[key] = workspace
+
+	// The cache is bounded: a server whose batches change shape all the
+	// time would otherwise keep a workspace per shape forever.
+	if len(e.workspaces) > maxDecodeWorkspaces {
+		for oldKey, oldWorkspace := range e.workspaces {
+			if oldKey == key {
+				continue
+			}
+			oldWorkspace.Free()
+			delete(e.workspaces, oldKey)
+			break
+		}
+	}
+
+	return workspace, nil
+}
+
 func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, error) {
 	ctx := e.ctx
 	batchSize := len(desc.Sequences)
 	numTokens := len(desc.Tokens)
 
 	// 1. Prepare Metadata Tensors
-	tokenPosTensor := ctx.NewTensorI32(1, numTokens)
+	//
+	// The tensors are the persistent ones of the workspace: a captured
+	// graph holds their addresses, so they cannot be allocated per call.
+	workspace, err := e.decodeWorkspace(device.DecodeWorkspaceShape{
+		NumTokens: numTokens,
+		Dim:       e.config.Dim,
+		HiddenDim: e.config.HiddenDim,
+		Heads:     e.config.Heads,
+		KVHeads:   e.config.KVHeads,
+		HeadDim:   e.config.HeadDim,
+		BatchSize: batchSize,
+		MaxBlocks: 1,
+		VocabSize: e.config.VocabSize,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	tokenPosTensor := workspace.TokenPos()
 	tokenPositions := make([]int32, numTokens)
 	for i, start := range desc.Offsets {
 		end := numTokens
@@ -557,9 +631,8 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 	if err := tokenPosTensor.LoadFrom(tokenPositions); err != nil {
 		return nil, err
 	}
-	defer tokenPosTensor.ReturnToPool()
 
-	tokenToSeqTensor := ctx.NewTensorI32(1, numTokens)
+	tokenToSeqTensor := workspace.TokenToSeq()
 	tokenToSeq := make([]int32, numTokens)
 	for i, val := range desc.TokenToSeq {
 		tokenToSeq[i] = int32(val)
@@ -567,7 +640,6 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 	if err := tokenToSeqTensor.LoadFrom(tokenToSeq); err != nil {
 		return nil, err
 	}
-	defer tokenToSeqTensor.ReturnToPool()
 
 	// Ensure KV blocks are allocated for all active sequences
 	for _, seq := range desc.Sequences {
@@ -599,7 +671,22 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 		}
 	}
 
-	blockTableTensor := ctx.NewTensorI32(batchSize, maxBlocks)
+	workspace, err = e.decodeWorkspace(device.DecodeWorkspaceShape{
+		NumTokens: numTokens,
+		Dim:       e.config.Dim,
+		HiddenDim: e.config.HiddenDim,
+		Heads:     e.config.Heads,
+		KVHeads:   e.config.KVHeads,
+		HeadDim:   e.config.HeadDim,
+		BatchSize: batchSize,
+		MaxBlocks: maxBlocks,
+		VocabSize: e.config.VocabSize,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	blockTableTensor := workspace.BlockTable()
 	btData := make([]int32, batchSize*maxBlocks)
 	for i, seq := range desc.Sequences {
 		seqID := fmt.Sprintf("seq-%d", seq.ID)
@@ -614,7 +701,6 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 	if err := blockTableTensor.LoadFrom(btData); err != nil {
 		return nil, err
 	}
-	defer blockTableTensor.ReturnToPool()
 
 	dim := e.config.Dim
 	eps := e.config.Eps
@@ -892,7 +978,7 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 				physPosData[i] = float32(table[blockIdx]*int32(e.cache.blockSize) + int32(offset))
 			}
 		}
-		physPosTensor := ctx.NewTensorFP32(1, numTokens)
+		physPosTensor := workspace.PhysPos()
 		if err := physPosTensor.LoadFrom(physPosData); err != nil {
 			return nil, err
 		}
@@ -906,7 +992,6 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 		// the pool: a quantized pool needs the codes and their scale,
 		// not the F16 values.
 		e.cache.StoreKVPagedBatch(layer, k, v, physPosTensor)
-		physPosTensor.ReturnToPool()
 
 		// Attention — use quantized path if cache is FP8/Q8_0
 		if e.cache != nil && (e.cache.Precision == device.DataTypeFP8 || e.cache.Precision == device.DataTypeQ8_0) {
