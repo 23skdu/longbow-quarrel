@@ -223,18 +223,6 @@ type Tensor struct {
 	qjlRows   int // For TurboQuant
 }
 
-func NewTensor(name string, data []float32) *Tensor {
-	dims := []int{len(data)}
-	strides := []int{1}
-	return &Tensor{
-		data:     data,
-		dims:     dims,
-		strides:  strides,
-		name:     name,
-		dataType: DataTypeF32,
-	}
-}
-
 func (t *Tensor) RawData() []byte {
 	if len(t.data) > 0 {
 		return unsafe.Slice((*byte)(unsafe.Pointer(&t.data[0])), len(t.data)*4) // #nosec G103

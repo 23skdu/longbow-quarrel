@@ -86,6 +86,9 @@ func main() {
 
 	fmt.Printf("=== Longbow-Quarrel CUDA ===\n")
 	metrics.RecordSIMDLevel(simd.GetCPULevel())
+	if simd.SIMDMetricsEnabled() {
+		fmt.Println("SIMD kernel instrumentation: on")
+	}
 	fmt.Printf("Model: %s\n", *modelPath)
 
 	resolvedPath, err := models.ResolveModelPath(*modelPath)

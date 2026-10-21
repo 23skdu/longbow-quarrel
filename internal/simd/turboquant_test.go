@@ -61,25 +61,24 @@ func TestTurboQuantVariants(t *testing.T) {
 	}
 
 	variants := []TurboQuantType{TurboQuant2, TurboQuant4, TurboQuant8}
-	names := []string{"TurboQuant2", "TurboQuant4", "TurboQuant8"}
 
-	for i, tt := range variants {
-		t.Run(names[i], func(t *testing.T) {
+	for _, tt := range variants {
+		t.Run(tt.String(), func(t *testing.T) {
 			q, s, res := PolarQuantVariant(input, rotation, n, tt)
 			if len(q) != n {
-				t.Errorf("PolarQuantVariant(%s): size mismatch", names[i])
+				t.Errorf("PolarQuantVariant(%s): size mismatch", tt)
 			}
 			if s <= 0 {
-				t.Errorf("PolarQuantVariant(%s): invalid scale %v", names[i], s)
+				t.Errorf("PolarQuantVariant(%s): invalid scale %v", tt, s)
 			}
 			if len(res) != n {
-				t.Errorf("PolarQuantVariant(%s): residual size mismatch", names[i])
+				t.Errorf("PolarQuantVariant(%s): residual size mismatch", tt)
 			}
 
 			// Verify dequantization works
 			reconstructed := DequantizeTurboQuant(q, s, rotation, n)
 			if len(reconstructed) != n {
-				t.Errorf("DequantizeTurboQuant(%s): size mismatch", names[i])
+				t.Errorf("DequantizeTurboQuant(%s): size mismatch", tt)
 			}
 		})
 	}

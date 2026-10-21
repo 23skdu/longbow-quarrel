@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/23skdu/longbow-quarrel/internal/config"
-	"github.com/23skdu/longbow-quarrel/internal/engine"
 )
 
 // freePort reserves an ephemeral port and releases it, returning the port
@@ -36,10 +35,7 @@ func freePort(t *testing.T) string {
 // /v1/chat/completions and /healthz did not exist in any released artifact
 // even though README.md and docs/api.md documented them.
 func TestStartAPIServer_ServesEndpoints(t *testing.T) {
-	mockEng, err := engine.NewMockEngine("mock", config.Config{})
-	if err != nil {
-		t.Fatalf("failed to build the mock engine: %v", err)
-	}
+	mockEng := &mockEngine{cfg: config.Config{}}
 
 	addr := freePort(t)
 

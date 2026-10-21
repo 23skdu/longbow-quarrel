@@ -85,6 +85,9 @@ func main() {
 
 	printVersion()
 	metrics.RecordSIMDLevel(simd.GetCPULevel())
+	if simd.SIMDMetricsEnabled() {
+		fmt.Println("SIMD kernel instrumentation: on")
+	}
 	fmt.Printf("=== Longbow-Quarrel (CPU) ===\nModel: %s\n", *cpuModelPath)
 
 	// Universal model resolution: accept a bare name like "qwen3" as well as a

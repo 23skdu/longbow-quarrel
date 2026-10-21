@@ -8,12 +8,11 @@ import (
 	"testing"
 
 	"github.com/23skdu/longbow-quarrel/internal/config"
-	"github.com/23skdu/longbow-quarrel/internal/engine"
 )
 
 func TestPhase3_Integration(t *testing.T) {
 	cfg := config.Config{VocabSize: 100}
-	eng, _ := engine.NewMockEngine("mock", cfg)
+	eng := &mockEngine{cfg: cfg}
 	tok := &mockTokenizer{}
 
 	server := &Server{

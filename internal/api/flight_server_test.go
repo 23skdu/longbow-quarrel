@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/23skdu/longbow-quarrel/internal/engine"
 	"github.com/23skdu/longbow-quarrel/internal/tokenizer"
 	"github.com/apache/arrow-go/v18/arrow/flight"
 	"google.golang.org/grpc"
@@ -21,7 +20,7 @@ func TestInferenceFlightServer_DoGet(t *testing.T) {
 	}
 
 	serverAddr := l.Addr().String()
-	mockEngine := &engine.MockEngine{}
+	mockEngine := &mockEngine{}
 	mockTok := &tokenizer.Tokenizer{}
 	server := NewInferenceFlightServer(serverAddr, mockEngine, mockTok)
 

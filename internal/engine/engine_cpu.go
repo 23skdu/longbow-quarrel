@@ -68,6 +68,16 @@ func NewCPUEngine(modelPath string, cfg config.Config) (Engine, error) {
 
 	// Load Dimensions from GGUF into config using dynamic architecture extraction
 	modelCfg := ExtractModelConfig(f)
+
+	// Multi-Head Latent Attention is not implemented on the CPU backend.
+	// A DeepSeek model would otherwise be loaded as if it were an ordinary
+	// attention model, and every token it produced would be wrong.
+	if modelCfg.IsMLA {
+		_ = f.Close()
+		return nil, fmt.Errorf("the CPU backend does not implement Multi-Head Latent Attention: " +
+			"this model needs the CUDA backend")
+	}
+
 	if cfg.Layers <= 0 {
 		cfg.Layers = modelCfg.Layers
 	}

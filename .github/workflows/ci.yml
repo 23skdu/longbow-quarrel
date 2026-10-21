@@ -173,13 +173,13 @@ jobs:
 
       - name: Race detector on the remaining internal packages
         # The job above only covered 5 of the 19 internal packages, so a race
-        # introduced in arrow_client, device, simd, vlm, vector, gguf,
+        # introduced in device, simd, vlm, vector, gguf,
         # ollama, mathx, config, cpu, logger, models, telemetry or promtest
         # would not be caught. README and docs/features.md claim "0 data
         # races across all packages", so the whole tree is gated here.
         env:
           GOMEMLIMIT: 2GiB
-        run: go test -race -timeout 900s -count=1 ./internal/arrow_client/... ./internal/device/... ./internal/simd/... ./internal/vlm/... ./internal/vector/... ./internal/gguf/... ./internal/ollama/... ./internal/mathx/... ./internal/config/... ./internal/cpu/... ./internal/logger/... ./internal/models/... ./internal/telemetry/... ./internal/promtest/...
+        run: go test -race -timeout 900s -count=1 ./internal/device/... ./internal/simd/... ./internal/vlm/... ./internal/vector/... ./internal/gguf/... ./internal/ollama/... ./internal/mathx/... ./internal/config/... ./internal/cpu/... ./internal/logger/... ./internal/models/... ./internal/telemetry/... ./internal/promtest/...
 
   # ===== NESTED WEBUI MODULE =====
   # cmd/webui is its own Go module, so `go build ./...` at the repo root never

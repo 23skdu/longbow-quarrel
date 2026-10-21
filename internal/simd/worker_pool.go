@@ -72,14 +72,6 @@ func (p *WorkerPool) workerLoop() {
 	}
 }
 
-// NumWorkers returns the number of persistent worker goroutines in the pool.
-func (p *WorkerPool) NumWorkers() int {
-	if p == nil {
-		return 1
-	}
-	return p.numWorkers
-}
-
 // ParallelFor executes fn(start, end) partitioned across the pool's workers for range [0, total).
 // The calling goroutine directly executes the first chunk to minimize scheduling latency.
 func (p *WorkerPool) ParallelFor(total int, fn func(start, end int)) {

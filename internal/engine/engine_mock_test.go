@@ -8,11 +8,15 @@ import (
 
 // MockEngine is a stub engine that returns fixed values.
 //
-// It is intended for tests only. It is deliberately NOT registered with the
-// production engine registry: it used to be, and because Infer returns
-// `count` copies of token 42 with a nil error, an engine-construction failure
-// on a host without CUDA or Metal silently produced plausible-looking
-// garbage. Use NewMockEngine directly from a test instead.
+// It lives in a test file: it is a test double, and a test double in a
+// production package is compiled into every binary that imports the
+// package.
+//
+// It is deliberately NOT registered with the production engine registry: it
+// used to be, and because Infer returns `count` copies of token 42 with a
+// nil error, an engine-construction failure on a host without CUDA or Metal
+// silently produced plausible-looking garbage. Use NewMockEngine directly
+// from a test instead.
 type MockEngine struct {
 	cfg config.Config
 }
