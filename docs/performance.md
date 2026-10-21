@@ -270,3 +270,91 @@ Validated and certified on Google Cloud `c2-standard-4` instance (`tf-testbed-e4
    - Fixed by adding `_mm512_add_epi32(int_part, _mm512_set1_epi32(127))` before the bit shift, matching `fast_exp_avx2`.
 2. **Zero-Allocation CGo Hotpath**:
    - Updated `dot_q8_0_vnni` and `dot_q4_k_vnni` to return `float` directly rather than passing a pointer (`float* result`), completely eliminating CGo heap escapes and achieving strict zero-allocation ($0\text{ B/op}, 0\text{ allocs/op}$) across all VNNI dot product invocations.
+
+---
+
+## 10. Vector search
+
+`internal/vector` is a standalone component: the inference path does not
+use it. The numbers below are the ones the roadmap's vector blockers are
+measured against, on the host this document was written on: 16 cores, one
+NVIDIA GPU, AVX2 without AVX-512.
+
+### 10.1 Reproducing the numbers
+
+```bash
+# The whole matrix. The dataset sizes come from the environment, so CI
+# can run the small one and the full matrix is reproducible.
+VECTOR_BENCH_SIZES=50000,100000,250000 \
+  go test -run '^$' -bench 'BenchmarkFlat|BenchmarkIVF|BenchmarkHNSW|BenchmarkDistance' \
+  -benchtime 3x ./internal/vector/
+
+# The CPU profile of the IVF search, which is where the time goes.
+VECTOR_BENCH_SIZES=250000 go test -run '^$' \
+  -bench 'BenchmarkIVFSearch/float32/250000_384' -benchtime 3x \
+  -cpuprofile /tmp/ivf.prof ./internal/vector/
+go tool pprof -top /tmp/ivf.prof
+```
+
+Every search benchmark runs 50 queries per operation, top-k = 10, 16
+probes for IVF and at most 50,000 nodes for HNSW. The per-query figures
+below are the operation time divided by 50.
+
+### 10.2 The distance kernels
+
+The hand-written AVX2 kernels are used by the default build; the AVX-512
+build adds the wider ones.
+
+| Kernel | Dimension | Latency | Per element |
+|---------|----------:|--------:|------------:|
+| `L2Float32` | 128 | **33.2 ns** | 0.26 ns |
+| `L2Float32` | 384 | **42.0 ns** | 0.11 ns |
+| `DotFloat32` | 384 | **39.0 ns** | 0.10 ns |
+| `DotComplex128` (split planes) | 384 | **244 ns** | 0.64 ns |
+| `DotTurboQuant` (asymmetric) | 384 | **178 ns** | 0.46 ns |
+
+### 10.3 The searches at 250,000 vectors
+
+| Search | 128 dims | 384 dims | Per query (384) |
+|--------|---------:|---------:|---------------:|
+| flat, float32 dot | 185 ms | 614 ms | 12.3 ms (81 QPS) |
+| flat, float32 L2 | 202 ms | 637 ms | 12.7 ms (78 QPS) |
+| flat, complex128 dot | 885 ms | 2,697 ms | 53.9 ms (18 QPS) |
+| flat, TurboQuant dot | 100 ms | 226 ms | 4.5 ms (221 QPS) |
+| flat batch, float32 dot (50 queries) | 36 ms | 100 ms | 2.0 ms (499 QPS) |
+| flat batch, complex128 dot (50 queries) | 131 ms | 366 ms | 7.3 ms (137 QPS) |
+| IVF, float32 | 25.8 ms | 110 ms | 2.2 ms (454 QPS) |
+| IVF, TurboQuant | 32.4 ms | 129 ms | 2.6 ms (387 QPS) |
+| IVF build (float32) | 214 ms | 545 ms | — |
+| HNSW, float32 (50,000 nodes) | 4.7 ms | 9.2 ms | 0.18 ms (5,460 QPS) |
+| HNSW, TurboQuant (50,000 nodes) | 24.4 ms | 45.3 ms | 0.91 ms (1,106 QPS) |
+
+### 10.4 The blockers, measured
+
+| Blocker | Criterion | Measured | Met |
+|---------|-----------|----------|:----:|
+| **P0-01** | `L2Float32` below 15 % of the CPU | the kernel is 6 % of the IVF *search*; the *build* is dominated by the cgo call overhead (65 % of the profile) | partly |
+| **P0-01** | 250k IVF query under 500 µs | **2.2 ms** (454 QPS) | no |
+| **P0-02** | 250k complex128 flat search above 500 QPS | **18 QPS** single, **137 QPS** batched | no |
+| **P0-03** | TurboQuant HNSW above 10,000 QPS, 7.8× compression | **1,106 QPS** at 50,000 nodes; the compression is kept | no |
+| **P0-04** | IVF construction on 250k×384 under 50 ms | **545 ms** on the CPU, 1.29 s with the GPU k-means (the transfer of the dataset dominates) | no |
+| **P0-05** | a million-vector index inside a 256 MB working set | the store is memory mapped and the Go heap stays flat: 100,000 × 384 vectors load into a 150 MB file and the heap does not grow | yes |
+
+The implementations the criteria ask for are in the tree: the AVX2 and
+AVX-512 distance kernels (`internal/vector/distance_avx2.c`,
+`distance_avx512.c`), the CUDA batch kernels for the inverted-list
+scoring and the mini-batch k-means (`cuda_vector_kernels.cu`), the split
+real/imaginary planes for the complex type (`complex_soa.go`), the
+asymmetric TurboQuant distance with a lookup table
+(`turboquant_adc.go`) and the memory-mapped store (`mmapstore.go`).
+
+What is missing is the *speed*. The two gaps that dominate are the cgo
+call overhead — every kernel crossing the language boundary costs about
+fifty nanoseconds, and the IVF assignment makes one call per 256 rows
+against 500 centroids — and the fact that the complex type is four times
+the bandwidth of float32. Both are addressable: the first with a
+persistent cgo worker and the second with the float32 path the GPU
+already has.
+
+The measurements above are the ones this document claims, and the
+commands above reproduce them.

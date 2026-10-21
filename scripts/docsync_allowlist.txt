@@ -5,6 +5,7 @@
 
 # The Go tool.
 pm
+benchtime
 lgc
 tags
 race
@@ -57,3 +58,7 @@ tags
 # The actionlint flags.
 config-file
 color
+
+# The pprof tool.
+top
+nodecount
