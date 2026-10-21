@@ -182,15 +182,14 @@ rewrites it, and the CI fails when it is out of date.
 <!-- coverage:start -->
 
 > These numbers cover the default build only. `internal/device` has
-> 92 `.go` files but only 13 compile without a build tag, and
-> `internal/engine` has 122 files of which 78 compile — all CUDA,
-> Metal and AVX-512 code is excluded from both the numerator
+> 92 `.go` files but only 14 compile without a build tag, and
+> `internal/engine` has 114 files of which 71 compile — all CUDA,
+> Metal, TPU and AVX-512 code is excluded from both the numerator
 > and the denominator. The percentages therefore say nothing about
 > the GPU backends.
 
 | Package | Coverage |
 |---|---|
-| `internal/config` | 100.0% |
 | `internal/cpu` | 100.0% |
 | `internal/logger` | 100.0% |
 | `internal/mathx` | 100.0% |
@@ -198,17 +197,18 @@ rewrites it, and the CI fails when it is out of date.
 | `internal/ollama` | 100.0% |
 | `internal/promtest` | 100.0% |
 | `internal/sampler` | 100.0% |
-| `internal/vector` | 100.0% |
 | `internal/vlm` | 100.0% |
 | `internal/metrics` | 99.5% |
-| `internal/tokenizer` | 98.5% |
-| `internal/simd` | 95.2% |
+| `internal/tokenizer` | 98.6% |
+| `internal/simd` | 95.5% |
 | `internal/telemetry` | 94.0% |
-| `internal/api` | 91.6% |
-| `internal/gguf` | 89.6% |
-| `internal/arrow_client` | 82.0% |
+| `internal/config` | 88.1% |
+| `internal/api` | 87.9% |
+| `internal/gguf` | 86.3% |
+| `internal/vector` | 84.8% |
 | `internal/engine` | 80.4% |
-| `internal/device` | 75.3% |
+| `internal/device` | 78.6% |
+| `internal/testmodel` | 0.0% |
 
 <!-- coverage:end -->
 

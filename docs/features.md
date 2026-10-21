@@ -17,7 +17,7 @@ A high-performance, memory-efficient LLM inference engine written in Go with nat
 - **Qwen 3.5 Hybrid Attention** — Native support for alternating GatedDeltaNet linear SSM and Full Self-Attention with per-head Q/K RMSNorm.
 - **Token Generation Loop** — Autoregressive sampling with temperature, top-K, top-P (nucleus), and repetition penalty.
 - **Batched Inference** — Continuous batching with iteration-level preemption and per-sequence KV cache isolation.
-- **Streaming Output** — Real-time token streaming via Server-Sent Events (SSE) and WebSocket, in the WebUI. The engine's own REST API accepts a `"stream": true` field and ignores it (see [roadmap.md](roadmap.md), Step 53).
+- **Streaming Output** — Real-time token streaming via Server-Sent Events (SSE) and WebSocket, in the WebUI. The engine's own REST API accepts a `"stream": true` field and answers with a `text/event-stream` of `chat.completion.chunk` objects (see [api.md](api.md)).
 - **Jinja2 Chat Template Rendering** — Auto-applies `tokenizer.chat_template` from GGUF KV metadata with lightweight Jinja2 subset renderer (`{% for %}`, `{% if %}`, `{% set %}`, `{{ var }}`). Falls back to simple template when not available.
 - **PromptCache (Radix-Tree Prefix Caching)** — Shared prompt prefix caching across requests for reduced TTFT. Populated after sequence completion in CPU, CUDA, and Metal engines.
 - **Model Quantization** — `cmd/quantize` reads a GGUF model and writes a quantized one (`q4_k`, `q6_k`, `q8_0`, `f16`, `f32`), keeping the metadata and the token embedding.

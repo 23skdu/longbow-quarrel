@@ -90,10 +90,11 @@ would have scraped nothing.
 > The Arrow Flight server is started with `-flight <addr>` and serves
 > single-request inference over `DoGet`. The *sharded* forward -- the
 > part that would spread a model over several machines -- is not
-> implemented on the worker side: the worker rejects the tensor forward
-> with `Unimplemented` rather than silently returning zeroed
-> activations. See [roadmap.md](roadmap.md) (Step 57) for the exact
-> boundary.
+> implemented: the repository is a single-device engine with a Flight
+> *server* for remote inference, and the worker rejects the tensor
+> forward with `Unimplemented` rather than silently returning zeroed
+> activations. The Flight client that used to live in the repository is
+> gone; a client is the Arrow library's own.
 >
 > To spread a model over several machines, run one process per machine
 > behind a load balancer. To spread it over several *devices in one
