@@ -3,7 +3,6 @@
 package main
 
 import (
-	"encoding/binary"
 	"os"
 	"testing"
 
@@ -14,98 +13,42 @@ import (
 
 // generateMoeTestGGUF creates a mock GGUF with Nemotron-like MoE metadata
 func generateMoeTestGGUF(path string) error {
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMagic))
-	_ = binary.Write(f, binary.LittleEndian, uint32(3))
-	_ = binary.Write(f, binary.LittleEndian, uint64(16)) // Increased tensor count for MoE
-	_ = binary.Write(f, binary.LittleEndian, uint64(14)) // Increased KV count for MoE
-
-	writeKV := func(key string, val interface{}) {
-		_ = binary.Write(f, binary.LittleEndian, uint64(len(key)))
-		_, _ = f.WriteString(key)
-		switch v := val.(type) {
-		case uint32:
-			_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeUint32))
-			_ = binary.Write(f, binary.LittleEndian, v)
-		case float32:
-			_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeFloat32))
-			_ = binary.Write(f, binary.LittleEndian, v)
-		case string:
-			_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeString))
-			_ = binary.Write(f, binary.LittleEndian, uint64(len(v)))
-			_, _ = f.WriteString(v)
-		case bool:
-			_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeBool))
-			_ = binary.Write(f, binary.LittleEndian, v)
-		}
+	kv := map[string]interface{}{
+		"general.architecture":                    "llama",
+		"llama.block_count":                       uint32(1),
+		"llama.embedding_length":                  uint32(64),
+		"llama.attention.head_count":              uint32(4),
+		"llama.attention.head_count_kv":           uint32(4),
+		"llama.context_length":                    uint32(128),
+		"llama.rope.freq_base":                    float32(10000.0),
+		"llama.vocab_size":                        uint32(256),
+		"llama.expert_count":                      uint32(128),
+		"llama.expert_used_count":                 uint32(6),
+		"llama.expert_shared_count":               uint32(1),
+		"llama.expert_feed_forward_length":        uint32(128),
+		"llama.expert_shared_feed_forward_length": uint32(128),
+		"llama.expert_weights_norm":               true,
 	}
 
-	// Basic Model Metadata
-	writeKV("general.architecture", "llama")
-	writeKV("llama.block_count", uint32(1))
-	writeKV("llama.embedding_length", uint32(64))
-	writeKV("llama.attention.head_count", uint32(4))
-	writeKV("llama.attention.head_count_kv", uint32(4))
-	writeKV("llama.context_length", uint32(128))
-	writeKV("llama.rope.freq_base", float32(10000.0))
-	writeKV("llama.vocab_size", uint32(256))
+	var tensors []gguf.TensorData
+	tensors = append(tensors, f32Tensor("token_embd.weight", []uint64{64, 256}, 1))
+	tensors = append(tensors, f32Tensor("output.weight", []uint64{64, 256}, 2))
+	tensors = append(tensors, f32Tensor("output_norm.weight", []uint64{64}, 3))
+	tensors = append(tensors, f32Tensor("blk.0.attn_q.weight", []uint64{64, 64}, 4))
+	tensors = append(tensors, f32Tensor("blk.0.attn_k.weight", []uint64{64, 64}, 5))
+	tensors = append(tensors, f32Tensor("blk.0.attn_v.weight", []uint64{64, 64}, 6))
+	tensors = append(tensors, f32Tensor("blk.0.attn_output.weight", []uint64{64, 64}, 7))
+	tensors = append(tensors, f32Tensor("blk.0.attn_norm.weight", []uint64{64}, 8))
+	tensors = append(tensors, f32Tensor("blk.0.ffn_norm.weight", []uint64{64}, 9))
+	tensors = append(tensors, f32Tensor("blk.0.ffn_gate_inp.weight", []uint64{64, 128}, 10))
+	tensors = append(tensors, f32Tensor("blk.0.ffn_gate_exps.weight", []uint64{128, 64, 128}, 11))
+	tensors = append(tensors, f32Tensor("blk.0.ffn_up_exps.weight", []uint64{128, 64, 128}, 12))
+	tensors = append(tensors, f32Tensor("blk.0.ffn_down_exps.weight", []uint64{64, 128, 128}, 13))
+	tensors = append(tensors, f32Tensor("blk.0.ffn_gate_shexp.weight", []uint64{64, 128}, 14))
+	tensors = append(tensors, f32Tensor("blk.0.ffn_up_shexp.weight", []uint64{64, 128}, 15))
+	tensors = append(tensors, f32Tensor("blk.0.ffn_down_shexp.weight", []uint64{128, 64}, 16))
 
-	// MOE Metadata
-	writeKV("llama.expert_count", uint32(128))
-	writeKV("llama.expert_used_count", uint32(6))
-	writeKV("llama.expert_shared_count", uint32(1))
-	writeKV("llama.expert_feed_forward_length", uint32(128))
-	writeKV("llama.expert_shared_feed_forward_length", uint32(128))
-	writeKV("llama.expert_weights_norm", true)
-
-	// Tensors
-	writeTensor := func(name string, dims []uint64) {
-		_ = binary.Write(f, binary.LittleEndian, uint64(len(name)))
-		_, _ = f.WriteString(name)
-		_ = binary.Write(f, binary.LittleEndian, uint32(len(dims)))
-		for _, d := range dims {
-			_ = binary.Write(f, binary.LittleEndian, uint64(d))
-		}
-		_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGMLTypeF32))
-		_ = binary.Write(f, binary.LittleEndian, uint64(0)) // offset
-	}
-
-	// Global Tensors
-	writeTensor("token_embd.weight", []uint64{64, 256})
-	writeTensor("output.weight", []uint64{64, 256})
-	writeTensor("output_norm.weight", []uint64{64})
-
-	// Block Tensors (Standard)
-	writeTensor("blk.0.attn_q.weight", []uint64{64, 64})
-	writeTensor("blk.0.attn_k.weight", []uint64{64, 64})
-	writeTensor("blk.0.attn_v.weight", []uint64{64, 64})
-	writeTensor("blk.0.attn_output.weight", []uint64{64, 64})
-	writeTensor("blk.0.attn_norm.weight", []uint64{64})
-	writeTensor("blk.0.ffn_norm.weight", []uint64{64})
-
-	// MOE Tensors
-	writeTensor("blk.0.ffn_gate_inp.weight", []uint64{64, 128})       // Router: [dim, num_experts]
-	writeTensor("blk.0.ffn_gate_exps.weight", []uint64{128, 64, 128}) // Experts: [hidden_dim, dim, num_experts]
-	writeTensor("blk.0.ffn_up_exps.weight", []uint64{128, 64, 128})
-	writeTensor("blk.0.ffn_down_exps.weight", []uint64{64, 128, 128}) // Down: [dim, hidden_dim, num_experts]
-
-	// Shared Expert Tensors
-	writeTensor("blk.0.ffn_gate_shexp.weight", []uint64{64, 128})
-	writeTensor("blk.0.ffn_up_shexp.weight", []uint64{64, 128})
-	writeTensor("blk.0.ffn_down_shexp.weight", []uint64{128, 64})
-
-	// Data Padding and Dummy Content
-	_, _ = f.Write(make([]byte, 2048))
-	// Large enough dummy data
-	dummyData := make([]byte, 1024*1024*10) // 10MB dummy
-	_, _ = f.Write(dummyData)
-
-	return nil
+	return buildTestModel(path, kv, tensors)
 }
 
 func TestNemotronMOECoherence(t *testing.T) {
@@ -147,88 +90,42 @@ func TestNemotronMOECoherence(t *testing.T) {
 
 // generateNemotronMiniTestGGUF creates a mock GGUF for Nemotron-Mini-4B (smaller MOE variant)
 func generateNemotronMiniTestGGUF(path string) error {
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMagic))
-	_ = binary.Write(f, binary.LittleEndian, uint32(3))
-	_ = binary.Write(f, binary.LittleEndian, uint64(16))
-	_ = binary.Write(f, binary.LittleEndian, uint64(14))
-
-	writeKV := func(key string, val interface{}) {
-		_ = binary.Write(f, binary.LittleEndian, uint64(len(key)))
-		_, _ = f.WriteString(key)
-		switch v := val.(type) {
-		case uint32:
-			_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeUint32))
-			_ = binary.Write(f, binary.LittleEndian, v)
-		case float32:
-			_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeFloat32))
-			_ = binary.Write(f, binary.LittleEndian, v)
-		case string:
-			_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeString))
-			_ = binary.Write(f, binary.LittleEndian, uint64(len(v)))
-			_, _ = f.WriteString(v)
-		case bool:
-			_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeBool))
-			_ = binary.Write(f, binary.LittleEndian, v)
-		}
+	kv := map[string]interface{}{
+		"general.architecture":                    "llama",
+		"llama.block_count":                       uint32(1),
+		"llama.embedding_length":                  uint32(64),
+		"llama.attention.head_count":              uint32(4),
+		"llama.attention.head_count_kv":           uint32(4),
+		"llama.context_length":                    uint32(128),
+		"llama.rope.freq_base":                    float32(10000.0),
+		"llama.vocab_size":                        uint32(256),
+		"llama.expert_count":                      uint32(128),
+		"llama.expert_used_count":                 uint32(6),
+		"llama.expert_shared_count":               uint32(1),
+		"llama.expert_feed_forward_length":        uint32(96),
+		"llama.expert_shared_feed_forward_length": uint32(96),
+		"llama.expert_weights_norm":               true,
 	}
 
-	// Nemotron-Mini-4B uses smaller dimensions but same expert configuration
-	writeKV("general.architecture", "llama")
-	writeKV("llama.block_count", uint32(1))
-	writeKV("llama.embedding_length", uint32(64))
-	writeKV("llama.attention.head_count", uint32(4))
-	writeKV("llama.attention.head_count_kv", uint32(4))
-	writeKV("llama.context_length", uint32(128))
-	writeKV("llama.rope.freq_base", float32(10000.0))
-	writeKV("llama.vocab_size", uint32(256))
+	var tensors []gguf.TensorData
+	tensors = append(tensors, f32Tensor("token_embd.weight", []uint64{64, 256}, 1))
+	tensors = append(tensors, f32Tensor("output.weight", []uint64{64, 256}, 2))
+	tensors = append(tensors, f32Tensor("output_norm.weight", []uint64{64}, 3))
+	tensors = append(tensors, f32Tensor("blk.0.attn_q.weight", []uint64{64, 64}, 4))
+	tensors = append(tensors, f32Tensor("blk.0.attn_k.weight", []uint64{64, 64}, 5))
+	tensors = append(tensors, f32Tensor("blk.0.attn_v.weight", []uint64{64, 64}, 6))
+	tensors = append(tensors, f32Tensor("blk.0.attn_output.weight", []uint64{64, 64}, 7))
+	tensors = append(tensors, f32Tensor("blk.0.attn_norm.weight", []uint64{64}, 8))
+	tensors = append(tensors, f32Tensor("blk.0.ffn_norm.weight", []uint64{64}, 9))
+	tensors = append(tensors, f32Tensor("blk.0.ffn_gate_inp.weight", []uint64{64, 128}, 10))
+	tensors = append(tensors, f32Tensor("blk.0.ffn_gate_exps.weight", []uint64{96, 64, 128}, 11))
+	tensors = append(tensors, f32Tensor("blk.0.ffn_up_exps.weight", []uint64{96, 64, 128}, 12))
+	tensors = append(tensors, f32Tensor("blk.0.ffn_down_exps.weight", []uint64{64, 96, 128}, 13))
+	tensors = append(tensors, f32Tensor("blk.0.ffn_gate_shexp.weight", []uint64{64, 96}, 14))
+	tensors = append(tensors, f32Tensor("blk.0.ffn_up_shexp.weight", []uint64{64, 96}, 15))
+	tensors = append(tensors, f32Tensor("blk.0.ffn_down_shexp.weight", []uint64{96, 64}, 16))
 
-	// MOE Metadata - Nemotron-Mini uses same expert config as full model
-	writeKV("llama.expert_count", uint32(128))
-	writeKV("llama.expert_used_count", uint32(6))
-	writeKV("llama.expert_shared_count", uint32(1))
-	writeKV("llama.expert_feed_forward_length", uint32(96)) // Smaller FFN
-	writeKV("llama.expert_shared_feed_forward_length", uint32(96))
-	writeKV("llama.expert_weights_norm", true)
-
-	writeTensor := func(name string, dims []uint64) {
-		_ = binary.Write(f, binary.LittleEndian, uint64(len(name)))
-		_, _ = f.WriteString(name)
-		_ = binary.Write(f, binary.LittleEndian, uint32(len(dims)))
-		for _, d := range dims {
-			_ = binary.Write(f, binary.LittleEndian, uint64(d))
-		}
-		_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGMLTypeF32))
-		_ = binary.Write(f, binary.LittleEndian, uint64(0))
-	}
-
-	writeTensor("token_embd.weight", []uint64{64, 256})
-	writeTensor("output.weight", []uint64{64, 256})
-	writeTensor("output_norm.weight", []uint64{64})
-	writeTensor("blk.0.attn_q.weight", []uint64{64, 64})
-	writeTensor("blk.0.attn_k.weight", []uint64{64, 64})
-	writeTensor("blk.0.attn_v.weight", []uint64{64, 64})
-	writeTensor("blk.0.attn_output.weight", []uint64{64, 64})
-	writeTensor("blk.0.attn_norm.weight", []uint64{64})
-	writeTensor("blk.0.ffn_norm.weight", []uint64{64})
-	writeTensor("blk.0.ffn_gate_inp.weight", []uint64{64, 128})
-	writeTensor("blk.0.ffn_gate_exps.weight", []uint64{96, 64, 128})
-	writeTensor("blk.0.ffn_up_exps.weight", []uint64{96, 64, 128})
-	writeTensor("blk.0.ffn_down_exps.weight", []uint64{64, 96, 128})
-	writeTensor("blk.0.ffn_gate_shexp.weight", []uint64{64, 96})
-	writeTensor("blk.0.ffn_up_shexp.weight", []uint64{64, 96})
-	writeTensor("blk.0.ffn_down_shexp.weight", []uint64{96, 64})
-
-	_, _ = f.Write(make([]byte, 2048))
-	dummyData := make([]byte, 1024*1024*10)
-	_, _ = f.Write(dummyData)
-
-	return nil
+	return buildTestModel(path, kv, tensors)
 }
 
 func TestNemotronMiniMOECoherence(t *testing.T) {
@@ -274,89 +171,42 @@ func TestNemotronMiniMOECoherence(t *testing.T) {
 
 // generateGPTOSSTestGGUF creates a mock GGUF for GPT-OSS MOE model
 func generateGPTOSSTestGGUF(path string) error {
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMagic))
-	_ = binary.Write(f, binary.LittleEndian, uint32(3))
-	_ = binary.Write(f, binary.LittleEndian, uint64(16))
-	_ = binary.Write(f, binary.LittleEndian, uint64(14))
-
-	writeKV := func(key string, val interface{}) {
-		_ = binary.Write(f, binary.LittleEndian, uint64(len(key)))
-		_, _ = f.WriteString(key)
-		switch v := val.(type) {
-		case uint32:
-			_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeUint32))
-			_ = binary.Write(f, binary.LittleEndian, v)
-		case float32:
-			_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeFloat32))
-			_ = binary.Write(f, binary.LittleEndian, v)
-		case string:
-			_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeString))
-			_ = binary.Write(f, binary.LittleEndian, uint64(len(v)))
-			_, _ = f.WriteString(v)
-		case bool:
-			_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeBool))
-			_ = binary.Write(f, binary.LittleEndian, v)
-		}
+	kv := map[string]interface{}{
+		"general.architecture":                    "llama",
+		"llama.block_count":                       uint32(1),
+		"llama.embedding_length":                  uint32(64),
+		"llama.attention.head_count":              uint32(4),
+		"llama.attention.head_count_kv":           uint32(4),
+		"llama.context_length":                    uint32(128),
+		"llama.rope.freq_base":                    float32(10000.0),
+		"llama.vocab_size":                        uint32(256),
+		"llama.expert_count":                      uint32(64),
+		"llama.expert_used_count":                 uint32(4),
+		"llama.expert_shared_count":               uint32(0),
+		"llama.expert_feed_forward_length":        uint32(128),
+		"llama.expert_shared_feed_forward_length": uint32(0),
+		"llama.expert_weights_norm":               false,
 	}
 
-	// GPT-OSS MOE configuration
-	writeKV("general.architecture", "llama")
-	writeKV("llama.block_count", uint32(1))
-	writeKV("llama.embedding_length", uint32(64))
-	writeKV("llama.attention.head_count", uint32(4))
-	writeKV("llama.attention.head_count_kv", uint32(4))
-	writeKV("llama.context_length", uint32(128))
-	writeKV("llama.rope.freq_base", float32(10000.0))
-	writeKV("llama.vocab_size", uint32(256))
+	var tensors []gguf.TensorData
+	tensors = append(tensors, f32Tensor("token_embd.weight", []uint64{64, 256}, 1))
+	tensors = append(tensors, f32Tensor("output.weight", []uint64{64, 256}, 2))
+	tensors = append(tensors, f32Tensor("output_norm.weight", []uint64{64}, 3))
+	tensors = append(tensors, f32Tensor("blk.0.attn_q.weight", []uint64{64, 64}, 4))
+	tensors = append(tensors, f32Tensor("blk.0.attn_k.weight", []uint64{64, 64}, 5))
+	tensors = append(tensors, f32Tensor("blk.0.attn_v.weight", []uint64{64, 64}, 6))
+	tensors = append(tensors, f32Tensor("blk.0.attn_output.weight", []uint64{64, 64}, 7))
+	tensors = append(tensors, f32Tensor("blk.0.attn_norm.weight", []uint64{64}, 8))
+	tensors = append(tensors, f32Tensor("blk.0.ffn_norm.weight", []uint64{64}, 9))
+	tensors = append(tensors, f32Tensor("blk.0.ffn_gate_inp.weight", []uint64{64, 64}, 10))
+	tensors = append(tensors, f32Tensor("blk.0.ffn_gate_exps.weight", []uint64{128, 64, 64}, 11))
+	tensors = append(tensors, f32Tensor("blk.0.ffn_up_exps.weight", []uint64{128, 64, 64}, 12))
+	tensors = append(tensors, f32Tensor("blk.0.ffn_down_exps.weight", []uint64{64, 128, 64}, 13))
+	tensors = append(tensors, f32Tensor("blk.0.ffn_gate_shexp.weight", []uint64{0}, 14))
+	tensors = append(tensors, f32Tensor("blk.0.ffn_up_shexp.weight", []uint64{0}, 15))
+	tensors = append(tensors, f32Tensor("blk.0.ffn_down_shexp.weight", []uint64{0}, 16))
 
-	// GPT-OSS uses 64 experts with top-4 routing
-	writeKV("llama.expert_count", uint32(64))
-	writeKV("llama.expert_used_count", uint32(4))
-	writeKV("llama.expert_shared_count", uint32(0)) // No shared experts
-	writeKV("llama.expert_feed_forward_length", uint32(128))
-	writeKV("llama.expert_shared_feed_forward_length", uint32(0))
-	writeKV("llama.expert_weights_norm", false)
-
-	writeTensor := func(name string, dims []uint64) {
-		_ = binary.Write(f, binary.LittleEndian, uint64(len(name)))
-		_, _ = f.WriteString(name)
-		_ = binary.Write(f, binary.LittleEndian, uint32(len(dims)))
-		for _, d := range dims {
-			_ = binary.Write(f, binary.LittleEndian, uint64(d))
-		}
-		_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGMLTypeF32))
-		_ = binary.Write(f, binary.LittleEndian, uint64(0))
-	}
-
-	writeTensor("token_embd.weight", []uint64{64, 256})
-	writeTensor("output.weight", []uint64{64, 256})
-	writeTensor("output_norm.weight", []uint64{64})
-	writeTensor("blk.0.attn_q.weight", []uint64{64, 64})
-	writeTensor("blk.0.attn_k.weight", []uint64{64, 64})
-	writeTensor("blk.0.attn_v.weight", []uint64{64, 64})
-	writeTensor("blk.0.attn_output.weight", []uint64{64, 64})
-	writeTensor("blk.0.attn_norm.weight", []uint64{64})
-	writeTensor("blk.0.ffn_norm.weight", []uint64{64})
-	writeTensor("blk.0.ffn_gate_inp.weight", []uint64{64, 64})       // Router: [dim, 64 experts]
-	writeTensor("blk.0.ffn_gate_exps.weight", []uint64{128, 64, 64}) // 64 experts
-	writeTensor("blk.0.ffn_up_exps.weight", []uint64{128, 64, 64})
-	writeTensor("blk.0.ffn_down_exps.weight", []uint64{64, 128, 64})
-	// No shared experts for GPT-OSS
-	writeTensor("blk.0.ffn_gate_shexp.weight", []uint64{0})
-	writeTensor("blk.0.ffn_up_shexp.weight", []uint64{0})
-	writeTensor("blk.0.ffn_down_shexp.weight", []uint64{0})
-
-	_, _ = f.Write(make([]byte, 2048))
-	dummyData := make([]byte, 1024*1024*10)
-	_, _ = f.Write(dummyData)
-
-	return nil
+	return buildTestModel(path, kv, tensors)
 }
 
 func TestGPTOSSMOECoherence(t *testing.T) {
@@ -406,89 +256,42 @@ func TestGPTOSSMOECoherence(t *testing.T) {
 
 // generateMixtralTestGGUF creates a mock GGUF for Mixtral-8x7B MOE model
 func generateMixtralTestGGUF(path string) error {
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMagic))
-	_ = binary.Write(f, binary.LittleEndian, uint32(3))
-	_ = binary.Write(f, binary.LittleEndian, uint64(16))
-	_ = binary.Write(f, binary.LittleEndian, uint64(14))
-
-	writeKV := func(key string, val interface{}) {
-		_ = binary.Write(f, binary.LittleEndian, uint64(len(key)))
-		_, _ = f.WriteString(key)
-		switch v := val.(type) {
-		case uint32:
-			_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeUint32))
-			_ = binary.Write(f, binary.LittleEndian, v)
-		case float32:
-			_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeFloat32))
-			_ = binary.Write(f, binary.LittleEndian, v)
-		case string:
-			_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeString))
-			_ = binary.Write(f, binary.LittleEndian, uint64(len(v)))
-			_, _ = f.WriteString(v)
-		case bool:
-			_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeBool))
-			_ = binary.Write(f, binary.LittleEndian, v)
-		}
+	kv := map[string]interface{}{
+		"general.architecture":                    "llama",
+		"llama.block_count":                       uint32(1),
+		"llama.embedding_length":                  uint32(64),
+		"llama.attention.head_count":              uint32(4),
+		"llama.attention.head_count_kv":           uint32(4),
+		"llama.context_length":                    uint32(128),
+		"llama.rope.freq_base":                    float32(10000.0),
+		"llama.vocab_size":                        uint32(256),
+		"llama.expert_count":                      uint32(8),
+		"llama.expert_used_count":                 uint32(2),
+		"llama.expert_shared_count":               uint32(0),
+		"llama.expert_feed_forward_length":        uint32(128),
+		"llama.expert_shared_feed_forward_length": uint32(0),
+		"llama.expert_weights_norm":               false,
 	}
 
-	// Mixtral architecture
-	writeKV("general.architecture", "llama")
-	writeKV("llama.block_count", uint32(1))
-	writeKV("llama.embedding_length", uint32(64))
-	writeKV("llama.attention.head_count", uint32(4))
-	writeKV("llama.attention.head_count_kv", uint32(4))
-	writeKV("llama.context_length", uint32(128))
-	writeKV("llama.rope.freq_base", float32(10000.0))
-	writeKV("llama.vocab_size", uint32(256))
+	var tensors []gguf.TensorData
+	tensors = append(tensors, f32Tensor("token_embd.weight", []uint64{64, 256}, 1))
+	tensors = append(tensors, f32Tensor("output.weight", []uint64{64, 256}, 2))
+	tensors = append(tensors, f32Tensor("output_norm.weight", []uint64{64}, 3))
+	tensors = append(tensors, f32Tensor("blk.0.attn_q.weight", []uint64{64, 64}, 4))
+	tensors = append(tensors, f32Tensor("blk.0.attn_k.weight", []uint64{64, 64}, 5))
+	tensors = append(tensors, f32Tensor("blk.0.attn_v.weight", []uint64{64, 64}, 6))
+	tensors = append(tensors, f32Tensor("blk.0.attn_output.weight", []uint64{64, 64}, 7))
+	tensors = append(tensors, f32Tensor("blk.0.attn_norm.weight", []uint64{64}, 8))
+	tensors = append(tensors, f32Tensor("blk.0.ffn_norm.weight", []uint64{64}, 9))
+	tensors = append(tensors, f32Tensor("blk.0.ffn_gate_inp.weight", []uint64{64, 8}, 10))
+	tensors = append(tensors, f32Tensor("blk.0.ffn_gate_exps.weight", []uint64{128, 64, 8}, 11))
+	tensors = append(tensors, f32Tensor("blk.0.ffn_up_exps.weight", []uint64{128, 64, 8}, 12))
+	tensors = append(tensors, f32Tensor("blk.0.ffn_down_exps.weight", []uint64{64, 128, 8}, 13))
+	tensors = append(tensors, f32Tensor("blk.0.ffn_gate_shexp.weight", []uint64{0}, 14))
+	tensors = append(tensors, f32Tensor("blk.0.ffn_up_shexp.weight", []uint64{0}, 15))
+	tensors = append(tensors, f32Tensor("blk.0.ffn_down_shexp.weight", []uint64{0}, 16))
 
-	// Mixtral uses 8 experts with top-2 routing
-	writeKV("llama.expert_count", uint32(8))
-	writeKV("llama.expert_used_count", uint32(2))
-	writeKV("llama.expert_shared_count", uint32(0))
-	writeKV("llama.expert_feed_forward_length", uint32(128))
-	writeKV("llama.expert_shared_feed_forward_length", uint32(0))
-	writeKV("llama.expert_weights_norm", false)
-
-	writeTensor := func(name string, dims []uint64) {
-		_ = binary.Write(f, binary.LittleEndian, uint64(len(name)))
-		_, _ = f.WriteString(name)
-		_ = binary.Write(f, binary.LittleEndian, uint32(len(dims)))
-		for _, d := range dims {
-			_ = binary.Write(f, binary.LittleEndian, uint64(d))
-		}
-		_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGMLTypeF32))
-		_ = binary.Write(f, binary.LittleEndian, uint64(0))
-	}
-
-	writeTensor("token_embd.weight", []uint64{64, 256})
-	writeTensor("output.weight", []uint64{64, 256})
-	writeTensor("output_norm.weight", []uint64{64})
-	writeTensor("blk.0.attn_q.weight", []uint64{64, 64})
-	writeTensor("blk.0.attn_k.weight", []uint64{64, 64})
-	writeTensor("blk.0.attn_v.weight", []uint64{64, 64})
-	writeTensor("blk.0.attn_output.weight", []uint64{64, 64})
-	writeTensor("blk.0.attn_norm.weight", []uint64{64})
-	writeTensor("blk.0.ffn_norm.weight", []uint64{64})
-	writeTensor("blk.0.ffn_gate_inp.weight", []uint64{64, 8})       // Router: [dim, 8 experts]
-	writeTensor("blk.0.ffn_gate_exps.weight", []uint64{128, 64, 8}) // 8 experts
-	writeTensor("blk.0.ffn_up_exps.weight", []uint64{128, 64, 8})
-	writeTensor("blk.0.ffn_down_exps.weight", []uint64{64, 128, 8})
-	// No shared experts for Mixtral
-	writeTensor("blk.0.ffn_gate_shexp.weight", []uint64{0})
-	writeTensor("blk.0.ffn_up_shexp.weight", []uint64{0})
-	writeTensor("blk.0.ffn_down_shexp.weight", []uint64{0})
-
-	_, _ = f.Write(make([]byte, 2048))
-	dummyData := make([]byte, 1024*1024*10)
-	_, _ = f.Write(dummyData)
-
-	return nil
+	return buildTestModel(path, kv, tensors)
 }
 
 func TestMixtralMOECoherence(t *testing.T) {

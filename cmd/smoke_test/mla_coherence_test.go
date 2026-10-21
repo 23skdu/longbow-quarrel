@@ -3,7 +3,6 @@
 package main
 
 import (
-	"encoding/binary"
 	"os"
 	"testing"
 
@@ -14,107 +13,48 @@ import (
 
 // generateDeepSeekMLATestGGUF creates a mock GGUF for DeepSeek V2/V3 Multi-Head Latent Attention (MLA)
 func generateDeepSeekMLATestGGUF(path string) error {
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMagic))
-	_ = binary.Write(f, binary.LittleEndian, uint32(3))
-	_ = binary.Write(f, binary.LittleEndian, uint64(19)) // 19 tensors
-	_ = binary.Write(f, binary.LittleEndian, uint64(17)) // 17 KV pairs
-
-	writeKV := func(key string, val interface{}) {
-		_ = binary.Write(f, binary.LittleEndian, uint64(len(key)))
-		_, _ = f.WriteString(key)
-		switch v := val.(type) {
-		case uint32:
-			_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeUint32))
-			_ = binary.Write(f, binary.LittleEndian, v)
-		case float32:
-			_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeFloat32))
-			_ = binary.Write(f, binary.LittleEndian, v)
-		case string:
-			_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeString))
-			_ = binary.Write(f, binary.LittleEndian, uint64(len(v)))
-			_, _ = f.WriteString(v)
-		case bool:
-			_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGUFMetadataValueTypeBool))
-			_ = binary.Write(f, binary.LittleEndian, v)
-		}
+	kv := map[string]interface{}{
+		"general.architecture":                 "deepseek2",
+		"deepseek2.block_count":                uint32(1),
+		"deepseek2.embedding_length":           uint32(64),
+		"deepseek2.attention.head_count":       uint32(4),
+		"deepseek2.attention.head_count_kv":    uint32(4),
+		"deepseek2.attention.head_dim":         uint32(16),
+		"deepseek2.context_length":             uint32(128),
+		"deepseek2.rope.freq_base":             float32(10000.0),
+		"deepseek2.vocab_size":                 uint32(256),
+		"deepseek2.attention.kv_lora_rank":     uint32(16),
+		"deepseek2.attention.q_lora_rank":      uint32(16),
+		"deepseek2.attention.qk_nope_head_dim": uint32(8),
+		"deepseek2.attention.qk_rope_head_dim": uint32(8),
+		"deepseek2.attention.v_head_dim":       uint32(8),
+		"deepseek2.expert_count":               uint32(8),
+		"deepseek2.expert_used_count":          uint32(2),
+		"deepseek2.expert_feed_forward_length": uint32(64),
 	}
 
-	// Model Architecture & Geometry
-	writeKV("general.architecture", "deepseek2")
-	writeKV("deepseek2.block_count", uint32(1))
-	writeKV("deepseek2.embedding_length", uint32(64))
-	writeKV("deepseek2.attention.head_count", uint32(4))
-	writeKV("deepseek2.attention.head_count_kv", uint32(4))
-	writeKV("deepseek2.attention.head_dim", uint32(16))
-	writeKV("deepseek2.context_length", uint32(128))
-	writeKV("deepseek2.rope.freq_base", float32(10000.0))
-	writeKV("deepseek2.vocab_size", uint32(256))
+	var tensors []gguf.TensorData
+	tensors = append(tensors, f32Tensor("token_embd.weight", []uint64{64, 256}, 1))
+	tensors = append(tensors, f32Tensor("output.weight", []uint64{64, 256}, 2))
+	tensors = append(tensors, f32Tensor("output_norm.weight", []uint64{64}, 3))
+	tensors = append(tensors, f32Tensor("blk.0.attn_norm.weight", []uint64{64}, 4))
+	tensors = append(tensors, f32Tensor("blk.0.attn_q_a.weight", []uint64{16, 64}, 5))
+	tensors = append(tensors, f32Tensor("blk.0.attn_q_a_norm.weight", []uint64{16}, 6))
+	tensors = append(tensors, f32Tensor("blk.0.attn_q_b.weight", []uint64{64, 16}, 7))
+	tensors = append(tensors, f32Tensor("blk.0.attn_kv_a_mqa.weight", []uint64{24, 64}, 8))
+	tensors = append(tensors, f32Tensor("blk.0.attn_kv_a_norm.weight", []uint64{16}, 9))
+	tensors = append(tensors, f32Tensor("blk.0.attn_kv_b.weight", []uint64{64, 16}, 10))
+	tensors = append(tensors, f32Tensor("blk.0.attn_output.weight", []uint64{64, 32}, 11))
+	tensors = append(tensors, f32Tensor("blk.0.ffn_norm.weight", []uint64{64}, 12))
+	tensors = append(tensors, f32Tensor("blk.0.ffn_gate_inp.weight", []uint64{64, 8}, 13))
+	tensors = append(tensors, f32Tensor("blk.0.ffn_gate_exps.weight", []uint64{64, 64, 8}, 14))
+	tensors = append(tensors, f32Tensor("blk.0.ffn_up_exps.weight", []uint64{64, 64, 8}, 15))
+	tensors = append(tensors, f32Tensor("blk.0.ffn_down_exps.weight", []uint64{64, 64, 8}, 16))
+	tensors = append(tensors, f32Tensor("blk.0.ffn_gate_shexp.weight", []uint64{0}, 17))
+	tensors = append(tensors, f32Tensor("blk.0.ffn_up_shexp.weight", []uint64{0}, 18))
+	tensors = append(tensors, f32Tensor("blk.0.ffn_down_shexp.weight", []uint64{0}, 19))
 
-	// MLA Specific Hyperparameters
-	writeKV("deepseek2.attention.kv_lora_rank", uint32(16))
-	writeKV("deepseek2.attention.q_lora_rank", uint32(16))
-	writeKV("deepseek2.attention.qk_nope_head_dim", uint32(8))
-	writeKV("deepseek2.attention.qk_rope_head_dim", uint32(8))
-	writeKV("deepseek2.attention.v_head_dim", uint32(8))
-
-	// MoE Specific Hyperparameters
-	writeKV("deepseek2.expert_count", uint32(8))
-	writeKV("deepseek2.expert_used_count", uint32(2))
-	writeKV("deepseek2.expert_feed_forward_length", uint32(64))
-
-	// Tensors
-	writeTensor := func(name string, dims []uint64) {
-		_ = binary.Write(f, binary.LittleEndian, uint64(len(name)))
-		_, _ = f.WriteString(name)
-		_ = binary.Write(f, binary.LittleEndian, uint32(len(dims)))
-		for _, d := range dims {
-			_ = binary.Write(f, binary.LittleEndian, uint64(d))
-		}
-		_ = binary.Write(f, binary.LittleEndian, uint32(gguf.GGMLTypeF32))
-		_ = binary.Write(f, binary.LittleEndian, uint64(0)) // offset
-	}
-
-	// Embedding & Output
-	writeTensor("token_embd.weight", []uint64{64, 256})
-	writeTensor("output.weight", []uint64{64, 256})
-	writeTensor("output_norm.weight", []uint64{64})
-
-	// Block Norm
-	writeTensor("blk.0.attn_norm.weight", []uint64{64})
-
-	// MLA Query Tensors (Low-Rank + RoPE)
-	writeTensor("blk.0.attn_q_a.weight", []uint64{16, 64})
-	writeTensor("blk.0.attn_q_a_norm.weight", []uint64{16})
-	writeTensor("blk.0.attn_q_b.weight", []uint64{64, 16})
-
-	// MLA KV Tensors (Compressed KV + Decoupled RoPE Key)
-	writeTensor("blk.0.attn_kv_a_mqa.weight", []uint64{24, 64})
-	writeTensor("blk.0.attn_kv_a_norm.weight", []uint64{16})
-	writeTensor("blk.0.attn_kv_b.weight", []uint64{64, 16})
-	writeTensor("blk.0.attn_output.weight", []uint64{64, 32})
-
-	// FFN & MoE Tensors
-	writeTensor("blk.0.ffn_norm.weight", []uint64{64})
-	writeTensor("blk.0.ffn_gate_inp.weight", []uint64{64, 8})
-	writeTensor("blk.0.ffn_gate_exps.weight", []uint64{64, 64, 8})
-	writeTensor("blk.0.ffn_up_exps.weight", []uint64{64, 64, 8})
-	writeTensor("blk.0.ffn_down_exps.weight", []uint64{64, 64, 8})
-	writeTensor("blk.0.ffn_gate_shexp.weight", []uint64{0})
-	writeTensor("blk.0.ffn_up_shexp.weight", []uint64{0})
-	writeTensor("blk.0.ffn_down_shexp.weight", []uint64{0})
-
-	// Data Padding and Dummy Content
-	_, _ = f.Write(make([]byte, 2048))
-	dummyData := make([]byte, 1024*1024*8) // 8MB dummy
-	_, _ = f.Write(dummyData)
-
-	return nil
+	return buildTestModel(path, kv, tensors)
 }
 
 func TestDeepSeekMLACoherence(t *testing.T) {

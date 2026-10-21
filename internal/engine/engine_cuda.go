@@ -133,6 +133,47 @@ func NewcudaEngine(modelPath string, cfg config.Config) (Engine, error) {
 	if cfg.Architecture == "" {
 		cfg.Architecture = modelCfg.Architecture
 	}
+
+	// The mixture-of-experts and the multi-head latent attention
+	// configurations come from the model metadata. They were not
+	// copied: a MoE model was loaded on the GPU as if it were a dense
+	// one, and the router and the experts were never used.
+	if modelCfg.IsMOE {
+		cfg.IsMOE = true
+		if cfg.ExpertCount <= 0 {
+			cfg.ExpertCount = modelCfg.ExpertCount
+		}
+		if cfg.ExpertUsedCount <= 0 {
+			cfg.ExpertUsedCount = modelCfg.ExpertUsedCount
+		}
+		if cfg.ExpertSharedCount <= 0 {
+			cfg.ExpertSharedCount = modelCfg.ExpertSharedCount
+		}
+		if cfg.ExpertFeedForwardLength <= 0 {
+			cfg.ExpertFeedForwardLength = modelCfg.ExpertFeedForwardLength
+		}
+		if cfg.ExpertSharedFeedForwardLength <= 0 {
+			cfg.ExpertSharedFeedForwardLength = modelCfg.ExpertSharedFeedForwardLength
+		}
+	}
+	if modelCfg.IsMLA {
+		cfg.IsMLA = true
+		if cfg.QLoRARank <= 0 {
+			cfg.QLoRARank = modelCfg.QLoRARank
+		}
+		if cfg.KVLoRARank <= 0 {
+			cfg.KVLoRARank = modelCfg.KVLoRARank
+		}
+		if cfg.QKNDim <= 0 {
+			cfg.QKNDim = modelCfg.QKNDim
+		}
+		if cfg.QKRopeDim <= 0 {
+			cfg.QKRopeDim = modelCfg.QKRopeDim
+		}
+		if cfg.VHeadDim <= 0 {
+			cfg.VHeadDim = modelCfg.VHeadDim
+		}
+	}
 	if modelCfg.IsGemma4 {
 		cfg.IsGemma4 = true
 		cfg.Gemma4SlidingWindowSize = modelCfg.Gemma4SlidingWindowSize
