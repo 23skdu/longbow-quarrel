@@ -68,7 +68,6 @@ func detectCPU() {
 	metrics.RecordSIMDLevel(cpuLevel)
 }
 
-
 var (
 	cpuInfoOS          = runtime.GOOS
 	cpuInfoPath        = "/proc/cpuinfo"

@@ -119,4 +119,3 @@ func auditRoPEDeviation(theta, expectedMaxDev, actualMaxDev float32) RoPEDeviati
 func auditActivationPrecision(actType string, maxVal float32) {
 	metrics.RecordActivationPrecision(actType, maxVal)
 }
-

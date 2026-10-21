@@ -30,9 +30,9 @@ func TestCUDAQuantizedKVCacheMatchesTheF16Path(t *testing.T) {
 	)
 
 	for _, tc := range []struct {
-		name   string
-		isFP8  bool
-		tol    float64
+		name  string
+		isFP8 bool
+		tol   float64
 	}{
 		{name: "int8", isFP8: false, tol: 0.05},
 		{name: "fp8", isFP8: true, tol: 0.25},
@@ -160,7 +160,7 @@ func TestCUDAQuantizedKVCacheMatchesTheF16Path(t *testing.T) {
 			// The same query against both pools.
 			qData := make([]float32, numTokens*heads*headDim)
 			for i := range qData {
-				qData[i] = float32(math.Sin(float64(i)*0.11))
+				qData[i] = float32(math.Sin(float64(i) * 0.11))
 			}
 			q := ctx.NewTensorFP32(numTokens, heads*headDim)
 			if q == nil {

@@ -147,4 +147,3 @@ func TestSampler_Mirostat(t *testing.T) {
 		t.Errorf("expected mirostatMu to be initialized and positive, got %f", s.mirostatMu)
 	}
 }
-

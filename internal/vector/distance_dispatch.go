@@ -23,8 +23,8 @@ import (
 // kernel contract (uniform, non-nil rows with at least dim elements),
 // in which case the caller must fall back to the scalar loop.
 type distanceKernelSet struct {
-	l2Float32       func(a, b []float32) float32
-	dotFloat32      func(a, b []float32) float32
+	l2Float32  func(a, b []float32) float32
+	dotFloat32 func(a, b []float32) float32
 
 	// Batch float32 over a contiguous row block (row-major): row j of
 	// the block lives at rows[j*stride : j*stride+dim]. One Go pointer

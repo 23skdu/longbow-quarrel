@@ -39,7 +39,6 @@ extern void cudaAdd(float* a, float* b, float* out, int size, cudaStream_t strea
 extern void cudaF32ToF16(cudaStream_t stream, const void* src, void* dst, int n);
 extern void cudaF16ToF32(cudaStream_t stream, const void* src, void* dst, int n);
 extern void cudaRMSNorm(float* input, float* weight, float* output, int rows, int cols, float eps, cudaStream_t stream);
-extern void cudaSoftmax(float* input, float* output, int rows, int cols, cudaStream_t stream);
 extern void cudaSwiGLU(float* gate, float* up, float* output, int size, cudaStream_t stream);
 extern int cudaSample(float* logits, const int32_t* prevTokens, int numPrevTokens, float repetitionPenalty, float frequencyPenalty, float presencePenalty, float temperature, int topK, float topP, unsigned long long seed, int vocabSize, cudaStream_t stream);
 
@@ -725,10 +724,6 @@ func dequantizeBlockCUDA(src []byte, dst []float32, blockSize, qjlRows int, rotD
 
 func (ctx *Context) RMSNorm(input, weight, output *Tensor, rows, cols int, eps float32) {
 	C.cudaRMSNorm((*C.float)(input.devPtr), (*C.float)(weight.devPtr), (*C.float)(output.devPtr), C.int(rows), C.int(cols), C.float(eps), ctx.Ctx)
-}
-
-func (ctx *Context) Softmax(input, output *Tensor, rows, cols int) {
-	C.cudaSoftmax((*C.float)(input.devPtr), (*C.float)(output.devPtr), C.int(rows), C.int(cols), ctx.Ctx)
 }
 
 func (ctx *Context) SampleTopKTopP(logits *Tensor, prevTokens []int32, repetitionPenalty, frequencyPenalty, presencePenalty, temperature float32, topK int, topP float32, seed uint64, vocabSize int) int {

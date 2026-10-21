@@ -188,6 +188,20 @@ func NewcudaEngine(modelPath string, cfg config.Config) (Engine, error) {
 		return nil, fmt.Errorf("failed to initialize paged cache: %w", err)
 	}
 
+	// The memory governor compacts the physical blocks and offloads the
+	// least recently used sequence when the device is under pressure. The
+	// registration used to happen in the tests only, so the trigger the
+	// decode loop fires did nothing.
+	//
+	// The governor measures the device memory against the limit in the
+	// memory configuration, which defaults to eight gigabytes whatever the
+	// card holds. On a GPU that is the wrong denominator: a 24 GB card
+	// never reaches the threshold and a 6 GB card reaches it too early.
+	if total, err := device.GetDeviceMemory(0); err == nil && total > 0 {
+		device.SetMaxMemory(total)
+	}
+	cache.RegisterMemoryGovernor(device.GetMemoryGovernor())
+
 	cudaEngineInitialized.WithLabelValues(arch, arch).Inc()
 	cudaMemoryUsage.WithLabelValues(arch).Set(float64(device.CUDAAllocatedBytes()))
 
@@ -580,7 +594,7 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 			maxBlocks = nt
 		}
 		seqID := fmt.Sprintf("seq-%d", seq.ID)
-		if nt := len(e.cache.blockTables[seqID]); nt > maxBlocks {
+		if nt := len(e.cache.BlockTable(seqID)); nt > maxBlocks {
 			maxBlocks = nt
 		}
 	}
@@ -589,7 +603,7 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 	btData := make([]int32, batchSize*maxBlocks)
 	for i, seq := range desc.Sequences {
 		seqID := fmt.Sprintf("seq-%d", seq.ID)
-		table := e.cache.blockTables[seqID]
+		table := e.cache.BlockTable(seqID)
 		for j, bidx := range table {
 			if j >= maxBlocks {
 				break
@@ -867,7 +881,10 @@ func (e *cudaEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, erro
 		for i, seqIdx := range desc.TokenToSeq {
 			seq := desc.Sequences[seqIdx]
 			seqID := fmt.Sprintf("seq-%d", seq.ID)
-			table := e.cache.blockTables[seqID]
+			table := e.cache.BlockTable(seqID)
+			// The sequence is in use, so the governor must not pick it
+			// as the least recently used one.
+			e.cache.Touch(seqID)
 			logicalPos := desc.ContextLens[seqIdx] + (i - desc.Offsets[seqIdx])
 			blockIdx := logicalPos / e.cache.blockSize
 			offset := logicalPos % e.cache.blockSize

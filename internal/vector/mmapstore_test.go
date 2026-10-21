@@ -34,7 +34,7 @@ func buildFlatFixture(n, dim, seed int) *FlatIndex {
 	for i := 0; i < n; i++ {
 		row := make([]float32, dim)
 		for j := 0; j < dim; j++ {
-			row[j] = float32((i*seed + j) % 17) / 17
+			row[j] = float32((i*seed+j)%17) / 17
 		}
 		rows[i] = row
 	}

@@ -664,4 +664,3 @@ func TestAVX512_VNNIKernels(t *testing.T) {
 		}
 	}
 }
-

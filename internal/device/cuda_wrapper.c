@@ -7,7 +7,6 @@
 // Extern declarations for CUDA kernels from cuda_kernels.cu
 extern void cudaRMSNormF16(cudaStream_t stream, void* input, void* weight, void* output, int rows, int cols, float eps);
 extern void cudaSwiGLUF16(cudaStream_t stream, void* gate, void* up, void* output, int size);
-extern void cudaSoftmaxF16(cudaStream_t stream, void* input, void* output, int rows, int cols);
 extern void cudaRoPEF16(cudaStream_t stream, void* tensor, int pos, int heads, int headDim, float theta);
 extern void cudaAddF16(cudaStream_t stream, void* a, void* b, void* out, int size);
 extern void cudaSiLUF16(cudaStream_t stream, void* input, void* output, int size);
@@ -19,10 +18,6 @@ void cudaRMSNorm(float* input, float* weight, float* output, int rows, int cols,
 
 void cudaSwiGLU(float* gate, float* up, float* output, int size, cudaStream_t stream) {
     cudaSwiGLUF16(stream, gate, up, output, size);
-}
-
-void cudaSoftmax(float* input, float* output, int rows, int cols, cudaStream_t stream) {
-    cudaSoftmaxF16(stream, input, output, rows, cols);
 }
 
 void cudaRoPE(float* tensor, int pos, int heads, int headDim, float theta, cudaStream_t stream) {

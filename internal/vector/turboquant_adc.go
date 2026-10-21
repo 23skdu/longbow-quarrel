@@ -159,11 +159,11 @@ type TurboPackedColumns struct {
 	WordsPerRow int
 	TotalBits   int
 
-	Codes    []int8     // Count*Dim
-	Words    []uint64   // Count*WordsPerRow
-	Scale    []float32  // Count
-	QJLScale []float32  // Count
-	Norm     []float32  // Count
+	Codes    []int8    // Count*Dim
+	Words    []uint64  // Count*WordsPerRow
+	Scale    []float32 // Count
+	QJLScale []float32 // Count
+	Norm     []float32 // Count
 }
 
 // NewTurboPackedColumns packs vs (whose codes each carry dim elements)

@@ -150,47 +150,6 @@ __global__ void swiglu_kernel(float* gate, float* up, float* output, int size) {
     }
 }
 
-__global__ void softmax_kernel(float* input, float* output, int rows, int cols) {
-    __shared__ float s_max;
-    __shared__ float s_sum;
-    for (int r = blockIdx.x; r < rows; r += gridDim.x) {
-        const float* in_row = input + r * cols;
-        float* out_row = output + r * cols;
-
-        // Pass 1: compute max across columns
-        float thread_max = -1e38f;
-        for (int j = threadIdx.x; j < cols; j += blockDim.x) {
-            thread_max = fmaxf(thread_max, in_row[j]);
-        }
-        float total_max = blockReduceMax(thread_max);
-        if (threadIdx.x == 0) {
-            s_max = total_max;
-        }
-        __syncthreads();
-
-        float max_val = s_max;
-
-        // Pass 2: compute sum of exp(x - max)
-        float thread_sum = 0.0f;
-        for (int j = threadIdx.x; j < cols; j += blockDim.x) {
-            thread_sum += expf(in_row[j] - max_val);
-        }
-        float total_sum = blockReduceSum(thread_sum);
-        if (threadIdx.x == 0) {
-            s_sum = total_sum > 0.0f ? (1.0f / total_sum) : 0.0f;
-        }
-        __syncthreads();
-
-        float inv_sum = s_sum;
-
-        // Pass 3: normalize
-        for (int j = threadIdx.x; j < cols; j += blockDim.x) {
-            out_row[j] = expf(in_row[j] - max_val) * inv_sum;
-        }
-        __syncthreads();
-    }
-}
-
 __global__ void rope_kernel(float* tensor, int pos, int heads, int headDim, float theta) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int halfDim = headDim / 2;
@@ -533,11 +492,6 @@ extern "C" {
     
     void cudaSwiGLUF16(cudaStream_t stream, void* gate, void* up, void* output, int size) {
         swiglu_kernel<<<256, 256, 0, stream>>>((float*)gate, (float*)up, (float*)output, size);
-    }
-    
-    void cudaSoftmaxF16(cudaStream_t stream, void* input, void* output, int rows, int cols) {
-        int blocks = (rows > 65535) ? 65535 : (rows > 0 ? rows : 1);
-        softmax_kernel<<<blocks, 256, 0, stream>>>((float*)input, (float*)output, rows, cols);
     }
     
     void cudaRoPEF16(cudaStream_t stream, void* tensor, int pos, int heads, int headDim, float theta) {

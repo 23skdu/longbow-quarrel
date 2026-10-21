@@ -247,4 +247,3 @@ func TestCPUEngineSwapModelErrors(t *testing.T) {
 		t.Error("expected an error when the model cannot be loaded")
 	}
 }
-

@@ -85,29 +85,6 @@ func TestPagedKVCacheRollback(t *testing.T) {
 	}
 }
 
-// TestPagedKVCacheStreamingParameters covers the streaming-LLM window
-// configuration.
-func TestPagedKVCacheStreamingParameters(t *testing.T) {
-	cache, ctx := newTestPagedCache(t, 512)
-	defer cache.Free()
-	defer ctx.Free()
-
-	cache.SetStreamingLLM("seq-a", 4, 16)
-
-	params, ok := cache.GetStreamingLLM("seq-a")
-	if !ok {
-		t.Fatal("the streaming parameters were not recorded")
-	}
-	if params.SinkBlocks != 4 || params.WindowBlocks != 16 {
-		t.Errorf("the streaming parameters are %+v, want 4 sink blocks and 16 window blocks", params)
-	}
-
-	// A sequence that was never configured has none.
-	if _, ok := cache.GetStreamingLLM("missing"); ok {
-		t.Error("a sequence that was never configured must not have streaming parameters")
-	}
-}
-
 // TestPagedKVCacheGetAndSize covers the per-sequence view and the size
 // report.
 func TestPagedKVCacheGetAndSize(t *testing.T) {

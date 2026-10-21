@@ -37,8 +37,8 @@ var (
 )
 
 var (
-	vecEnvDisableSIMD  = "DISABLE_SIMD"
-	vecEnvDisableAVX2  = "DISABLE_AVX2"
+	vecEnvDisableSIMD   = "DISABLE_SIMD"
+	vecEnvDisableAVX2   = "DISABLE_AVX2"
 	vecEnvDisableAVX512 = "DISABLE_AVX512"
 )
 

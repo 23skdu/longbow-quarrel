@@ -173,6 +173,11 @@ func NewCPUEngine(modelPath string, cfg config.Config) (Engine, error) {
 		return nil, fmt.Errorf("failed to initialize paged cache: %w", err)
 	}
 
+	// The memory governor compacts the physical blocks and offloads the
+	// least recently used sequence when the host is under pressure. The
+	// registration used to happen in the tests only.
+	cache.RegisterMemoryGovernor(device.GetMemoryGovernor())
+
 	logger.Log.Info("CPU engine initialized with PagedKVCache", "model", modelPath, "heads", cfg.Heads, "kv_heads", cfg.KVHeads, "dim", cfg.Dim)
 
 	e := &CPUEngine{

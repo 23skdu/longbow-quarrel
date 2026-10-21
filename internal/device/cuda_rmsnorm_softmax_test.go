@@ -70,70 +70,6 @@ func TestCUDA_WarpShuffle_RMSNorm(t *testing.T) {
 	}
 }
 
-func TestCUDA_WarpShuffle_Softmax(t *testing.T) {
-	ctx := NewContext()
-	defer ctx.Free()
-
-	testConfigs := []struct {
-		rows int
-		cols int
-	}{
-		{rows: 1, cols: 32},
-		{rows: 2, cols: 256},
-		{rows: 4, cols: 1024},
-		{rows: 8, cols: 4096},
-	}
-
-	for _, tc := range testConfigs {
-		inputData := make([]float32, tc.rows*tc.cols)
-		for i := range inputData {
-			inputData[i] = (rand.Float32() - 0.5) * 10.0
-		}
-
-		inTensor := ctx.NewTensorFP32(tc.rows, tc.cols)
-		defer inTensor.Free()
-		inTensor.LoadFrom(inputData)
-
-		outTensor := ctx.NewTensorFP32(tc.rows, tc.cols)
-		defer outTensor.Free()
-
-		ctx.Softmax(inTensor, outTensor, tc.rows, tc.cols)
-		ctx.Synchronize()
-
-		outData := outTensor.ToHost()
-
-		// Verify against CPU reference
-		for r := 0; r < tc.rows; r++ {
-			maxVal := -1e38
-			for c := 0; c < tc.cols; c++ {
-				v := float64(inputData[r*tc.cols+c])
-				if v > maxVal {
-					maxVal = v
-				}
-			}
-
-			var sumExp float64
-			for c := 0; c < tc.cols; c++ {
-				sumExp += math.Exp(float64(inputData[r*tc.cols+c]) - maxVal)
-			}
-
-			var rowSum float32
-			for c := 0; c < tc.cols; c++ {
-				expected := math.Exp(float64(inputData[r*tc.cols+c])-maxVal) / sumExp
-				actual := float64(outData[r*tc.cols+c])
-				rowSum += outData[r*tc.cols+c]
-				if math.Abs(expected-actual) > 1e-4 {
-					t.Fatalf("Softmax mismatch at row %d, col %d: expected %f, got %f", r, c, expected, actual)
-				}
-			}
-
-			if math.Abs(float64(rowSum)-1.0) > 1e-4 {
-				t.Fatalf("Softmax row %d sum != 1.0: got %f", r, rowSum)
-			}
-		}
-	}
-}
-
 func BenchmarkCUDA_WarpShuffle_RMSNorm_4096(b *testing.B) {
 	ctx := NewContext()
 	defer ctx.Free()
@@ -150,24 +86,6 @@ func BenchmarkCUDA_WarpShuffle_RMSNorm_4096(b *testing.B) {
 	b.ResetTimer()
 	for b.Loop() {
 		ctx.RMSNorm(inTensor, wTensor, outTensor, rows, cols, 1e-5)
-	}
-	ctx.Synchronize()
-}
-
-func BenchmarkCUDA_WarpShuffle_Softmax_4096(b *testing.B) {
-	ctx := NewContext()
-	defer ctx.Free()
-
-	cols := 4096
-	rows := 1
-	inTensor := ctx.NewTensorFP32(rows, cols)
-	defer inTensor.Free()
-	outTensor := ctx.NewTensorFP32(rows, cols)
-	defer outTensor.Free()
-
-	b.ResetTimer()
-	for b.Loop() {
-		ctx.Softmax(inTensor, outTensor, rows, cols)
 	}
 	ctx.Synchronize()
 }

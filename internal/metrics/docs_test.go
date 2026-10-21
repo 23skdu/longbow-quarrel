@@ -254,8 +254,7 @@ func docsMetricsPath(t *testing.T) string {
 
 // productionMetricAllowlist contains declared metrics that are intentionally not
 // written by the standard engine execution path on this host (e.g. experimental backends).
-var productionMetricAllowlist = map[string]string{
-}
+var productionMetricAllowlist = map[string]string{}
 
 // TestMetrics_WrittenByProductionCode verifies that every declared metric is written
 // by production code or is on the explicit allowlist, and that no dashboard panel reads
@@ -270,8 +269,8 @@ func TestMetrics_WrittenByProductionCode(t *testing.T) {
 		varName string
 		file    string
 	}
-	metricDecls := map[string]metricInfo{}   // fullName -> info
-	varToMetric := map[string]string{}       // varName -> fullName
+	metricDecls := map[string]metricInfo{}     // fullName -> info
+	varToMetric := map[string]string{}         // varName -> fullName
 	funcToVars := map[string]map[string]bool{} // funcName -> set of varNames written
 
 	fset := token.NewFileSet()
@@ -525,4 +524,3 @@ func extractMetricNameFromExpr(expr ast.Expr) string {
 	}
 	return full
 }
-

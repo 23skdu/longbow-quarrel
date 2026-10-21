@@ -264,13 +264,13 @@ func (c *Config) NeedsPagedAttention() bool {
 
 func Default() Config {
 	return Config{
-		SeqLen:        2048,
-		MaxTokens:     64,
-		Eps:           1e-5,
-		RopeTheta:     10000.0,
-		EOSTokenID:    2,
-		KVCacheType:   KVCacheF16,
-		DebugMemory:   false,
+		SeqLen:      2048,
+		MaxTokens:   64,
+		Eps:         1e-5,
+		RopeTheta:   10000.0,
+		EOSTokenID:  2,
+		KVCacheType: KVCacheF16,
+		DebugMemory: false,
 
 		// Speculative decoding is off unless a draft model is given.
 		SpeculativeDraftLength: 4,

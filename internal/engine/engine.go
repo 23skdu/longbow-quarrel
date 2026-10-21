@@ -63,7 +63,15 @@ func NewMetalEngine(modelPath string, config config.Config) (Engine, error) {
 	}
 
 	e.cache = &PagedKVCache{}
-	e.cache.Init(ctx, e.config)
+	if err := e.cache.Init(ctx, e.config); err != nil {
+		ctx.Free()
+		return nil, fmt.Errorf("failed to initialize paged cache: %w", err)
+	}
+
+	// The memory governor compacts the physical blocks and offloads the
+	// least recently used sequence when the device is under pressure. The
+	// registration used to happen in the tests only.
+	e.cache.RegisterMemoryGovernor(device.GetMemoryGovernor())
 
 	go e.runBatchLoop()
 

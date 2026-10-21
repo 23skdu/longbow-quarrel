@@ -68,11 +68,11 @@ func init() {
 			return callBatchTurboAVX2(q, packed, start, end, out)
 		},
 		mqDotFloat32: func(qs []float32, numQ int, rows []float32, stride, count int, out []float32) bool {
-				return callMQF32AVX2(false, qs, numQ, rows, stride, count, out)
-			},
+			return callMQF32AVX2(false, qs, numQ, rows, stride, count, out)
+		},
 		mqL2Float32: func(qs []float32, numQ int, rows []float32, stride, count int, out []float32) bool {
-				return callMQF32AVX2(true, qs, numQ, rows, stride, count, out)
-			},
+			return callMQF32AVX2(true, qs, numQ, rows, stride, count, out)
+		},
 		mqDotComplexSoA: func(qsRe, qsIm []float64, numQ int, re, im []float64, dim, start, end int, out []float32) bool {
 			return callMQCSoAAVX2(false, qsRe, qsIm, numQ, re, im, dim, start, end, out)
 		},
