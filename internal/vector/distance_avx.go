@@ -9,6 +9,8 @@ float vec_l2_f32_avx2(const float* a, const float* b, int n);
 float vec_dot_f32_avx2(const float* a, const float* b, int n);
 void vec_batch_l2_f32_avx2(const float* q, const float* rows, long rowStride, int dim, int m, float* out);
 void vec_batch_dot_f32_avx2(const float* q, const float* rows, long rowStride, int dim, int m, float* out);
+void vec_batch_l2_f32_gather_avx2(const float* q, const float* rows, const int32_t* indices, long rowStride, int dim, int m, float* out);
+void vec_batch_dot_f32_gather_avx2(const float* q, const float* rows, const int32_t* indices, long rowStride, int dim, int m, float* out);
 void vec_batch_dot_c128_soa_avx2(const double* qRe, const double* qIm, const double* re, const double* im, int dim, int m, double* out);
 void vec_batch_l2_c128_soa_avx2(const double* qRe, const double* qIm, const double* re, const double* im, int dim, int m, double* out);
 float vec_turbo_dot_avx2(const int8_t* aCodes, const int8_t* bCodes, const uint64_t* aWords, const uint64_t* bWords, int dim, int wordsPerRow, int totalBits, float scaleA, float scaleB, float qjlScaleA, float qjlScaleB);
@@ -54,6 +56,12 @@ func init() {
 		},
 		batchDotFloat32: func(q []float32, rows []float32, stride, count int, out []float32) bool {
 			return callBatchF32AVX2(false, q, rows, stride, count, out)
+		},
+		batchL2Float32Gather: func(q []float32, rows []float32, indices []int32, stride, count int, out []float32) bool {
+			return callBatchGatherF32AVX2(true, q, rows, indices, stride, count, out)
+		},
+		batchDotFloat32Gather: func(q []float32, rows []float32, indices []int32, stride, count int, out []float32) bool {
+			return callBatchGatherF32AVX2(false, q, rows, indices, stride, count, out)
 		},
 		dotComplexSoA: func(qRe, qIm []float64, re, im []float64, dim int, start, end int, out []float64) bool {
 			return callBatchCSoAAVX2(true, qRe, qIm, re, im, dim, start, end, out)
@@ -101,6 +109,35 @@ func callBatchF32AVX2(l2 bool, q, rows []float32, stride, count int, out []float
 		C.vec_batch_dot_f32_avx2(
 			(*C.float)(unsafe.Pointer(&q[0])),
 			(*C.float)(unsafe.Pointer(&rows[0])),
+			C.long(stride), C.int(dim), C.int(count),
+			(*C.float)(unsafe.Pointer(&out[0])),
+		)
+	}
+	return true
+}
+
+// callBatchGatherF32AVX2 scores the rows the index list names. The
+// indices are threaded straight through to C: they are only dereferenced
+// during the call and never retained.
+func callBatchGatherF32AVX2(l2 bool, q, rows []float32, indices []int32, stride, count int, out []float32) bool {
+	dim := len(q)
+	if dim == 0 || stride < dim || count <= 0 || len(indices) < count ||
+		len(rows) < count*stride || len(out) < count {
+		return false
+	}
+	if l2 {
+		C.vec_batch_l2_f32_gather_avx2(
+			(*C.float)(unsafe.Pointer(&q[0])),
+			(*C.float)(unsafe.Pointer(&rows[0])),
+			(*C.int32_t)(unsafe.Pointer(&indices[0])),
+			C.long(stride), C.int(dim), C.int(count),
+			(*C.float)(unsafe.Pointer(&out[0])),
+		)
+	} else {
+		C.vec_batch_dot_f32_gather_avx2(
+			(*C.float)(unsafe.Pointer(&q[0])),
+			(*C.float)(unsafe.Pointer(&rows[0])),
+			(*C.int32_t)(unsafe.Pointer(&indices[0])),
 			C.long(stride), C.int(dim), C.int(count),
 			(*C.float)(unsafe.Pointer(&out[0])),
 		)

@@ -47,6 +47,16 @@ type IVFIndex struct {
 	f32RowsUniform   bool
 	f32RowsChecked   bool
 
+	// f32Flat is the rows of the index in one contiguous buffer, with
+	// the rows at a fixed stride. The scan needs it: the cgo rules
+	// forbid an array of row pointers, so the gather kernels address
+	// the rows through one base pointer and a stride. Without it the
+	// scan had to copy every candidate into a scratch buffer, and the
+	// copy cost as much as the distance.
+	f32Flat    []float32
+	f32FlatOK  bool
+	f32FlatDim int
+
 	// TurboQuant query prep cache. The reference implementation
 	// created the seed-42 QJL matrix per probe; caching it yields the
 	// byte-identical matrix per Search.
@@ -214,6 +224,10 @@ func (idx *IVFIndex) Build(floatVectors [][]float32) error {
 		}
 	}
 
+	// Build the contiguous copy the gather kernels address. The rows
+	// themselves become views into it, so the data is stored once.
+	idx.buildFlatFloat32()
+
 	// Stage the freshly built lists for the CUDA scan hook.
 	if idx.gpuStaged && gpuStageLists != nil {
 		idx.gpuListMu.Lock()
@@ -221,6 +235,42 @@ func (idx *IVFIndex) Build(floatVectors [][]float32) error {
 		idx.gpuListMu.Unlock()
 	}
 	return nil
+}
+
+// buildFlatFloat32 copies the rows into one contiguous buffer and makes
+// the rows views into it.
+//
+// The copy is the price of the layout: the cgo rules forbid passing an
+// array of row pointers to C, so a kernel can only address the rows
+// through one base pointer and a stride. The copy is made once, at build
+// time, and the scan then reads the rows where they are.
+func (idx *IVFIndex) buildFlatFloat32() {
+	idx.f32Flat = nil
+	idx.f32FlatOK = false
+	idx.f32FlatDim = 0
+
+	dim := idx.Dimension
+	if dim <= 0 || len(idx.Float32) == 0 {
+		return
+	}
+	for i := range idx.Float32 {
+		if len(idx.Float32[i]) < dim {
+			return
+		}
+	}
+
+	flat := make([]float32, len(idx.Float32)*dim)
+	rows := make([][]float32, len(idx.Float32))
+	for i := range idx.Float32 {
+		row := flat[i*dim : (i+1)*dim : (i+1)*dim]
+		copy(row, idx.Float32[i][:dim])
+		rows[i] = row
+	}
+
+	idx.Float32 = rows
+	idx.f32Flat = flat
+	idx.f32FlatDim = dim
+	idx.f32FlatOK = true
 }
 
 // gpuKmeans runs the mini-batch iterations on the device. Returns false
@@ -599,9 +649,13 @@ func (idx *IVFIndex) Search(query []float32, k int) ([]SearchResult, error) {
 		dim := idx.Dimension
 		gatherable := idx.f32RowsUniform && dim > 0 && len(query) <= dim
 		var scratch sync.Pool
+		var idScratch sync.Pool
 		if gatherable {
 			scratch.New = func() interface{} {
 				return make([]float32, batchScoreBlock*dim)
+			}
+			idScratch.New = func() interface{} {
+				return make([]int32, batchScoreBlock)
 			}
 		}
 		idx.runProbes(numProbes, probedIDs, k, func(p, cID int, h *resultHeap) {
@@ -610,6 +664,16 @@ func (idx *IVFIndex) Search(query []float32, k int) ([]SearchResult, error) {
 				return
 			}
 			if gatherable && idx.listIdsInBounds(list) {
+				// The rows are read where they are, through the index
+				// list: the gather kernel takes the row numbers and
+				// addresses the rows itself. Copying them into a
+				// scratch buffer first cost as much as the distance.
+				if idx.f32FlatOK {
+					ids := idScratch.Get().([]int32)
+					idx.searchFloat32GatherIndexed(ks, h, query, list, ids, dim, k)
+					idScratch.Put(ids)
+					return
+				}
 				g := scratch.Get().([]float32)
 				idx.searchFloat32Gather(ks, h, query, list, g, dim, k)
 				scratch.Put(g)
@@ -634,6 +698,36 @@ func (idx *IVFIndex) listIdsInBounds(list []int) bool {
 		}
 	}
 	return true
+}
+
+// searchFloat32GatherIndexed scores one probed list through the gather
+// kernel: the rows are read where they are, through the row numbers of
+// the list.
+//
+// The scores land in the heap in list order, so the heap contents are
+// identical to the per-vector reference loop.
+func (idx *IVFIndex) searchFloat32GatherIndexed(ks *distanceKernelSet, h *resultHeap, query []float32, list []int, ids []int32, dim, k int) {
+	var buf [batchScoreBlock]float32
+	for start := 0; start < len(list); start += batchScoreBlock {
+		end := start + batchScoreBlock
+		if end > len(list) {
+			end = len(list)
+		}
+		count := end - start
+		for j := 0; j < count; j++ {
+			ids[j] = int32(list[start+j])
+		}
+		if !scoreFloat32Gather(ks, true, query, idx.f32Flat, ids[:count], dim, count, buf[:]) {
+			// The native path rejected the shape: score the block with
+			// the scalar reference.
+			for j := 0; j < count; j++ {
+				buf[j] = DotFloat32(query, idx.Float32[list[start+j]])
+			}
+		}
+		for j, sc := range buf[:count] {
+			heapAdd(h, list[start+j], sc, k)
+		}
+	}
 }
 
 // searchFloat32Gather scores one probed list through the gather+batch

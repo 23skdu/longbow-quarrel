@@ -97,18 +97,21 @@ the gap for each blocker are in
 
 | Blocker | The implementation | The target | Measured |
 |---------|--------------------|-----------|----------|
-| **P0-01** | AVX2 and AVX-512 distance kernels (`internal/vector/distance_avx2.c`, `distance_avx512.c`) and the CUDA batch kernel for the inverted-list scoring (`cuda_vector_kernels.cu`) | `L2Float32` below 15 % of the CPU; 250k IVF query under 500 µs | the kernel is 6 % of the search; the query is 2.2 ms |
+| **P0-01** | AVX2 and AVX-512 distance kernels (`internal/vector/distance_avx2.c`, `distance_avx512.c`), the gather kernels that score an inverted list without copying it, and the CUDA batch kernel for the inverted-list scoring (`cuda_vector_kernels.cu`) | `L2Float32` below 15 % of the CPU; 250k IVF query under 500 µs | the kernel is 6 % of the search; the query is 298 µs at 128 dimensions and 1.52 ms at 384 |
 | **P0-02** | the complex type is stored as split real and imaginary planes (`complex_soa.go`) and the CUDA batch path uses them | 250k `complex128` flat search above 500 QPS | 18 QPS single, 137 QPS batched |
 | **P0-03** | the asymmetric TurboQuant distance with a lookup table (`turboquant_adc.go`) | TurboQuant HNSW above 10,000 QPS, keeping the 7.8× compression | 1,106 QPS at 50,000 nodes; the compression is kept |
 | **P0-04** | the mini-batch k-means on the device (`cuda_vector_kernels.cu`) and the multi-query L2 kernel for the assignment | IVF construction on 250k×384 under 50 ms | 545 ms on the CPU, 1.29 s with the GPU (the transfer of the dataset dominates) |
 | **P0-05** | the memory-mapped store with pre-faulting and page-eviction hints (`mmapstore.go`) | a million-vector index inside a 256 MB working set | the store is memory mapped and the Go heap stays flat: 100,000 × 384 vectors load into a 150 MB file and the heap does not grow |
 
-Two gaps dominate the rest. The first is the cgo call overhead: every
-crossing of the language boundary costs about fifty nanoseconds, and the
-IVF assignment makes one call per 256 rows against 500 centroids. The
-second is the bandwidth of the complex type, which is four times that of
-float32 on the CPU. Both are addressable — the first with a persistent
-cgo worker, the second with the float32 path the GPU already has.
+The gap that dominates the rest is the memory bandwidth of the scan. At
+250k × 384 with sixteen probes the scan reads twelve megabytes per query,
+and the rows of a list are scattered, so the prefetcher cannot follow
+them. Reordering the index so that the rows of a list are contiguous
+would bring the query under the target: the list would become a range
+instead of a list of numbers, and the ids would need a mapping back to
+the original vectors. The second gap is the bandwidth of the complex
+type, which is four times that of float32 on the CPU — the float32 path
+the GPU already has is the answer.
 
 The verification matrix for these: the consolidated suite keeps all its
 gates green, `internal/vector` stays at or above 80 % coverage (it is at

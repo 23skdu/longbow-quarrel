@@ -11,6 +11,10 @@ float vec_l2_f32_avx512(const float* a, const float* b, int n);
 float vec_dot_f32_avx512(const float* a, const float* b, int n);
 void vec_batch_l2_f32_avx512(const float* q, const float* rows, long rowStride, int dim, int m, float* out);
 void vec_batch_dot_f32_avx512(const float* q, const float* rows, long rowStride, int dim, int m, float* out);
+void vec_batch_l2_f32_gather_avx2(const float* q, const float* rows, const int32_t* indices, long rowStride, int dim, int m, float* out);
+void vec_batch_dot_f32_gather_avx2(const float* q, const float* rows, const int32_t* indices, long rowStride, int dim, int m, float* out);
+void vec_batch_l2_f32_gather_avx512(const float* q, const float* rows, const int32_t* indices, long rowStride, int dim, int m, float* out);
+void vec_batch_dot_f32_gather_avx512(const float* q, const float* rows, const int32_t* indices, long rowStride, int dim, int m, float* out);
 void vec_batch_dot_c128_soa_avx512(const double* qRe, const double* qIm, const double* re, const double* im, int dim, int m, double* out);
 void vec_batch_l2_c128_soa_avx512(const double* qRe, const double* qIm, const double* re, const double* im, int dim, int m, double* out);
 void vec_mq_dot_f32_avx512(const float* qs, int numQ, const float* rows, long rowStride, int dim, int m, float* out);
@@ -68,6 +72,12 @@ func init() {
 			batchDotFloat32: func(q []float32, rows []float32, stride, count int, out []float32) bool {
 				return callBatchF32AVX512(false, q, rows, stride, count, out)
 			},
+			batchL2Float32Gather: func(q []float32, rows []float32, indices []int32, stride, count int, out []float32) bool {
+				return callBatchGatherF32AVX512(true, q, rows, indices, stride, count, out)
+			},
+			batchDotFloat32Gather: func(q []float32, rows []float32, indices []int32, stride, count int, out []float32) bool {
+				return callBatchGatherF32AVX512(false, q, rows, indices, stride, count, out)
+			},
 			dotComplexSoA: func(qRe, qIm []float64, re, im []float64, dim int, start, end int, out []float64) bool {
 				return callBatchCSoAAVX512(true, qRe, qIm, re, im, dim, start, end, out)
 			},
@@ -121,6 +131,12 @@ func init() {
 			batchDotFloat32: func(q []float32, rows []float32, stride, count int, out []float32) bool {
 				return callBatchF32AVX2(false, q, rows, stride, count, out)
 			},
+			batchL2Float32Gather: func(q []float32, rows []float32, indices []int32, stride, count int, out []float32) bool {
+				return callBatchGatherF32AVX2(true, q, rows, indices, stride, count, out)
+			},
+			batchDotFloat32Gather: func(q []float32, rows []float32, indices []int32, stride, count int, out []float32) bool {
+				return callBatchGatherF32AVX2(false, q, rows, indices, stride, count, out)
+			},
 			dotComplexSoA: func(qRe, qIm []float64, re, im []float64, dim int, start, end int, out []float64) bool {
 				return callBatchCSoAAVX2(true, qRe, qIm, re, im, dim, start, end, out)
 			},
@@ -165,6 +181,33 @@ func callBatchF32AVX512(l2 bool, q []float32, rows []float32, stride, count int,
 		C.vec_batch_dot_f32_avx512(
 			(*C.float)(unsafe.Pointer(&q[0])),
 			(*C.float)(unsafe.Pointer(&rows[0])),
+			C.long(stride), C.int(dim), C.int(count),
+			(*C.float)(unsafe.Pointer(&out[0])),
+		)
+	}
+	return true
+}
+
+// callBatchGatherF32AVX512 scores the rows the index list names.
+func callBatchGatherF32AVX512(l2 bool, q, rows []float32, indices []int32, stride, count int, out []float32) bool {
+	dim := len(q)
+	if dim == 0 || stride < dim || count <= 0 || len(indices) < count ||
+		len(rows) < count*stride || len(out) < count {
+		return false
+	}
+	if l2 {
+		C.vec_batch_l2_f32_gather_avx512(
+			(*C.float)(unsafe.Pointer(&q[0])),
+			(*C.float)(unsafe.Pointer(&rows[0])),
+			(*C.int32_t)(unsafe.Pointer(&indices[0])),
+			C.long(stride), C.int(dim), C.int(count),
+			(*C.float)(unsafe.Pointer(&out[0])),
+		)
+	} else {
+		C.vec_batch_dot_f32_gather_avx512(
+			(*C.float)(unsafe.Pointer(&q[0])),
+			(*C.float)(unsafe.Pointer(&rows[0])),
+			(*C.int32_t)(unsafe.Pointer(&indices[0])),
 			C.long(stride), C.int(dim), C.int(count),
 			(*C.float)(unsafe.Pointer(&out[0])),
 		)
@@ -362,6 +405,35 @@ func callBatchTurboAVX512(q *TurboPrep, packed *TurboPackedColumns, start, end i
 // Same helpers as distance_avx.go, which is excluded under this tag;
 // keeping local copies here mirrors internal/simd/avx512.go, which also
 // declares both ISA levels in one file.
+
+// callBatchGatherF32AVX2 scores the rows the index list names, with the
+// AVX2 kernels: the AVX-512 build falls back to them when the wider
+// ones are not available.
+func callBatchGatherF32AVX2(l2 bool, q, rows []float32, indices []int32, stride, count int, out []float32) bool {
+	dim := len(q)
+	if dim == 0 || stride < dim || count <= 0 || len(indices) < count ||
+		len(rows) < count*stride || len(out) < count {
+		return false
+	}
+	if l2 {
+		C.vec_batch_l2_f32_gather_avx2(
+			(*C.float)(unsafe.Pointer(&q[0])),
+			(*C.float)(unsafe.Pointer(&rows[0])),
+			(*C.int32_t)(unsafe.Pointer(&indices[0])),
+			C.long(stride), C.int(dim), C.int(count),
+			(*C.float)(unsafe.Pointer(&out[0])),
+		)
+	} else {
+		C.vec_batch_dot_f32_gather_avx2(
+			(*C.float)(unsafe.Pointer(&q[0])),
+			(*C.float)(unsafe.Pointer(&rows[0])),
+			(*C.int32_t)(unsafe.Pointer(&indices[0])),
+			C.long(stride), C.int(dim), C.int(count),
+			(*C.float)(unsafe.Pointer(&out[0])),
+		)
+	}
+	return true
+}
 
 func callBatchF32AVX2(l2 bool, q, rows []float32, stride, count int, out []float32) bool {
 	dim := len(q)
