@@ -196,6 +196,30 @@ else
 fi
 
 # ------------------------------------------------------------------------------
+# 9d. Dead code
+# ------------------------------------------------------------------------------
+# A function that no code path reaches is a subsystem a reader would
+# reasonably believe is live. The analysis found 250 of them in the 2026-09
+# audit; the gate keeps the number from growing again.
+log_header "9d. Checking for unreachable code"
+if "${SCRIPT_DIR}/deadcode.sh"; then
+    log_pass "Dead Code Check"
+else
+    log_fail "Dead Code Check"
+fi
+
+# ------------------------------------------------------------------------------
+# 9e. Tests that cannot fail
+# ------------------------------------------------------------------------------
+# A test with no assertion passes whatever the code under test does.
+log_header "9e. Checking for tests that cannot fail"
+if go run ./scripts/vacuous_tests; then
+    log_pass "Vacuous Test Check"
+else
+    log_fail "Vacuous Test Check"
+fi
+
+# ------------------------------------------------------------------------------
 # 9b. Metal type check
 # ------------------------------------------------------------------------------
 # The Metal backend is a `darwin && metal` build, so it is normally only

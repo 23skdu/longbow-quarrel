@@ -57,8 +57,8 @@ run them. `scripts/run_all_tests.sh` runs the local ones:
 | 10 | Zero-allocation hotpath | An allocation in a hot kernel |
 | 11 | Workflow lint | A broken workflow file |
 | 12 | Documentation drift | The docs, the chart and the dashboard against the code |
-| 13 | Dead code | A function that no code path reaches |
-| 14 | Vacuous tests | A test that cannot fail |
+| 13 | Dead code (9d) | A function that no code path reaches |
+| 14 | Vacuous tests (9e) | A test that cannot fail |
 
 The CI jobs that run the same checks: `lint`, `build`, `webui`,
 `webui-browser`, `metal-build`, `metal-tests`, `fuzz-tests`,
