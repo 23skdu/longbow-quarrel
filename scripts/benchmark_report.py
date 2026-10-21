@@ -8,6 +8,7 @@ and produces a formatted comparison table.
 Usage:
     python3 scripts/benchmark_report.py benchmark_results/summary.csv
     python3 scripts/benchmark_report.py benchmark_results/*.csv --format json
+    python3 scripts/benchmark_report.py benchmark_results/*.csv --markdown
     python3 scripts/benchmark_report.py benchmark_results/summary.csv --best
 """
 
@@ -117,6 +118,26 @@ def print_comparison(results: list[dict], show_best: bool = False):
         print()
 
 
+def print_markdown(results: list[dict]):
+    """Print the comparison as a markdown table.
+
+    The nightly job attaches this to the release, and a release note is
+    read as markdown, not as a table drawn with box characters.
+    """
+    grouped = group_by_model(results)
+
+    for model, model_results in sorted(grouped.items()):
+        tokens = model_results[0]['tokens'] if model_results else 0
+        print(f"### {model} ({tokens} tokens)")
+        print()
+        print("| Engine | Mean t/s | StdDev | Min | Max | Runs |")
+        print("|---|---:|---:|---:|---:|---:|")
+        for r in sorted(model_results, key=lambda x: x['tps_mean'], reverse=True):
+            print(f"| {r['engine']} | {r['tps_mean']:.2f} | {r['tps_stddev']:.2f} | "
+                  f"{r['tps_min']:.2f} | {r['tps_max']:.2f} | {r['runs']} |")
+        print()
+
+
 def print_json(results: list[dict]):
     grouped = group_by_model(results)
     output = {}
@@ -136,11 +157,13 @@ def print_json(results: list[dict]):
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python3 benchmark_report.py <csv_files...> [--format json|table] [--best]")
+        print("Usage: python3 benchmark_report.py <csv_files...> [--format json|table|markdown] [--best]")
         sys.exit(1)
 
     show_best = '--best' in sys.argv
     fmt = 'json' if '--json' in sys.argv or '--format json' in sys.argv else 'table'
+    if '--markdown' in sys.argv or '--format markdown' in sys.argv:
+        fmt = 'markdown'
 
     csv_files = [f for f in sys.argv[1:] if not f.startswith('--')]
 
@@ -157,6 +180,8 @@ def main():
 
     if fmt == 'json':
         print_json(all_results)
+    elif fmt == 'markdown':
+        print_markdown(all_results)
     else:
         print_comparison(all_results, show_best)
 

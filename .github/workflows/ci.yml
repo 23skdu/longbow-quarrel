@@ -92,6 +92,13 @@ jobs:
         # has no assertion at all. The allowlist only ever shrinks.
         run: go run ./scripts/vacuous_tests
 
+      - name: Check for unreachable code
+        # The reachability analysis over the whole module. A function that
+        # no code path reaches is a subsystem a reader would reasonably
+        # believe is live; the audit found 250 of them. The allowlist
+        # holds the two that are left, with the reason.
+        run: ./scripts/deadcode.sh
+
       - name: Check for duplicate package-level declarations
         # A duplicate top-level declaration only breaks the build when two
         # files that declare the same name land in the same package. With
@@ -152,6 +159,36 @@ jobs:
       - name: Build
         run: go build -v ./cmd/quarrel
 
+      - name: Build every command
+        # A command that nobody compiles rots silently: it can stop
+        # building and nothing notices until someone runs it. The CI
+        # built one command out of sixteen.
+        run: |
+          set -euo pipefail
+          for cmd in ./cmd/...; do
+            name="$(basename "$cmd")"
+            if [ "$name" = "webui" ]; then
+              continue  # its own module, with its own job
+            fi
+            if [ "$name" = "integration_cuda_test" ]; then
+              continue  # a test-only package, it has no binary
+            fi
+            echo "--- building $cmd"
+            go build -v -o "/tmp/quarrel-bin/$name" "$cmd"
+          done
+
+      - name: Build the commands for every platform
+        # The commands that target a specific platform are built for it:
+        # the CPU ones for Linux and for macOS, and the Metal ones for
+        # macOS with the metal tag.
+        run: |
+          set -euo pipefail
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            echo "--- building for $target"
+            GOOS="${target%/*}" GOARCH="${target#*/}" CGO_ENABLED=0 \
+              go build -v -o /dev/null ./cmd/quarrel
+          done
+
       - name: Install the Playwright driver
         # The browser e2e test in internal/api skips itself when the driver
         # is missing, so without this step it never runs. The community fork
@@ -180,6 +217,44 @@ jobs:
         env:
           GOMEMLIMIT: 2GiB
         run: go test -race -timeout 900s -count=1 ./internal/device/... ./internal/simd/... ./internal/vlm/... ./internal/vector/... ./internal/gguf/... ./internal/ollama/... ./internal/mathx/... ./internal/config/... ./internal/cpu/... ./internal/logger/... ./internal/models/... ./internal/telemetry/... ./internal/promtest/...
+
+  # ===== ALTERNATIVE BUILD CONFIGURATIONS =====
+  # The repository has three build configurations that the default build
+  # does not cover: the emlgo math backend, the emlfast backend and the
+  # pure-Go build without cgo. They were vetted and never tested, so a
+  # defect in them was invisible.
+  alternate-builds:
+    name: Alternative Builds
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Test the emlgo math backend
+        run: go test -count=1 -tags emlgo ./internal/mathx/... ./internal/simd/...
+
+      - name: Test the emlgo and emlfast math backends
+        run: go test -count=1 -tags "emlgo emlfast" ./internal/mathx/... ./internal/simd/...
+
+      - name: Test the build without cgo
+        # The pure-Go build is the one that runs on a host without a
+        # compiler. Its test suite did not compile at all: three tests
+        # referred to the scalar kernels that only the cgo build has.
+        run: go test -count=1 ./internal/simd/... ./internal/vector/...
+
+        env:
+          CGO_ENABLED: 0
+
+      - name: Build without cgo
+        run: go build -v ./...
+
+        env:
+          CGO_ENABLED: 0
 
   # ===== NESTED WEBUI MODULE =====
   # cmd/webui is its own Go module, so `go build ./...` at the repo root never
@@ -264,6 +339,26 @@ jobs:
 
       - name: Build with Metal tags
         run: go build -v -tags "darwin,metal" ./cmd/quarrel
+
+      - name: Build every Metal command
+        # Eight commands are behind the "darwin && metal" build tag, and
+        # the macOS job built none of them: they can stop compiling and
+        # nothing notices until someone runs one on a Mac.
+        run: |
+          set -euo pipefail
+          for cmd in benchmark_json debug_generation debug_layers dump_tensors \
+                     gemma4_coherence gemma4_test generate_text simple_debug; do
+            echo "--- building cmd/$cmd"
+            go build -v -tags "darwin,metal" -o "/tmp/quarrel-bin/$cmd" "./cmd/$cmd"
+          done
+
+      - name: Build the CPU commands for macOS
+        run: |
+          set -euo pipefail
+          for cmd in benchmark demo dump_metadata quantize simple vector_benchmark; do
+            echo "--- building cmd/$cmd"
+            go build -v -o "/tmp/quarrel-bin/$cmd" "./cmd/$cmd"
+          done
 
   # ===== METAL GPU TESTS =====
   metal-tests:
@@ -562,6 +657,47 @@ jobs:
           ./scripts/benchmark_compare.sh -m ~/.ollama/models -p "The capital of France is" -n 32 > benchmark_output.txt 2>&1
           cat benchmark_output.txt
 
+      - name: Cross-engine benchmark
+        # The nightly job used to run benchmark_compare.sh only. The two
+        # scripts that actually benchmark the engines, and the script
+        # that turns their results into a table, were never invoked by
+        # anything.
+        run: |
+          set -euo pipefail
+          MODEL=$(find ~/.ollama/models -name '*.gguf' | head -1)
+          if [ -z "$MODEL" ]; then
+            echo "no model found" >&2
+            exit 1
+          fi
+          ./scripts/benchmark_engines.sh -m "$MODEL" -n 32 -r 3 -w 1 \
+            -o benchmark_results || echo "the cross-engine benchmark failed"
+
+      - name: Multi-model benchmark
+        run: |
+          set -euo pipefail
+          find ~/.ollama/models -name '*.gguf' -print0 |
+            while IFS= read -r -d '' model; do
+              printf '%s:%s\n' "$(basename "$model" .gguf)" "$model"
+            done > models.txt
+          if [ ! -s models.txt ]; then
+            echo "no models found" >&2
+            exit 1
+          fi
+          ./scripts/benchmark_models.sh -l models.txt -n 32 -r 2 \
+            -o benchmark_results || echo "the multi-model benchmark failed"
+
+      - name: Build the benchmark report
+        # The report is a markdown table, so it can be attached to the
+        # release.
+        run: |
+          set -euo pipefail
+          {
+            echo "## Cross-engine benchmark"
+            echo
+            python3 scripts/benchmark_report.py benchmark_results/*.csv --markdown || echo "(no benchmark results)"
+          } > benchmark_report.md
+          cat benchmark_report.md
+
       - name: Upload benchmark results
         uses: actions/upload-artifact@v7
         with:
@@ -569,6 +705,8 @@ jobs:
           path: |
             bench_results.txt
             benchmark_output.txt
+            benchmark_report.md
+            benchmark_results/
 
   # ===== COVERAGE AND QUALITY =====
   coverage:
@@ -727,6 +865,29 @@ jobs:
           echo "## Release Notes" > release_notes.md
           echo "" >> release_notes.md
           git log --oneline --since="1 week ago" >> release_notes.md
+
+      - name: Download the benchmark report
+        uses: actions/download-artifact@v7
+        with:
+          name: benchmark-results
+          path: benchmark-artifact
+
+      - name: Add the benchmark report to the release notes
+        # The report was uploaded as an artifact and never attached to
+        # the release, so the numbers the roadmap asks for were nowhere.
+        run: |
+          set -euo pipefail
+          {
+            echo ""
+            echo "## Benchmarks"
+            echo ""
+            if [ -f benchmark-artifact/benchmark_report.md ]; then
+              cat benchmark-artifact/benchmark_report.md
+            else
+              echo "No benchmark results were produced for this run."
+            fi
+          } >> release_notes.md
+          cat release_notes.md
 
       - name: Create Draft Release
         uses: softprops/action-gh-release@v3

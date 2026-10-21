@@ -118,7 +118,8 @@ func fp32ToFp16Value(f float32) uint16 {
 
 	var h uint16
 	if exp == 0 {
-		h = 0
+		// A zero keeps its sign: -0 is not +0.
+		h = uint16(sign << 15)
 	} else if exp == 255 {
 		// The mantissa is shifted by thirteen bits, not nine: the
 		// float32 mantissa has twenty-three bits and the float16 mantissa
