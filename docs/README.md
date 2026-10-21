@@ -5,12 +5,10 @@
 | [usage.md](usage.md) | The command line, the options, the model resolution, the LoRA loading, the deployment |
 | [api.md](api.md) | The two HTTP listeners, the endpoints, the request and response shapes |
 | [architecture.md](architecture.md) | The layers of the engine, the element sizes, the directory layout |
-| [features.md](features.md) | What the engine does, feature by feature |
-| [comparison.md](comparison.md) | How it compares with llama.cpp, vLLM, Ollama and TensorRT-LLM |
+| [features.md](features.md) | What the engine does, and how it compares with the other engines |
 | [metrics.md](metrics.md) | Every Prometheus metric the code declares |
-| [performance.md](performance.md) | The measurements, with the method they were taken with |
+| [performance.md](performance.md) | The measurements, and the method they were taken with |
 | [dependencies.md](dependencies.md) | The pinned versions, and why each one is pinned |
-| [testplan.md](testplan.md) | The A/B plan and the CI regression gates |
 | [turboquant.md](turboquant.md) | The TurboQuant format and its kernels |
 | [webui.md](webui.md) | The WebUI binary, its routes and its API |
 | [README_CLOUD.md](README_CLOUD.md) | The cloud deployment: the limits, the probes, the Helm chart |
@@ -35,12 +33,17 @@ as the twelfth gate of `scripts/run_all_tests.sh`. It checks that:
 2. every metric the Grafana dashboard queries is declared, in a query that
    matches the metric's type, and every declared metric is on the
    dashboard;
-3. every flag the reference documentation mentions exists;
+3. every flag the reference documentation mentions exists, and every flag
+   the commands declare is in the reference;
 4. every endpoint the API reference lists is one the server registers, and
    every route the server registers is in the reference;
 5. the pinned versions in `dependencies.md` are the ones the module files
    hold, and the number of metrics the documents claim is the real one;
-6. every document is listed in this index.
+6. every document is listed in this index;
+7. every link between the documents resolves, and every section a link
+   points at still exists;
+8. the layout in the architecture document names every package of the
+   engine.
 
 ```bash
 go run ./scripts/docsync

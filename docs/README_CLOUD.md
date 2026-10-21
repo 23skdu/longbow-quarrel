@@ -16,7 +16,13 @@ resources:
     memory: "8Gi"
 ```
 
-> **Note on Zero-Copy Inference (v0.3.0):** With direct memory-mapped matrix-vector multiplication (`MatVecMulQ8_0`, `MatVecMulQ4_K`, `MatVecMulQ6_K`, `MatVecMulQ2_K`, `MatVecMulQ3_K`, `MatVecMulQ4_0`, `MatVecMulQ5_0`, `MatVecMulQ5_K`, `MatVecMulBF16`), RAM allocations on the Go heap remain `< 50 MB` even for 4B–8B models. The requested memory primarily accommodates OS page cache and the paged KV cache. When GPU VRAM is limited, use `-ngl <layers>` to offload a portion of layers to GPU while running remaining layers on host CPU.
+> **Note on Zero-Copy Inference (v0.3.0):** With the direct matrix-vector
+> multiplication over the memory-mapped weights (the formats are in
+> [features.md](features.md#2-quantization-and-formats)), the allocations on
+> the Go heap stay under 50 MB even for 4B–8B models, and under 20 MB
+> for a 4B one. The requested memory accommodates the page cache and the
+> paged KV cache. When the VRAM is limited, use `-ngl <layers>` to
+> offload part of the layers to the GPU and run the rest on the host.
 
 
 ## 2. Health & Readiness Probes
@@ -80,36 +86,28 @@ The API and the metrics are two separate listeners, and the ServiceMonitor
 scrapes the metrics one. A chart that pointed the monitor at the API port
 would have scraped nothing.
 
-## 5. Distributed Sharding (Arrow Flight)
+## 5. Distributed and multi-device inference
 
-> **Not available as an environment configuration.** Earlier revisions of
-> this document named `QUARREL_SHARD_ROLE` and `QUARREL_WORKER_ADDRS`.
-> Neither variable exists: no part of the code reads them, so setting
-> them did nothing at all.
+> **Not available, and the failure is loud.** Earlier revisions of this
+> document named `QUARREL_SHARD_ROLE` and `QUARREL_WORKER_ADDRS`. Neither
+> variable exists: no part of the code reads them, so setting them did
+> nothing at all.
 >
 > The Arrow Flight server is started with `-flight <addr>` and serves
-> single-request inference over `DoGet`. The *sharded* forward -- the
-> part that would spread a model over several machines -- is not
-> implemented: the repository is a single-device engine with a Flight
-> *server* for remote inference, and the worker rejects the tensor
-> forward with `Unimplemented` rather than silently returning zeroed
-> activations. The Flight client that used to live in the repository is
-> gone; a client is the Arrow library's own.
+> single-request inference over `DoGet`. The *sharded* forward — the
+> part that would spread a model over several machines — is not
+> implemented: the worker rejects the tensor forward with `Unimplemented`
+> rather than silently returning zeroed activations. The Flight client
+> that used to live in the repository is gone; a client is the Arrow
+> library's own.
+>
+> The tensor-parallel and pipeline-parallel managers were unit-tested and
+> never used: the engine loads the whole model onto one device and never
+> calls a collective. They have been deleted, so there is no code that
+> looks like it shards a model and does not. `-devices` with a *single*
+> device id does work — it selects the CUDA device the engine runs on —
+> but `-devices 0,1`, `-tp-size 2` and `-pp-stages 2` exit with an error
+> rather than printing a topology the engine never applies.
 >
 > To spread a model over several machines, run one process per machine
-> behind a load balancer. To spread it over several *devices in one
-> process* is not implemented: `-devices 0,1`, `-tp-size 2` and
-> `-pp-stages 2` exit with an error rather than pretending to shard.
-
-### Multi-Device Parallelism
-
-> **Not available.** The tensor-parallel and pipeline-parallel
-> managers were implemented and unit-tested, and the inference engine
-> never used them: it loads the whole model onto a single device and
-> never calls a collective. They have been deleted, so there is no code
-> that looks like it shards a model and does not.
->
-> `-devices` with a *single* device id does work: it selects the CUDA
-> device the engine runs on. `-devices 0,1`, `-tp-size 2` and
-> `-pp-stages 2` exit with an error rather than printing a topology that
-> the engine never applies.
+> behind a load balancer.

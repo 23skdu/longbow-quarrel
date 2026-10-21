@@ -68,21 +68,21 @@ go build -tags darwin,metal -o quarrel-simple ./cmd/simple/
 
 ### Options
 ```text
---model string       Model path or fuzzy name (e.g. "Qwen3.5", "mistral:latest")
---prompt string      Text prompt (default: "The capital of France is")
---n int              Number of tokens to generate (default: 50)
---temp float         Sampling temperature 0.0-1.0 (default: 0.7)
---topk int           Top-K filtering (default: 40)
---topp float         Top-P nucleus sampling (default: 0.95)
---min-p float        Min-P sampling threshold (default: 0.0)
---rep-penalty float  Repetition penalty (default: 1.1)
---presence-penalty float  Presence penalty (default: 0.0)
---frequency-penalty float  Frequency penalty (default: 0.0)
---ngl int            Number of GPU layers to offload (-1 for all, default: -1)
---lora string        Path to LoRA adapter .gguf file (optional)
---seed int           Random seed (default: 0 = auto)
---stream             Stream tokens as they are generated
---max-memory int     Max memory in MB (0 = no limit)
+-model string       Model path or fuzzy name (e.g. "Qwen3.5", "mistral:latest")
+-prompt string      Text prompt (default: "The capital of France is")
+-n int              Number of tokens to generate (default: 50)
+-temp float         Sampling temperature 0.0-1.0 (default: 0.7)
+-topk int           Top-K filtering (default: 40)
+-topp float         Top-P nucleus sampling (default: 0.95)
+-min-p float        Min-P sampling threshold (default: 0.0)
+-rep-penalty float  Repetition penalty (default: 1.1)
+-presence-penalty float  Presence penalty (default: 0.0)
+-frequency-penalty float  Frequency penalty (default: 0.0)
+-ngl int            Number of GPU layers to offload (-1 for all, default: -1)
+-lora string        Path to LoRA adapter .gguf file (optional)
+-seed int           Random seed (default: 0 = auto)
+-stream             Stream tokens as they are generated
+-max-memory int     Max memory in MB (0 = no limit)
 ```
 
 ---
@@ -98,14 +98,21 @@ make nvidia
 ### Options
 ```text
 -model string       Model name or GGUF path
--prompt string      Text prompt for single inference
+-prompt string      Text prompt for single inference (default: "Hello world")
 -n int              Tokens to generate (default: 20)
--api-addr string    Address of the OpenAI-compatible REST API (default: ":8080")
+-api-addr string    Address of the OpenAI-compatible REST API (default: ":8080", empty disables it)
 -metrics string     Prometheus metrics address (default: ":9090")
+-flight string      Arrow Flight server address (default: ":50051")
 -ngl int            Number of GPU layers to offload (default: -1 for all)
 -gpu-layers int     Alias for -ngl
 -devices string     Comma-separated CUDA device ids (a single device selects it)
--kv-cache-size int Context window / KV cache capacity in tokens (default: 2048)
+-tp-size int        Tensor parallel degree (default: 1; more than 1 exits with an error)
+-pp-stages int      Pipeline parallel stages (default: 1; more than 1 exits with an error)
+-kv-cache-size int  Context window / KV cache capacity in tokens (default: 2048)
+-kv-cache-type string  The precision of the KV cache: f16, tq1_0, tq2_0, fp8, q8_0 (default: "f16")
+-max-batch-size int Maximum batch size (default: 16)
+-block-size int     Paged attention block size (default: 16)
+-total-blocks int   Total paged cache blocks (default: 256)
 -temp float         Sampling temperature (default: 0.7)
 -topk int           Top-K sampling (default: 40)
 -topp float         Top-P nucleus sampling (default: 0.95)
@@ -115,17 +122,13 @@ make nvidia
 -frequency-penalty float  Frequency penalty (default: 0.0)
 -seed int           Random seed (0 for auto)
 -stream             Stream tokens as they are generated
+-stop-tokens string Comma-separated list of stop token ids (e.g. 2,13)
 -lora string        Path to LoRA adapter .gguf file (optional)
--metrics string     Prometheus metrics address (default: ":9090")
--flight string      Arrow Flight server address (default: ":50051")
--max-batch-size int Maximum batch size (default: 16)
--block-size int     Paged attention block size (default: 16)
--total-blocks int   Total paged cache blocks (default: 256)
+-image string       Path to an image file, for the vision pipeline (optional)
 -activation-log string  Write a JSON activation log (embedding, per-layer activations, logits) to this path
 -draft-model string Path to a smaller GGUF model used for speculative decoding (optional)
 -draft-length int   Tokens the draft model proposes per step (default: 4)
 -draft-paths int    Parallel draft paths per step (default: 2)
--flight string      Arrow Flight server address (default: ":50051")
 ```
 
 > The API and the metrics are **two separate listeners**. The API server

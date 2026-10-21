@@ -53,43 +53,38 @@ see [docs/dependencies.md](docs/dependencies.md).
 
 ## What's New since v0.2.0
 
-- **Zero-Copy Quantized Inference (RAM Exhaustion & OOM Elimination):** Direct matrix-vector dot products over memory-mapped quantized weights (`Q8_0`, `Q4_K`, `Q6_K`) and on-demand token embedding lookups. Slashes CPU heap memory by **99.9%** (from 17.9 GB down to < 20 MB for a 4B parameter model), allowing large models to run smoothly without disk swapping or OOM crashes.
-- **Partial GPU Layer Offloading (`-ngl` / `-gpu-layers`):** Seamlessly split transformer layers across GPU VRAM and CPU host RAM with automatic activation roundtripping. Run models that exceed your GPU's dedicated VRAM.
-- **Universal Multi-Engine Model Resolver:** Automatically discovers and fuzzy-matches models from `~/.cache/llmfit/models/`, `~/.cache/llama.cpp/`, `~/.cache/huggingface/hub/`, `~/.cache/quarrel/models/`, `~/.local/share/nomic.ai/GPT4All/`, and local files. Ollama tags (`mistral:latest`) are resolved through the Ollama manifest store (`~/.ollama/models/` or `$OLLAMA_MODELS`). Pass `--model Qwen3.5` or `--model mistral` and Quarrel locates it instantly.
-- **Qwen 3.5 Hybrid Architecture Support:** Native support for hybrid GatedDeltaNet linear State Space Models (SSM) and full self-attention with per-head Q/K RMSNorm.
-- **Vectorized TurboQuant Kernels:** AVX-512, AVX2 and ARM NEON implementations of the PolarQuant and QJL transforms, dispatched at runtime by CPU feature detection, with a canonical pure-Go fallback.
-- **SIMD GGUF Dequantization Kernels:** Vectorized batch dequantization and zero-copy matrix-vector multiplication (`MatVecMulQ4_K`, `MatVecMulQ6_K`).
-- **Comprehensive Verification:** Clean `go vet`, 0 `gosec` security vulnerabilities, 0 data races (`go test -race`), a `vacuous_tests` gate that fails any test which cannot fail, and a `dupcheck` gate that fails on duplicate package-level declarations in any build configuration.
-- **CPU/GPU Parity:** The CPU and the GPU are compared on the same model, on a model the test suite builds itself. Six defects in the GPU's batched forward came out of it: the activations were half precision where the kernels are single precision, the tensor pool handed out buffers with the wrong element type, the KV store was called with the batch size instead of the token count, the scratch was sized for one token, the block table could be zero wide, and the embedding lookup used the vocabulary count where the dimension belongs.
-- **Correct Paged Attention:** The position tensors, the block tables and the physical slots all say what they hold, on the CUDA and the Metal side alike. The CPU and the GPU parity test checks the result, and a device-level test checks that every token lands in the slot its position names.
-- **Model Quantization:** `quantize -i model.gguf -o model-q4_k.gguf -t q4_k` converts a model into a quantized one. The repository could read GGUF files but not write them, so this was not possible before; and the Q4_K and FP8 codecs did not round-trip, so the CPU and the GPU decoded the same Q4_K model differently.
-- **Engine Health Audit:** Every forward pass audits its own logit distribution. A model that produces NaNs, infinities, extreme values or a flat distribution is reported in the log and in the Prometheus metrics (`logit_nan_count_total`, `logit_flat_distribution_total`, `logit_max_value`, and the rest) — all of which were previously permanently zero.
-- **Activation Logging:** `quarrel -activation-log <path>` writes a JSON file with the embedding, the per-layer activations (peak magnitude, a sample, and the NaN and Inf counts of each tensor) and the final logits, so a broken layer can be found.
-- **Speculative Decoding:** A smaller draft model proposes the next tokens and the target model verifies them in one forward pass, with the standard `min(1, p_target/p_draft)` acceptance test and a residual-distribution correction. Enable it with `-draft-model <path>`; the draft model runs on the CPU so the GPU memory stays with the target.
-- **Distributed Inference (Arrow Flight):** A Flight **server** for single-request inference. The client, the master engine and the remote worker engine have been deleted: they were never reachable from a shipped binary. The **sharded** tensor forward is *not* implemented: the worker rejects it with `Unimplemented` rather than silently returning zeroed activations. See `docs/roadmap.md` for the exact boundary.
+| Area | What changed |
+|---|---|
+| **The shipped binary** | The CPU build was a stub that exited 1; it is now a real binary that runs inference. The OpenAI-compatible REST API is served, and `"stream": true` returns a real `text/event-stream`. |
+| **Memory** | The weights stay memory-mapped and quantized: the dot products run over the bytes directly, so a 4B model needs < 20 MB of heap instead of 17.9 GB. |
+| **The SIMD path** | The AVX-512 build is compiled, tested and gated. The TurboQuant C kernels are called, and the CPU and CUDA encoders agree. The arm64 configuration is built and tested too. |
+| **The CUDA path** | A CPU-vs-CUDA parity test found six defects in the batched forward; the quantized (int8/FP8) paged KV cache works. |
+| **Speculative decoding** | Wired end to end through `-draft-model` and the API's `speculative` field, with the `min(1, p_target/p_draft)` acceptance rule. |
+| **The model formats** | A GGUF writer, a corrected Q4_K and FP8 codec, `cmd/quantize`, and a model file validated at load. |
+| **The observability surface** | 133 Prometheus metrics, a Grafana dashboard over all of them, and a drift checker that fails the build when the chart, the dashboard and the code disagree. |
+| **The gates** | A dead-code gate, a vacuous-test gate, a duplicate-declaration gate, a workflow lint, the security scans and the documentation drift check. |
+
+The full record, including the defects these fixes closed, is in
+[docs/roadmap.md](docs/roadmap.md#what-has-landed); the feature list is in
+[docs/features.md](docs/features.md).
 
 ---
 
 ## Features
 
-### Model Support
-- **Architectures**: Qwen 3.5 (Hybrid SSM/Linear + Full Attention), Llama 3/3.1/3.2, Mistral, Gemma 4 (Hybrid sliding + full), SmolLM2, Phi3, Granite
-- **Quantizations**: Q4_0, Q4_K, Q6_K, Q8_0, FP16, FP32, FP8 (E4M3/E5M2), TurboQuant (PolarQuant + QJL)
-- **Zero-Copy**: Weights remain in quantized mmap format; operations evaluate directly on quantized bytes
+- **Models**: Qwen 3.5 (hybrid SSM + attention), Llama 3/3.1/3.2, Mistral,
+  Gemma 4, SmolLM2, Phi3, Granite; Q4_0, Q4_K, Q6_K, Q8_0, FP16, FP32, FP8
+  and TurboQuant.
+- **Backends**: CUDA and Metal on the GPU, AVX-512, AVX2 and ARM NEON on the
+  CPU, with the layers split between the GPU and the host (`-ngl`).
+- **Serving**: continuous batching, a paged KV cache with prefix caching, an
+  8× compressed TurboQuant KV cache, speculative decoding, an
+  OpenAI-compatible REST API, an Arrow Flight server and a WebUI.
+- **Operations**: 133 Prometheus metrics, a Grafana dashboard, a Kubernetes
+  Helm chart, Docker images and an engine health audit.
 
-### Hardware Acceleration
-- **Apple Silicon (Metal)**: 60+ custom MSL compute kernels (MatMul, RMSNorm, RoPE, SwiGLU, Flash Attention)
-- **NVIDIA GPU (CUDA)**: Fused FP16/FP8 kernels, Tensor Cores, cuDNN flash attention, and a single selectable device (`-devices N`). Multi-device tensor and pipeline parallelism are implemented in the device layer but **not used by the engine**: `-tp-size 2` / `-pp-stages 2` exit with an error rather than pretending to shard the model.
-- **CPU SIMD**: AVX-512, AVX2, and ARM64 NEON vectorized arithmetic
-- **Hybrid Offloading**: Partition layers dynamically between GPU VRAM and CPU system RAM
-
-### Advanced Serving & Cache
-- **Continuous Batching**: Dynamic iteration-level batching with preemption
-- **Paged KV Cache**: Virtual memory block allocation with prefix caching
-- **TurboQuant KV Cache**: 8x KV cache compression with PolarQuant + QJL residual
-- **Distributed Sharding**: Client, master and worker plumbing via Apache Arrow Flight RPC. The worker-side sharded forward is not implemented yet (it fails loudly, not silently).
-- **Speculative Decoding**: Draft-model token proposals verified by the target model, exposed as `-draft-model` and as the REST API's `"speculative"` / `"draft_k"` fields.
-- **API**: OpenAI-compatible (`/v1/chat/completions`, `/v1/completions`) on the API listener, and Prometheus metrics (`/metrics`) on a separate metrics listener. The WebSocket streaming lives in the WebUI binary, not in the API server.
+The comparison with the other engines is in
+[docs/features.md](docs/features.md).
 
 ---
 
@@ -217,21 +212,20 @@ rewrites it, and the CI fails when it is out of date.
 
 ```
 cmd/
-  simple/          # Minimal CLI inference with universal resolver & offload
-  quarrel/         # High-performance CUDA CLI & server (Linux)
-  benchmark/       # SIMD & inference benchmarking
-  webui/           # Server-rendered web UI with WebSocket streaming (stdlib html/template)
+  quarrel/         # The engine and its REST API
+  simple/          # A minimal CLI over the same engine
+  webui/           # The browser UI (its own Go module)
 internal/
-  engine/          # Core inference engine, continuous batching, layer offload
-  device/          # GPU backends (Metal, CUDA, CPU, multi-GPU)
-  simd/            # SIMD kernels (AVX-512, AVX2, ARM NEON, TurboQuant)
-  gguf/            # GGUF parser, metadata extraction, zero-copy dequant
-  models/          # Universal multi-engine model cache resolver
-  tokenizer/       # Fast BPE & SentencePiece tokenization
-  metrics/         # Prometheus observability instrumentation
-docs/              # Detailed architecture, API, and performance documentation
+  engine/          # The inference engine, the KV caches, the batching
+  device/          # The backends: CUDA, Metal, CPU
+  simd/            # The SIMD kernels: AVX-512, AVX2, ARM NEON
+  gguf/            # The GGUF reader and writer, the zero-copy dequant
+  vector/          # The vector search package
+  metrics/         # The Prometheus instrumentation
+docs/              # The documentation index
 ```
 
 ---
 
-*For detailed specifications, see the [Documentation Index](docs/).*
+*For the full layout, see [architecture.md](docs/architecture.md); for the
+specifications, the [documentation index](docs/).*

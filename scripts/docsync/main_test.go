@@ -311,6 +311,66 @@ func TestTheDocumentIndexListsEveryDocument(t *testing.T) {
 	}
 }
 
+// TestTheDirectoryLayoutNamesEveryPackage checks that the layout in the
+// architecture document names every package of the engine.
+func TestTheDirectoryLayoutNamesEveryPackage(t *testing.T) {
+	problems := 0
+	report := func(format string, args ...interface{}) { problems++ }
+
+	problems += checkTheDirectoryLayout(report, false)
+	if problems != 0 {
+		t.Errorf("%d package(s) are not in the layout", problems)
+	}
+}
+
+// TestTheFlagReferenceIsComplete checks that every flag the commands
+// declare is in the reference: a flag nobody can find is a flag
+// nobody uses.
+func TestTheFlagReferenceIsComplete(t *testing.T) {
+	flags, err := commandFlags()
+	if err != nil {
+		t.Fatalf("failed to read the command flags: %v", err)
+	}
+
+	problems := 0
+	report := func(format string, args ...interface{}) { problems++ }
+
+	problems += checkTheFlagReferenceIsComplete(flags, report, false)
+	if problems != 0 {
+		t.Errorf("%d flag(s) are not in the reference", problems)
+	}
+}
+
+// TestTheCrossLinksResolve checks that every link between the documents
+// resolves: a merge that moves a section must not leave the anchors
+// behind.
+func TestTheCrossLinksResolve(t *testing.T) {
+	problems := 0
+	report := func(format string, args ...interface{}) { problems++ }
+
+	problems += checkCrossLinks(report, false)
+	if problems != 0 {
+		t.Errorf("%d link(s) in the documentation do not resolve", problems)
+	}
+}
+
+// TestAnchorSlug checks the shape of the anchor a heading makes.
+func TestAnchorSlug(t *testing.T) {
+	cases := map[string]string{
+		"The vector search":                "the-vector-search",
+		"2. Quantization and formats":      "2-quantization-and-formats",
+		"10. Vector search":                "10-vector-search",
+		"The `code` in it":                 "the-code-in-it",
+		"WebUI (Templ)":                    "webui-templ",
+		"Longbow-Quarrel: Cloud (Phase 4)": "longbow-quarrel-cloud-phase-4",
+	}
+	for heading, want := range cases {
+		if got := anchorSlug(heading); got != want {
+			t.Errorf("the anchor of %q is %q, want %q", heading, got, want)
+		}
+	}
+}
+
 // TestCheckTheClaimedMetricCountCatchesAStaleCount checks that the check
 // notices a document that claims the wrong number of metrics.
 func TestCheckTheClaimedMetricCountCatchesAStaleCount(t *testing.T) {

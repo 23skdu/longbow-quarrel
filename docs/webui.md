@@ -8,7 +8,7 @@
 > for CLI tooling. None of them are dependencies of `cmd/webui`.
 >
 > The ideas that are still open are in
-> [roadmap.md](roadmap.md#webui).
+> [roadmap.md](roadmap.md#planned-features).
 
 ## 1. Overview
 
@@ -27,22 +27,20 @@ The stack is deliberately minimal:
 | Front-end | Plain HTML, CSS and JavaScript served from `cmd/webui/static/` |
 | Browser tests | `@playwright/test` |
 
-### The template is composed from parts
+### No framework, and no build step
 
-`cmd/webui/templates/index.go` holds the page as five parts — the head,
-the header, the sidebar, the chat and the scripts — parsed into one
-template set. It used to be one string of a hundred and eighty lines, in
-which a change to the sidebar meant finding the right place by eye.
+The front-end is plain JavaScript. A component framework needs a
+bundler, and the WebUI is shipped as a static directory of files that a
+Go binary serves: the cost of a framework is a `node_modules` directory
+in the image and a build step in every release, and the benefit is a
+component model the three hundred lines of `static/js/ui.js` do not need
+yet.
 
-### The front-end has no framework, and no build step
-
-The plan proposed React, and separately Svelte or Vue. The
-implementation is plain JavaScript, and that is the decision: a
-component framework needs a bundler, and the WebUI is built and shipped
-as a static directory of files that a Go binary serves. The cost of a
-framework is a `node_modules` directory in the image and a build step in
-every release; the benefit is a component model the three hundred lines
-of `static/js/ui.js` do not need yet.
+The page is composed from parts for the same reason.
+`cmd/webui/templates/index.go` holds it as five — the head, the header,
+the sidebar, the chat and the scripts — parsed into one template set,
+instead of one string in which a change to the sidebar meant finding the
+right place by eye.
 
 The model gallery and the LoRA adapter browser are in the sidebar, drawn
 by `UIController.renderGallery` and `UIController.renderAdapters` from
@@ -197,6 +195,8 @@ did: every API endpoint answered 404 (the router mounted the API under
 `/api/` without stripping the prefix), the settings were not saved, the
 conversation was never read back from the local storage, and the
 WebUI's own metrics were never counted.
+
+The Go suite covers the same binary from the other side.
 
 | Suite | What it covers |
 |---|---|

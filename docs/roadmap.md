@@ -27,7 +27,7 @@ The work that closed them is in [What has landed](#what-has-landed).
 What is **not** finished is what the document always said it was not
 finished with: the [planned features](#planned-features) — the designs
 that were specified and never built — and the [vector-search
-blockers](#vector-search), whose implementations are in the tree but
+blockers](#the-vector-search), whose implementations are in the tree but
 whose performance targets are not all met.
 
 **Definition of done for v1.0.0:** every P0 and P1 item closed; the CI
@@ -72,10 +72,13 @@ and the `avx512` build.
 `scripts/docsync` is the drift checker behind gate 12. It verifies that
 every flag the Helm chart passes is a flag the command has, that every
 metric the Grafana dashboard queries is declared and queried in the right
-shape, that every flag the reference documentation mentions exists, that
-the API reference and the server agree on the routes, and that the
-pinned versions in [dependencies.md](dependencies.md) are the ones the
-module files hold.
+shape, that every flag the reference documentation mentions exists and
+every flag the commands declare is in it, that the API reference and the
+server agree on the routes, that the pinned versions in
+[dependencies.md](dependencies.md) are the ones the module files hold,
+that every document is in the index, that every link between the
+documents resolves, and that the layout in the architecture document names
+every package.
 
 `scripts/deadcode.sh` is the gate behind gate 13: the reachability
 analysis over the whole module, with the tests as roots, fails when a new

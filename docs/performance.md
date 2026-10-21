@@ -74,7 +74,7 @@ Parallel outer-row goroutines used when `rowsA * colsB >= 1024`.
 > (`polar_quant_avx512`, `polar_quant_avx2`, `polar_quant_neon`,
 > `qjl_transform_*`) were never referenced from any Go file. The numbers
 > below are the actual measured ones; see
-> [roadmap.md](roadmap.md) Step 33.
+> [roadmap.md](roadmap.md#what-has-landed).
 
 The C kernels are now dispatched at runtime from
 `internal/simd/turboquant_simd_{amd64,arm64,generic}.go`, guarded by CPU
@@ -386,3 +386,89 @@ a float32 path.
 
 The measurements above are the ones this document claims, and the
 commands above reproduce them.
+
+---
+
+## 11. How the numbers are measured
+
+> This section used to be a document of its own
+> (`docs/testplan.md`). It describes how every number in this document is
+> taken, and it is here because a number without its method is an
+> anecdote.
+
+### 11.1 The hardware envelope
+
+| Component | Specification | Constraints |
+|:---|:---|:---|
+| **Host CPU** | Intel Core i7-12650H (6 P-cores, 4 E-cores, 16 threads), AVX2, FMA, AVX-VNNI | No AVX-512. The P/E split needs thread pinning. |
+| **Host RAM** | 24 GB DDR5 | `GOMEMLIMIT=2GiB` in CI, to keep the tests from swapping. |
+| **GPU** | NVIDIA GeForce RTX 4060 Laptop, 8 GB | 24 SMs, PCIe 4.0 x8. |
+| **Toolchain** | GCC 13+, NVCC 12.4, Go 1.27 | The cgo boundary costs about 5 µs per call. |
+
+### 11.2 What is measured
+
+| Axis | Measure |
+|:---|:---|
+| Latency | Time to first token, inter-token latency (P50, P95, P99), throughput in tokens per second |
+| Memory | Heap allocations per operation, heap growth, peak RSS |
+| Compute | Kernel throughput, GPU occupancy |
+| Accuracy | The maximum difference against the float32 reference |
+
+### 11.3 The noise
+
+A benchmark on a laptop measures the machine as much as the code, so
+the harness controls what it can:
+
+- **Thread pinning.** The benchmark is pinned to the physical
+  performance cores (`taskset -c 0,2,4,6,8,10`), with
+  `GOMAXPROCS` matching. An efficiency core adds up to 45 % of
+  variance.
+- **Clock stability.** A laptop GPU throttles with its thermal
+  headroom, which is up to 30 % of run-to-run drift. Where the runner
+  allows it, the clocks are locked (`nvidia-smi -lgc`), and otherwise
+  the temperature is checked before the run.
+- **The garbage collector.** `GOMEMLIMIT=2GiB`, and an explicit
+  `runtime.GC()` before the timer starts.
+
+### 11.4 The statistics
+
+- **Warmup**: five iterations are discarded, to populate the kernel
+  caches, the driver tables and the mmap page faults.
+- **Measurement**: at least twenty iterations per configuration.
+- **Outliers**: values outside `[Q1 - 1.5·IQR, Q3 + 1.5·IQR]` are
+  reported.
+- **Stability**: the coefficient of variation,
+  `CV = σ/µ × 100 %`, must be under 3 % in an isolated run and under
+  5 % in CI. A run above that is marked unstable and repeated.
+
+### 11.5 The decision matrix
+
+A change is accepted against the baseline if **all** of these hold:
+
+1. **Throughput**: the ratio of the new throughput to the old is at
+   least 0.95 (no more than a 5 % regression under CI noise, and no
+   regression at all in a controlled local run).
+2. **Allocations**: the allocations of a decode loop do not increase.
+   Any increase fails immediately.
+3. **Parity**: the maximum relative error against the reference is at
+   most 1e-4.
+4. **Latency**: the P99 inter-token latency does not exceed 1.10 × the
+   baseline.
+
+### 11.6 The recurring comparisons
+
+| Comparison | Command | What it decides |
+|:---|:---|:---|
+| SIMD dot products | `go test -run '^$' -bench 'BenchmarkVecDotQ\|BenchmarkMatVecMulQ' -benchmem -count=5 ./internal/simd/` | Whether a kernel change is faster and still allocation-free |
+| The worker pool | `go test -run '^$' -bench 'BenchmarkWorkerPool\|BenchmarkEndToEndInferenceStep' -benchmem -count=5 ./internal/simd/` | Whether the persistent pool beats the goroutine-per-call path |
+| The split-K attention | `go test -v -tags cuda -run 'TestCUDA_AttentionPagedSplitK' ./internal/device` | Whether the split-K kernel agrees with the reference |
+| The graph capture | `go test -v -tags cuda -run 'TestCUDA_Graph' ./internal/device` | Whether the replay is bit-exact with the eager path |
+| The vector search | `VECTOR_BENCH_SIZES=50000,100000,250000 go test -run '^$' -bench 'BenchmarkFlat\|BenchmarkIVF\|BenchmarkHNSW\|BenchmarkDistance' ./internal/vector/` | Where the vector search spends its time |
+
+### 11.7 The gates that enforce it
+
+`scripts/run_all_tests.sh` runs the gates; the list and what each one
+catches is in [roadmap.md](roadmap.md#the-gates). The two that measure
+rather than check are the coverage gate
+(`scripts/coverage_gate.sh coverage.out`) and the zero-allocation gate
+(`scripts/bench_gate.sh check-zero-alloc ./internal/simd`).

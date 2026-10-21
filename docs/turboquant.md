@@ -70,7 +70,7 @@ For each index $j$:
 > dispatched at runtime from
 > `internal/simd/turboquant_simd_{amd64,arm64,generic}.go`, with a single
 > canonical reference implementation in `internal/simd/turboquant.go`.
-> See [roadmap.md](roadmap.md) Step 33.
+> See [roadmap.md](roadmap.md#what-has-landed).
 
 | Backend | Location | Supported Transforms |
 |---------|----------|----------------------|

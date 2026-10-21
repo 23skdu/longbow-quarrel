@@ -7,38 +7,19 @@ Comprehensive architectural overview of Longbow-Quarrel (v0.3.0), covering execu
 ## 1. System Topology
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                      Client Interfaces                          │
-│         CLI (cmd/simple, cmd/quarrel)  |  Templ WebUI           │
-│         OpenAI-Compatible REST API    |  WebSocket Stream       │
-└────────────────────────────────┬────────────────────────────────┘
-                                 │
-┌────────────────────────────────▼────────────────────────────────┐
-│                   Universal Model Resolver                      │
-│      ~/.cache/llmfit/models/ | ~/.cache/llama.cpp/             │
-│      ~/.cache/huggingface/   | ~/.ollama/models/               │
-└────────────────────────────────┬────────────────────────────────┘
-                                 │
-┌────────────────────────────────▼────────────────────────────────┐
-│                        Engine Layer                             │
-│                  (internal/engine/interface.go)                 │
-├────────────────────────────────┬────────────────────────────────┤
-│          CUDA Engine           │           CPU Engine           │
-│     (engine_cuda.go)           │     (engine_cpu.go)            │
-│  - Fused GPU kernels           │  - Zero-copy quantized mmap    │
-│  - Partial layer offloading    │  - SIMD batch dequantization   │
-│  - KV Cache on VRAM            │  - ApplyLayerCPU pipeline      │
-└───────────────┬────────────────┴────────────────┬───────────────┘
-                │                                 │
-                ▼                                 ▼
-┌────────────────────────────────┐ ┌──────────────────────────────┐
-│        NVIDIA CUDA GPU         │ │       Host CPU SIMD          │
-│   (internal/device/cuda.go)    │ │   (internal/simd/)           │
-│ - Tensor Cores / cuDNN         │ │ - AVX-512 / AVX2 / ARM NEON  │
-│ - Flash Attention              │ │ - MatVecMul Q8_0,Q4_K,Q6_K   │
-│ - libcuda_kernels.a            │ │   Q2_K,Q3_K,Q4_0,Q5_0,Q5_K  │
-│                                │ │   Q6_K, BF16                │
-└────────────────────────────────┘ └──────────────────────────────┘
+  CLI / REST API / WebSocket        the WebUI binary
+            │
+            ▼
+  Universal Model Resolver           the model caches and the local paths
+            │
+            ▼
+  Engine  (internal/engine)          batching, the KV caches, the audits
+     ┌──────┴───────┐
+     ▼              ▼
+  CUDA engine    CPU engine         the same layers, two backends
+     │              │
+     ▼              ▼
+  CUDA device     SIMD kernels      internal/device, internal/simd
 ```
 
 ---
@@ -49,18 +30,12 @@ In traditional CPU inference engines, weights are dequantized upfront into `[]fl
 
 Longbow-Quarrel eliminates this overhead via:
 
-1. **Zero-Copy Matrix-Vector Multiplication:**
-   - Evaluates direct dot products between activation vectors and raw quantized bytes directly from the memory-mapped file:
-     - `gguf.MatVecMulQ8_0(data, vector, rows, cols)`
-     - `gguf.MatVecMulQ4_K(data, vector, rows, cols)`
-     - `gguf.MatVecMulQ6_K(data, vector, rows, cols)`
-     - `gguf.MatVecMulQ2_K(data, vector, rows, cols)`
-     - `gguf.MatVecMulQ3_K(data, vector, rows, cols)`
-     - `gguf.MatVecMulQ4_0(data, vector, rows, cols)`
-     - `gguf.MatVecMulQ5_0(data, vector, rows, cols)`
-     - `gguf.MatVecMulQ5_K(data, vector, rows, cols)`
-     - `gguf.MatVecMulBF16(data, vector, rows, cols)`
-   - No floating-point weight buffers are allocated on the Go heap.
+1. **Zero-Copy Matrix-Vector Multiplication:** the dot product of an
+   activation and a weight is evaluated directly over the quantized bytes
+   of the memory-mapped file — `gguf.MatVecMulQ8_0`, `MatVecMulQ4_K`,
+   `MatVecMulQ6_K` and the rest; the list of the formats is in
+   [features.md](features.md#2-quantization-and-formats). No floating-point
+   weight buffer is allocated on the Go heap.
 2. **On-Demand Token Embedding Lookup:**
    - Reads only the specific token's embedding vector (e.g. 2,560 elements = 10 KB) directly from mmap rather than materializing the full vocabulary embedding table (150,000 × 2,560 × 4 bytes = 1.5 GB).
 3. **Outcome:**
@@ -73,21 +48,16 @@ Longbow-Quarrel eliminates this overhead via:
 When a model exceeds available GPU VRAM, Longbow-Quarrel splits transformer layers dynamically:
 
 ```
-Input Token → GPU Embedding
-                 │
-                 ▼
-[Layers 0 .. numGPULayers - 1]  ───────► Runs on GPU VRAM
-                 │
-                 │ Activation Download (hidden.ToHostF32())
-                 ▼
-[Layers numGPULayers .. N - 1]  ───────► Runs on CPU RAM (ApplyLayerCPU)
-                 │
-                 │ Activation Upload (hidden.LoadFrom())
-                 ▼
-GPU Final RMSNorm & Output Head ───────► Runs on GPU
-                 │
-                 ▼
-              Sampler
+  token → GPU embedding
+              │
+              ▼
+  layers 0 .. numGPULayers-1        on the GPU
+              │  activation down
+              ▼
+  layers numGPULayers .. N-1         on the CPU
+              │  activation up
+              ▼
+  output norm, output head, sampler  on the GPU
 ```
 
 ### Key Components:
@@ -165,48 +135,29 @@ two build-tagged implementations:
 ## 8. Directory Layout
 
 ```
+cmd/          the engine, the CLI, the WebUI, the tools
 internal/
-  api/             # HTTP & Arrow Flight RPC servers
-  config/          # Model and runtime configurations
-  device/          # Hardware abstractions (CUDA, Metal, CPU)
-  engine/
-    activation_logger.go # The JSON activation log
-    audit.go       # The logit, KV cache and weight diagnostics
-    cpu_weights.go # Neutral CPU layer pipeline & zero-copy matvec dispatch
-    engine_cpu.go  # Pure CPU inference engine
-    engine_cuda.go # CUDA engine with hybrid layer offloading
-    interface.go   # Core engine interface contracts
-    kv_cache.go    # Contiguous & sliding window KV cache
-    kv_cache_paged.go # Paged virtual memory KV cache
-    kv_cache_sliding_window.go # The sliding window KV cache
-    lora.go        # LoRA adapter management
-    prompt_cache.go # Radix-tree prefix caching
-    prompt_wrapper.go # Jinja2 chat template renderer
-    speculative.go # Speculative decoding manager
-    continuous_batching.go # Continuous batching with preemption
-  gguf/
-    dequant.go     # Scalar dequant + BF16/F16 + MatVecMulQ8_0
-    dequant_simd.go# SIMD dequant + zero-copy MatVecMul for all quant formats
-    fp8.go         # The FP8 E4M3 and E5M2 conversions
-    quantize.go    # The Q4_K encoder
-    quantize_q6k.go, quantize_q8_0.go # The other encoders
-    reader.go      # Binary GGUF parser & tensor mmap indexer
-    writer.go      # The GGUF writer: the other half of the reader
-  mathx/           # Pluggable math backend: stdlib `math` vs `emlgo` (`-tags emlgo`)
-  models/
-    resolver.go    # Universal multi-engine cache resolver
-  simd/
-    turboquant.go         # Canonical TurboQuant reference + public API
-    turboquant_simd_amd64.go # Runtime dispatch: AVX-512, then AVX2
-    turboquant_simd_arm64.go # Runtime dispatch: NEON
-    turboquant_simd_generic.go # No accelerator (pure Go fallback)
-    turboquant_avx512.c # AVX-512 TurboQuant kernel
-    turboquant_avx2.c   # AVX2 TurboQuant kernel
-    turboquant_neon.c   # ARM NEON TurboQuant kernel
-  tokenizer/       # Fast BPE & SentencePiece tokenizer
+  api/         the HTTP listeners and the Arrow Flight server
+  config/      the model and runtime configuration
+  cpu/         the CPU feature detection
+  device/      the backends: CUDA, Metal, CPU
+  engine/      the inference engine, the KV caches, the batching
+  gguf/        the GGUF reader and writer, the zero-copy dequant
+  logger/      the structured logger
+  mathx/       the pluggable math backend
+  metrics/     the Prometheus instrumentation
+  models/      the model resolver
+  ollama/      the Ollama manifest store
+  promtest/    the metric assertions the tests use
+  sampler/     the samplers and the grammar constraints
+  simd/        the SIMD kernels
+  telemetry/   the OpenTelemetry spans
+  testmodel/   the model builder the tests use
+  tokenizer/   the BPE and SentencePiece tokenizers
+  vector/      the vector search package
+  vlm/         the vision pipeline
+scripts/      the gates, the benchmarks and the drift checker
 ```
-
----
 
 ## 8.1 Element Sizes
 

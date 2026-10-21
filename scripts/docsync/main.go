@@ -18,7 +18,13 @@
 //  3. every metric the Grafana dashboard queries must be declared, in a
 //     query that matches the metric's type, and every declared metric
 //     must be on the dashboard;
-//  4. every flag the reference documentation mentions must exist.
+//  4. every flag the reference documentation mentions must exist;
+//  5. every endpoint the reference lists must be one the server
+//     registers, and every route the server registers must be in it;
+//  6. the pinned versions in the dependency document must be the ones
+//     the module files hold;
+//  7. every document must be in the documentation index, and every link
+//     between the documents must resolve.
 //
 // Usage:
 //
@@ -38,6 +44,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 const (
@@ -100,10 +107,13 @@ func main() {
 	problems += checkChartValues(flags, report, *verbose)
 	problems += checkDashboard(metrics, report, *verbose)
 	problems += checkDocumentedFlags(flags, report, *verbose)
+	problems += checkTheFlagReferenceIsComplete(flags, report, *verbose)
 	problems += checkDocumentedEndpoints(report, *verbose)
 	problems += checkPinnedVersions(report, *verbose)
 	problems += checkTheClaimedMetricCount(metrics, report, *verbose)
 	problems += checkTheDocumentIndex(report, *verbose)
+	problems += checkTheDirectoryLayout(report, *verbose)
+	problems += checkCrossLinks(report, *verbose)
 
 	if problems > 0 {
 		fmt.Printf("\ndocsync: %d problem(s) found\n", problems)
@@ -200,51 +210,66 @@ func commandFlags() (map[string]map[string]flagDef, error) {
 }
 
 // flagsInFile reads the flag registrations of one file.
+// flagKinds are the flag package's constructors.
+var flagKinds = map[string]bool{
+	"String": true, "Int": true, "Int64": true, "Bool": true,
+	"Float64": true, "Uint": true, "Duration": true,
+}
+
+// flagsInFile reads the flags a file declares.
+//
+// The flags are not always package-level variables: the simple CLI
+// declares them inside main(), and a scan that only looked at the
+// package block found nothing there.
 func flagsInFile(path string) (map[string]flagDef, error) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, path, nil, 0)
 	if err != nil {
 		return nil, err
 	}
+	if !importsFlag(file) {
+		return map[string]flagDef{}, nil
+	}
 
 	flags := map[string]flagDef{}
-	for _, decl := range file.Decls {
-		gen, ok := decl.(*ast.GenDecl)
-		if !ok || gen.Tok != token.VAR {
-			continue
+	ast.Inspect(file, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
 		}
-		for _, spec := range gen.Specs {
-			value, ok := spec.(*ast.ValueSpec)
-			if !ok || len(value.Values) == 0 {
-				continue
-			}
-			call, ok := value.Values[0].(*ast.CallExpr)
-			if !ok {
-				continue
-			}
-			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok || sel.Sel == nil || sel.Sel.Name != "String" &&
-				sel.Sel.Name != "Int" && sel.Sel.Name != "Int64" &&
-				sel.Sel.Name != "Bool" && sel.Sel.Name != "Float64" &&
-				sel.Sel.Name != "Uint" {
-				continue
-			}
-			if len(call.Args) < 2 {
-				continue
-			}
-			nameLit, ok := call.Args[0].(*ast.BasicLit)
-			if !ok {
-				continue
-			}
-			name := strings.Trim(nameLit.Value, "\"")
-			def := flagDef{name: name, kind: sel.Sel.Name}
-			if len(call.Args) >= 2 {
-				def.deflt = literalText(call.Args[1])
-			}
-			flags[name] = def
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel == nil || !flagKinds[sel.Sel.Name] {
+			return true
+		}
+		pkg, ok := sel.X.(*ast.Ident)
+		if !ok || pkg.Name != "flag" {
+			return true
+		}
+		if len(call.Args) < 2 {
+			return true
+		}
+		nameLit, ok := call.Args[0].(*ast.BasicLit)
+		if !ok {
+			return true
+		}
+		name := strings.Trim(nameLit.Value, "\"")
+		def := flagDef{name: name, kind: sel.Sel.Name}
+		def.deflt = literalText(call.Args[1])
+		flags[name] = def
+		return true
+	})
+	return flags, nil
+}
+
+// importsFlag reports whether a file imports the standard flag package.
+func importsFlag(file *ast.File) bool {
+	for _, imp := range file.Imports {
+		path := strings.Trim(imp.Path.Value, "\"")
+		if path == "flag" {
+			return true
 		}
 	}
-	return flags, nil
+	return false
 }
 
 // literalText returns the text of a literal, including a negative one.
@@ -662,7 +687,16 @@ func loadAllowed(path string) map[string]bool {
 
 // flagsUnder reads the flag registrations of every Go file under the
 // given directories.
+//
+// The test files are left out when the flags have to be documented: a
+// flag a test declares is not a flag a user passes.
 func flagsUnder(root string, dirs []string) (map[string]flagDef, error) {
+	return flagsUnderFiles(root, dirs, true)
+}
+
+// flagsUnderFiles reads the flag registrations of every Go file under
+// the given directories.
+func flagsUnderFiles(root string, dirs []string, includeTests bool) (map[string]flagDef, error) {
 	flags := map[string]flagDef{}
 	for _, dir := range dirs {
 		err := filepath.Walk(filepath.Join(root, dir), func(path string, info os.FileInfo, err error) error {
@@ -670,6 +704,9 @@ func flagsUnder(root string, dirs []string) (map[string]flagDef, error) {
 				return nil
 			}
 			if info.IsDir() || !strings.HasSuffix(path, ".go") {
+				return nil
+			}
+			if !includeTests && strings.HasSuffix(path, "_test.go") {
 				return nil
 			}
 			// The command line builds are read separately, with their
@@ -827,7 +864,6 @@ func checkTheClaimedMetricCount(metrics map[string]metricDef, report func(string
 	// claim, so a count in them is history rather than a claim.
 	docs := []string{
 		"README.md",
-		"docs/comparison.md",
 		"docs/features.md",
 		"docs/usage.md",
 		"docs/api.md",
@@ -899,6 +935,275 @@ func checkTheDocumentIndex(report func(string, ...interface{}), verbose bool) in
 		}
 	}
 
+	return problems
+}
+
+// linkRe matches a markdown link and captures its target.
+var linkRe = regexp.MustCompile(`\[[^\]]*\]\(\s*([^)\s]+)`)
+
+// headingRe matches a markdown heading and captures its text.
+var headingRe = regexp.MustCompile(`^#{1,6}\s+(.*)$`)
+
+// checkCrossLinks verifies that every link between the documents
+// resolves.
+//
+// A merge that moves a section leaves the anchors behind: the document
+// still reads well and the link silently goes nowhere. Two links were
+// broken that way when the comparison document was folded into the
+// features one.
+func checkCrossLinks(report func(string, ...interface{}), verbose bool) int {
+	problems := 0
+
+	documents, err := markdownDocuments()
+	if err != nil {
+		report("failed to list the documents: %v", err)
+		return 1
+	}
+
+	anchors := map[string]map[string]bool{}
+	for _, doc := range documents {
+		anchors[doc] = headingAnchors(doc)
+	}
+
+	for _, doc := range documents {
+		raw, err := readRepoFile(doc)
+		if err != nil {
+			report("failed to read %s: %v", doc, err)
+			problems++
+			continue
+		}
+		for _, match := range linkRe.FindAllStringSubmatch(string(raw), -1) {
+			target := match[1]
+			if target == "" || strings.HasPrefix(target, "http://") ||
+				strings.HasPrefix(target, "https://") ||
+				strings.HasPrefix(target, "mailto:") {
+				continue
+			}
+
+			file, fragment, _ := strings.Cut(target, "#")
+			resolved := doc
+			if file != "" {
+				resolved = filepath.Join(filepath.Dir(doc), file)
+				if !repoHas(resolved) {
+					report("%s links to %s, which does not exist", doc, target)
+					problems++
+					continue
+				}
+			}
+			if fragment == "" {
+				continue
+			}
+			if known, ok := anchors[resolved]; ok {
+				if !known[fragment] {
+					report("%s links to %s, and that section does not exist", doc, target)
+					problems++
+				}
+				continue
+			}
+			// A target that is not a document has no sections; the
+			// fragment has to be in its text.
+			raw, err := readRepoFile(resolved)
+			if err != nil || !strings.Contains(string(raw), fragment) {
+				report("%s links to %s, and that fragment does not exist", doc, target)
+				problems++
+			}
+		}
+	}
+
+	if verbose {
+		fmt.Printf("%d document(s) checked for broken links\n", len(documents))
+	}
+	return problems
+}
+
+// repoHas reports whether the repository holds a file or a directory
+// under a name.
+func repoHas(name string) bool {
+	if repoFS == nil {
+		return false
+	}
+	handle, err := repoFS.Open(name)
+	if err != nil {
+		return false
+	}
+	// The name is a directory: it exists, and a link to it is a link to
+	// the index inside it.
+	_ = handle.Close()
+	return true
+}
+
+// markdownDocuments lists the documents the checks read: the README at
+// the root of the repository and every document in the documentation
+// directory.
+func markdownDocuments() ([]string, error) {
+	documents := []string{"README.md"}
+
+	entries, err := readRepoDir("docs")
+	if err != nil {
+		return nil, err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
+			continue
+		}
+		documents = append(documents, "docs/"+entry.Name())
+	}
+	sort.Strings(documents)
+	return documents, nil
+}
+
+// headingAnchors returns the anchors the headings of a document make,
+// in the shape a markdown renderer gives them.
+func headingAnchors(doc string) map[string]bool {
+	raw, err := readRepoFile(doc)
+	if err != nil {
+		return map[string]bool{}
+	}
+
+	anchors := map[string]bool{}
+	seen := map[string]int{}
+	for _, line := range strings.Split(string(raw), "\n") {
+		match := headingRe.FindStringSubmatch(line)
+		if match == nil {
+			continue
+		}
+		slug := anchorSlug(match[1])
+		if slug == "" {
+			continue
+		}
+		// A repeated heading gets a number after it.
+		count := seen[slug]
+		seen[slug] = count + 1
+		if count > 0 {
+			slug = fmt.Sprintf("%s-%d", slug, count)
+		}
+		anchors[slug] = true
+	}
+	return anchors
+}
+
+// anchorSlug turns a heading into its anchor: the text in lower case,
+// without the punctuation, with the spaces turned into hyphens.
+func anchorSlug(heading string) string {
+	var slug strings.Builder
+	for _, r := range strings.ToLower(heading) {
+		switch {
+		case unicode.IsLetter(r), unicode.IsDigit(r), r == '-', r == '_':
+			slug.WriteRune(r)
+		case unicode.IsSpace(r):
+			slug.WriteRune(' ')
+		}
+	}
+	return strings.Join(strings.Fields(slug.String()), "-")
+}
+
+// checkTheFlagReferenceIsComplete verifies that every flag the commands
+// declare is in the reference.
+//
+// The reference listed the flags of an older version of the command. The
+// ones it did not have were the ones nobody could find, and the check
+// that ran the other way round did not notice them.
+func checkTheFlagReferenceIsComplete(flags map[string]map[string]flagDef, report func(string, ...interface{}), verbose bool) int {
+	problems := 0
+
+	raw, err := readRepoFile("docs/usage.md")
+	if err != nil {
+		report("failed to read docs/usage.md: %v", err)
+		return 1
+	}
+	reference := string(raw)
+
+	known := map[string]bool{}
+	for _, build := range flags {
+		for name := range build {
+			known[name] = true
+		}
+	}
+	// The simple CLI is documented in the same reference.
+	otherFlags, err := flagsUnderFiles(repoRoot, []string{"cmd/simple"}, false)
+	if err != nil {
+		report("failed to read cmd/simple: %v", err)
+		return 1
+	}
+	for name := range otherFlags {
+		known[name] = true
+	}
+
+	for _, name := range sortedNames(known) {
+		if !strings.Contains(reference, "-"+name) {
+			report("the command declares -%s, and docs/usage.md does not document it", name)
+			problems++
+		}
+	}
+
+	if verbose {
+		fmt.Printf("checked %d flags against the reference\n", len(known))
+	}
+	return problems
+}
+
+// sortedNames returns the keys of a set in order.
+func sortedNames(set map[string]bool) []string {
+	names := make([]string, 0, len(set))
+	for name := range set {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// checkTheDirectoryLayout verifies that the layout in the architecture
+// document names every package.
+//
+// The layout used to be a list of the files, kept by hand. It had
+// drifted, and a list of files is a list that has to be rewritten every
+// time a file is added; a list of packages is one that only changes
+// when a package does.
+func checkTheDirectoryLayout(report func(string, ...interface{}), verbose bool) int {
+	problems := 0
+
+	raw, err := readRepoFile("docs/architecture.md")
+	if err != nil {
+		report("failed to read docs/architecture.md: %v", err)
+		return 1
+	}
+	document := string(raw)
+
+	start := strings.Index(document, "## 8. Directory Layout")
+	if start < 0 {
+		report("docs/architecture.md has no directory layout")
+		return 1
+	}
+	layout := document[start:]
+	if end := strings.Index(layout, "\n## "); end > 0 {
+		layout = layout[:end]
+	}
+
+	// The commands under cmd/ are a set of tools and debug helpers, and
+	// the layout names them as a group. The packages under internal/
+	// are the units of the engine, and each one is named.
+	for _, dir := range []string{"internal"} {
+		entries, err := readRepoDir(dir)
+		if err != nil {
+			report("failed to list %s: %v", dir, err)
+			problems++
+			continue
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			name := entry.Name()
+			if !strings.Contains(layout, name+"/") {
+				report("the layout in docs/architecture.md does not name %s/%s", dir, name)
+				problems++
+			}
+		}
+	}
+
+	if verbose {
+		fmt.Println("the layout in docs/architecture.md names every package")
+	}
 	return problems
 }
 
