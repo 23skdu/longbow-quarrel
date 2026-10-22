@@ -258,7 +258,7 @@ if command -v docker >/dev/null 2>&1; then
             "${DOCKER_CACHE_ARGS[@]}" \
             -v "${REPO_ROOT}:/src" -w /src -e CGO_ENABLED=1 \
             -e GOMAXPROCS=4 -e GOMEMLIMIT=2GiB \
-            golang:1.27 go test -p 4 -timeout 180s -count=1 ./internal/simd/... >/dev/null 2>&1; then
+            golang:1.27.3 go test -p 4 -timeout 180s -count=1 ./internal/simd/... >/dev/null 2>&1; then
         log_pass "ARM64 / NEON Build and Tests"
     else
         log_fail "ARM64 / NEON Build and Tests"

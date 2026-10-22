@@ -4,7 +4,7 @@
 # =============================================================================
 # DevSecOps Standards:
 # - Minimal attack surface (multi-stage build, Alpine 3.24)
-# - Deterministic compilation (Go 1.27.2, -trimpath, -ldflags="-s -w")
+# - Deterministic compilation (Go 1.27.3, -trimpath, -ldflags="-s -w")
 # - Non-root execution (UID 10001)
 # - Least privilege container security (read-only rootfs capable)
 # =============================================================================
@@ -12,7 +12,7 @@
 # -----------------------------------------------------------------------------
 # Stage 1: Build Environment
 # -----------------------------------------------------------------------------
-FROM golang:1.27.2-alpine3.24 AS cpu-builder
+FROM golang:1.27.3-alpine3.24 AS cpu-builder
 
 RUN apk add --no-cache build-base git ca-certificates
 

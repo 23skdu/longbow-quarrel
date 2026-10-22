@@ -17,7 +17,7 @@ go run ./scripts/vacuous_tests          # unrelated but part of the gate
 
 ## Go module — root (`github.com/23skdu/longbow-quarrel`)
 
-Toolchain: `go 1.27.2`
+Toolchain: `go 1.27.3`
 
 | Module | Version | Notes |
 |---|---|---|
@@ -147,7 +147,7 @@ cd cmd/webui && go build ./... && go vet ./... && go test ./...
 
 | Tool | Version | Notes |
 |---|---|---|
-| Go | `1.27` | matches `go.mod` |
+| Go | `1.27.3` | matches `go.mod` |
 | golangci-lint | v2.14.0 | must stay v2: repo config is `version: "2"` |
 | gosec | v2.29.0 | current |
 | goimports | v0.50.0 | tracks the `golang.org/x/tools` series |
@@ -183,7 +183,7 @@ workflow run. The fuzz job satisfies this via `matrix.target`/`matrix.duration`.
 
 | Image | Pinned to | Rationale |
 |---|---|---|
-| `golang` | `1.27.2-alpine3.24` | current 1.27 patch |
+| `golang` | `1.27.3-alpine3.24` | current 1.27 patch |
 | `alpine` | `3.24` | 3.19 is EOL |
 | `nvidia/cuda` | `12.9.2-devel-ubuntu24.04`, `12.9.2-runtime-ubuntu24.04` | latest CUDA 12.x |
 | `ubuntu` | `24.04` | jammy has no modern Python |

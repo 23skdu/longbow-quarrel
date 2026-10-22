@@ -11,7 +11,7 @@ High-performance, memory-efficient LLM inference engine written in Go with nativ
 
 | Component | Version | Notes |
 |---|---|---|
-| Go | 1.27+ | `go.mod` declares `go 1.27.2` |
+| Go | 1.27+ | `go.mod` declares `go 1.27.3` |
 | CUDA (NVIDIA path) | 12.9 | Driver ≥ 575.51.03, or ≥ 525.60.13 with minor-version compatibility |
 | cuDNN | 9 | Package name `libcudnn9-cuda-12` tracks the CUDA 12 series |
 | Alpine (CPU/metal images) | 3.24 | |

@@ -4,7 +4,7 @@
 # =============================================================================
 # DevSecOps Standards:
 # - Multi-stage build isolating CUDA developer toolkit from runtime container
-# - Go 1.27.2 with deterministic compilation (-trimpath, -ldflags="-s -w")
+# - Go 1.27.3 with deterministic compilation (-trimpath, -ldflags="-s -w")
 # - Unprivileged non-root service account (UID 10001)
 # - Minimal attack surface with vetted CUDA 12.9 + cuDNN 9 + NCCL runtimes
 # =============================================================================
@@ -25,8 +25,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libcudnn9-dev-cuda-12 \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Go 1.27.2
-ENV GO_VERSION=1.27.2
+# Install Go 1.27.3
+ENV GO_VERSION=1.27.3
 RUN wget -q https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz && \
     rm -rf /usr/local/go && \
     tar -C /usr/local -xzf go${GO_VERSION}.linux-amd64.tar.gz && \

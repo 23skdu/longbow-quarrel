@@ -10,7 +10,7 @@ on:
     - cron: '0 2 * * *'
 
 env:
-  GO_VERSION: '1.27'
+  GO_VERSION: '1.27.3'
   MODEL_PATH: '~/.ollama/models'
   # Pinned toolchain versions so a red build always reproduces locally.
   # golangci-lint must be v2: the repo config file is `version: "2"`.
