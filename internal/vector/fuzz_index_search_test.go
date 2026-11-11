@@ -95,6 +95,26 @@ func FuzzIVFIndexSearch(f *testing.F) {
 	})
 }
 
+func FuzzMMapFlatRoundTrip(f *testing.F) {
+	f.Add([]byte{1, 2, 3, 4})
+	f.Fuzz(func(t *testing.T, data []byte) {
+		idx := buildFlatFixture(8, 4, 3)
+		path := mmapTestPath(t, "fuzz.bin")
+		if err := SaveFlatIndexFloat32(path, idx); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		loaded, store, err := LoadFlatIndexFloat32(path)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		t.Cleanup(func() { _ = store.Close() })
+		if loaded.Count() != idx.Count() {
+			t.Fatalf("count mismatch")
+		}
+		_ = data
+	})
+}
+
 func FuzzHNSWIndexSearch(f *testing.F) {
 	f.Add([]byte{1, 2, 3, 4})
 	f.Fuzz(func(t *testing.T, data []byte) {
