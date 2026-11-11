@@ -285,7 +285,14 @@ race:
 	$(GO) test -race -short ./...
 
 test-coverage:
-	@echo "Collecting statement coverage..."
+	@echo "Verifying 100% package test presence and collecting coverage..."
+	@UNTESTED=$$($(GO) test -list '.*' ./... 2>&1 | grep '\[no test files\]' || true); \
+	if [ -n "$$UNTESTED" ]; then \
+		echo "Found packages without test files:"; \
+		echo "$$UNTESTED"; \
+		exit 1; \
+	fi
+	@echo "All packages have active test coverage."
 	$(GO) test -short -cover ./...
 
 coverage-gate:
