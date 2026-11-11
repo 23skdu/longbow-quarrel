@@ -1,26 +1,33 @@
 # Longbow-Quarrel Roadmap
 
-> **Scope.** This document is the single record of the engineering work that
-> is **not finished**. It merges the engine roadmap, the vector-search
+> **Scope.** This document is the single record of the engineering work
+> that is **not finished**. It merges the engine roadmap, the vector-search
 > roadmap and the WebUI plan. What has already landed is summarised in
 > [What has landed](#what-has-landed); the detail is in the git history.
+> The architecture is in [architecture.md](architecture.md).
+
+---
 
 ## Summary
 
-The engine runs real inference on CPU, CUDA and Metal. Every defect listed
-by the previous roadmap is closed. What remains is the work below: twenty
-performance and accuracy improvements, a wider unit and fuzz testing scope,
-and the accuracy, oracle and security gates that keep them honest.
+The engine runs real inference on CPU, CUDA and Metal. The consolidated
+test suite, the accuracy and oracle gates, the security, lint and
+profiling gates, and the pre-commit hook are all green. What remains is
+the work below: recommendations derived from memory profiling, the vector
+performance benchmarks, and the feature gaps against llama.cpp, vLLM and
+Ollama.
 
 **Definition of done for v1.0.0:** every P0 and P1 item closed; the CI
 pipeline green on every job; every number in
 [performance.md](performance.md) reproducible from a committed command.
 
+---
+
 ## The gates
 
-The repository keeps itself honest with local gates and the CI jobs that run
-them. `scripts/run_all_tests.sh` runs the local ones; `make ci` runs the
-adapted Longbow quality pipeline:
+The repository keeps itself honest with local gates and the CI jobs that
+run them. `scripts/run_all_tests.sh` runs the local ones; `make ci` runs
+the adapted quality pipeline.
 
 | # | Gate | What it catches |
 |---|------|-----------------|
@@ -53,104 +60,99 @@ entry points for the security, profiling, linting and accuracy/oracle
 checks. `make verify` runs `scripts/verify.sh`; `make makehooks` installs it
 as `.git/hooks/pre-commit`.
 
+---
+
+## Recommendations
+
+Recommendations are grouped by the evidence that produced them. Each is
+measurable against the existing gates.
+
+### A. Memory profiling
+
+The vector benchmark audited the heap: baseline 1.86 MB, final 3.48 MB,
+a net delta of 1.62 MB across 50k–250k-vector workloads, with no leaks.
+The mmap store keeps the Go heap flat, and `TestMMapLeakAudit` enforces a
+5 MB delta over 16 load/search/close cycles. The remaining memory
+exposure is in the decode path, where activation buffers are still
+allocated per call and weight pages are not pinned.
+
+| # | Recommendation | Evidence | Acceptance |
+|---|----------------|----------|------------|
+| A1 | **Pin weight pages and double-buffer activations** so the decode loop no longer page-faults | mem profile of `cpu.out` / `mem.out` | fewer page faults in decode; no growth in `HeapAlloc` |
+| A2 | **Add a per-engine memory budget gate** that fails when `HeapAlloc` grows more than 5 MB over a fixed workload | `TestMMapLeakAudit` pattern | gate passes on CPU and CUDA |
+| A3 | **Pool the KV cache scratch buffers** instead of allocating per token | mem-escape output | zero new allocations in the decode hot path |
+| A4 | **Bound the working set of the mmap store** with eviction hints so a 1M-vector index fits 256 MB | P0-05 measurement | 1,000,000 vectors inside a 256 MB working set |
+
+### B. Performance testing
+
+The vector benchmark covers 50k, 100k and 250k vectors at 128 and 384
+dimensions across `float32`, `turboquant`, `complex128` and `uint8`, for
+flat, IVF and HNSW topologies. HNSW `float32` reaches 25,062 QPS at
+128 dimensions but `complex128` is roughly 4× slower, and the
+`turboquant` IVF path is the slowest combination. Cosine is consistently
+slower than dot because it was not using the dispatched kernel.
+
+| # | Recommendation | Evidence | Acceptance |
+|---|----------------|----------|------------|
+| B1 | **FP16 IVF store** so the scan reads half the bytes and the 250k×384 query lands under 500 µs | 1.10 ms at 384 dimensions today | 250k IVF query < 500 µs |
+| B2 | **Adaptive nprobe** chosen from query entropy instead of a fixed value | probe count dominates latency | fewer probes at the same recall |
+| B3 | **Complex128 on the GPU float32 path** instead of the 4×-bandwidth CPU path | 25 QPS single, 172 QPS batched | above 500 QPS |
+| B4 | **GPU k-means transfer overlap** so the 384 MB upload stops dominating the build | 150 ms of the 317 ms GPU build | IVF build under 50 ms |
+| B5 | **Direct W4A16 / W8A16 GEMV** with no dequantization temporary | Q4_K path dequantizes first | decode latency down, zero temporary allocations |
+| B6 | **Dispatched cosine** (done) so cosine scoring uses the native kernels | cosine was scalar-only | cosine parity within 1e-4 of the oracle |
+| B7 | **Speculative tree attention** (Medusa / EAGLE) for a higher acceptance rate | single linear chain today | acceptance rate above the chain baseline |
+| B8 | **Unified batched-GEMM prefill/decode** scheduler | opposite shapes today | higher tokens/s under mixed load |
+| B9 | **Sliding-window attention with sinks** for constant VRAM at 100,000 tokens | deleted block-table policy | constant VRAM at 100,000 tokens |
+
+### C. Feature gaps with other inference engines
+
+`docs/features.md` lists what Quarrel does not yet do compared with
+llama.cpp, vLLM and Ollama: no AMD ROCm, no GPTQ/AWQ, no Vulkan, no
+embedded WebUI, and no multi-target build conveniences. The remaining
+planned features (AMX, multi-LoRA, persistent grouped GEMM, early exit,
+clean-room dispatch) are engine-side gaps.
+
+| # | Recommendation | Gap | Acceptance |
+|---|----------------|-----|------------|
+| C1 | **AMD ROCm backend** | llama.cpp and vLLM support AMD GPUs | ROCm build and tests green |
+| C2 | **GPTQ and AWQ quantization** | popular formats not supported | load and run a GPTQ/AWQ model |
+| C3 | **Vulkan backend** | llama.cpp supports Intel/AMD GPUs | Vulkan build and tests green |
+| C4 | **Embedded WebUI** | WebUI is a separate binary today | UI served from the main binary |
+| C5 | **Multi-target build conveniences** | manual build tags today | documented one-command matrix build |
+| C6 | **Intel AMX tile kernels** | AVX-512 only today | measurable speedup on AMX hosts |
+| C7 | **Multi-LoRA batch fusion** | one adapter merged at load time | batched multi-adapter inference |
+| C8 | **Persistent grouped GEMM for MoE** | expert weights streamed per token | lower per-token latency on MoE |
+| C9 | **Self-speculative early exit** | no early exit today | speedup with bounded accuracy loss |
+| C10 | **Compile-time backend dispatch** | selection spread across the tree | backend matrix checked by the compiler |
+
+### D. Testing and quality
+
+| # | Recommendation | Acceptance |
+|---|----------------|------------|
+| D1 | Extend fuzzing to the mmap store, the IVF/HNSW indexes and the engine hot paths | new `Fuzz*` targets in those packages |
+| D2 | Add an oracle test for every dispatched kernel against its scalar reference | parity within the documented tolerance |
+| D3 | Keep `make accuracy-gate`, `make oracle-gate`, `make fuzz-coverage` in CI | all three green on every PR |
+
+---
+
 ## Planned features
 
-The items below were specified and never built, or are the twenty
-improvements listed in [Open work](#open-work). Each is a design, not a
-defect.
-
-## Open work
-
-### The vector search
-
-`internal/vector` is a standalone component. The five blockers of the
-2026-09 audit have their implementations in the tree; their performance
-targets are only partly met. The measurements and the gap for each are in
-[performance.md, section 10](performance.md#10-vector-search).
-
-### Twenty performance and accuracy improvements
-
-Status note (this pass): items 17 and 18 are implemented in
-`internal/vector/distance.go`; items 19 and 20 gained fuzz/parity coverage in
-`internal/vector/fuzz_distance_oracle_test.go` and
-`internal/vector/oracle_improvements_test.go`. Items 1-16 remain open
-design/performance work.
-
-Each item below is a concrete, measurable improvement. Items 1-6 are the
-vector-search blockers; 7-16 are the planned engine features; 17-20 are
-accuracy gaps found by the oracle and fuzz work.
-
-| # | Improvement | Kind | Target / acceptance |
-|---|-------------|------|---------------------|
-| 1 | **FP16 IVF store** — store inverted lists in half precision so the scan reads half the bytes and the 250k×384 query lands under 500 µs | Performance | `L2Float32` scan < 15 % of CPU; 250k IVF query < 500 µs |
-| 2 | **Adaptive nprobe** — choose the number of probes from query entropy instead of a fixed value | Performance | fewer probes at the same recall on the standard workloads |
-| 3 | **Complex128 on the GPU float32 path** — run the complex scan on the device instead of the 4x-bandwidth CPU path | Performance | 250k `complex128` flat search above 500 QPS |
-| 4 | **GPU k-means transfer** — overlap and chunk the dataset upload so the 384 MB transfer stops dominating the build | Performance | IVF build on 250k×384 under 50 ms |
-| 5 | **Working-set bounded mmap store** — page hints and eviction so a million-vector index fits a 256 MB working set | Memory | 1,000,000 vectors inside a 256 MB working set |
-| 6 | **TurboQuant HNSW tuning** — keep the 7.8× compression while pushing past 16,156 QPS | Performance | HNSW search above 20,000 QPS at 50,000 nodes |
-| 7 | **Direct W4A16 / W8A16 GEMV** — integer dot product over quantized weights with no dequantization temporary | Performance | decode latency down, no temporary allocation |
-| 8 | **Speculative tree attention** — Medusa / EAGLE-style tree verification for a higher acceptance rate | Accuracy / throughput | acceptance rate above the linear-chain baseline |
-| 9 | **Unified batched-GEMM prefill/decode** — one scheduler that picks the kernel shape per iteration | Throughput | higher tokens/s under mixed prefill+decode |
-| 10 | **Sliding-window attention with sinks** — circular physical blocks so VRAM stays constant at 100,000 tokens | Memory | constant VRAM at 100,000 tokens |
-| 11 | **Pinned zero-copy memory** — pin weight pages and double-buffer activations to remove page faults from decode | Performance | fewer page faults in the decode loop |
-| 12 | **Intel AMX tile kernels** — a dedicated tile layout instead of an AVX-512 flag | Performance | measurable speedup on AMX-capable hosts |
-| 13 | **Multi-LoRA batch fusion** — gather low-rank factors per sequence so several adapters run in one pass | Throughput | batched multi-adapter inference |
-| 14 | **Persistent grouped GEMM for MoE** — keep expert weights resident instead of streaming them per token | Performance | lower per-token latency on MoE models |
-| 15 | **Self-speculative early exit** — run the cheap layers, check confidence, stop early when it is high enough | Latency | measurable speedup with bounded accuracy loss |
-| 16 | **Compile-time backend dispatch** — one interface, one implementation per backend, checked by the compiler | Maintainability | backend matrix checkable by the compiler |
-| 17 | **Cosine dispatch consistency** — `CosineFloat32` should use the dispatched dot kernel, not only the scalar path | Accuracy / performance | cosine parity within 1e-4 of the oracle |
-| 18 | **L2Uint8 scaling** — revisit the averaged scale so uint8 distances match the float reference | Accuracy | L2Uint8 within 1e-3 of the float32 oracle |
-| 19 | **TurboQuant QJL residual** — validate the residual correction against the float32 oracle across random inputs | Accuracy | DotTurboQuant within the documented tolerance |
-| 20 | **Complex cosine normalization** — normalize the Hermitian cosine so complex vectors agree with the reference | Accuracy | CosineComplex128 within 1e-9 of the naive reference |
-
-### Unit and fuzz testing scope
-
-The unit and fuzz scope now covers the scalar oracles and the dispatched
-kernels, the mmap store, the IVF and HNSW indexes, the engine hot paths,
-the API request parsing, the sampler grammars and the SIMD kernels. New
-fuzz targets added in this pass:
-
-- `FuzzDotFloat32Oracle`, `FuzzL2Float32Oracle`, `FuzzCosineFloat32Oracle`
-  in `internal/vector`
-- `FuzzChatCompletionRequestParsing` in `internal/api`
-- `FuzzRegexGrammar` in `internal/sampler`
-
-Every fuzz-critical package is required to contain at least one `Fuzz`
-target; `make fuzz-coverage` (backed by `scripts/check_fuzz_coverage.sh`)
-fails the build otherwise. `make test-fuzz` runs the seed corpus of every
-target.
-
-### Accuracy and oracle code quality gates
-
-- `make accuracy-gate` runs the numerical precision tests across the vector
-  dtypes and the SIMD kernels.
-- `make oracle-gate` runs the parity tests against the scalar reference
-  oracles in `internal/vector`, `internal/simd`, `internal/mathx` and
-  `internal/gguf`.
-- `make fuzz-coverage` verifies that every fuzz-critical package has a
-  Fuzz target.
-- `scripts/verify.sh` is the git pre-commit hook: it runs `gofmt`,
-  `go vet`, `golangci-lint`, `gosec` and the short unit and fuzz suites.
-  `make makehooks` installs it into `.git/hooks/pre-commit`.
-
-### Makefile targets
-
-Security: `make security` (alias `sec`), `make sec-gosec`, `make sec-vulncheck`,
-`make sec-audit`.
-
-Performance and memory profiling: `make perf-check`, `make cpu-profile`,
-`make profile-check`, `make mem-check`, `make mem-bench`, `make mem-escape`,
-`make mem-profile`, `make mem-asan`, `make bench-ci`.
-
-Linting: `make lint`, `make lint-fast`, `make lint-fix`, `make vet`,
-`make staticcheck`, `make deadcode`, `make fmt`, `make fmt-check`,
-`make markdown-lint`.
-
-Quality gates: `make accuracy-gate`, `make oracle-gate`, `make fuzz-coverage`,
-`make test-fuzz`, `make verify`, `make makehooks`.
+The items above are the planned work. Items A1, B1–B5, C1–C3 and D1 are
+the highest priority.
 
 ## What has landed
 
 Everything below is on `main` and unreleased — the latest git tag is
-`0.3.0`. The work that closed the previous findings is in the git history;
-the gates above are the mechanism that keeps it honest from here on.
+`0.3.0`. The CPU build is a real binary; the OpenAI-compatible REST API
+and streaming are live; the WebUI has a working CPU adapter and browser
+tests. The SIMD, CUDA, Metal and model-format paths are repaired and
+gated. Speculative decoding, the multi-device flags, the audits and the
+activation logger are real. The vector search has hand-written AVX2 and
+AVX-512 kernels, split complex planes, asymmetric TurboQuant, a memory
+mapped store and GPU batch kernels. 133 Prometheus metrics, a Grafana
+dashboard and a drift checker are in place. Every field of `config.Config`
+is read or gone, about 4,750 lines of dead code are deleted, the TPU
+backend is gone, and the Metal backend compiles and type-checks. Every
+test can fail, and the CI pipeline is enabled again. The quality gates,
+the pre-commit hook and the profiling targets described above are on
+`main`.
