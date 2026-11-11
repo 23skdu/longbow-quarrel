@@ -10,7 +10,15 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# Resolve the repository root whether this script is run from scripts/
+# directly or via the .git/hooks/pre-commit symlink.
+if [ -f "${SCRIPT_DIR}/../go.mod" ]; then
+    REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+elif [ -f "${SCRIPT_DIR}/../../go.mod" ]; then
+    REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+else
+    REPO_ROOT="$(pwd)"
+fi
 cd "${REPO_ROOT}"
 
 export GOMEMLIMIT="${QUARREL_TEST_MEMLIMIT:-2GiB}"
