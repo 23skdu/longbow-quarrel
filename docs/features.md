@@ -266,7 +266,8 @@ not the K-quants.
 - **133 Prometheus metrics** with a Grafana dashboard over all of them,
   and a Kubernetes Helm chart with health probes and a ServiceMonitor.
 - **Fuzzing and a security gate** — `gosec` and `govulncheck` run in CI
-  on two build configurations.
+  on two build configurations; `make security`, `make verify` and
+  `make makehooks` expose the same checks locally.
 
 ## What the others do that Quarrel does not
 
