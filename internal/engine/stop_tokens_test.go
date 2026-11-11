@@ -73,13 +73,13 @@ func TestStopTokensTerminateSequence(t *testing.T) {
 
 	// Engine stop token
 	tok = 99
-	if !(isStopToken(engineStopTokens, tok) || isStopToken(stopTokenSet(seq.Config.StopTokens), tok)) {
+	if !isStopToken(engineStopTokens, tok) && !isStopToken(stopTokenSet(seq.Config.StopTokens), tok) {
 		t.Fatalf("token %d should be recognised as engine stop token", tok)
 	}
 
 	// Per-sequence stop token from SamplerConfig
 	tok = 42
-	if !(isStopToken(engineStopTokens, tok) || isStopToken(stopTokenSet(seq.Config.StopTokens), tok)) {
+	if !isStopToken(engineStopTokens, tok) && !isStopToken(stopTokenSet(seq.Config.StopTokens), tok) {
 		t.Fatalf("token %d should be recognised as per-sequence stop token", tok)
 	}
 }

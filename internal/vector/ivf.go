@@ -45,7 +45,7 @@ type IVFIndex struct {
 	centroidsFlat    []float32
 	centroidsUniform bool
 	f32RowsUniform   bool
-	f32RowsChecked   bool
+	f32RowsChecked   bool //nolint:unused
 
 	// f32Flat is the rows of the index in one contiguous buffer, with
 	// the rows at a fixed stride. The cgo rules forbid an array of row
@@ -779,7 +779,7 @@ func (idx *IVFIndex) Search(query []float32, k int) ([]SearchResult, error) {
 				}
 				g := scratch.Get().([]float32)
 				idx.searchFloat32Gather(ks, h, query, list, g, dim, k)
-				scratch.Put(g)
+				scratch.Put(g) //nolint:staticcheck // slice header pooling is intentional
 				return
 			}
 			for _, vID := range list {

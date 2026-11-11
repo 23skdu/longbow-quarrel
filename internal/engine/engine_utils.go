@@ -305,6 +305,8 @@ func ExtractModelConfig(f *gguf.GGUFFile) config.Config {
 //
 // A rank of zero means the model does not declare one, and a weight with
 // no columns means the tensor was not loaded; neither is a mismatch.
+//
+//nolint:unused
 func checkMLAQLoRARank(declared, weightCols int) error {
 	if declared <= 0 || weightCols <= 0 {
 		return nil

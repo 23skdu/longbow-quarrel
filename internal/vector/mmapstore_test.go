@@ -208,7 +208,7 @@ func twoKHeader(path string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	return f.Truncate(mmapHeaderSize)
 }
 
@@ -429,7 +429,7 @@ func TestLoadFlatIndexComplexSoA_BadFiles(t *testing.T) {
 		if err := f.Truncate(sz.Size() - 8); err != nil {
 			t.Fatalf("truncate: %v", err)
 		}
-		f.Close()
+		_ = f.Close()
 		if _, _, err := LoadFlatIndexComplexSoA(path); err != ErrMMapTooShort {
 			t.Fatalf("err = %v want ErrMMapTooShort", err)
 		}

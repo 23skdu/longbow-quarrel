@@ -336,13 +336,7 @@ func (idx *FlatIndex) batchSearchFloat32MQ(ks *distanceKernelSet, qm []float32, 
 	// dot) must take the per-query path that implements those
 	// semantics; routing cosine through the dot kernel returned
 	// unnormalised scores.
-	useMQ := false
-	if l2 && ks.mqL2Float32 != nil {
-		useMQ = true
-	}
-	if metric == MetricDot && ks.mqDotFloat32 != nil {
-		useMQ = true
-	}
+	useMQ := (l2 && ks.mqL2Float32 != nil) || (metric == MetricDot && ks.mqDotFloat32 != nil)
 	if !useMQ {
 		return idx.batchSearchCosineOrUnknownF32(qm, numQ, k, metric, n)
 	}
@@ -475,13 +469,7 @@ func (idx *FlatIndex) batchSearchComplexMQ(ks *distanceKernelSet, soa *ComplexSo
 	// Same metric guard as the float32 path: the SoA multi-query
 	// kernels are dot/L2 only, so cosine and unknown metrics must go
 	// through the per-query SoA scoring which normalises cosine.
-	useMQ := false
-	if l2 && ks.mqL2ComplexSoA != nil {
-		useMQ = true
-	}
-	if metric == MetricDot && ks.mqDotComplexSoA != nil {
-		useMQ = true
-	}
+	useMQ := (l2 && ks.mqL2ComplexSoA != nil) || (metric == MetricDot && ks.mqDotComplexSoA != nil)
 	if !useMQ {
 		return idx.batchSearchComplexPerQuery(qReM, qImM, numQ, k, metric, n)
 	}

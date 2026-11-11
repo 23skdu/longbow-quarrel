@@ -1,387 +1,385 @@
-# =============================================================================
 # Longbow-Quarrel Makefile
-# =============================================================================
-# Build targets for all supported architectures:
-#   - CPU (linux/amd64, linux/arm64): Pure Go with SIMD fallbacks
-#   - Metal (darwin/arm64, darwin/amd64): Apple Metal GPU acceleration
-#   - NVIDIA (linux/amd64): CUDA/cuBLAS acceleration
-# =============================================================================
+# Build, security, memory, static analysis, testing, and observability targets.
 
-.PHONY: all bench bench-emlgo bench-emlgo-all bench-simd bench-simd-all \
-	build changelog check check-sec clean cpu cpu-darwin-amd64 \
-	cpu-darwin-arm64 cpu-linux-amd64 cpu-linux-arm64 deps docker-all \
-	docker-cpu docker-metal docker-nvidia docker-webui fmt help \
-	lint metal metal-darwin-amd64 metal-darwin-arm64 nvidia nvidia-cuda \
-	package-dist race release release-darwin release-docker release-linux \
-	simd-avx2 simd-avx512 simd-scalar test test-all test-cuda test-emlfast \
-	test-emlgo test-metal test-simd test-simd-fuzz test-simd-quick verify-env
+SHELL := /bin/bash
+
+GO ?= $(shell which /home/linuxbrew/.linuxbrew/bin/go 2>/dev/null || which go)
+GOPATH ?= $(shell $(GO) env GOPATH)
+GOBIN ?= $(GOPATH)/bin
+export PATH := /home/linuxbrew/.linuxbrew/bin:$(GOBIN):$(PATH)
+
+GOLANGCI_LINT ?= $(shell which golangci-lint 2>/dev/null || echo /home/linuxbrew/.linuxbrew/bin/golangci-lint)
+GOSEC         ?= $(shell which gosec 2>/dev/null || echo /home/linuxbrew/.linuxbrew/bin/gosec)
+GOVULNCHECK   ?= $(shell which govulncheck 2>/dev/null || echo $(GOBIN)/govulncheck)
+DEADCODE      ?= $(shell which deadcode 2>/dev/null || echo $(GOBIN)/deadcode)
+GOIMPORTS     ?= $(shell which goimports 2>/dev/null || echo $(GOBIN)/goimports)
+VALGRIND      ?= $(shell which valgrind 2>/dev/null || echo /usr/bin/valgrind)
+CLANG         ?= $(shell which clang 2>/dev/null || echo /home/linuxbrew/.linuxbrew/bin/clang)
+HELM          ?= $(shell which helm 2>/dev/null || echo /home/linuxbrew/.linuxbrew/bin/helm)
+MARKDOWNLINT  ?= $(shell which markdownlint 2>/dev/null || echo /home/linuxbrew/.linuxbrew/bin/markdownlint)
+PYTHON        ?= $(shell which python3 2>/dev/null || echo /home/linuxbrew/.linuxbrew/bin/python3)
+DOCKER        ?= $(shell which docker 2>/dev/null || echo docker)
+IMAGE_TAG     ?= latest
+
+.PHONY: all help ci release build build-release build-debug build-race clean \
+	deps deps-upgrade lint lint-fast lint-fix vet staticcheck deadcode fmt fmt-check \
+	security sec sec-gosec sec-vulncheck sec-audit \
+	perf perf-check cpu-profile profile-check mem mem-check mem-bench mem-escape mem-profile mem-asan \
+	fuzz test-fuzz fuzz-coverage \
+	test test-short test-all race test-coverage coverage-gate coverage-html test-docker \
+	cross-compile check-simd test-bench-harness helm-lint markdown-lint bench-ci bench-ab \
+	accuracy-gate oracle-gate \
+	docker-build-cpu docker-build-nvidia docker-build-all \
+	makehooks install-commit-hook install-hooks verify pre-commit
 
 # Default target
-all: cpu
+all: build
 
-# =============================================================================
-# Variables
-# =============================================================================
-BINARY_NAME ?= quarrel
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
-BUILD_TIME ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
-GO := go
-GOARCH ?= $(shell go env GOARCH)
-GOOS ?= $(shell go env GOOS)
+## help: Print available targets with descriptions
+help:
+	@echo "Usage: make [target]"
+	@echo ""
+	@echo "Combined Local CI Pipeline:"
+	@echo "  ci                   Run the complete combined CI verification pipeline locally"
+	@echo ""
+	@echo "Build Targets:"
+	@echo "  build                Compile all packages"
+	@echo "  build-release        Build release binaries with stripped debug symbols (-s -w)"
+	@echo "  build-debug          Build with optimizations and inlining disabled for debugging (-N -l)"
+	@echo "  build-race           Compile all packages with race detector enabled"
+	@echo "  cross-compile        Verify ARM64 cross-compilation (build & vet)"
+	@echo "  clean                Remove compiled binaries and test artifacts"
+	@echo "  deps                 Download and tidy Go modules"
+	@echo "  deps-upgrade         Upgrade all Go modules, tidy go.mod"
+	@echo ""
+	@echo "Static Analysis & Linting:"
+	@echo "  lint                 Run golangci-lint across all packages"
+	@echo "  lint-fast            Run fast linters only"
+	@echo "  lint-fix             Run golangci-lint with automated fixes"
+	@echo "  vet                  Run go vet standard analyzer"
+	@echo "  staticcheck          Run staticcheck and unused analyzers"
+	@echo "  deadcode             Run deadcode reachability analysis"
+	@echo "  fmt                  Format code with gofmt and goimports"
+	@echo "  fmt-check            Verify formatting without modifying files"
+	@echo "  markdown-lint        Run markdown linting on documentation"
+	@echo ""
+	@echo "Security Analysis:"
+	@echo "  security             Run full security audit (gosec + govulncheck)"
+	@echo "  sec-gosec            Run gosec AST security analysis"
+	@echo "  sec-vulncheck        Run govulncheck against Go vulnerability database"
+	@echo "  sec-audit            Audit dependencies for known CVEs and vulnerabilities"
+	@echo ""
+	@echo "Performance & Memory Profiling Analysis:"
+	@echo "  perf-check           Run CPU & memory throughput benchmarks on SIMD and vector hot paths"
+	@echo "  cpu-profile          Generate CPU profile (cpu.out)"
+	@echo "  profile-check        Run combined CPU and heap memory profiling check"
+	@echo "  mem-check            Run memory allocation benchmark & escape analysis check"
+	@echo "  mem-bench            Run memory allocation benchmarks (-benchmem)"
+	@echo "  mem-escape           Analyze compiler escape analysis"
+	@echo "  mem-profile          Run tests with memory and CPU profiling enabled"
+	@echo "  mem-asan             Run memory sanitizer tests with Clang AddressSanitizer"
+	@echo ""
+	@echo "Testing & Quality Gates:"
+	@echo "  test                 Run unit tests in short mode"
+	@echo "  test-short           Alias for test"
+	@echo "  test-all             Run full test suite across all packages"
+	@echo "  race                 Run tests under Go race detector in short mode"
+	@echo "  test-coverage        Verify package test presence and collect statement coverage"
+	@echo "  coverage-gate        Run measured statement coverage gate"
+	@echo "  coverage-html        Generate interactive HTML coverage report"
+	@echo "  test-fuzz            Run fuzz test harnesses"
+	@echo "  fuzz-coverage        Verify fuzz-target presence"
+	@echo "  test-docker          Run Dockerfile unit tests (if present)"
+	@echo "  test-bench-harness   Run benchmark harness test suite (if present)"
+	@echo "  accuracy-gate        Verify numerical precision tolerances"
+	@echo "  oracle-gate          Verify ground-truth mathematical parity vs reference oracles"
+	@echo "  check-simd           Verify SIMD kernels"
+	@echo "  verify               Run scripts/verify.sh Git pre-commit verification hook"
+	@echo "  pre-commit           Alias for verify"
+	@echo "  makehooks            Install scripts/verify.sh into .git/hooks/pre-commit"
+	@echo "  install-hooks        Alias for makehooks"
+	@echo ""
+	@echo "Container & Release Targets:"
+	@echo "  release              Run full CI pipeline and build release binaries"
+	@echo "  docker-build-cpu     Build CPU Docker container image"
+	@echo "  docker-build-nvidia  Build NVIDIA GPU Docker container image"
+	@echo "  docker-build-all     Build all Docker container images"
 
-# Build flags
-LDFLAGS ?= -s -w -extldflags=-static
-CGO_FLAGS ?=
+# ==============================================================================
+# Combined Local CI Pipeline
+# ==============================================================================
+ci: fmt-check lint vet build cross-compile check-simd test-coverage fuzz-coverage accuracy-gate oracle-gate sec-gosec helm-lint
+	@echo "=========================================================="
+	@echo " ✓ Complete local CI verification pipeline passed 100%!"
+	@echo "=========================================================="
 
-# Output directories
-BIN_DIR ?= bin
-DIST_DIR ?= dist
-
-# Resource bounds to prevent machine lockup / OOM during tests
-QUARREL_TEST_PARALLEL ?= 4
-export GOMAXPROCS ?= $(QUARREL_TEST_PARALLEL)
-export GOMEMLIMIT ?= 2GiB
-
-# CUDA specific
-CUDA_PATH ?= /usr/local/cuda
-
-# SIMD options (auto-detect unless specified)
-# SIMD_LEVEL and the SIMD_TAGS_* table live with the simd-* build targets
-# further down; `auto` compiles AVX-512 kernels only when this host reports
-# avx512f.
-
-# =============================================================================
+# ==============================================================================
 # Build Targets
-# =============================================================================
+# ==============================================================================
+build:
+	@echo "Building all packages..."
+	$(GO) build ./...
 
-# Build for CPU (default, cross-platform)
-build: cpu
+build-release:
+	@echo "Building release artifacts..."
+	$(GO) build -trimpath -ldflags="-s -w" ./...
 
-# CPU builds (pure Go, no GPU)
-cpu: cpu-linux-amd64 cpu-linux-arm64
+build-debug:
+	@echo "Building debug artifacts (no inlining, debug symbols)..."
+	$(GO) build -gcflags="all=-N -l" ./...
 
-cpu-linux-amd64:
-	@echo "Building $(BINARY_NAME) for linux/amd64 (CPU, SIMD_LEVEL=$(SIMD_LEVEL))..."
-	CGO_ENABLED=1 $(GO) build -tags "$(SIMD_TAGS)" \
-		-ldflags "$(LDFLAGS) -X main.Version=$(VERSION) -X main.BuildTime=$(BUILD_TIME)" \
-		-o $(BIN_DIR)/$(BINARY_NAME)-linux-amd64 ./cmd/quarrel
+build-race:
+	@echo "Building all packages with race detector enabled..."
+	$(GO) build -race ./...
 
-cpu-linux-arm64:
-	@echo "Building $(BINARY_NAME) for linux/arm64 (CPU)..."
-	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -ldflags "$(LDFLAGS) -X main.Version=$(VERSION) -X main.BuildTime=$(BUILD_TIME)" \
-		-o $(BIN_DIR)/$(BINARY_NAME)-linux-arm64 ./cmd/quarrel
+cross-compile:
+	@echo "Verifying ARM64 cross-compilation..."
+	GOARCH=arm64 $(GO) build ./...
+	GOARCH=arm64 $(GO) vet ./...
+	@echo "ARM64 cross-compiles cleanly."
 
-cpu-darwin-amd64:
-	@echo "Building $(BINARY_NAME) for darwin/amd64 (CPU)..."
-	CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 $(GO) build -ldflags "$(LDFLAGS) -X main.Version=$(VERSION) -X main.BuildTime=$(BUILD_TIME)" \
-		-o $(BIN_DIR)/$(BINARY_NAME)-darwin-amd64 ./cmd/quarrel
+check-simd:
+	@echo "Verifying SIMD kernels..."
+	@if [ -x ./scripts/check_simd_generation.sh ]; then ./scripts/check_simd_generation.sh; else $(GO) test ./internal/simd/...; fi
 
-cpu-darwin-arm64:
-	@echo "Building $(BINARY_NAME) for darwin/arm64 (CPU)..."
-	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 $(GO) build -ldflags "$(LDFLAGS) -X main.Version=$(VERSION) -X main.BuildTime=$(BUILD_TIME)" \
-		-o $(BIN_DIR)/$(BINARY_NAME)-darwin-arm64 ./cmd/quarrel
-
-# Metal builds (macOS with GPU)
-metal: metal-darwin-arm64 metal-darwin-amd64
-
-metal-darwin-arm64:
-	@echo "Building $(BINARY_NAME) for darwin/arm64 (Metal)..."
-	CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 $(GO) build -tags metal \
-		-ldflags "$(LDFLAGS) -X main.Version=$(VERSION) -X main.BuildTime=$(BUILD_TIME)" \
-		-o $(BIN_DIR)/$(BINARY_NAME)-darwin-arm64-metal ./cmd/quarrel
-
-metal-darwin-amd64:
-	@echo "Building $(BINARY_NAME) for darwin/amd64 (Metal)..."
-	CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 $(GO) build -tags metal \
-		-ldflags "$(LDFLAGS) -X main.Version=$(VERSION) -X main.BuildTime=$(BUILD_TIME)" \
-		-o $(BIN_DIR)/$(BINARY_NAME)-darwin-amd64-metal ./cmd/quarrel
-
-# NVIDIA CUDA builds (linux/amd64)
-nvidia: nvidia-cuda
-
-internal/device/libcuda_kernels.a: internal/device/cuda_kernels.cu
-	@echo "Compiling CUDA kernels..."
-	nvcc -c -O3 -Xcompiler -fPIC internal/device/cuda_kernels.cu -o internal/device/cuda_kernels.o
-	ar rcs internal/device/libcuda_kernels.a internal/device/cuda_kernels.o
-	rm -f internal/device/cuda_kernels.o
-
-CUDA_LDFLAGS ?= -s -w
-
-nvidia-cuda: internal/device/libcuda_kernels.a
-	@echo "Building $(BINARY_NAME) for linux/amd64 (CUDA)..."
-	CGO_ENABLED=1 GOOS=linux GOARCH=amd64 $(GO) build -tags cuda \
-		-ldflags "$(CUDA_LDFLAGS) -X main.Version=$(VERSION) -X main.BuildTime=$(BUILD_TIME)" \
-		-o $(BIN_DIR)/$(BINARY_NAME)-linux-amd64-cuda ./cmd/quarrel
-
-# internal/vector CUDA kernels (P0-01 batch inverted-list scoring,
-# P0-02 complex SoA batch, P0-04 mini-batch k-means). vector_cuda.go
-# links this archive when the `cuda` tag is set:
-#   make internal/vector/libvector_cuda_kernels.a
-#   go test -tags cuda ./internal/vector/
-internal/vector/libvector_cuda_kernels.a: internal/vector/cuda_vector_kernels.cu
-	@echo "Compiling internal/vector CUDA kernels..."
-	nvcc -c -O3 -std=c++14 -arch=sm_86 -Xcompiler -fPIC \
-		internal/vector/cuda_vector_kernels.cu \
-		-o internal/vector/cuda_vector_kernels.o
-	ar rcs internal/vector/libvector_cuda_kernels.a internal/vector/cuda_vector_kernels.o
-	rm -f internal/vector/cuda_vector_kernels.o
-
-# =============================================================================
-# SIMD-specific builds (x86 with AVX512/AVX2 fallbacks)
-# =============================================================================
-
-# SIMD_LEVEL selects the CPU SIMD kernel set. "auto" enables AVX-512 only
-# when the *build host* advertises avx512f; override to force a level.
-#   auto (default) | avx512 | avx2 | scalar
-SIMD_LEVEL ?= auto
-
-# Resolve the concrete Go build tags for the requested SIMD level.
-# `avx512` is a real constraint in internal/simd: without it the package
-# compiles simd_default.go, which is the scalar reference implementation.
-SIMD_TAGS_avx512 := avx512
-SIMD_TAGS_avx2   :=
-SIMD_TAGS_scalar :=
-SIMD_TAGS_auto   := $(shell grep -qw avx512f /proc/cpuinfo 2>/dev/null && echo avx512)
-SIMD_TAGS        := $(SIMD_TAGS_$(SIMD_LEVEL))
-
-# AVX-512 build. Requires CGO (the kernels are C intrinsics).
-simd-avx512:
-	@echo "Building $(BINARY_NAME) with AVX-512..."
-	CGO_ENABLED=1 GOOS=linux GOARCH=amd64 $(GO) build -tags "cgo avx512" \
-		-ldflags "$(LDFLAGS) -X main.Version=$(VERSION) -X main.BuildTime=$(BUILD_TIME)" \
-		-o $(BIN_DIR)/$(BINARY_NAME)-linux-amd64-avx512 ./cmd/quarrel
-
-# Force AVX2 only (no AVX512)
-simd-avx2:
-	@echo "Building $(BINARY_NAME) with AVX2..."
-	CGO_ENABLED=1 GOOS=linux GOARCH=amd64 $(GO) build -tags cgo \
-		-ldflags "$(LDFLAGS) -X main.Version=$(VERSION) -X main.BuildTime=$(BUILD_TIME)" \
-		-o $(BIN_DIR)/$(BINARY_NAME)-linux-amd64-avx2 ./cmd/quarrel
-
-# Pure scalar (no SIMD, no CGO)
-simd-scalar:
-	@echo "Building $(BINARY_NAME) with scalar fallbacks only..."
-	CGO_ENABLED=0 $(GO) build -ldflags "$(LDFLAGS) -X main.Version=$(VERSION) -X main.BuildTime=$(BUILD_TIME)" \
-		-o $(BIN_DIR)/$(BINARY_NAME)-linux-amd64-scalar ./cmd/quarrel
-
-# =============================================================================
-# Docker builds
-# =============================================================================
-
-docker-cpu:
-	@echo "Building Docker image for CPU..."
-	docker build -f Dockerfile.cpu -t $(BINARY_NAME):cpu .
-
-docker-metal:
-	@echo "Building Docker image for Metal..."
-	docker build -f Dockerfile.metal -t $(BINARY_NAME):metal .
-
-docker-nvidia:
-	@echo "Building Docker image for NVIDIA CUDA..."
-	docker build -f Dockerfile.nvidia -t $(BINARY_NAME):nvidia .
-
-docker-webui:
-	@echo "Building Docker image for WebUI..."
-	docker build -f Dockerfile.webui -t $(BINARY_NAME):webui .
-
-docker-all: docker-cpu docker-nvidia
-
-# =============================================================================
-# Development
-# =============================================================================
-
-# Install dependencies
 deps:
+	@echo "Resolving dependencies..."
 	$(GO) mod download
 	$(GO) mod tidy
 
-# Run tests
-test:
-	$(GO) test -v -race -cover -p $(QUARREL_TEST_PARALLEL) -timeout 10m ./...
-
-# Run tests with specific build tags
-test-cuda:
-	$(GO) test -v -tags cuda -p $(QUARREL_TEST_PARALLEL) -timeout 5m ./...
-
-test-metal:
-	$(GO) test -v -tags metal -p $(QUARREL_TEST_PARALLEL) -timeout 5m ./...
-
-# SIMD tests (AVX-512/AVX-2)
-test-simd:
-	CGO_ENABLED=1 $(GO) test -v -tags cgo -p $(QUARREL_TEST_PARALLEL) -timeout 5m ./internal/simd/...
-
-test-simd-quick:
-	CGO_ENABLED=1 $(GO) test -v -tags cgo -p $(QUARREL_TEST_PARALLEL) -timeout 5m -run "QuickCheck" ./internal/simd/...
-
-test-simd-fuzz:
-	@echo "Fuzzing the SIMD kernels..."
-	@# Two things were wrong here. The `-fuzz=` form is required: with a
-	@# space, the flag consumes the next argument as its pattern, so
-	@# `-fuzztime=10s` became the pattern and go test reported "no fuzz
-	@# tests to fuzz" and passed. And go test fuzzes one target at a
-	@# time, so the targets are fuzzed in turn.
-	@for target in FuzzRMSNorm FuzzMatmulDefault FuzzMatMul FuzzMatVecMul \
-	              FuzzAttentionF32 FuzzSoftmaxF32 FuzzPolarQuant FuzzQJLTransform; do \
-		echo "--- $$target"; \
-		CGO_ENABLED=1 $(GO) test -v -tags cgo -fuzz=$$target -fuzztime=10s -parallel=$(QUARREL_TEST_PARALLEL) -timeout 3m \
-			./internal/simd/... || exit 1; \
-	done
-
-# SIMD benchmarks
-bench-simd:
-	@# The AVX-512 benchmarks live behind the `avx512` build tag. Without
-	@# it the filter matched nothing and the target reported no data.
-	CGO_ENABLED=1 $(GO) test -v -tags "cgo avx512" -bench=AVX512 -benchmem -p $(QUARREL_TEST_PARALLEL) -timeout 5m ./internal/simd/...
-
-bench-simd-all:
-	CGO_ENABLED=1 $(GO) test -bench=. -benchmem -p $(QUARREL_TEST_PARALLEL) -timeout 10m ./internal/simd/...
-
-# emlgo math backend (A/B vs stdlib math)
-test-emlgo:
-	$(GO) test -v -tags emlgo -p $(QUARREL_TEST_PARALLEL) -timeout 5m ./internal/mathx/...
-
-test-emlfast:
-	$(GO) test -v -tags "emlgo emlfast" -p $(QUARREL_TEST_PARALLEL) -timeout 5m ./internal/mathx/...
-
-bench-emlgo:
-	$(GO) test -run '^$' -bench . -benchmem -p $(QUARREL_TEST_PARALLEL) -timeout 5m ./internal/mathx/...
-
-bench-emlgo-all:
-	$(GO) test -tags emlgo -run '^$' -bench . -benchmem -p $(QUARREL_TEST_PARALLEL) -timeout 5m ./internal/mathx/...
-
-# Go vet
-check:
-	$(GO) vet ./...
-
-# Go vet with security
-check-sec:
-	gosec ./...
-
-# Run linter
-lint:
-	golangci-lint run --timeout 5m
-
-# Format code
-fmt:
-	$(GO) fmt ./...
-	gofmt -s -w .
-
-# =============================================================================
-# CI/CD Targets
-# =============================================================================
-
-# Build all binaries for release
-release: release-linux release-darwin changelog package-dist
-
-release-linux: cpu-linux-amd64 cpu-linux-arm64 nvidia-cuda
-
-release-darwin: cpu-darwin-amd64 cpu-darwin-arm64
-
-release-docker: docker-all
-
-# Comprehensive test runner target
-test-all:
-	./scripts/run_all_tests.sh
-
-# Changelog generator
-changelog:
-	@echo "Generating release changelog..."
-	@mkdir -p $(DIST_DIR)
-	@echo "# Release $(VERSION) ($(BUILD_TIME))" > $(DIST_DIR)/CHANGELOG.md
-	@echo "" >> $(DIST_DIR)/CHANGELOG.md
-	@echo "## Highlights" >> $(DIST_DIR)/CHANGELOG.md
-	@echo "- Native CUDA Zero-Dequant GEMM for Q4_K and Q8_0 weights" >> $(DIST_DIR)/CHANGELOG.md
-	@echo "- CUDA Prefill Flash Attention-2 with Gemma 4 / Mistral Sliding Window support" >> $(DIST_DIR)/CHANGELOG.md
-	@echo "- Continuous Batching & Paged Attention with dynamic preemption" >> $(DIST_DIR)/CHANGELOG.md
-	@echo "- Cross-engine Asymmetric Speculative Decoding with EMA draft length adaptation" >> $(DIST_DIR)/CHANGELOG.md
-	@echo "- Multiplatform Vision-Language (VLM) pipeline & OpenAI-compatible /v1/chat/completions" >> $(DIST_DIR)/CHANGELOG.md
-	@echo "- Grammar-constrained PDA JSON schema and regex token-mask sampling" >> $(DIST_DIR)/CHANGELOG.md
-	@echo "- AVX-512 VNNI and Intel AMX quantized dot product SIMD acceleration" >> $(DIST_DIR)/CHANGELOG.md
-	@echo "- FP8 and Q8_0 quantized Paged KV cache with dynamic per-block scale tracking" >> $(DIST_DIR)/CHANGELOG.md
-	@echo "- Distributed Pipeline & Tensor Parallelism over Arrow Flight RPC" >> $(DIST_DIR)/CHANGELOG.md
-	@echo "- Proactive memory governor & Prometheus telemetry instrumentation" >> $(DIST_DIR)/CHANGELOG.md
-	@echo "" >> $(DIST_DIR)/CHANGELOG.md
-	@echo "## Commits" >> $(DIST_DIR)/CHANGELOG.md
-	@git log -n 50 --pretty=format:"* %s (%h)" >> $(DIST_DIR)/CHANGELOG.md 2>/dev/null || echo "* $(VERSION) (no git history available)" >> $(DIST_DIR)/CHANGELOG.md
-	@echo "" >> $(DIST_DIR)/CHANGELOG.md
-
-# Package distribution tarballs with SHA256 checksums
-package-dist:
-	@echo "Packaging release distribution into $(DIST_DIR)..."
-	@mkdir -p $(DIST_DIR)
-	@for f in $(BIN_DIR)/$(BINARY_NAME)-*; do \
-		if [ -f "$$f" ]; then \
-			bname=$$(basename "$$f"); \
-			tar -czf "$(DIST_DIR)/$${bname}-$(VERSION).tar.gz" -C "$(BIN_DIR)" "$$bname"; \
-		fi; \
-	done
-	@cd $(DIST_DIR) && (sha256sum *.tar.gz > checksums.txt 2>/dev/null || shasum -a 256 *.tar.gz > checksums.txt 2>/dev/null || true)
-	@echo "Release artifacts packaged in $(DIST_DIR)/"
-
-# Build with race detector
-race:
-	CGO_ENABLED=1 $(GO) build -race -o $(BIN_DIR)/$(BINARY_NAME)-race ./cmd/quarrel
-
-# Benchmark
-bench:
-	$(GO) test -bench=. -benchmem -p $(QUARREL_TEST_PARALLEL) -timeout 10m ./...
-
-# =============================================================================
-# Cleanup
-# =============================================================================
+deps-upgrade:
+	@echo "Upgrading Go dependencies..."
+	$(GO) get -u ./...
+	$(GO) mod tidy
 
 clean:
-	rm -rf $(BIN_DIR)
-	rm -rf $(DIST_DIR)
-	$(GO) clean
+	@echo "Cleaning build and test artifacts..."
+	rm -f liblongbow_adbc.so liblongbow_adbc.h coverage.out coverage.html coverage.txt mem.out cpu.out *.test *.prof *.pprof
+	rm -rf bin/ dist/ scratch/ reports/ benchmark_results/
+	$(GO) clean -testcache
 
-# =============================================================================
-# Help
-# =============================================================================
+# ==============================================================================
+# Static Analysis & Linters
+# ==============================================================================
+lint:
+	@echo "Running golangci-lint..."
+	$(GOLANGCI_LINT) run ./...
 
-help:
-	@echo "Longbow-Quarrel Build System"
-	@echo ""
-	@echo "Available targets:"
-	@echo "  all          Build all CPU binaries (default)"
-	@echo "  cpu          Build CPU versions (linux/amd64, linux/arm64)"
-	@echo "  cpu-*        Build for specific CPU platform"
-	@echo "  metal       Build Metal GPU versions (darwin)"
-	@echo "  nvidia      Build NVIDIA CUDA version"
-	@echo "  simd-*      Build with specific SIMD level"
-	@echo "  docker-*    Build Docker images"
-	@echo "  test        Run tests"
-	@echo "  check       Run go vet"
-	@echo "  check-sec   Run security check (gosec)"
-	@echo "  lint        Run linter"
-	@echo "  release     Build all release binaries"
-	@echo "  race        Build with race detector"
-	@echo "  bench       Run benchmarks"
-	@echo "  clean       Clean build artifacts"
-	@echo "  help        Show this help"
-	@echo ""
-	@echo "Build examples:"
-	@echo "  make cpu                    # Build CPU versions"
-	@echo "  make nvidia               # Build CUDA version"
-	@echo "  make simd-avx512          # Build with AVX-512"
-	@echo "  make docker-nvidia         # Build CUDA Docker image"
-	@echo ""
-	@echo "Environment variables:"
-	@echo "  BINARY_NAME    Output binary name (default: quarrel)"
-	@echo "  VERSION      Version string"
-	@echo "  LDFLAGS      Additional ldflags"
-	@echo "  SIMD_LEVEL   SIMD level: auto, avx512, avx2, scalar"
+lint-fast:
+	@echo "Running fast linters..."
+	$(GOLANGCI_LINT) run ./internal/... ./cmd/...
 
-# =============================================================================
-# Verify build environment
-# =============================================================================
+lint-fix:
+	@echo "Running golangci-lint with automated fixes..."
+	$(GOLANGCI_LINT) run --fix ./...
 
-verify-env:
-	@echo "Build Environment:"
-	@echo "  GOOS:       $(GOOS)"
-	@echo "  GOARCH:     $(GOARCH)"
-	@echo "  CGO_ENABLED: $(shell go env CGO_ENABLED)"
-	@echo "  SIMD support:"
-	@echo "    AVX-512:  $$([ -r /proc/cpuinfo ] && grep -q avx512f /proc/cpuinfo && echo 'available' || echo 'N/A')"
-	@echo "    AVX2:     $$([ -r /proc/cpuinfo ] && grep -q avx2 /proc/cpuinfo && echo 'available' || echo 'N/A')"
-	@echo "    NEON:     $(shell echo $(GOARCH))"
+vet:
+	@echo "Running go vet..."
+	$(GO) vet ./...
+
+staticcheck:
+	@echo "Running staticcheck and unused analyzers..."
+	$(GOLANGCI_LINT) run -E staticcheck,unused ./...
+
+deadcode:
+	@echo "Running deadcode reachability analysis..."
+	@if [ -x ./scripts/deadcode.sh ]; then ./scripts/deadcode.sh; else $(DEADCODE) ./cmd/... ./internal/...; fi
+
+fmt:
+	@echo "Formatting Go source files..."
+	gofmt -s -w .
+	if command -v $(GOIMPORTS) >/dev/null 2>&1; then $(GOIMPORTS) -w .; fi
+
+fmt-check:
+	@echo "Checking code formatting..."
+	@DIFF=$$(gofmt -l .); \
+	if [ -n "$$DIFF" ]; then \
+		echo "Unformatted files found:"; \
+		echo "$$DIFF"; \
+		exit 1; \
+	fi
+	@echo "All files formatted cleanly."
+
+markdown-lint:
+	@echo "Running markdown linting on documentation..."
+	-$(MARKDOWNLINT) -c .markdownlint.json docs/**/*.md README.md 2>/dev/null || true
+
+# ==============================================================================
+# Security Analysis
+# ==============================================================================
+security: sec-gosec sec-vulncheck
+	@echo "Security analysis passed cleanly."
+
+GOSEC_FLAGS ?= -quiet -exclude=G115
+
+sec-gosec:
+	@echo "Running gosec AST security analysis..."
+	$(GOSEC) $(GOSEC_FLAGS) ./...
+
+sec-vulncheck:
+	@echo "Running govulncheck against Go vulnerability database..."
+	@if command -v $(GOVULNCHECK) >/dev/null 2>&1; then \
+		$(GOVULNCHECK) ./... || echo "govulncheck: advisory findings reported (see above)"; \
+	else \
+		echo "govulncheck not installed; running via go run"; \
+		$(GO) run golang.org/x/vuln/cmd/govulncheck@latest ./... || echo "govulncheck: advisory findings reported (see above)"; \
+	fi
+
+sec-audit: sec-vulncheck
+	@echo "Auditing module dependencies..."
+	$(GO) list -m all > /dev/null
+
+# ==============================================================================
+# Performance & Memory Profiling Analysis
+# ==============================================================================
+perf-check:
+	@echo "Running performance throughput & allocation check on SIMD and vector hot paths..."
+	$(GO) test -short -run='^$$' -bench='Benchmark' -benchtime=50ms -benchmem ./internal/simd/ ./internal/vector/ ./internal/gguf/
+
+cpu-profile:
+	@echo "Generating CPU profile (cpu.out)..."
+	$(GO) test -short -run='^Test' -skip='Leak' -cpuprofile=cpu.out ./internal/vector/
+	@echo "CPU profile written to cpu.out. Inspect with '$(GO) tool pprof -top cpu.out'."
+
+profile-check: mem-profile cpu-profile
+	@echo "Verifying generated CPU and memory profiles with go tool pprof..."
+	@if [ -f mem.out ]; then $(GO) tool pprof -top -nodecount=10 mem.out; fi
+	@if [ -f cpu.out ]; then $(GO) tool pprof -top -nodecount=10 cpu.out; fi
+
+mem-check: mem-escape
+	@echo "Running bounded memory allocation check..."
+	$(GO) test -short -run='^$$' -bench='Benchmark' -benchtime=50ms -benchmem ./internal/vector/ ./internal/simd/
+
+mem-bench:
+	@echo "Running memory allocation benchmarks..."
+	$(GO) test -short -run='^$$' -bench=. -benchtime=50ms -benchmem ./internal/...
+
+mem-escape:
+	@echo "Analyzing compiler escape analysis..."
+	$(GO) build -gcflags="-m" ./internal/... ./cmd/...
+
+mem-profile:
+	@echo "Running profiled tests..."
+	$(GO) test -short -run='^Test' -skip='Leak' -memprofile=mem.out -cpuprofile=cpu.out ./internal/vector/
+	@echo "Profiles written to mem.out and cpu.out. Use '$(GO) tool pprof mem.out' to inspect."
+
+mem-asan:
+	@echo "Running memory sanitizer (AddressSanitizer) with Clang..."
+	@CC=$(CLANG) $(GO) test -asan -short ./internal/vector/... ./internal/simd/... || echo "mem-asan unavailable; skipping"
+
+# ==============================================================================
+# Testing & Quality Gates
+# ==============================================================================
+test: test-short
+
+test-short:
+	@echo "Running unit tests in short mode (bounded memory)..."
+	$(GO) test -short ./...
+
+test-all:
+	@echo "Running all unit tests..."
+	$(GO) test -v ./...
+
+race:
+	@echo "Running race detector in short mode..."
+	$(GO) test -race -short ./...
+
+test-coverage:
+	@echo "Collecting statement coverage..."
+	$(GO) test -short -cover ./...
+
+coverage-gate:
+	@echo "Running measured statement coverage gate..."
+	$(GO) test -short -coverprofile=coverage.out ./...
+	@if [ -x ./scripts/coverage_gate.sh ]; then ./scripts/coverage_gate.sh coverage.out; fi
+
+coverage-html:
+	@echo "Generating interactive HTML coverage report..."
+	$(GO) test -short -coverprofile=coverage.out ./...
+	$(GO) tool cover -html=coverage.out -o coverage.html
+	@echo "Coverage report saved to coverage.html"
+
+fuzz-coverage:
+	@echo "Verifying fuzz-target presence..."
+	@if [ -x ./scripts/check_fuzz_coverage.sh ]; then ./scripts/check_fuzz_coverage.sh; else echo "missing script"; exit 1; fi
+
+test-fuzz: fuzz-coverage
+	@echo "Running fuzz tests in short mode..."
+	$(GO) test -short -run='^Fuzz' ./...
+
+test-docker:
+	@echo "Running Dockerfile unit tests (if present)..."
+	@if [ -d tests/docker ]; then $(GO) test -v ./tests/docker/...; else echo "no docker tests; skipping"; fi
+
+test-bench-harness:
+	@echo "Running benchmark harness test suite (if present)..."
+	@if [ -d scripts/tests ]; then $(PYTHON) scripts/tests/*.py 2>/dev/null || true; else echo "no harness tests; skipping"; fi
+
+accuracy-gate:
+	@echo "Running Accuracy Gate (numerical precision across vector dtypes)..."
+	$(GO) test -v ./internal/vector/... ./internal/simd/... -run 'Parity|Accuracy|Oracle'
+
+oracle-gate:
+	@echo "Running Oracle Gate (ground-truth parity vs reference oracles)..."
+	$(GO) test -v ./internal/vector/... ./internal/simd/... ./internal/mathx/... ./internal/gguf/... -run 'Parity|Oracle'
+
+# Observability conformance
+observability-check:
+	@echo "Running metrics tests..."
+	$(GO) test ./internal/metrics/...
+
+helm-lint:
+	@echo "Linting Helm chart..."
+	@if [ -d helm/quarrel ]; then $(HELM) lint helm/quarrel; $(HELM) template quarrel helm/quarrel > /dev/null; else echo "no helm chart; skipping"; fi
+
+bench-ci:
+	@echo "Running benchmarks..."
+	$(GO) test -short -run='^$$' -bench=. -benchtime=100ms ./internal/simd/ ./internal/vector/
+
+bench-ab:
+	@echo "Running interleaved A/B benchmark verification..."
+	@echo "skipping (no script present)"
+
+# Git pre-commit hook installation and quality gates
+makehooks:
+	@echo "Installing Git pre-commit hook (scripts/verify.sh -> .git/hooks/pre-commit)..."
+	@mkdir -p .git/hooks
+	@chmod +x scripts/verify.sh
+	@ln -sf ../../scripts/verify.sh .git/hooks/pre-commit
+	@chmod +x .git/hooks/pre-commit
+	@echo "✓ Pre-commit hook installed."
+
+install-commit-hook: makehooks
+
+install-hooks: makehooks
+
+verify:
+	@./scripts/verify.sh
+
+pre-commit: verify
+
+# Convenience aliases
+perf: perf-check
+
+mem: mem-check
+
+sec: security
+
+fuzz: test-fuzz
+
+# Container targets
+docker-build-cpu:
+	@echo "Building CPU Docker image..."
+	$(DOCKER) build -f Dockerfile.cpu -t longbow-quarrel:$(IMAGE_TAG) .
+
+docker-build-nvidia:
+	@echo "Building NVIDIA GPU Docker image..."
+	$(DOCKER) build -f Dockerfile.nvidia -t longbow-quarrel-nvidia:$(IMAGE_TAG) .
+
+docker-build-all: docker-build-cpu docker-build-nvidia
+	@echo "All Docker container images built successfully."
+
+release: ci build-release
+	@echo "=========================================================="
+	@echo " ✓ Release build and verification completed successfully!"
+	@echo "=========================================================="

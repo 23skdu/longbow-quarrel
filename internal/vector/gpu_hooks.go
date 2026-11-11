@@ -27,8 +27,8 @@ var (
 	// gpuFreeFloat32 / gpuFreeComplex release a staged store (no-op on
 	// nil is never needed: callers only hold stores after successful
 	// staging, and each hook has its matching free).
-	gpuFreeFloat32 func(store interface{})
-	gpuFreeComplex func(store interface{})
+	gpuFreeFloat32 func(store interface{}) //nolint:unused
+	gpuFreeComplex func(store interface{}) //nolint:unused
 
 	// gpuQPackedFloat32 packs a query block [numQ][dim] row-major.
 	gpuQPackedFloat32 func(queries [][]float32) (qs interface{}, ok bool)
@@ -53,7 +53,7 @@ var (
 	gpuStageLists func(store interface{}, lists [][]int) (listsStore interface{}, ok bool)
 
 	// gpuFreeLists releases the staged lists.
-	gpuFreeLists func(listsStore interface{})
+	gpuFreeLists func(listsStore interface{}) //nolint:unused
 
 	// gpuScanListsFloat32 scores the rows of the given IVF lists
 	// (listIDs index the staged lists) against one query with a

@@ -63,7 +63,7 @@ func TestTheMillionVectorStoreStaysOutOfTheHeap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	if loaded.Count() != p05Rows {
 		t.Fatalf("the loaded index holds %d vectors, want %d", loaded.Count(), p05Rows)

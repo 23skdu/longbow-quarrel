@@ -100,10 +100,14 @@ func L2Float32(a, b []float32) float32 {
 }
 
 // CosineFloat32 computes cosine similarity between two float32 vectors.
+//
+// It uses the dispatched dot kernel (DotFloat32) so that cosine scoring
+// benefits from the same native kernels as the dot product, while
+// agreeing with the scalar oracle within the documented 1e-4 budget.
 func CosineFloat32(a, b []float32) float32 {
-	dot := dotFloat32Scalar(a, b)
-	normA := dotFloat32Scalar(a, a)
-	normB := dotFloat32Scalar(b, b)
+	dot := DotFloat32(a, b)
+	normA := DotFloat32(a, a)
+	normB := DotFloat32(b, b)
 	if normA <= 0 || normB <= 0 {
 		return 0
 	}
@@ -216,23 +220,23 @@ func DotUint8(a, b *Uint8Vector) float32 {
 }
 
 // L2Uint8 computes the squared Euclidean distance between two Uint8Vectors.
+//
+// The vectors are reconstructed with their own scales before differencing,
+// so the result matches the float32 reference instead of the previous
+// averaged-scale approximation.
 func L2Uint8(a, b *Uint8Vector) float32 {
 	n := len(a.Data)
 	if len(b.Data) < n {
 		n = len(b.Data)
 	}
-	scaleAvg := (a.Scale + b.Scale) * 0.5
-	var sumDist uint64
+	var sum float64
 	for i := 0; i < n; i++ {
-		var diff uint64
-		if a.Data[i] >= b.Data[i] {
-			diff = uint64(a.Data[i] - b.Data[i])
-		} else {
-			diff = uint64(b.Data[i] - a.Data[i])
-		}
-		sumDist += diff * diff
+		da := float64(a.Data[i]) * float64(a.Scale)
+		db := float64(b.Data[i]) * float64(b.Scale)
+		d := da - db
+		sum += d * d
 	}
-	return float32(sumDist) * (scaleAvg * scaleAvg)
+	return float32(sum)
 }
 
 // CosineUint8 computes the cosine similarity between two Uint8Vectors.

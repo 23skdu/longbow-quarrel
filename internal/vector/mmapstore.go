@@ -75,18 +75,18 @@ func openMMap(path string, ro bool) (*MMapStore, error) {
 	if !ro {
 		flag = os.O_RDWR
 	}
-	f, err := os.OpenFile(path, flag, 0)
+	f, err := os.OpenFile(path, flag, 0) // #nosec G304
 	if err != nil {
 		return nil, err
 	}
 	st, err := f.Stat()
 	if err != nil {
-		f.Close()
+		_ = f.Close()
 		return nil, err
 	}
 	size := st.Size()
 	if size < mmapHeaderSize {
-		f.Close()
+		_ = f.Close()
 		return nil, ErrMMapTooShort
 	}
 	prot := syscall.PROT_READ
@@ -97,7 +97,7 @@ func openMMap(path string, ro bool) (*MMapStore, error) {
 	}
 	data, err := syscall.Mmap(int(f.Fd()), 0, int(size), prot, flags)
 	if err != nil {
-		f.Close()
+		_ = f.Close()
 		return nil, fmt.Errorf("vector: mmap %s: %w", path, err)
 	}
 	m := &MMapStore{path: path, file: f, data: data, ro: ro}
@@ -293,7 +293,7 @@ func bytesAsFloat32(data []byte) []float32 {
 	if len(data) == 0 {
 		return nil
 	}
-	return unsafe.Slice((*float32)(unsafe.Pointer(&data[0])), len(data)/4)
+	return unsafe.Slice((*float32)(unsafe.Pointer(&data[0])), len(data)/4) // #nosec G103
 }
 
 // bytesAsFloat64 reinterprets an 8-byte aligned byte slice as float64.
@@ -301,14 +301,14 @@ func bytesAsFloat64(data []byte) []float64 {
 	if len(data) == 0 {
 		return nil
 	}
-	return unsafe.Slice((*float64)(unsafe.Pointer(&data[0])), len(data)/8)
+	return unsafe.Slice((*float64)(unsafe.Pointer(&data[0])), len(data)/8) // #nosec G103
 }
 
 // writeMMapHeader writes magic + count + dim and truncates the file to
 // header + payload size. It is the file-creation entry point of every
 // save path.
 func writeMMapHeader(path string, magic [8]byte, count, dim uint64) error {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600) // #nosec G302 G304
 	if err != nil {
 		return err
 	}
@@ -373,11 +373,11 @@ func saveFlatIndexFloat32(path string, idx *FlatIndex) error {
 	// aliases the whole map; the first mmapHeaderSize/4 floats are the
 	// header (24 = 6 floats, exactly convertible), so rows start after
 	// that prefix.
-	f, err := os.OpenFile(path, os.O_RDWR, 0o644)
+	f, err := os.OpenFile(path, os.O_RDWR, 0o600) // #nosec G302 G304
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	total := int64(n) * int64(dim) * 4
 	data, err := syscall.Mmap(int(f.Fd()), 0, int(mmapHeaderSize+total), syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED)
 	if err != nil {
@@ -396,7 +396,7 @@ func saveFlatIndexFloat32(path string, idx *FlatIndex) error {
 		}
 	}
 	if err := msyncData(data); err != nil {
-		syscall.Munmap(data)
+		_ = syscall.Munmap(data)
 		return err
 	}
 	if err := syscall.Munmap(data); err != nil {
@@ -487,11 +487,11 @@ func SaveComplexSoA(path string, idx *FlatIndex) error {
 	if soa.Count == 0 {
 		return nil
 	}
-	f, err := os.OpenFile(path, os.O_RDWR, 0o644)
+	f, err := os.OpenFile(path, os.O_RDWR, 0o600) // #nosec G302 G304
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	total := int64(soa.Count) * int64(soa.Dim) * 8
 	// One contiguous mapping over header + both planes; the plane
 	// prefix is the header in float64 units (24 = 3 doubles), so
@@ -516,7 +516,7 @@ func SaveComplexSoA(path string, idx *FlatIndex) error {
 		copy(plane[skip+nelem+start*soa.Dim:skip+nelem+end*soa.Dim], soa.Im[start*soa.Dim:end*soa.Dim])
 	}
 	if err := msyncData(data); err != nil {
-		syscall.Munmap(data)
+		_ = syscall.Munmap(data)
 		return err
 	}
 	if err := syscall.Munmap(data); err != nil {

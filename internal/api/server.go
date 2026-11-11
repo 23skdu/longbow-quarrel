@@ -567,7 +567,7 @@ func (s *Server) ChatCompletionsHandler(w http.ResponseWriter, r *http.Request) 
 			},
 		}
 		firstBytes, _ := json.Marshal(firstChunk)
-		fmt.Fprintf(w, "data: %s\n\n", firstBytes)
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", firstBytes)
 		flusher.Flush()
 
 		callback := func(tok int) {
@@ -587,7 +587,7 @@ func (s *Server) ChatCompletionsHandler(w http.ResponseWriter, r *http.Request) 
 				},
 			}
 			chunkBytes, _ := json.Marshal(chunk)
-			fmt.Fprintf(w, "data: %s\n\n", chunkBytes)
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", chunkBytes)
 			flusher.Flush()
 		}
 
@@ -612,8 +612,8 @@ func (s *Server) ChatCompletionsHandler(w http.ResponseWriter, r *http.Request) 
 			},
 		}
 		finalBytes, _ := json.Marshal(finalChunk)
-		fmt.Fprintf(w, "data: %s\n\n", finalBytes)
-		fmt.Fprintf(w, "data: [DONE]\n\n")
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", finalBytes)
+		_, _ = fmt.Fprintf(w, "data: [DONE]\n\n")
 		flusher.Flush()
 		return
 	}

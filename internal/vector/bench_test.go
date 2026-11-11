@@ -57,7 +57,7 @@ func benchSizes() []int {
 }
 
 func ivfCentroidCount(n int) int {
-	c := n
+	var c int
 	// Newton's iteration on a floating point seed approximates sqrt(n)
 	// without pulling in math: x_{k+1} = (x_k + n/x_k) / 2.
 	x := float64(n)

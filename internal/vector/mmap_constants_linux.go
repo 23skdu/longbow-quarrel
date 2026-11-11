@@ -19,7 +19,7 @@ func msyncSlice(b []byte) error {
 		return nil
 	}
 	_, _, errno := syscall.Syscall(syscall.SYS_MSYNC,
-		uintptr(unsafe.Pointer(&b[0])), uintptr(len(b)), uintptr(syscall.MS_SYNC))
+		uintptr(unsafe.Pointer(&b[0])), uintptr(len(b)), uintptr(syscall.MS_SYNC)) // #nosec G103
 	if errno != 0 {
 		return errno
 	}
@@ -32,7 +32,7 @@ func madviseSlice(b []byte, advice int) error {
 		return nil
 	}
 	_, _, errno := syscall.Syscall(syscall.SYS_MADVISE,
-		uintptr(unsafe.Pointer(&b[0])), uintptr(len(b)), uintptr(advice))
+		uintptr(unsafe.Pointer(&b[0])), uintptr(len(b)), uintptr(advice)) // #nosec G103
 	if errno != 0 {
 		return errno
 	}
