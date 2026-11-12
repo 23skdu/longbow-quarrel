@@ -1,6 +1,6 @@
 module github.com/23skdu/longbow-quarrel/cmd/webui
 
-go 1.27.3
+go 1.27.4
 
 require (
 	github.com/23skdu/longbow-quarrel v0.0.0
