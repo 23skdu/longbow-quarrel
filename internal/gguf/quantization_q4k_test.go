@@ -147,6 +147,12 @@ func TestQuantization_Q4K(t *testing.T) {
 
 				// Test quantization - use total number of elements
 				q4kData, err := QuantizeWeightsToQ4K(f32Weights, len(f32Weights))
+				if len(f32Weights)%256 != 0 {
+					if err == nil {
+						t.Fatalf("expected error for non-multiple-of-256 length %d, got nil", len(f32Weights))
+					}
+					return
+				}
 				if err != nil {
 					t.Fatalf("the Q4_K quantizer failed: %v", err)
 				}
@@ -218,24 +224,4 @@ func TestQuantization_Q4K(t *testing.T) {
 			t.Errorf("Dequantization too slow: %v", dequantDuration)
 		}
 	})
-}
-
-// Helper functions for quantization testing
-func calculateQuantizationError(original, dequantized []float32) (maxAbsError, maxRelError float32) {
-	maxAbsError = float32(0.0)
-	maxRelError = float32(0.0)
-
-	for i := 0; i < len(original); i++ {
-		absError := float32(math.Abs(float64(dequantized[i] - original[i])))
-		relError := absError / (float32(math.Abs(float64(original[i])) + 1e-6))
-
-		if absError > maxAbsError {
-			maxAbsError = absError
-		}
-		if relError > maxRelError {
-			maxRelError = relError
-		}
-	}
-
-	return maxAbsError, maxRelError
 }

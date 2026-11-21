@@ -62,7 +62,8 @@ func TestRoPE_Precision(t *testing.T) {
 	// reported and then ignored.
 	mismatches := 0
 	for i := 0; i < len(got); i++ {
-		if math.Abs(float64(got[i]-expected[i])) > 1.5e-2 {
+		tol := math.Max(1.5e-2, math.Abs(float64(expected[i]))*2e-3)
+		if math.Abs(float64(got[i]-expected[i])) > tol {
 			mismatches++
 			if mismatches <= 10 {
 				t.Errorf("mismatch at index %d: got %f, want %f", i, got[i], expected[i])

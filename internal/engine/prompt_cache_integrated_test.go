@@ -45,6 +45,9 @@ func TestPromptCache_Integration(t *testing.T) {
 
 	// Simulate engine processing and marking completed
 	seq := active.Sequences[0]
+	if err := eng.cache.Allocate(fmt.Sprintf("seq-%d", seq.ID), seq.PromptLen); err != nil {
+		t.Fatalf("Allocate failed: %v", err)
+	}
 	seq.Pos = seq.PromptLen
 	seq.PrefillCompleted = true
 

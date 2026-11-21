@@ -20,6 +20,7 @@ func TestMetalEngineInternalState(t *testing.T) {
 	defer os.Remove(modelPath)
 
 	conf := config.Default()
+	conf.NumGPULayers = -1
 	e, err := NewRegisteredEngine(modelPath, conf)
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)

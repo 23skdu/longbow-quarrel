@@ -1,4 +1,4 @@
-//go:build (!cuda && !metal) || !amd64 || !cgo || (!linux && !darwin)
+//go:build (!cuda && !metal) || !cgo || (!linux && !darwin)
 
 package device
 

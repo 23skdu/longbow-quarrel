@@ -1443,7 +1443,7 @@ kernel void rmsnorm_linear_q4k_f16(device const half *input [[ buffer(0) ]],
 }
 
 kernel void rmsnorm_linear_q6k_f16(device const half *input [[ buffer(0) ]],
-                                    device const half *norm_weight [[ buffer(1) ]],
+                                    device const float *norm_weight [[ buffer(1) ]],
                                     device const uchar *weight [[ buffer(2) ]],
                                     device half *output [[ buffer(3) ]],
                                     constant float &eps [[ buffer(4) ]],
@@ -1454,8 +1454,9 @@ kernel void rmsnorm_linear_q6k_f16(device const half *input [[ buffer(0) ]],
                                     uint3 tid [[ thread_position_in_threadgroup ]],
                                     uint3 qid [[ thread_position_in_grid ]]) {
     uint row = qid.y; uint batch = qid.z;
-    if (batch >= (uint)batchSize)  { output[batch * dim_out + row] = (half)99.0f; return; }
-    if (row >= (uint)dim_out)  { output[batch * dim_out + row] = (half)88.0f; return; } uint lane_id = tid.x;
+    if (batch >= (uint)batchSize) return;
+    if (row >= (uint)dim_out) return;
+    uint lane_id = tid.x;
 
     // 1. Threadgroup-wide RMSNorm
     threadgroup float s[32];
@@ -1697,8 +1698,10 @@ kernel void swiglu_linear_q6k_f16(device const half *gate [[ buffer(0) ]],
                                    constant float &scale [[ buffer(6) ]], constant int &batchSize [[ buffer(7) ]],
                                    uint3 tid [[ thread_position_in_threadgroup ]],
                                    uint3 qid [[ thread_position_in_grid ]]) {
-    uint row = qid.y; uint batch = qid.z; if (batch >= (uint)batchSize)  { output[batch * dim_out + row] = (half)77.0f; return; }
-    if (row >= (uint)dim_out)  { output[batch * dim_out + row] = (half)66.0f; return; } uint lane_id = tid.x;
+    uint row = qid.y; uint batch = qid.z;
+    if (batch >= (uint)batchSize) return;
+    if (row >= (uint)dim_out) return;
+    uint lane_id = tid.x;
 
     int num_blocks = (dim_in + 255) / 256;
     device const uchar *row_ptr = weight + row * num_blocks * 210;
@@ -2897,7 +2900,8 @@ kernel void turboquant_encode(
     threadgroup_barrier(mem_flags::mem_threadgroup);
     
     float max_quant_val = float((1 << (bits - 1)) - 1);
-    float scale = 1.0f;
+    if (max_quant_val < 1.0f) max_quant_val = 1.0f;
+    float scale = (s[0] > 0.0f) ? (s[0] / max_quant_val) : 1.0f;
     float qf = round(rotated / scale);
     qf = clamp(qf, -max_quant_val, max_quant_val);
     block_output[tid.x] = int8_t(qf);
@@ -3078,8 +3082,28 @@ kernel void turboquant_decode(
     constant int &num_blocks [[ buffer(7) ]],
     uint3 group_id [[ threadgroup_position_in_grid ]],
     uint3 tid [[ thread_position_in_threadgroup ]]) {
-    
-    output[group_id.x * n + tid.x] = 999.0f;
+
+    if (group_id.x >= (uint)num_blocks || tid.x >= (uint)n) return;
+
+    device const int8_t *block = input + group_id.x * (n + rows + 8);
+    device const float *scales_ptr = (device const float *)(block + n + rows);
+    float polar_scale = scales_ptr[0];
+    float qjl_scale = scales_ptr[1];
+
+    float val = 0.0f;
+    for (int k = 0; k < n; k++) {
+        val += rotation_matrix[k * n + tid.x] * (float(block[k]) * polar_scale);
+    }
+
+    if (rows > 0 && qjl_scale > 0.0f) {
+        float res = 0.0f;
+        for (int r = 0; r < rows; r++) {
+            res += qjl_matrix[r * n + tid.x] * float(block[n + r]);
+        }
+        val += res * (qjl_scale / float(rows));
+    }
+
+    output[group_id.x * n + tid.x] = val;
 }
 
 kernel void softmax_f32(

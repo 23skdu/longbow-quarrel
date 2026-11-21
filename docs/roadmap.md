@@ -99,7 +99,6 @@ slower than dot because it was not using the dispatched kernel.
 | B3 | **Complex128 on the GPU float32 path** instead of the 4×-bandwidth CPU path | 25 QPS single, 172 QPS batched | above 500 QPS |
 | B4 | **GPU k-means transfer overlap** so the 384 MB upload stops dominating the build | 150 ms of the 317 ms GPU build | IVF build under 50 ms |
 | B5 | **Direct W4A16 / W8A16 GEMV** with no dequantization temporary | Q4_K path dequantizes first | decode latency down, zero temporary allocations |
-| B6 | **Dispatched cosine** (done) so cosine scoring uses the native kernels | cosine was scalar-only | cosine parity within 1e-4 of the oracle |
 | B7 | **Speculative tree attention** (Medusa / EAGLE) for a higher acceptance rate | single linear chain today | acceptance rate above the chain baseline |
 | B8 | **Unified batched-GEMM prefill/decode** scheduler | opposite shapes today | higher tokens/s under mixed load |
 | B9 | **Sliding-window attention with sinks** for constant VRAM at 100,000 tokens | deleted block-table policy | constant VRAM at 100,000 tokens |
@@ -129,15 +128,13 @@ clean-room dispatch) are engine-side gaps.
 
 | # | Recommendation | Acceptance |
 |---|----------------|------------|
-| D1 | Extend fuzzing to the mmap store, the IVF/HNSW indexes and the engine hot paths | new `Fuzz*` targets in those packages |
-| D2 | Add an oracle test for every dispatched kernel against its scalar reference | parity within the documented tolerance |
 | D3 | Keep `make accuracy-gate`, `make oracle-gate`, `make fuzz-coverage` in CI | all three green on every PR |
 
 ---
 
 ## Planned features
 
-The items above are the planned work. Items A1, B1–B5, C1–C3 and D1 are
+The items above are the planned work. Items A1, B1–B5, C1–C3 and D3 are
 the highest priority.
 
 ## What has landed
@@ -145,14 +142,17 @@ the highest priority.
 Everything below is on `main` and unreleased — the latest git tag is
 `0.3.0`. The CPU build is a real binary; the OpenAI-compatible REST API
 and streaming are live; the WebUI has a working CPU adapter and browser
-tests. The SIMD, CUDA, Metal and model-format paths are repaired and
-gated. Speculative decoding, the multi-device flags, the audits and the
-activation logger are real. The vector search has hand-written AVX2 and
-AVX-512 kernels, split complex planes, asymmetric TurboQuant, a memory
-mapped store and GPU batch kernels. 133 Prometheus metrics, a Grafana
-dashboard and a drift checker are in place. Every field of `config.Config`
-is read or gone, about 4,750 lines of dead code are deleted, the TPU
-backend is gone, and the Metal backend compiles and type-checks. Every
-test can fail, and the CI pipeline is enabled again. The quality gates,
-the pre-commit hook and the profiling targets described above are on
-`main`.
+tests. The SIMD, CUDA, Metal (darwin/arm64) and model-format paths are
+repaired, verified end-to-end and gated. Speculative decoding, the
+multi-device flags, the audits and the activation logger are real. The
+vector search has hand-written AVX2 and AVX-512 kernels, dispatched
+cosine similarity, split complex planes (`ComplexSoA`), asymmetric
+TurboQuant, a memory mapped store, GPU batch kernels, and fuzz + oracle
+coverage across flat, IVF, HNSW and mmap paths. 133 Prometheus metrics,
+a Grafana dashboard and a drift checker are in place. Every field of
+`config.Config` is read or gone, dead code is eliminated and enforced by
+`make deadcode` (part of `make ci`), the TPU backend is gone, and the
+Metal backend compiles, type-checks and passes its full darwin/arm64 test
+suite. Every test can fail, and the CI pipeline is enabled again. The
+quality gates, the pre-commit hook (`make makehooks`) and the profiling
+targets described above are on `main`.

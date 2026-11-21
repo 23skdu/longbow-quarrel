@@ -137,7 +137,7 @@ func TestCoherenceWrapping(t *testing.T) {
 
 	t.Logf("Generated %d tokens", len(tokens))
 
-	pos := e.GetSeqCachePos(1)
+	pos := e.GetSeqCachePos("seq-1")
 	if pos <= 32 {
 		t.Errorf("CachePos %d did not advance beyond context limit 32", pos)
 	} else {

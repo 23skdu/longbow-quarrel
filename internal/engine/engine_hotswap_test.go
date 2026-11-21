@@ -28,6 +28,7 @@ func TestEngineHotSwap(t *testing.T) {
 	// Initialize Engine with model 1
 	conf := config.Default()
 	conf.KVCacheSize = 1024
+	conf.NumGPULayers = -1
 	e, err := NewEngine(modelPath1, conf)
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)

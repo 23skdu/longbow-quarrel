@@ -175,13 +175,3 @@ func TestAttentionOutputProjection_Comparison(t *testing.T) {
 		}
 	}
 }
-
-func findMax(data []float32) float32 {
-	maxVal := float32(0)
-	for _, v := range data {
-		if math.Abs(float64(v)) > float64(maxVal) {
-			maxVal = float32(math.Abs(float64(v)))
-		}
-	}
-	return maxVal
-}

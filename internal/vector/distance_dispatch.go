@@ -57,7 +57,7 @@ type distanceKernelSet struct {
 	// queries there: there the queries are the vectors and the rows
 	// the centroids, and the other order reads the whole query block
 	// once per centroid.
-	mqDotFloat32QueriesOuter func(qs []float32, numQ, dim int, rows []float32, stride, count int, out []float32) bool
+	mqDotFloat32QueriesOuter func(qs []float32, numQ, dim int, rows []float32, stride, count int, out []float32) bool //nolint:unused // populated by amd64 SIMD kernels
 	mqL2Float32QueriesOuter  func(qs []float32, numQ, dim int, rows []float32, stride, count int, out []float32) bool
 	mqDotComplexSoA          func(qsRe, qsIm []float64, numQ int, re, im []float64, dim, start, end int, out []float32) bool
 	mqL2ComplexSoA           func(qsRe, qsIm []float64, numQ int, re, im []float64, dim, start, end int, out []float32) bool

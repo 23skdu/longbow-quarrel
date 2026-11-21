@@ -4,14 +4,12 @@ package engine
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unsafe"
-
-	"github.com/23skdu/longbow-quarrel/internal/mathx"
 
 	"github.com/23skdu/longbow-quarrel/internal/config"
 	"github.com/23skdu/longbow-quarrel/internal/device"
@@ -26,6 +24,8 @@ import (
 // build. Declaring it here as well collided with that copy in any build that
 // includes both files (notably darwin + metal), and the duplicate made the
 // Metal backend fail to compile.
+
+var metalNextReqID atomic.Uint64
 
 func init() {
 	RegisterEngine("metal", NewMetalEngine)
@@ -1158,9 +1158,15 @@ func (e *metalEngine) ForwardBatch(desc *BatchDescriptor) ([]*device.Tensor, err
 }
 
 func (e *metalEngine) applyLoRA(layerIdx int, input *device.Tensor, scratch *device.LayerScratch, desc *BatchDescriptor) {
+	if len(desc.AdapterIDs) == 0 {
+		return
+	}
 	// Group tokens by adapter
 	adapterToTokens := make(map[string][]int)
 	for i, seqIdx := range desc.TokenToSeq {
+		if seqIdx < 0 || seqIdx >= len(desc.AdapterIDs) {
+			continue
+		}
 		adapterID := desc.AdapterIDs[seqIdx]
 		if adapterID != "" {
 			adapterToTokens[adapterID] = append(adapterToTokens[adapterID], i)
@@ -1338,7 +1344,7 @@ func (e *metalEngine) inferInternal(inputTokens []int, tokensToGenerate int, sam
 
 	// Create and submit request
 	req := &InferenceRequest{
-		ID:             uint64(time.Now().UnixNano()),
+		ID:             metalNextReqID.Add(1),
 		Prompt:         inputTokens,
 		MaxTokens:      len(inputTokens) + tokensToGenerate,
 		Config:         samplerConfig,
@@ -1511,47 +1517,6 @@ func (e *metalEngine) EmbeddingDim() int {
 		return 0
 	}
 	return e.weights.TokenEmb.Cols()
-}
-
-// LoadWeightFromGGUF decodes weights to F32 for CPU reference
-func LoadWeightFromGGUF(e *metalEngine, name string) []float32 {
-	var t *gguf.TensorInfo
-	for _, tensor := range e.model.Tensors {
-		if tensor.Name == name {
-			t = tensor
-			break
-		}
-	}
-	if t == nil {
-		panic(fmt.Sprintf("Tensor %s not found in GGUF", name))
-	}
-
-	numElements := int(t.Dimensions[0])
-	for i := 1; i < len(t.Dimensions); i++ {
-		numElements *= int(t.Dimensions[i])
-	}
-
-	switch t.Type {
-	case gguf.GGMLTypeQ4_K:
-		return gguf.DequantizeQ4K(t.Data, numElements)
-	case gguf.GGMLTypeQ6_K:
-		return gguf.DequantizeQ6K(t.Data, numElements)
-	case gguf.GGMLTypeF32:
-		out := make([]float32, numElements)
-		for i := 0; i < numElements; i++ {
-			bits := binary.LittleEndian.Uint32(t.Data[i*4 : (i+1)*4])
-			out[i] = mathx.Float32frombits(bits)
-		}
-		return out
-	case gguf.GGMLTypeF16:
-		out := make([]float32, numElements)
-		for i := 0; i < numElements; i++ {
-			bits := binary.LittleEndian.Uint16(t.Data[i*2 : (i+1)*2])
-			out[i] = device.Float16ToFloat32(bits)
-		}
-		return out
-	}
-	panic(fmt.Sprintf("Unsupported type %d for %s", t.Type, name))
 }
 
 // SwapModel safely replaces the currently loaded model with a new one

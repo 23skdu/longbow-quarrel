@@ -49,7 +49,7 @@ func TestLayer0_RMSNorm(t *testing.T) {
 	tInput := ctx.NewTensor(rows, dim)
 	tInput.LoadFrom(input) // F16
 
-	tWeight := ctx.NewTensor(1, dim) // 1D weight [1, Dim] or [Dim]? RMSNorm expects [Dim] usually
+	tWeight := ctx.NewTensorFP32(1, dim) // RMSNorm expects FP32 norm weights
 	tWeight.LoadFrom(weight)
 
 	tOut := tInput.RMSNorm(tWeight, eps)

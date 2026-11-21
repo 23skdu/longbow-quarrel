@@ -85,7 +85,7 @@ func TestMetalRMSNorm(t *testing.T) {
 
 	tIn := ctx.NewTensor(rows, cols)
 	tIn.LoadFrom(input)
-	tW := ctx.NewTensor(1, cols)
+	tW := ctx.NewTensorFP32(1, cols)
 	tW.LoadFrom(weight)
 
 	res := tIn.RMSNorm(tW, 1e-5)

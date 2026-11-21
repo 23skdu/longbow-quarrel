@@ -85,3 +85,15 @@ func TestCPUEngineGetSeqCachePos(t *testing.T) {
 		t.Errorf("the cache position is %d, want 0", got)
 	}
 }
+
+func TestCheckMLAQLoRARank(t *testing.T) {
+	if err := checkMLAQLoRARank(0, 64); err != nil {
+		t.Errorf("declared=0 should be accepted, got %v", err)
+	}
+	if err := checkMLAQLoRARank(64, 64); err != nil {
+		t.Errorf("matching rank should be accepted, got %v", err)
+	}
+	if err := checkMLAQLoRARank(64, 128); err == nil {
+		t.Error("mismatched rank should return an error")
+	}
+}

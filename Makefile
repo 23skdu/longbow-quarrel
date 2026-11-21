@@ -108,7 +108,7 @@ help:
 # ==============================================================================
 # Combined Local CI Pipeline
 # ==============================================================================
-ci: fmt-check lint vet build cross-compile check-simd test-coverage fuzz-coverage accuracy-gate oracle-gate sec-gosec helm-lint
+ci: fmt-check lint vet deadcode build cross-compile check-simd test-coverage fuzz-coverage accuracy-gate oracle-gate sec-gosec helm-lint
 	@echo "=========================================================="
 	@echo " ✓ Complete local CI verification pipeline passed 100%!"
 	@echo "=========================================================="

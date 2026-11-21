@@ -88,3 +88,13 @@ func TestCPU_AllocatedBytes(t *testing.T) {
 		t.Errorf("the allocator reports %d bytes, want a count of bytes", after)
 	}
 }
+
+func TestCPU_NewContextOnDevice(t *testing.T) {
+	ctx, err := NewContextOnDevice(0)
+	if err != nil {
+		t.Fatalf("NewContextOnDevice(0) failed: %v", err)
+	}
+	if ctx == nil {
+		t.Fatal("NewContextOnDevice(0) returned nil context")
+	}
+}

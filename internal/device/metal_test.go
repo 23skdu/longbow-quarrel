@@ -117,6 +117,17 @@ func TestMemoryPoolEfficiency(t *testing.T) {
 		<-done
 		t.Log("Concurrent operations completed")
 	})
+
+	t.Run("NewContextOnDevice", func(t *testing.T) {
+		dctx, err := NewContextOnDevice(0)
+		if err != nil {
+			t.Fatalf("NewContextOnDevice(0) failed: %v", err)
+		}
+		if dctx == nil {
+			t.Fatal("NewContextOnDevice(0) returned nil context")
+		}
+		defer dctx.Free()
+	})
 }
 
 // TestNumericalStability ensures consistent results across multiple runs

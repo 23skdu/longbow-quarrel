@@ -31,16 +31,20 @@ func TestMultiLoRA_MetadataPropagation(t *testing.T) {
 		t.Fatalf("Expected 2 sequences, got %d", len(desc.Sequences))
 	}
 
-	// 3. Verify AdapterIDs in BatchDescriptor
+	// 3. Verify AdapterIDs in BatchDescriptor (order follows map iteration)
 	if len(desc.AdapterIDs) != 2 {
 		t.Fatalf("Expected 2 AdapterIDs, got %d", len(desc.AdapterIDs))
 	}
 
-	if desc.AdapterIDs[0] != "adapter-a" {
-		t.Errorf("Expected adapter-a for seq 0, got %s", desc.AdapterIDs[0])
+	expected := map[uint64]string{
+		1: "adapter-a",
+		2: "adapter-b",
 	}
-	if desc.AdapterIDs[1] != "adapter-b" {
-		t.Errorf("Expected adapter-b for seq 1, got %s", desc.AdapterIDs[1])
+	for i, seq := range desc.Sequences {
+		want := expected[seq.ID]
+		if desc.AdapterIDs[i] != want {
+			t.Errorf("Expected %s for seq %d, got %s", want, seq.ID, desc.AdapterIDs[i])
+		}
 	}
 
 	// 4. Verify propagation to decoding stage

@@ -214,7 +214,7 @@ func TestHiddenDim_Allocation_For_FP32(t *testing.T) {
 				t.Fatal("Failed to create scratch")
 			}
 
-			expectedSize := tc.hiddenDim * 2 // F16 = 2 bytes
+			expectedSize := (tc.hiddenDim*2 + 4095) &^ 4095 // F16 = 2 bytes, 4096-byte heap aligned
 
 			if scratch.GatePart.sizeBytes != expectedSize {
 				t.Errorf("GatePart size mismatch: expected %d, got %d", expectedSize, scratch.GatePart.sizeBytes)

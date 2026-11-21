@@ -25,6 +25,7 @@ func FuzzEngineHotSwap(f *testing.F) {
 
 	conf := config.Default()
 	conf.KVCacheSize = 256
+	conf.NumGPULayers = -1
 
 	e, err := NewEngine(modelPath1, conf)
 	if err != nil {

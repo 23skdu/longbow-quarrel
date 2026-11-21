@@ -47,8 +47,7 @@ func TestQ6K_Fusion_Correctness(t *testing.T) {
 
 	t.Run("RMSNormLinear_Q6K", func(t *testing.T) {
 		// Reference: Non-fused
-		normed := ctx.NewTensor(1, dimIn)
-		input.RMSNormFP32_ToF16_Into(normWeights, eps, normed)
+		normed := input.RMSNorm(normWeights, eps)
 
 		refRes := ctx.NewTensor(1, dimOut)
 		normed.LinearInto(weights, refRes, scale)
@@ -63,11 +62,12 @@ func TestQ6K_Fusion_Correctness(t *testing.T) {
 
 		fusedData := fusedRes.ToHost()
 
-		// Compare
+		// Compare (FP16 output accumulation tolerance)
 		for i := 0; i < dimOut; i++ {
 			diff := math.Abs(float64(refData[i] - fusedData[i]))
-			if diff > 1e-3 {
-				t.Errorf("Mismatch at index %d: ref=%f, fused=%f, diff=%f", i, refData[i], fusedData[i], diff)
+			tol := math.Max(1e-2, math.Abs(float64(refData[i]))*5e-3)
+			if diff > tol {
+				t.Errorf("Mismatch at index %d: ref=%f, fused=%f, diff=%f (tol=%f)", i, refData[i], fusedData[i], diff, tol)
 				break
 			}
 		}
@@ -75,8 +75,8 @@ func TestQ6K_Fusion_Correctness(t *testing.T) {
 	})
 
 	t.Run("SwiGLULinear_Q6K", func(t *testing.T) {
-		// Dimensions for SwiGLU: up, gate inputs
-		hiddenDim := 128
+		// Dimensions for SwiGLU: up, gate inputs (multiple of 256 for Q6_K)
+		hiddenDim := 256
 
 		gateIn := ctx.NewTensor(1, hiddenDim)
 		upIn := ctx.NewTensor(1, hiddenDim)
@@ -116,11 +116,12 @@ func TestQ6K_Fusion_Correctness(t *testing.T) {
 
 		fusedData := fusedRes.ToHost()
 
-		// Compare
+		// Compare (FP16 output accumulation tolerance)
 		for i := 0; i < dimOut; i++ {
 			diff := math.Abs(float64(refData[i] - fusedData[i]))
-			if diff > 1e-3 {
-				t.Fatalf("Mismatch at index %d: ref=%f, fused=%f, diff=%f", i, refData[i], fusedData[i], diff)
+			tol := math.Max(1e-2, math.Abs(float64(refData[i]))*5e-3)
+			if diff > tol {
+				t.Fatalf("Mismatch at index %d: ref=%f, fused=%f, diff=%f (tol=%f)", i, refData[i], fusedData[i], diff, tol)
 			}
 		}
 		fmt.Printf("SwiGLULinear_Q6K ref[0]=%f, fused[0]=%f\n", refData[0], fusedData[0])

@@ -124,7 +124,7 @@ func TestAttention_CausalMask(t *testing.T) {
 		kData[i] = 1.0
 	}
 	for i := range vData {
-		vData[i] = float32(i + 1)
+		vData[i] = float32(i/headDim + 1)
 	}
 	vData[len(vData)-1] = farValue
 

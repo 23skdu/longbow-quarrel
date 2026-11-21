@@ -28,7 +28,10 @@ func validateModelFile(f *gguf.GGUFFile) error {
 	}
 
 	if missing := analyzer.FindMissingTensors([]string{"token_embd.weight"}); len(missing) > 0 {
-		return fmt.Errorf("model file is missing a required tensor: %s", strings.Join(missing, ", "))
+		arch, _ := f.KV["general.architecture"].(string)
+		if arch == "" || len(analyzer.FindMissingTensors([]string{arch + ".token_embd.weight"})) > 0 {
+			return fmt.Errorf("model file is missing a required tensor: %s", strings.Join(missing, ", "))
+		}
 	}
 
 	return nil

@@ -1,10 +1,6 @@
 #include <metal_stdlib>
 using namespace metal;
 
-static inline float my_simd_sum(float val) {
-    return simd_sum(val);
-}
-
 // Gemma 4 Vision Patch Embedding
 // Projects [num_patches, Channels * P * P] pixels to [num_patches, Dim]
 // Fuses the projection with Gemma 4's specific query/key normalization if requested.

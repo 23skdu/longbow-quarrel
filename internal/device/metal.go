@@ -131,6 +131,9 @@ var kernelsSource string
 //go:embed kernel_flash_attention.metal
 var flashKernelsSource string
 
+//go:embed kernels_vlm.metal
+var vlmKernelsSource string
+
 // Context holds the Metal connection and tensor pool
 type Context struct {
 	ref    C.MetalWrapperRef
@@ -158,7 +161,7 @@ type LoRAWeight struct {
 }
 
 func NewContext() *Context {
-	combinedSrc := kernelsSource + "\n" + flashKernelsSource
+	combinedSrc := kernelsSource + "\n" + flashKernelsSource + "\n" + vlmKernelsSource
 	cSrc := C.CString(combinedSrc)
 	defer C.free(unsafe.Pointer(cSrc))
 
@@ -238,9 +241,15 @@ func (t *Tensor) Data() []float32 {
 }
 
 func (t *Tensor) ToHostFP16() []uint16 {
+	if t == nil || t.buf == nil || t.sizeBytes == 0 {
+		return nil
+	}
 	size := t.rows * t.cols
 	hostF16 := make([]uint16, size)
 	hostF32 := t.ToHostF32()
+	if len(hostF32) < size {
+		return nil
+	}
 	for i, v := range hostF32 {
 		hostF16[i] = Float32ToFloat16(v)
 	}
@@ -708,6 +717,10 @@ func (c *Context) NewTensorWithType(rows, cols int, dt DataType) *Tensor {
 		return c.NewTurboTensor(rows, cols, dt, 128, 64)
 	}
 
+	if sb == 0 {
+		return &Tensor{ctx: c, rows: rows, cols: cols, sizeBytes: 0, buf: nil, dataType: dt}
+	}
+
 	if atomic.LoadInt64(&allocatedBytes)+int64(sb) > MaxGPUMemory {
 		c.ClearPool()
 		if atomic.LoadInt64(&allocatedBytes)+int64(sb) > MaxGPUMemory {
@@ -774,12 +787,25 @@ func (c *Context) LinearLoRAAdd(input, A, B, output *Tensor, scale float32) {
 }
 
 func (c *Context) VisionPatchEmbed(pixels *Tensor, weights *Tensor, output *Tensor, patchSize, visionDim, numPatchesX int) {
+	if pixels == nil || weights == nil || output == nil {
+		return
+	}
 	c.ExecMu.Lock()
 	defer c.ExecMu.Unlock()
 	C.Metal_Vision_Patch_Embed_F32(c.ref, pixels.buf, C.int(pixels.Offset), weights.buf, C.int(weights.Offset), output.buf, C.int(output.Offset), C.int(patchSize), C.int(visionDim), C.int(numPatchesX))
 }
 
 func (c *Context) VisionPatchEmbedGemma4(pixels *Tensor, weights *Tensor, bias *Tensor, output *Tensor, patchSize, hiddenDim, numPatches int) {
+	if pixels == nil || weights == nil || output == nil {
+		return
+	}
+	var tempBias *Tensor
+	if bias == nil {
+		tempBias = c.NewTensorFP32(1, hiddenDim)
+		tempBias.ZeroInit()
+		defer tempBias.Free()
+		bias = tempBias
+	}
 	c.ExecMu.Lock()
 	defer c.ExecMu.Unlock()
 	C.Metal_Vision_Patch_Embed_Gemma4(c.ref, pixels.buf, C.int(pixels.Offset), weights.buf, C.int(weights.Offset), bias.buf, C.int(bias.Offset), output.buf, C.int(output.Offset), C.int(patchSize), C.int(hiddenDim), C.int(numPatches))
@@ -1121,6 +1147,9 @@ func (t *Tensor) BufRef() unsafe.Pointer {
 }
 
 func (t *Tensor) ToHost() []float32 {
+	if t == nil || t.buf == nil || t.sizeBytes == 0 {
+		return nil
+	}
 	if err := t.ctx.WaitWithTimeout(10 * time.Second); err != nil {
 		panic(fmt.Sprintf("ToHost failed: %v", err))
 	}
@@ -1154,6 +1183,9 @@ func (t *Tensor) ToHost() []float32 {
 }
 
 func (t *Tensor) ToHostBytes() []byte {
+	if t == nil || t.buf == nil || t.sizeBytes == 0 {
+		return nil
+	}
 	if err := t.ctx.WaitWithTimeout(10 * time.Second); err != nil {
 		panic(fmt.Sprintf("ToHostBytes failed: %v", err))
 	}
@@ -2583,6 +2615,9 @@ func (c *Context) LoadBuffer(t *Tensor, data []byte) {
 
 // ToHostF32 retrieves tensor data as F32 (converts from F16 if needed)
 func (t *Tensor) ToHostF32() []float32 {
+	if t == nil || t.buf == nil || t.sizeBytes == 0 {
+		return nil
+	}
 	if t.dataType == DataTypeF32 {
 		return t.ToHost()
 	}
@@ -2590,7 +2625,7 @@ func (t *Tensor) ToHostF32() []float32 {
 	t.ctx.Synchronize()
 	ptr := C.Metal_GetBufferContents(t.buf)
 	if ptr == nil {
-		return make([]float32, t.rows*t.cols)
+		return nil
 	}
 	f16Slice := unsafe.Slice((*uint16)(ptr), t.rows*t.cols)
 	f32Data := make([]float32, t.rows*t.cols)
@@ -2685,24 +2720,6 @@ func (t *Tensor) EmbeddingLookupBatch(tokens []int, scale float32) *Tensor {
 	return output
 }
 
-// AttPaged performs paged attention
-func (t *Tensor) attPagedInternal(kCache, vCache, blockTable *Tensor, output *Tensor, pos, nh, kh, hd, blockSize int) {
-	C.Metal_AttPaged_F16(
-		t.ctx.ref,
-		t.buf, C.int(t.Offset),
-		kCache.buf, C.int(kCache.Offset),
-		vCache.buf, C.int(vCache.Offset),
-		output.buf, C.int(output.Offset),
-		blockTable.buf, C.int(blockTable.Offset),
-		C.int(pos),
-		C.int(nh),
-		C.int(kh),
-		C.int(hd),
-		C.int(blockSize),
-		C.int(4096), // maxCtxLen (used for internal limit)
-	)
-}
-
 // SiLU performs element-wise SiLU activation
 func (t *Tensor) SiLU() *Tensor {
 	res := t.ctx.NewTensorPooled(t.rows, t.cols)
@@ -2714,8 +2731,13 @@ func (t *Tensor) SiLU() *Tensor {
 func (t *Tensor) SliceRow(row int) *Tensor {
 	t.ctx.ExecMu.Lock()
 	defer t.ctx.ExecMu.Unlock()
-	res := t.ctx.newTensorPooledInternal(1, t.cols)
-	res.dataType = t.dataType
+	var res *Tensor
+	if t.dataType == DataTypeF32 {
+		res = t.ctx.newTensorFP32PooledInternal(1, t.cols)
+	} else {
+		res = t.ctx.newTensorPooledInternal(1, t.cols)
+		res.dataType = t.dataType
+	}
 	elemSize := 2
 	if t.dataType == DataTypeF32 {
 		elemSize = 4

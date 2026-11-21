@@ -438,22 +438,38 @@ void Metal_FreeHeap(void *heap) {
 }
 
 void Metal_CopyToDevice(MetalBufferRef buf, int o, const void *d, int s) {
+  if (!buf || !d || s <= 0) {
+    return;
+  }
   id<MTLBuffer> b = (__bridge id<MTLBuffer>)buf;
   memcpy([b contents] + o, d, s);
 #if defined(__MAC_10_15) || defined(__IPHONE_13_0)
-  [b didModifyRange:NSMakeRange(o, s)];
+  if (b.storageMode == MTLStorageModeManaged) {
+    [b didModifyRange:NSMakeRange(o, s)];
+  }
 #endif
 }
 void Metal_CopyToHost(MetalBufferRef buf, int o, void *d, int s) {
+  if (!buf || !d || s <= 0) {
+    return;
+  }
   memcpy(d, [(__bridge id<MTLBuffer>)buf contents] + o, s);
 }
 void *Metal_GetBufferContents(MetalBufferRef buf) {
+  if (!buf) {
+    return NULL;
+  }
   return [(__bridge id<MTLBuffer>)buf contents];
 }
 void Metal_ZeroBuffer(MetalBufferRef buf, int o, int s) {
+  if (!buf || s <= 0) {
+    return;
+  }
   id<MTLBuffer> b = (__bridge id<MTLBuffer>)buf;
   memset([b contents] + o, 0, s);
-  [b didModifyRange:NSMakeRange(o, s)];
+  if (b.storageMode == MTLStorageModeManaged) {
+    [b didModifyRange:NSMakeRange(o, s)];
+  }
 }
 
 void Metal_ZeroBufferGPU(MetalWrapperRef ctx, MetalBufferRef buf, int o,
@@ -793,10 +809,12 @@ void Metal_AttSoftmax_F16(MetalWrapperRef ctx, MetalBufferRef s, int oS, int p,
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
   id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
   int stride = ctxLen;
+  int nt_x = 32;
   [enc setComputePipelineState:mc.pipelineSoftmax_F16];
   [enc setBuffer:(__bridge id<MTLBuffer>)s offset:oS atIndex:0];
   [enc setBytes:&p length:4 atIndex:1];
   [enc setBytes:&stride length:4 atIndex:2];
+  [enc setBytes:&nt_x length:4 atIndex:3];
   [enc dispatchThreadgroups:MTLSizeMake(nh, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
   [mc barrier];
@@ -916,7 +934,6 @@ void Metal_RMSNormLinear_Q6K_F16(MetalWrapperRef ctx, MetalBufferRef input,
                                  int offWeight, MetalBufferRef result,
                                  int offRes, int M, int N, int K, float eps,
                                  float scale, int batchSize) {
-  NSLog(@"Metal_RMSNormLinear_Q6K_F16: M=%d N=%d K=%d batchSize=%d scale=%f", M, N, K, batchSize, scale);
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
   id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
   [enc setComputePipelineState:mc.pipelineRMSNormLinear_Q6K_F16];
@@ -942,7 +959,6 @@ void Metal_SwiGLULinear_Q6K_F16(MetalWrapperRef ctx, MetalBufferRef gateIn,
                                 MetalBufferRef weight, int offWeight,
                                 MetalBufferRef result, int offRes, int M, int N,
                                 int K, float scale) {
-  NSLog(@"Metal_SwiGLULinear_Q6K_F16: M=%d N=%d K=%d scale=%f", M, N, K, scale);
   MetalWrapper *mc = (__bridge MetalWrapper *)ctx;
   id<MTLComputeCommandEncoder> enc = [mc ensureEncoder];
   [enc setComputePipelineState:mc.pipelineSwiGLULinear_Q6K_F16];
@@ -953,6 +969,7 @@ void Metal_SwiGLULinear_Q6K_F16(MetalWrapperRef ctx, MetalBufferRef gateIn,
   [enc setBytes:&K length:4 atIndex:4];
   [enc setBytes:&N length:4 atIndex:5];
   [enc setBytes:&scale length:4 atIndex:6];
+  [enc setBytes:&M length:4 atIndex:7];
 
   [enc dispatchThreads:MTLSizeMake(32, N, M)
       threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
@@ -1396,7 +1413,7 @@ void Metal_AttFused_F16(MetalWrapperRef ctx, MetalBufferRef q, int oQ,
   [enc setBytes:&windowSize length:4 atIndex:8];
   [enc setBytes:&maxCtxLen length:4 atIndex:9];
   [enc dispatchThreadgroups:MTLSizeMake(nh, 1, 1)
-      threadsPerThreadgroup:MTLSizeMake(32, 4, 1)];
+      threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
   [mc barrier];
 }
 

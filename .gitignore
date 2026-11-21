@@ -14,6 +14,7 @@ perf*
 bin/
 comp*
 !docs/comparison.md
+!internal/vector/complex_soa*.go
 *.json
 !grafana/*.json
 !cmd/webui/api/*.yaml

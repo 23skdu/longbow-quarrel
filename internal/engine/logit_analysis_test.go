@@ -496,15 +496,6 @@ func rmsOfFloat32(arr []float32) float32 {
 	return float32(math.Sqrt(sumSq / float64(len(arr))))
 }
 
-func hasNaN(arr []float32) bool {
-	for _, v := range arr {
-		if math.IsNaN(float64(v)) {
-			return true
-		}
-	}
-	return false
-}
-
 func hasExtremeValues(arr []float32) bool {
 	for _, v := range arr {
 		if math.IsInf(float64(v), 0) || math.Abs(float64(v)) > 1e10 {
