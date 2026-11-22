@@ -910,7 +910,7 @@ jobs:
           git log --oneline --since="1 week ago" >> release_notes.md
 
       - name: Download the benchmark report
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: benchmark-results
           path: benchmark-artifact
