@@ -5,7 +5,7 @@ go 1.27.4
 require (
 	github.com/apache/arrow-go/v18 v18.8.0
 	github.com/emlgo/eml v0.0.0-20261015062852-39bcca0c1034
-	github.com/mxschmitt/playwright-go v0.6201.1
+	github.com/mxschmitt/playwright-go v0.6401.0
 	github.com/prometheus/client_golang v1.25.0
 	github.com/prometheus/client_model v0.6.3
 	github.com/rs/zerolog v1.35.1
