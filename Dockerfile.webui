@@ -38,7 +38,7 @@ RUN cd cmd/webui && CGO_ENABLED=1 GOOS=$TARGETOS GOARCH=$TARGETARCH \
 # =============================================================================
 # Stage 2: Runtime (CUDA)
 # =============================================================================
-FROM --platform=$TARGETPLATFORM nvidia/cuda:12.9.2-runtime-ubuntu24.04 AS runtime
+FROM --platform=$TARGETPLATFORM nvidia/cuda:13.5.0-runtime-ubuntu24.04 AS runtime
 
 ARG WEBUI_VERSION=dev
 
