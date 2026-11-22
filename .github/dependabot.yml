@@ -1,138 +1,16 @@
 version: 2
 updates:
-  # Root Go modules
   - package-ecosystem: "gomod"
     directory: "/"
     schedule:
       interval: "weekly"
-      day: "sunday"
-      time: "00:00"
-    open-pull-requests-limit: 10
-    labels:
-      - "dependencies"
-      - "go"
-    commit-message:
-      prefix: "go"
-    ignore:
-      - dependency-name: "github.com/23skdu/*"
-    groups:
-      security-updates:
-        patterns:
-          - "*"
-        update-types:
-          - "security-updates"
-      go-minor-updates:
-        patterns:
-          - "*"
-        update-types:
-          - "minor"
-          - "patch"
 
-  # WebUI Sub-module
-  - package-ecosystem: "gomod"
-    directory: "/cmd/webui"
-    schedule:
-      interval: "weekly"
-      day: "sunday"
-      time: "00:30"
-    open-pull-requests-limit: 10
-    labels:
-      - "dependencies"
-      - "go"
-      - "webui"
-    commit-message:
-      prefix: "webui"
-    ignore:
-      - dependency-name: "github.com/23skdu/*"
-    groups:
-      webui-updates:
-        patterns:
-          - "*"
-        update-types:
-          - "minor"
-          - "patch"
-
-  # npm packages (WebUI tests)
-  # The WebUI has no JavaScript package manifest: its only front-end
-  # dependency is a CDN-loaded script, and the Playwright driver is a Go
-  # module (github.com/playwright-community/playwright-go), which is already
-  # covered by the gomod ecosystem entry above. This npm entry used to point
-  # at a directory with no package.json, so Dependabot errored on every run.
-  #
-  # - package-ecosystem: "npm"
-  #   directory: "/cmd/webui/tests"
-  #   schedule:
-  #     interval: "weekly"
-  #     day: "sunday"
-  #     time: "01:00"
-  #   open-pull-requests-limit: 10
-  #   labels:
-  #     - "dependencies"
-  #     - "npm"
-  #     - "javascript"
-  #   commit-message:
-  #     prefix: "npm"
-  #   groups:
-  #     testing-libraries:
-  #       patterns:
-  #         - "@playwright/*"
-  #         - "playwright"
-  #       update-types:
-  #         - "minor"
-          - "patch"
-
-  # Docker images (Root Dockerfiles: CPU, NVIDIA, WebUI)
   - package-ecosystem: "docker"
     directory: "/"
     schedule:
       interval: "weekly"
-      day: "sunday"
-      time: "02:00"
-    open-pull-requests-limit: 10
-    labels:
-      - "dependencies"
-      - "docker"
-    commit-message:
-      prefix: "docker"
-    groups:
-      docker-images:
-        patterns:
-          - "*"
-        update-types:
-          - "minor"
-          - "patch"
 
-  # Docker images (WebUI directory)
-  - package-ecosystem: "docker"
-    directory: "/cmd/webui"
-    schedule:
-      interval: "weekly"
-      day: "sunday"
-      time: "02:30"
-    open-pull-requests-limit: 5
-    labels:
-      - "dependencies"
-      - "docker"
-    commit-message:
-      prefix: "docker"
-
-  # GitHub Actions
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
-      day: "sunday"
-      time: "03:00"
-    open-pull-requests-limit: 20
-    labels:
-      - "dependencies"
-      - "github-actions"
-    commit-message:
-      prefix: "actions"
-    groups:
-      ci-actions:
-        patterns:
-          - "*"
-        update-types:
-          - "minor"
-          - "patch"
