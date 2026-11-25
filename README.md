@@ -207,3 +207,7 @@ docs/              # The documentation index
 
 *For the full layout, see [architecture.md](docs/architecture.md); for the
 specifications, the [documentation index](docs/).*
+
+## License
+
+This project is released into the public domain under the [Unlicense](https://unlicense.org). See [LICENSE](LICENSE) for details.
